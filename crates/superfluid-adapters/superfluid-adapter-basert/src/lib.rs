@@ -90,29 +90,52 @@ impl Runtime for Basert {
     }
 
     fn pull(&self, pull: &Pull, _args: &WorkerArgs) -> Result<std::path::PathBuf, String> {
-        pull.split()?;
+        let (id, variant) = pull.split()?;
         let tool = basert_tool()?;
-        let mut cmd = std::process::Command::new(&tool);
-        cmd.arg("resolve").arg(&pull.id);
-        if pull.offline {
-            cmd.arg("--offline");
-        }
-        for (name, value) in &pull.options {
-            cmd.arg(format!("--{name}"));
-            cmd.args(value);
-        }
-        superfluid_adapter_kit::run_pull_tool(&mut cmd, &format!("basert resolve {}", pull.id)).map_err(|why| {
-            if why.contains("unrecognized subcommand") {
-                format!("the basert tool at {} is older than this adapter (it has no `resolve`): update the runtime", tool.display())
-            } else {
-                why
+        if !pull.offline {
+            let mut cmd = std::process::Command::new(&tool);
+            cmd.arg("pull").arg(id);
+            for (name, value) in &pull.options {
+                cmd.arg(format!("--{name}"));
+                cmd.args(value);
             }
-        })
+            superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {id}"))?;
+        }
+        let list = std::process::Command::new(&tool)
+            .args(["list", "--json"])
+            .output()
+            .map_err(|e| format!("basert list --json: {e}"))?;
+        if !list.status.success() {
+            return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
+        }
+        installed_path(&String::from_utf8_lossy(&list.stdout), id, variant)
+            .map_err(|why| if pull.offline { format!("{why} (offline: nothing was pulled)") } else { why })
     }
 
     fn plan(&self, req: &Request, host: &Host) -> Option<Result<Vec<Plan>, String>> {
         Some(recipe::plan(req, host))
     }
+}
+
+/// The `.base` file `basert list --json` holds for `id`: the variant named with the id,
+/// else the one variant installed, else `default-q4` among several.
+fn installed_path(list_json: &str, id: &str, variant: Option<&str>) -> Result<std::path::PathBuf, String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(list_json).map_err(|e| format!("basert list --json: {e}"))?;
+    let mine: Vec<&serde_json::Value> =
+        entries.iter().filter(|m| m["id"] == id && m["installed"] == true && m["path"].is_string()).collect();
+    let variants = || mine.iter().filter_map(|m| m["variant"].as_str()).collect::<Vec<_>>().join(", ");
+    let chosen = match variant {
+        Some(v) => mine
+            .iter()
+            .find(|m| m["variant"] == v)
+            .ok_or_else(|| format!("basert has no installed variant {v} of {id} (installed: {})", variants()))?,
+        None => match mine.as_slice() {
+            [] => return Err(format!("basert has no installed model {id}")),
+            [one] => one,
+            many => many.iter().find(|m| m["variant"] == "default-q4").unwrap_or(&many[0]),
+        },
+    };
+    Ok(std::path::PathBuf::from(chosen["path"].as_str().unwrap_or_default()))
 }
 
 fn basert_tool() -> Result<std::path::PathBuf, String> {
@@ -240,3 +263,50 @@ mod tests {
         assert!(!gpu_name().is_empty());
     }
 }
+
+#[cfg(test)]
+mod pull_tests {
+    use super::installed_path;
+
+    fn list(entries: &[(&str, &str, bool)]) -> String {
+        let items: Vec<String> = entries
+            .iter()
+            .map(|(id, variant, installed)| {
+                format!(
+                    r#"{{"id":"{id}","variant":"{variant}","installed":{installed},"path":"/m/{id}/{variant}/model.base"}}"#
+                )
+            })
+            .collect();
+        format!("[{}]", items.join(","))
+    }
+
+    #[test]
+    fn the_one_installed_variant_is_the_model() {
+        let l = list(&[("org/a", "default-q4", true), ("org/b", "default-q8", true)]);
+        assert_eq!(installed_path(&l, "org/b", None).unwrap().to_str().unwrap(), "/m/org/b/default-q8/model.base");
+    }
+
+    #[test]
+    fn a_named_variant_is_taken_and_a_missing_one_refused() {
+        let l = list(&[("org/a", "default-q4", true), ("org/a", "default-q8", true)]);
+        assert_eq!(installed_path(&l, "org/a", Some("default-q8")).unwrap().to_str().unwrap(), "/m/org/a/default-q8/model.base");
+        let e = installed_path(&l, "org/a", Some("default-f16")).unwrap_err();
+        assert!(e.contains("no installed variant default-f16") && e.contains("default-q4, default-q8"), "{e}");
+    }
+
+    #[test]
+    fn several_variants_fall_back_to_default_q4_then_the_first() {
+        let l = list(&[("org/a", "default-q8", true), ("org/a", "default-q4", true)]);
+        assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q4/model.base");
+        let l = list(&[("org/a", "default-q8", true), ("org/a", "default-f16", true)]);
+        assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q8/model.base");
+    }
+
+    #[test]
+    fn a_model_not_installed_is_refused() {
+        let l = list(&[("org/a", "default-q4", false)]);
+        assert!(installed_path(&l, "org/a", None).unwrap_err().contains("no installed model org/a"));
+        assert!(installed_path("not json", "org/a", None).unwrap_err().contains("basert list --json"));
+    }
+}
+

@@ -56,7 +56,7 @@ Pulling happens during `superfluid serve`; there is no separate `pull` command.
 |---|---|---|---|---|
 | `llamacpp` | `llama download -hf` | the quant (`Q4_K_M`) | `--pull-file <name>`, `--pull-no-mmproj` | Hugging Face cache |
 | `mlx` | `huggingface_hub.snapshot_download` | a revision | `--pull-revision <rev>` | Hugging Face cache (no `*.py` files are fetched) |
-| `basert` | `basert resolve` | a variant | `--pull-target <scheme>`, `--pull-profile <json>`, `--pull-revision <rev>`, `--pull-force` | the baseRT models cache (`BASERT_MODELS_DIR`) |
+| `basert` | `basert pull`, then `basert list --json` for the path | a variant | `--pull-target <scheme>`, `--pull-profile <json>`, `--pull-revision <rev>`, `--pull-force` | the baseRT models cache (`BASERT_MODELS_DIR`) |
 
 - `--offline` only looks in the cache and fetches nothing.
 - An undeclared `--pull-*` option, or `--pull-*` with no model given by id, is refused before anything is fetched.
