@@ -23,9 +23,9 @@ superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
 ```
 
 <p align="center">
-  <img alt="Labelled superfluid, above: a chat question is answered in 0.36 s while eight agents prefill 7.5k-token prompts. Labelled llama-server, below: the same eight agents, and the chat is still waiting for its first token" src="docs/assets/demo/agents-chat.gif" width="100%">
+  <img alt="superfluid top, the terminal monitor, while eight agents prefill on baseRT: lanes fill, prefill peaks near 1,000 tokens per second, a chat preempts a lane, decode starts and the KV pool grows" src="docs/assets/demo/tui-basert.gif" width="100%">
 </p>
-<p align="center"><sub>Eight agents reading 7.5k-token documents, a chat question two seconds in. Same Mac, same model.</sub></p>
+<p align="center"><sub><code>superfluid top</code> while eight agents read 7.5k-token documents on Qwen3.8-27B through the baseRT engine (Apple M5 Pro), at six times real time. The chat question that arrives at 4 s is answered in 0.25 s.</sub></p>
 
 ## Why
 
