@@ -5,11 +5,12 @@
 #
 # Environment:
 #   SUPERFLUID_VERSION  a release tag (v0.1.0); default: the latest release
+#   SUPERFLUID_NO_BASERT  set to skip installing the baseRT engine
 #   SUPERFLUID_PREFIX   where to install; default: ~/.local (bin/ and libexec/superfluid/ under it)
 #
-# Nothing runs as root and nothing outside the prefix is touched. Runtimes
-# (llama.cpp, MLX, baseRT) are installed later, by `superfluid runtime install`
-# or on first `superfluid serve`, under ~/.superfluid.
+# Nothing runs as root and nothing outside the prefix is touched. The baseRT
+# engine is installed where it runs (Apple silicon, Linux arm64 with CUDA);
+# llama.cpp and MLX install themselves the first time a model needs them.
 set -eu
 
 REPO="basecompute/superfluid"
@@ -63,6 +64,19 @@ cp "$tmp/$name"/libexec/superfluid/* "$PREFIX/libexec/superfluid/"
 chmod +x "$PREFIX"/bin/superfluid* "$PREFIX"/libexec/superfluid/superfluid-worker-*
 
 say "installed $("$PREFIX/bin/superfluid" --version) to $PREFIX/bin"
+
+# The baseRT engine ships for Apple silicon and Linux arm64 (CUDA); install it
+# where it runs so .base bundles serve without a first-use wait. llama.cpp and
+# MLX install themselves the first time a model needs them.
+case "$target" in
+  aarch64-apple-darwin | aarch64-unknown-linux-gnu)
+    if [ -z "${SUPERFLUID_NO_BASERT:-}" ]; then
+      say "installing the baseRT engine"
+      "$PREFIX/bin/superfluid" runtime install basert \
+        || say "the baseRT engine was not installed; .base bundles need it (superfluid runtime install basert), GGUF and MLX models do not"
+    fi
+    ;;
+esac
 case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;
   *) say "add $PREFIX/bin to your PATH, e.g.: export PATH=\"$PREFIX/bin:\$PATH\"" ;;
