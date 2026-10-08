@@ -27,6 +27,13 @@ say "building the llama.cpp adapter (worker + tokenizer library)"
 cargo build --release --manifest-path "$MANIFEST" \
   -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
 
+# The baseRT worker installs the engine (its release ships a worker of its own
+# that serves); the engine runs on Apple silicon and Linux arm64.
+BASERT=""
+{ [ "$OS" = Darwin ] && [ "$ARCH" = arm64 ]; } || { [ "$OS" = Linux ] && [ "$ARCH" = aarch64 ]; } && BASERT=1
+say "building the baseRT adapter's worker"
+cargo build --release --manifest-path "$MANIFEST" -p superfluid-adapter-basert --bin superfluid-worker-basert
+
 if [ -n "$MLX" ]; then
   RECIPE="$ROOT/crates/superfluid-adapters/superfluid-adapter-mlx/recipe.json"
   PY_FIELDS="$(python3 - "$RECIPE" <<'PY'
@@ -71,7 +78,7 @@ PY
 fi
 
 rm -rf "$STAGE"; mkdir -p "$STAGE"
-cp "$TARGET/superfluid-worker-llamacpp" "$TARGET/$TOKENIZER" "$STAGE/"
+cp "$TARGET/superfluid-worker-llamacpp" "$TARGET/$TOKENIZER" "$TARGET/superfluid-worker-basert" "$STAGE/"
 [ -n "$MLX" ] && cp "$TARGET/superfluid-worker-mlx" "$STAGE/"
 chmod +x "$STAGE"/superfluid-worker-*
 
@@ -138,6 +145,7 @@ print(f"[adapters] {id}: plans {install}: {names}")
 }
 
 check_adapter llamacpp
+[ -n "$BASERT" ] && check_adapter basert
 if [ -n "$MLX" ]; then
   check_adapter mlx
   bare "$STAGE/superfluid-worker-mlx" plan | grep -q "\"name\":\"$PY_NAME\"" \

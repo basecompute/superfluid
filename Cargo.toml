@@ -43,7 +43,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/basecompute/superfluid"
@@ -53,22 +53,22 @@ categories = ["command-line-utilities", "science"]
 
 [workspace.dependencies]
 baseRT-sys = { path = "third_party/baseRT/baseRT-sys", version = "0.3.0", features = ["no-link"] }
-superfluid-abi = { path = "crates/superfluid-abi", version = "0.1.0" }
-superfluid-fingerprint = { path = "crates/superfluid-fingerprint", version = "0.1.0" }
-superfluid-proto = { path = "crates/superfluid-proto", version = "0.1.0" }
-superfluid-engine = { path = "crates/superfluid-engine", version = "0.1.0" }
-superfluid-agent = { path = "crates/superfluid-agent", version = "0.1.0" }
-superfluid-shm = { path = "crates/superfluid-shm", version = "0.1.0" }
-superfluid-linkf = { path = "crates/superfluid-linkf", version = "0.1.0" }
-superfluid-executor = { path = "crates/superfluid-executor", version = "0.1.0" }
-superfluid-adapter-kit = { path = "crates/superfluid-adapters/superfluid-adapter-kit", version = "0.1.0" }
-superfluid-adapter-mock = { path = "crates/superfluid-adapters/superfluid-adapter-mock", version = "0.1.0" }
-superfluid-adapter-basert = { path = "crates/superfluid-adapters/superfluid-adapter-basert", version = "0.1.0" }
-superfluid-adapter-llamacpp = { path = "crates/superfluid-adapters/superfluid-adapter-llamacpp", version = "0.1.0" }
-superfluid-adapter-mlx = { path = "crates/superfluid-adapters/superfluid-adapter-mlx", version = "0.1.0" }
-superfluid-tokenizer-hf = { path = "crates/superfluid-tokenizer-hf", version = "0.1.0" }
-superfluid-worker = { path = "crates/superfluid-worker", version = "0.1.0" }
-superfluid = { path = "crates/superfluid-daemon", version = "0.1.0" }
+superfluid-abi = { path = "crates/superfluid-abi", version = "0.1.1" }
+superfluid-fingerprint = { path = "crates/superfluid-fingerprint", version = "0.1.1" }
+superfluid-proto = { path = "crates/superfluid-proto", version = "0.1.1" }
+superfluid-engine = { path = "crates/superfluid-engine", version = "0.1.1" }
+superfluid-agent = { path = "crates/superfluid-agent", version = "0.1.1" }
+superfluid-shm = { path = "crates/superfluid-shm", version = "0.1.1" }
+superfluid-linkf = { path = "crates/superfluid-linkf", version = "0.1.1" }
+superfluid-executor = { path = "crates/superfluid-executor", version = "0.1.1" }
+superfluid-adapter-kit = { path = "crates/superfluid-adapters/superfluid-adapter-kit", version = "0.1.1" }
+superfluid-adapter-mock = { path = "crates/superfluid-adapters/superfluid-adapter-mock", version = "0.1.1" }
+superfluid-adapter-basert = { path = "crates/superfluid-adapters/superfluid-adapter-basert", version = "0.1.1" }
+superfluid-adapter-llamacpp = { path = "crates/superfluid-adapters/superfluid-adapter-llamacpp", version = "0.1.1" }
+superfluid-adapter-mlx = { path = "crates/superfluid-adapters/superfluid-adapter-mlx", version = "0.1.1" }
+superfluid-tokenizer-hf = { path = "crates/superfluid-tokenizer-hf", version = "0.1.1" }
+superfluid-worker = { path = "crates/superfluid-worker", version = "0.1.1" }
+superfluid = { path = "crates/superfluid-daemon", version = "0.1.1" }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1.1", features = ["use-std"] }
 thiserror = "2"

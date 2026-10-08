@@ -364,7 +364,12 @@ impl FleetManager {
         *node.checkout_at(slot) = Some(head);
         let open = node.conns.iter().filter(|c| c.lock().expect("node conn").is_some()).count();
         node.open.store(open.max(1), std::sync::atomic::Ordering::Relaxed);
-        self.mark_up(i);
+        if new {
+            // Listed as down only until this connection was in place: not a return.
+            self.shared.lock().expect("shared").meta[i].down_since = None;
+        } else {
+            self.mark_up(i);
+        }
         Ok((i, new, open))
     }
 
