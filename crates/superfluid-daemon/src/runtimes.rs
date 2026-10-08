@@ -323,7 +323,7 @@ impl Catalog {
     }
 
     fn with_tokenizer(&self, mut runtime: Runtime) -> Result<Runtime, String> {
-        let linked = crate::linked::get(runtime.id).is_some();
+        let linked = crate::linked::get(runtime.id.base()).is_some();
         match runtime.info.tokenizer.clone() {
             Some(TokenizerSource::Library(stem)) => {
                 runtime.tokenizer = crate::dylib_tokenizer::find_library(&runtime.worker.bin, &stem);
