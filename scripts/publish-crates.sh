@@ -34,7 +34,12 @@ for crate in $order; do
     continue
   fi
   attempt=0
-  until cargo publish -p "$name" --locked --no-verify 2>&1 | tee /tmp/publish.log; do
+  while :; do
+    if cargo publish -p "$name" --locked --no-verify >/tmp/publish.log 2>&1; then
+      cat /tmp/publish.log
+      break
+    fi
+    cat /tmp/publish.log
     attempt=$((attempt + 1))
     if grep -q "429" /tmp/publish.log && [ "$attempt" -le 24 ]; then
       echo "crates.io rate limit; waiting 10 minutes ($attempt)"
