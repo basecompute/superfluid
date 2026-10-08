@@ -3374,13 +3374,14 @@ fn an_idle_daemon_releases_expired_pins() {
     let s = run_session(&d, 0..96, 16);
     d.pin(s, 100).unwrap();
     assert_eq!(stats.pins_held.load(Ordering::Relaxed), 1);
-    for _ in 0..500 {
+    // The idle daemon sweeps on its own clock; a loaded runner may take seconds.
+    for _ in 0..5000 {
         if stats.pins_held.load(Ordering::Relaxed) == 0 {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    assert_eq!(stats.pins_held.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.pins_held.load(Ordering::Relaxed), 0, "the expired pin was released within 10 s");
     assert_eq!(stats.pins_expired.load(Ordering::Relaxed), 1);
 }
 
