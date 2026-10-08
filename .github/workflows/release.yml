@@ -119,10 +119,15 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
+      # The crates come from the tag; the publishing script from the ref this
+      # run was started on, so a fixed script can finish an older tag's publish.
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: scripts/publish-crates.sh
+        run: |
+          git fetch -q origin "${{ github.sha }}"
+          git show "${{ github.sha }}:scripts/publish-crates.sh" > /tmp/publish-crates.sh
+          sh /tmp/publish-crates.sh
 
   release:
     needs: build
