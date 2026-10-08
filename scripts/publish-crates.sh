@@ -12,7 +12,9 @@ m = json.load(sys.stdin)
 members = set(m["workspace_members"])
 packages = {p["id"]: p for p in m["packages"] if p["id"] in members}
 by_name = {p["name"]: p["id"] for p in packages.values()}
-deps = {pid: [by_name[d["name"]] for d in p["dependencies"] if d["name"] in by_name and d.get("kind") in (None, "build")] for pid, p in packages.items()}
+# Every dependency crates.io must already hold: normal and build dependencies, and the
+# dev-dependencies that carry a version (a path-only dev-dependency is dropped on publish).
+deps = {pid: [by_name[d["name"]] for d in p["dependencies"] if d["name"] in by_name and (d.get("kind") in (None, "build") or d["req"] != "*")] for pid, p in packages.items()}
 order, seen = [], set()
 def visit(pid):
     if pid in seen:
