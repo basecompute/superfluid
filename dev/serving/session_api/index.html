@@ -1,0 +1,2675 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="One serving daemon for local LLM inference — across runtimes and machines.">
+      
+      
+      
+        <link rel="canonical" href="https://superfluid.sh/dev/serving/session_api/">
+      
+      
+        <link rel="prev" href="../ollama_api/">
+      
+      
+        <link rel="next" href="../cli/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/logos/superfluid-logo.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Session API - superfluid</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/basecompute.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#session-api" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="superfluid" class="md-header__button md-logo" aria-label="superfluid" data-md-component="logo">
+      
+  <img src="../../assets/logos/superfluid-wordmark-dark.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            superfluid
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Session API
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+    
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/basecompute/superfluid" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="superfluid" class="md-nav__button md-logo" aria-label="superfluid" data-md-component="logo">
+      
+  <img src="../../assets/logos/superfluid-wordmark-dark.svg" alt="logo">
+
+    </a>
+    superfluid
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/basecompute/superfluid" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting_started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting_started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quickstart
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Serving
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Serving
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../openai_compatible_server/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAI-compatible server
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../responses_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenAI Responses API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../anthropic_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Anthropic Messages API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ollama_api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ollama-compatible API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session API
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Session API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#over-http" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Over HTTP
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#in-a-browser" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In a browser
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#requests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Requests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#python-client" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Python client
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour-to-know" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour to know
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Command-line reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multiple_models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Serving multiple models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../distributed_serving/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed serving
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Integrations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Integrations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    superfluid launch
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/claude_code/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/codex/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Codex
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/pi/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    pi
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/opencode/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenCode
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/hermes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hermes Agent
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/cline/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cline
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/openclaw/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenClaw
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../integrations/ollama_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ollama CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Models
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Models
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../models/supported_models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../models/runtimes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Runtimes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Features
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/tool_calling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tool calling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/chat_templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chat templates and reasoning
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/structured_outputs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Structured outputs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/sampling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sampling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/speculative_decoding/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Speculative decoding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/multimodal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Vision and audio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions and prefix caching
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/scheduling/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scheduling and QoS
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/security/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_8" >
+        
+          
+          <label class="md-nav__link" for="__nav_8" id="__nav_8_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Design
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_8_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_8">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Design
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../design/architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../design/adapters/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing a runtime adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" >
+        
+          
+          <label class="md-nav__link" for="__nav_9" id="__nav_9_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Performance
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Performance
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../performance/benchmarks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Benchmarks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_10" >
+        
+          
+          <label class="md-nav__link" for="__nav_10" id="__nav_10_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_10_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_10">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contributing
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../contributing/development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#over-http" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Over HTTP
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#in-a-browser" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In a browser
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#routes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Routes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#requests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Requests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#python-client" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Python client
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#behaviour-to-know" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Behaviour to know
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="session-api">Session API<a class="headerlink" href="#session-api" title="Permanent link">&para;</a></h1>
+<p>The session API is superfluid's own protocol. The <a href="../openai_compatible_server/">OpenAI</a>, <a href="../anthropic_api/">Anthropic</a> and <a href="../ollama_api/">Ollama</a> routes run each request as a fresh session; the session API keeps sessions in the daemon by id, so a client appends to one, generates on it, forks it and reads it back, across restarts. <a href="../../features/sessions/">Sessions and prefix caching</a> describes what a session holds.</p>
+<table>
+<thead>
+<tr>
+<th>transport</th>
+<th>flag</th>
+<th>encoding</th>
+<th>credential</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>unix socket</td>
+<td><code>--socket</code> (default <code>~/.superfluid/superfluid.sock</code>)</td>
+<td>frames of a <code>u32</code> little-endian length and a postcard-encoded <code>Request</code> or <code>Response</code></td>
+<td>none: the socket's file permissions</td>
+</tr>
+<tr>
+<td>browser transport</td>
+<td><code>--web 127.0.0.1:&lt;port&gt;</code>, off by default</td>
+<td>JSON over HTTP and WebSocket</td>
+<td>a token minted at every start</td>
+</tr>
+</tbody>
+</table>
+<p>Both carry the same requests and replies. <code>superfluid session</code> and <code>superfluid media</code> are clients of the socket.</p>
+<h2 id="over-http">Over HTTP<a class="headerlink" href="#over-http" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>superfluid<span class="w"> </span>serve<span class="w"> </span>unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M<span class="w"> </span>--web<span class="w"> </span><span class="m">127</span>.0.0.1:8455
+</code></pre></div>
+<p>The server prints the listener's address and the path of the token it wrote, <code>&lt;sessions&gt;/web-token</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nv">TOKEN</span><span class="o">=</span><span class="k">$(</span>cat<span class="w"> </span>~/.superfluid/sessions/web-token<span class="k">)</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>rpc<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span>curl<span class="w"> </span>-s<span class="w"> </span>http://127.0.0.1:8455/web/rpc<span class="w"> </span>-H<span class="w"> </span><span class="s1">'content-type: application/json'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span>-H<span class="w"> </span><span class="s2">"authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s2">"x-superfluid-csrf: </span><span class="nv">$TOKEN</span><span class="s2">"</span><span class="w"> </span>-d<span class="w"> </span><span class="s2">"</span><span class="nv">$1</span><span class="s2">"</span><span class="p">;</span><span class="w"> </span><span class="nb">echo</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="o">}</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>rpc<span class="w"> </span><span class="s1">'{"Create":{"parent":null,"params":{"temperature":0.7,"top_p":0.95,"min_p":0.0,"top_k":0,"seed":1}}}'</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="c1"># {"Created":{"session":1}}</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>rpc<span class="w"> </span><span class="s1">'{"AppendMessage":{"session":1,"role":1,"text":"Name three rivers."}}'</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>curl<span class="w"> </span>-N<span class="w"> </span>http://127.0.0.1:8455/web/stream<span class="w"> </span>-H<span class="w"> </span><span class="s1">'content-type: application/json'</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">"authorization: Bearer </span><span class="nv">$TOKEN</span><span class="s2">"</span><span class="w"> </span>-H<span class="w"> </span><span class="s2">"x-superfluid-csrf: </span><span class="nv">$TOKEN</span><span class="s2">"</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">'{"session":1,"max_tokens":256}'</span>
+</code></pre></div>
+<p>A request is the JSON form of one <code>Request</code>: its name as the key and its fields as the value, as in <code>{"Create":{...}}</code>; a request without fields is a bare string, such as <code>"Tree"</code>. A reply is one <code>Response</code> in the same form, such as <code>{"Created":{"session":1}}</code> or <code>{"Err":{"message":"..."}}</code>. Roles are <code>0</code> system, <code>1</code> user, <code>2</code> assistant and <code>3</code> tool.</p>
+<p>To continue the conversation, append the next user message and stream again: generating after a user message opens a new assistant turn.</p>
+<h2 id="in-a-browser">In a browser<a class="headerlink" href="#in-a-browser" title="Permanent link">&para;</a></h2>
+<p>A web page can use only <code>/web/ws</code>. Browsers apply CORS to <code>fetch</code>, and the listener sends no CORS headers, so a page's request to <code>/web/rpc</code> or <code>/web/stream</code> fails before it is sent. List the page's origin with <code>--web-origin</code>, and pass the token in the subprotocol list, since a browser cannot set headers on a WebSocket:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>superfluid<span class="w"> </span>serve<span class="w"> </span>unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M<span class="w"> </span>--web<span class="w"> </span><span class="m">127</span>.0.0.1:8455<span class="w"> </span>--web-origin<span class="w"> </span>http://localhost:5173
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">// TOKEN is the contents of web-token, passed in by whatever serves the page.</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="kd">const</span><span class="w"> </span><span class="nx">ws</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">WebSocket</span><span class="p">(</span><span class="s2">"ws://127.0.0.1:8455/web/ws"</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="s2">"superfluid.v1"</span><span class="p">,</span><span class="w"> </span><span class="sb">`superfluid.token.</span><span class="si">${</span><span class="nx">TOKEN</span><span class="si">}</span><span class="sb">`</span><span class="p">]);</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="kd">const</span><span class="w"> </span><span class="nx">send</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="nx">request</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">ws</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nb">JSON</span><span class="p">.</span><span class="nx">stringify</span><span class="p">(</span><span class="nx">request</span><span class="p">));</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="nx">ws</span><span class="p">.</span><span class="nx">onopen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">=&gt;</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span><span class="nx">send</span><span class="p">({</span><span class="w"> </span><span class="nx">Create</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">parent</span><span class="o">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nx">params</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">temperature</span><span class="o">:</span><span class="w"> </span><span class="mf">0.7</span><span class="p">,</span><span class="w"> </span><span class="nx">top_p</span><span class="o">:</span><span class="w"> </span><span class="mf">0.95</span><span class="p">,</span><span class="w"> </span><span class="nx">min_p</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">top_k</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">seed</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="nx">ws</span><span class="p">.</span><span class="nx">onmessage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">({</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">data</span><span class="p">);</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Created</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">    </span><span class="kd">const</span><span class="w"> </span><span class="nx">session</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Created</span><span class="p">.</span><span class="nx">session</span><span class="p">;</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">    </span><span class="nx">send</span><span class="p">({</span><span class="w"> </span><span class="nx">AppendMessage</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">session</span><span class="p">,</span><span class="w"> </span><span class="nx">role</span><span class="o">:</span><span class="w"> </span><span class="mf">1</span><span class="p">,</span><span class="w"> </span><span class="nx">text</span><span class="o">:</span><span class="w"> </span><span class="s2">"Name three rivers."</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">    </span><span class="nx">send</span><span class="p">({</span><span class="w"> </span><span class="nx">Generate</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nx">session</span><span class="p">,</span><span class="w"> </span><span class="nx">max_tokens</span><span class="o">:</span><span class="w"> </span><span class="mf">256</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="p">});</span>
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Delta</span><span class="o">?</span><span class="p">.</span><span class="nx">event</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">Generated</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="w">    </span><span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">append</span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Delta</span><span class="p">.</span><span class="nx">event</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">Generated</span><span class="p">.</span><span class="nx">text</span><span class="p">);</span>
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Generated</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">"finished"</span><span class="p">,</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Generated</span><span class="p">.</span><span class="nx">finish</span><span class="p">);</span>
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a><span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a><span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">error</span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span>
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="p">};</span>
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The token changes at every start and <code>web-token</code> is readable only by the daemon's user, so a page cannot load it itself; whatever serves or opens the page has to pass it in.</p>
+</div>
+<h2 id="routes">Routes<a class="headerlink" href="#routes" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>method</th>
+<th>path</th>
+<th>request</th>
+<th>reply</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>POST</code></td>
+<td><code>/web/rpc</code></td>
+<td>one request</td>
+<td>one reply; <code>Generate</code>, <code>Subscribe</code> and <code>Unsubscribe</code> are refused with an <code>Err</code></td>
+</tr>
+<tr>
+<td><code>POST</code></td>
+<td><code>/web/stream</code></td>
+<td><code>{"session", "max_tokens", "provisional"}</code>; <code>provisional</code> defaults to false</td>
+<td>server-sent events</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/web/ws</code></td>
+<td>a WebSocket with the <code>superfluid.v1</code> subprotocol; one request per frame</td>
+<td>one reply per text frame; every request, streaming included</td>
+</tr>
+<tr>
+<td><code>GET</code></td>
+<td><code>/web/health</code></td>
+<td></td>
+<td><code>200</code>, without a token</td>
+</tr>
+</tbody>
+</table>
+<p><code>/web/rpc</code> and <code>/web/stream</code> take the token as <code>Authorization: Bearer</code> and again as <code>X-Superfluid-CSRF</code>; <code>/web/ws</code> takes it as <code>Authorization</code> or as a <code>superfluid.token.&lt;token&gt;</code> subprotocol, and requires an <code>Origin</code> listed by <code>--web-origin</code>. See <a href="../../deployment/security/#browser-transport">Security</a>.</p>
+<table>
+<thead>
+<tr>
+<th>status</th>
+<th>when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>401</code></td>
+<td>missing or wrong token</td>
+</tr>
+<tr>
+<td><code>403</code></td>
+<td><code>Origin</code> not listed, or a missing or wrong CSRF header</td>
+</tr>
+<tr>
+<td><code>429</code></td>
+<td>a <code>Complete</code> past the listener's completion bucket, with <code>Retry-After</code> and a <code>Throttled</code> body</td>
+</tr>
+<tr>
+<td><code>200</code></td>
+<td>anything else, including a request the daemon refuses, which carries <code>Err</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>/web/stream</code> sends one <code>data:</code> line per event:</p>
+<table>
+<thead>
+<tr>
+<th>data</th>
+<th>when</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>{"committed": &lt;event&gt;}</code></td>
+<td>a committed <code>Generated</code>, <code>ToolUse</code>, <code>ToolResult</code> or <code>ToolParseFailure</code></td>
+</tr>
+<tr>
+<td><code>{"provisional": {"channel", "text"}}</code></td>
+<td>text ahead of its commit, with <code>"provisional": true</code></td>
+</tr>
+<tr>
+<td><code>{"done": {"tokens_generated", "finish", "warm_prefix"}}</code></td>
+<td>the generation ended</td>
+</tr>
+<tr>
+<td><code>{"error": "&lt;message&gt;"}</code></td>
+<td>the generation failed</td>
+</tr>
+<tr>
+<td><code>[DONE]</code></td>
+<td>last</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>channel</code> is <code>0</code> text, <code>1</code> reasoning, <code>2</code> tool call. <code>finish</code> is <code>1</code> end of turn, <code>2</code> <code>max_tokens</code>, <code>3</code> grammar, <code>4</code> cancelled, <code>5</code> error, and <code>0</code> on a <code>Generated</code> event while its turn is still open.</li>
+<li><code>warm_prefix</code> counts the prompt tokens that came from the cache instead of a prefill.</li>
+<li>Closing the stream ends the generation, as <code>Cancel</code> on <code>/web/rpc</code> does; it finishes with <code>4</code>.</li>
+</ul>
+<p>An event is <code>{"event_id", "epoch", "ts_unix_ms", "body"}</code>, with <code>body</code> one session-log record, such as <code>{"Generated":{"span":[...],"text":"...","channel":0,"finish":0}}</code>, or a bare string for a record without fields, such as <code>"EpochBump"</code>.</p>
+<table>
+<thead>
+<tr>
+<th>record</th>
+<th>fields</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Created</code></td>
+<td><code>parent</code>, <code>params</code></td>
+</tr>
+<tr>
+<td><code>Forked</code>, <code>Rebased</code></td>
+<td><code>parent</code>, <code>fork_at</code>, <code>params</code>; <code>Rebased</code> also <code>edits</code></td>
+</tr>
+<tr>
+<td><code>Message</code></td>
+<td><code>role</code>, <code>text</code>, <code>span</code></td>
+</tr>
+<tr>
+<td><code>GenerationPrompt</code></td>
+<td><code>span</code>: the assistant header the turn opened with</td>
+</tr>
+<tr>
+<td><code>Generated</code></td>
+<td><code>span</code>, <code>text</code>, <code>channel</code>, <code>finish</code></td>
+</tr>
+<tr>
+<td><code>ToolUse</code></td>
+<td><code>name</code>, <code>arguments</code>; its <code>event_id</code> is the <code>call_id</code> that <code>AppendToolResult</code> answers</td>
+</tr>
+<tr>
+<td><code>ToolResult</code></td>
+<td><code>call_id</code>, <code>content</code>, <code>span</code></td>
+</tr>
+<tr>
+<td><code>Appended</code></td>
+<td><code>text</code>, <code>span</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>span</code> is the token ids the record put on the model's input.</p>
+<h2 id="requests">Requests<a class="headerlink" href="#requests" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>request</th>
+<th>fields</th>
+<th>reply</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Create</code></td>
+<td><code>parent</code> (a session id or <code>null</code>), <code>params</code></td>
+<td><code>Created {session}</code></td>
+</tr>
+<tr>
+<td><code>Append</code></td>
+<td><code>session</code>, <code>text</code> (or <code>null</code>), <code>span</code> (token ids)</td>
+<td><code>Committed {event}</code></td>
+</tr>
+<tr>
+<td><code>AppendMessage</code></td>
+<td><code>session</code>, <code>role</code>, <code>text</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>AppendSystem</code></td>
+<td><code>session</code>, <code>text</code> (or <code>null</code>), <code>tools</code> (JSON strings)</td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>AppendBlock</code></td>
+<td><code>session</code>, <code>role</code>, <code>kind</code>, <code>payload</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>AppendImage</code></td>
+<td><code>session</code>, <code>role</code>, <code>blob</code> (a <code>PutMedia</code> hash), <code>pre_text</code>, <code>post_text</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>Read</code></td>
+<td><code>session</code>, <code>cursor</code></td>
+<td><code>Events {events}</code>, from event <code>cursor</code> on</td>
+</tr>
+<tr>
+<td><code>List</code></td>
+<td></td>
+<td><code>Sessions {ids}</code></td>
+</tr>
+<tr>
+<td><code>Sessions</code></td>
+<td><code>include_archived</code></td>
+<td><code>SessionList {sessions}</code></td>
+</tr>
+<tr>
+<td><code>Tree</code></td>
+<td></td>
+<td><code>Tree {nodes}</code>, each <code>[id, parent, fork_at]</code></td>
+</tr>
+<tr>
+<td><code>Inspect</code></td>
+<td><code>session</code></td>
+<td><code>Inspection {inspection}</code></td>
+</tr>
+<tr>
+<td><code>SetMeta</code></td>
+<td><code>session</code>, <code>expected_version</code>, <code>title</code>, <code>archived</code></td>
+<td><code>Meta {version}</code></td>
+</tr>
+<tr>
+<td><code>Purge</code></td>
+<td><code>session</code>, <code>expected_generation</code>, <code>mode</code> (<code>"Cascade"</code> or <code>"Reroot"</code>)</td>
+<td><code>Purged {sessions}</code></td>
+</tr>
+<tr>
+<td><code>Generate</code></td>
+<td><code>session</code>, <code>max_tokens</code></td>
+<td><code>Delta {event}</code> per committed event, then <code>Generated {events, tokens_generated, finish, warm_prefix}</code></td>
+</tr>
+<tr>
+<td><code>Cancel</code></td>
+<td><code>session</code></td>
+<td><code>Cancelling</code>, or <code>Err</code> when nothing is generating</td>
+</tr>
+<tr>
+<td><code>Subscribe</code></td>
+<td><code>session</code>, <code>cursor</code>, <code>provisional</code></td>
+<td><code>Subscribed {sub}</code>, then <code>SubEvent {sub, event}</code>, <code>SubProvisional {sub, channel, text}</code>, and last <code>SubEnded {sub, reason}</code> (<code>unsubscribed</code>, <code>lagged</code>, <code>publisher closed</code> or <code>purged</code>)</td>
+</tr>
+<tr>
+<td><code>Unsubscribe</code></td>
+<td><code>sub</code></td>
+<td><code>Unsubscribed</code></td>
+</tr>
+<tr>
+<td><code>Complete</code></td>
+<td><code>prefix</code>, <code>suffix</code>, <code>mode</code> (<code>0</code> PSM, <code>1</code> SPM), <code>max_tokens</code></td>
+<td><code>Completion {text, tokens, cached, expired}</code>, or <code>Throttled {retry_after_ms}</code></td>
+</tr>
+<tr>
+<td><code>Fork</code></td>
+<td><code>session</code>, <code>at_event</code>, <code>params</code> (<code>null</code> keeps the parent's)</td>
+<td><code>Created {session}</code></td>
+</tr>
+<tr>
+<td><code>Rebase</code></td>
+<td><code>session</code>, <code>edits</code>, <code>params</code></td>
+<td><code>Created</code></td>
+</tr>
+<tr>
+<td><code>Trim</code></td>
+<td><code>session</code>, <code>to_event</code></td>
+<td><code>Created</code></td>
+</tr>
+<tr>
+<td><code>AppendToolResult</code></td>
+<td><code>session</code>, <code>call_id</code>, <code>content</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>AppendToolOutcome</code></td>
+<td><code>session</code>, <code>call_id</code>, <code>outcome</code> (<code>1</code> failed, <code>2</code> cancelled), <code>note</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>RequestToolCancel</code></td>
+<td><code>session</code>, <code>call_id</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>OpenToolCalls</code></td>
+<td><code>session</code></td>
+<td><code>ToolCalls {calls}</code>, each <code>[call_id, name, arguments]</code></td>
+</tr>
+<tr>
+<td><code>Ledger</code></td>
+<td><code>session</code></td>
+<td><code>Ledger {entries}</code></td>
+</tr>
+<tr>
+<td><code>RequestPermission</code></td>
+<td><code>session</code>, <code>call_id</code>, <code>text</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>RespondPermission</code></td>
+<td><code>session</code>, <code>request_id</code>, <code>granted</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>SetQos</code></td>
+<td><code>session</code>, <code>class</code> (<a href="../../features/scheduling/"><code>0</code> to <code>3</code></a>), <code>batch_invariant</code></td>
+<td><code>Committed</code></td>
+</tr>
+<tr>
+<td><code>SetBackgroundRate</code></td>
+<td><code>divisor</code></td>
+<td><code>Ack</code></td>
+</tr>
+<tr>
+<td><code>Pin</code></td>
+<td><code>session</code>, <code>ttl_ms</code> (<code>0</code> clears)</td>
+<td><code>Pinned {deadline_unix_ms}</code></td>
+</tr>
+<tr>
+<td><code>PutMedia</code></td>
+<td><code>bytes</code>, <code>mime</code></td>
+<td><code>Media {hash}</code></td>
+</tr>
+<tr>
+<td><code>GcMedia</code></td>
+<td></td>
+<td><code>Gc {kept, removed}</code></td>
+</tr>
+<tr>
+<td><code>SetLogLevel</code></td>
+<td><code>directive</code></td>
+<td><code>Ack</code></td>
+</tr>
+<tr>
+<td><code>Metrics</code></td>
+<td></td>
+<td><code>Text {text}</code>, the Prometheus exposition</td>
+</tr>
+</tbody>
+</table>
+<p>Any request can be answered with <code>Err {message}</code>. A <code>Rebase</code> edit is <code>{"Drop":{"from","to"}}</code> or <code>{"Replace":{"from","to","role","text"}}</code>. In JSON, <code>PutMedia</code>'s <code>bytes</code> is an array of numbers.</p>
+<ul>
+<li>A connection runs one request at a time, in order: a <code>Generate</code> streams its <code>Delta</code> frames and its <code>Generated</code> summary before the next request starts. Send <code>Cancel</code> on a second connection, or on <code>/web/rpc</code>.</li>
+<li>Only committed events carry ids, and a cursor a client holds still resolves after a restart.</li>
+<li><code>Subscribe</code> sends the backlog from the cursor, then live events, deduplicated by id. With <code>provisional</code>, text also arrives ahead of its commit as <code>SubProvisional</code>.</li>
+<li><code>Complete</code> is metered per connection on the socket and on <code>/web/ws</code>, and by one bucket for the whole listener on <code>/web/rpc</code>.</li>
+<li>Event ids count up from <code>0</code> (<code>Created</code>) within a session, and a fork keeps its parent's ids for the events it shares. <code>Fork {at_event: n}</code> makes a session holding the parent's events <code>0</code> to <code>n - 1</code>; the next id of a session is the length of its <code>Read</code> from <code>0</code>, and forking there keeps everything.</li>
+<li><code>params</code> takes all five fields and fills nothing in from the model's defaults. <code>temperature</code> <code>0</code> is greedy and <code>top_k</code> <code>0</code> disables top-k.</li>
+<li><code>AppendSystem</code> opens a session with a system turn declaring <code>tools</code>, rendered the way the HTTP routes render the same tools. A tool is an OpenAI function tool (<code>{"type":"function","function":{"name","description","parameters"}}</code>), a bare function, or an Anthropic tool with <code>input_schema</code>. Templates declare tools only in the first turn, so it is refused once the session has any input, a fork's inherited history included. The model's calls arrive as <code>ToolUse</code> events; answer each with <code>AppendToolResult</code>.</li>
+<li>Rebase ranges are half-open, sorted and do not overlap, and never include event <code>0</code>. Replacing from one message to the end of the session is "edit this message and drop what followed".</li>
+</ul>
+<h2 id="python-client">Python client<a class="headerlink" href="#python-client" title="Permanent link">&para;</a></h2>
+<p><code>clients/python</code> is a client for <code>/web/rpc</code> and <code>/web/stream</code> with no dependencies beyond the standard library.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>pip<span class="w"> </span>install<span class="w"> </span>./clients/python
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>superfluid<span class="w"> </span>serve<span class="w"> </span>&lt;model&gt;<span class="w"> </span>--web<span class="w"> </span><span class="m">127</span>.0.0.1:8460
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">superfluid_client</span><span class="w"> </span><span class="kn">import</span> <span class="n">Client</span><span class="p">,</span> <span class="n">Sampling</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">sf</span> <span class="o">=</span> <span class="n">Client</span><span class="p">()</span>                       <span class="c1"># http://127.0.0.1:8460, token from ~/.superfluid/sessions/web-token</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">s</span> <span class="o">=</span> <span class="n">sf</span><span class="o">.</span><span class="n">session</span><span class="p">(</span><span class="n">Sampling</span><span class="p">(</span><span class="n">temperature</span><span class="o">=</span><span class="mf">0.7</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">1</span><span class="p">),</span> <span class="n">system</span><span class="o">=</span><span class="s2">"You are a code reviewer."</span><span class="p">)</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="n">q</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">user</span><span class="p">(</span><span class="nb">open</span><span class="p">(</span><span class="s2">"diff.patch"</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">s</span><span class="o">.</span><span class="n">stream</span><span class="p">(</span><span class="n">max_tokens</span><span class="o">=</span><span class="mi">512</span><span class="p">):</span>          <span class="c1"># token by token; chunk.kind is "text" or "reasoning"</span>
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    <span class="nb">print</span><span class="p">(</span><span class="n">chunk</span><span class="o">.</span><span class="n">text</span><span class="p">,</span> <span class="n">end</span><span class="o">=</span><span class="s2">""</span><span class="p">)</span>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="n">security</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">fork_after</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="n">seed</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>              <span class="c1"># the diff is shared by reference and starts warm</span>
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="n">security</span><span class="o">.</span><span class="n">user</span><span class="p">(</span><span class="s2">"Focus on security."</span><span class="p">)</span>
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="nb">print</span><span class="p">(</span><span class="n">security</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="mi">512</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">)</span>
+<a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a>
+<a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="n">fixed</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">edit</span><span class="p">(</span><span class="n">q</span><span class="p">,</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"diff-v2.patch"</span><span class="p">)</span><span class="o">.</span><span class="n">read</span><span class="p">())</span> <span class="c1"># a new branch with the message replaced</span>
+<a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a><span class="n">again</span> <span class="o">=</span> <span class="n">sf</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">id</span><span class="p">)</span>                            <span class="c1"># the same session, after a restart too</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="n">weather</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"type"</span><span class="p">:</span> <span class="s2">"function"</span><span class="p">,</span> <span class="s2">"function"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"name"</span><span class="p">:</span> <span class="s2">"get_weather"</span><span class="p">,</span> <span class="s2">"description"</span><span class="p">:</span> <span class="s2">"Current weather"</span><span class="p">,</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>           <span class="s2">"parameters"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"type"</span><span class="p">:</span> <span class="s2">"object"</span><span class="p">,</span> <span class="s2">"properties"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"city"</span><span class="p">:</span> <span class="p">{</span><span class="s2">"type"</span><span class="p">:</span> <span class="s2">"string"</span><span class="p">}},</span> <span class="s2">"required"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"city"</span><span class="p">]}}}</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">s</span> <span class="o">=</span> <span class="n">sf</span><span class="o">.</span><span class="n">session</span><span class="p">(</span><span class="n">system</span><span class="o">=</span><span class="s2">"Answer with the tools."</span><span class="p">,</span> <span class="n">tools</span><span class="o">=</span><span class="p">[</span><span class="n">weather</span><span class="p">])</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">s</span><span class="o">.</span><span class="n">user</span><span class="p">(</span><span class="s2">"Is it raining in Paris?"</span><span class="p">)</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="n">reply</span> <span class="o">=</span> <span class="n">s</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="mi">256</span><span class="p">)</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">reply</span><span class="o">.</span><span class="n">tool_calls</span><span class="p">:</span>                   <span class="c1"># ToolCall(id, name, arguments)</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="n">s</span><span class="o">.</span><span class="n">tool_result</span><span class="p">(</span><span class="n">call</span><span class="p">,</span> <span class="n">get_weather</span><span class="p">(</span><span class="o">**</span><span class="n">call</span><span class="o">.</span><span class="n">json</span><span class="p">()))</span>   <span class="c1"># your function, returning a string</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="nb">print</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="mi">256</span><span class="p">)</span><span class="o">.</span><span class="n">text</span><span class="p">)</span>
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>call</th>
+<th>request</th>
+<th>what it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Client.session(sampling, system=, tools=)</code></td>
+<td><code>Create</code>; <code>AppendSystem</code> with <code>tools</code></td>
+<td>new session, opening with the system message and tools given</td>
+</tr>
+<tr>
+<td><code>Session.user(text)</code>, <code>.system</code>, <code>.assistant</code></td>
+<td><code>AppendMessage</code></td>
+<td>append a message</td>
+</tr>
+<tr>
+<td><code>Session.declare(system=, tools=)</code></td>
+<td><code>AppendSystem</code></td>
+<td>open the session with a system turn declaring tools, each a dict or a JSON string</td>
+</tr>
+<tr>
+<td><code>Session.stream(max_tokens)</code>, <code>.generate(max_tokens)</code></td>
+<td><code>/web/stream</code></td>
+<td>generate the next turn; a <code>Reply</code> has <code>text</code>, <code>reasoning</code>, <code>tool_calls</code>, <code>finish</code>, <code>tokens</code>, <code>warm_prefix</code></td>
+</tr>
+<tr>
+<td><code>Session.cancel()</code></td>
+<td><code>Cancel</code></td>
+<td>stop the generation in flight; leaving a <code>stream()</code> loop early does this too</td>
+</tr>
+<tr>
+<td><code>Session.fork(at=, seed=)</code>, <code>.fork_after(event)</code></td>
+<td><code>Fork</code></td>
+<td>new session holding the events before <code>at</code> (default: all of them)</td>
+</tr>
+<tr>
+<td><code>Session.edit(event, text)</code>, <code>.rebase(edits)</code></td>
+<td><code>Rebase</code></td>
+<td>new session with a message replaced, or events dropped or replaced</td>
+</tr>
+<tr>
+<td><code>Session.trim(to_event)</code></td>
+<td><code>Trim</code></td>
+<td>new session holding the events before <code>to_event</code></td>
+</tr>
+<tr>
+<td><code>Session.events(cursor)</code>, <code>.messages()</code></td>
+<td><code>Read</code></td>
+<td>the log, raw or folded into messages</td>
+</tr>
+<tr>
+<td><code>Session.tool_result(call, content)</code>, <code>.open_tool_calls()</code></td>
+<td><code>AppendToolResult</code>, <code>OpenToolCalls</code></td>
+<td>answer a tool call the model made</td>
+</tr>
+<tr>
+<td><code>Session.pin(ttl_s)</code>, <code>.set_qos(class)</code></td>
+<td><code>Pin</code>, <code>SetQos</code></td>
+<td>hold the prefix in cache; set the scheduling class</td>
+</tr>
+<tr>
+<td><code>Client.call(verb, args)</code></td>
+<td>any</td>
+<td>send a raw request; returns <code>(variant, payload)</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>clients/python/examples</code> has two demos: <code>fanout.py</code> reads a document once and streams several questions about it from forks at the same time, and <code>pull_the_plug.py</code> kills its own server with SIGKILL mid-reply, restarts it and continues the same reply.</p>
+<h2 id="behaviour-to-know">Behaviour to know<a class="headerlink" href="#behaviour-to-know" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A session keeps the exact tokens a turn produced, reasoning included. The HTTP routes render each request's history through the chat template, which for some reasoning models (Qwen3) drops earlier turns' reasoning, so a later turn can come out differently from the same conversation sent over HTTP. To give the model a past turn in the template's form, rebase its <code>Generated</code> events into one <code>assistant</code> message holding the text.</li>
+<li>A generation continued after a cancel or a <code>max_tokens</code> cut draws exactly the tokens the uncut generation would have. A fork that keeps its parent's seed shares the parent's random draws, but it computes the end of its prompt in a different batch shape than the parent did, so a sampled fork can drift from the parent's words after a while; give forks their own seeds rather than relying on one to retrace its parent.</li>
+<li>After a crash the history is prefilled again, which can differ from the original decode in the last bits of floating point, so a sampled continuation can drift from what the uninterrupted run would have drawn.</li>
+<li>Provisional text runs ahead of the commit. After a crash, generation resumes from the last committed event, so a client showing provisional text can see the tail after it drawn again.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../ollama_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Ollama-compatible API">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Ollama-compatible API
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../cli/" class="md-footer__link md-footer__link--next" aria-label="Next: Command-line reference">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Command-line reference
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      <a href="https://basecompute.co">Base Compute</a> · Melbourne &amp; Berlin
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://discord.gg/kaYmAGckCq" target="_blank" rel="noopener" title="Discord" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M492.5 69.8c-.2-.3-.4-.6-.8-.7-38.1-17.5-78.4-30-119.7-37.1-.4-.1-.8 0-1.1.1s-.6.4-.8.8c-5.5 9.9-10.5 20.2-14.9 30.6-44.6-6.8-89.9-6.8-134.4 0-4.5-10.5-9.5-20.7-15.1-30.6-.2-.3-.5-.6-.8-.8s-.7-.2-1.1-.2C162.5 39 122.2 51.5 84.1 69c-.3.1-.6.4-.8.7C7.1 183.5-13.8 294.6-3.6 404.2c0 .3.1.5.2.8s.3.4.5.6c44.4 32.9 94 58 146.8 74.2.4.1.8.1 1.1 0s.7-.4.9-.7c11.3-15.4 21.4-31.8 30-48.8.1-.2.2-.5.2-.8s0-.5-.1-.8-.2-.5-.4-.6-.4-.3-.7-.4c-15.8-6.1-31.2-13.4-45.9-21.9-.3-.2-.5-.4-.7-.6s-.3-.6-.3-.9 0-.6.2-.9.3-.5.6-.7c3.1-2.3 6.2-4.7 9.1-7.1.3-.2.6-.4.9-.4s.7 0 1 .1c96.2 43.9 200.4 43.9 295.5 0 .3-.1.7-.2 1-.2s.7.2.9.4c2.9 2.4 6 4.9 9.1 7.2.2.2.4.4.6.7s.2.6.2.9-.1.6-.3.9-.4.5-.6.6c-14.7 8.6-30 15.9-45.9 21.8-.2.1-.5.2-.7.4s-.3.4-.4.7-.1.5-.1.8.1.5.2.8c8.8 17 18.8 33.3 30 48.8.2.3.6.6.9.7s.8.1 1.1 0c52.9-16.2 102.6-41.3 147.1-74.2.2-.2.4-.4.5-.6s.2-.5.2-.8c12.3-126.8-20.5-236.9-86.9-334.5zm-302 267.7c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.4 59.2-52.8 59.2m195.4 0c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.2 59.2-52.8 59.2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://github.com/basecompute/superfluid" target="_blank" rel="noopener" title="GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://basecompute.co" target="_blank" rel="noopener" title="Base Compute" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M351.9 280H161c2.9 64.5 17.2 123.9 37.5 167.4 11.4 24.5 23.7 41.8 35.1 52.4 11.2 10.5 18.9 12.2 22.9 12.2s11.7-1.7 22.9-12.2c11.4-10.6 23.7-28 35.1-52.4 20.3-43.5 34.6-102.9 37.5-167.4zm-191-48h190.9c-2.8-64.5-17.1-123.9-37.4-167.4-11.4-24.4-23.7-41.8-35.1-52.4C268.1 1.7 260.4 0 256.4 0s-11.7 1.7-22.9 12.2c-11.4 10.6-23.7 28-35.1 52.4-20.3 43.5-34.6 102.9-37.5 167.4m-48 0c3.5-85.6 25.6-165.1 57.9-217.3C78.7 47.3 10.9 131.2 1.5 232zM1.5 280c9.4 100.8 77.2 184.7 169.3 217.3-32.3-52.2-54.4-131.7-57.9-217.3zm398.4 0c-3.5 85.6-25.6 165.1-57.9 217.3 92.1-32.7 159.9-116.5 169.3-217.3zm111.4-48C501.9 131.2 434.1 47.3 342 14.7c32.3 52.2 54.4 131.7 57.9 217.3z"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "content.code.copy", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
