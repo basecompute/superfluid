@@ -1,0 +1,12 @@
+[package]
+name = "superfluid-fingerprint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The §4 identity contracts as one typed, pinned definition: materialization compatibility, provenance lineage, generation behavior"
+
+[dependencies]

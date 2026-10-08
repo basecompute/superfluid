@@ -1,0 +1,21 @@
+[package]
+name = "superfluid-tokenizer-llamacpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The llama.cpp runtime's tokenizer library: GGUF tokenization through the vocabulary-only load of the llama.cpp beside it, loaded by the daemon at run time"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+superfluid-adapter-kit = { workspace = true }
+superfluid-adapter-llamacpp = { path = "..", version = "0.1.0" }
+libc = "0.2"
+
+[lints]
+workspace = true

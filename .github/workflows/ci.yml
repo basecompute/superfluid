@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Each test binary carries its own copy of the debug info on Linux, and the
+  # workspace's test binaries together outgrow the runner's disk (ld then
+  # dies with SIGBUS). Panics still name their file and line without it.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  core:
+    name: build, clippy, test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build
+      - name: cargo test
+        run: cargo test
+
+  adapters:
+    name: runtime adapters
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: basert adapter, daemon without it
+        run: |
+          set -o pipefail
+          cargo test -p superfluid-adapter-basert -- --nocapture 2>&1 | python3 scripts/skip_report.py "basert adapter"
+          cargo clippy -p superfluid --no-default-features --all-targets -- -D warnings
+
+      - name: llama.cpp adapter, its tokenizer library, daemon with llamacpp
+        run: |
+          cargo clippy -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp --all-targets -- -D warnings
+          cargo clippy -p superfluid --features llamacpp --all-targets -- -D warnings
+
+      - name: Plan the llama.cpp install
+        id: llama
+        run: |
+          cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+          plan=$(target/debug/superfluid-worker-llamacpp plan | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
+          name=$(printf '%s' "$plan" | python3 -c 'import sys, json; print(json.load(sys.stdin)["install"])')
+          {
+            echo "name=$name"
+            echo "plan<<PLAN_EOF"
+            echo "$plan"
+            echo "PLAN_EOF"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/superfluid-ci/llamacpp
+          key: llamacpp-${{ runner.os }}-${{ runner.arch }}-${{ steps.llama.outputs.name }}
+      - name: llama.cpp adapter tests
+        env:
+          PLAN: ${{ steps.llama.outputs.plan }}
+        run: |
+          set -o pipefail
+          dir="$HOME/.cache/superfluid-ci/llamacpp/${{ steps.llama.outputs.name }}"
+          [ -f "$dir/runtime.json" ] || { rm -rf "$dir"; target/debug/superfluid-worker-llamacpp install --into "$dir" --plan "$PLAN"; }
+          export SUPERFLUID_LLAMA_LIB="$dir/lib"
+          cargo test -p superfluid-adapter-llamacpp -- --nocapture 2>&1 | python3 scripts/skip_report.py "llama.cpp adapter"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/superfluid-ci/adapter-python
+          key: adapter-python-${{ hashFiles('crates/superfluid-adapters/superfluid-adapter-mlx/recipe.json') }}
+      - name: The adapters as a release ships them
+        # The cache action expands ~ itself; an env value would reach the
+        # script as a literal ~ and the build would look for Python under it.
+        run: SUPERFLUID_ADAPTER_CACHE="$HOME/.cache/superfluid-ci/adapter-python" bash scripts/build_runtime_adapters.sh "${RUNNER_TEMP}/adapters"

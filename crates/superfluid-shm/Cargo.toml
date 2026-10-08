@@ -1,0 +1,19 @@
+[package]
+name = "superfluid-shm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Link W local-adapter mechanics: POSIX shared-memory segments, SCM_RIGHTS fd passing, and the token/logits ring layout shared by worker and node-agent"
+
+[dependencies]
+superfluid-engine.workspace = true
+superfluid-abi.workspace = true
+libc = "0.2"
+thiserror.workspace = true
+
+[lints]
+workspace = true

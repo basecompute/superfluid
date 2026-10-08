@@ -1,0 +1,23 @@
+[package]
+name = "superfluid-executor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The generic executor: the Engine tick contract implemented once over a runtime's RuntimePrimitives (batch step, sequences, state export), so an adapter supplies only what its runtime does"
+
+[dependencies]
+superfluid-abi = { workspace = true }
+superfluid-engine = { workspace = true }
+superfluid-fingerprint = { workspace = true }
+llguidance = "1.8"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+superfluid = { path = "../superfluid-daemon" }
+
+[lints]
+workspace = true

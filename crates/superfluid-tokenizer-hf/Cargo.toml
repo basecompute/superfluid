@@ -1,0 +1,19 @@
+[package]
+name = "superfluid-tokenizer-hf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "HF tokenizer.json as a superfluid Tokenizer: the daemon's built-in tokenizer for HF-layout artifacts (MLX, safetensors), no runtime FFI"
+
+[dependencies]
+superfluid-engine = { workspace = true }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+serde_json = "1"
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

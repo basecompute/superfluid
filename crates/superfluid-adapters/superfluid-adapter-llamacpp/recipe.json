@@ -1,0 +1,93 @@
+{
+  "about": "llama.cpp builds this adapter drives, as ggml-org publishes them: each asset of a tested build with the size and SHA-256 GitHub lists for it. A build is tested when llama.cpp's llama.h, ggml.h, ggml-backend.h and gguf.h at that build declare what src/sys.rs declares. Add a build here, newest first, after running the adapter's tests on it.",
+  "release": "https://github.com/ggml-org/llama.cpp/releases/download/{version}/{name}",
+  "api": "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}",
+  "tested": [
+    {
+      "version": "b11284",
+      "published": "2026-09-30",
+      "assets": [
+        {
+          "name": "cudart-llama-b11284-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 594377553,
+          "sha256": "c8b9f1d3841458938eeba402acd0f64de83ca281e232300be55d4b9091305edb"
+        },
+        {
+          "name": "cudart-llama-b11284-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+          "size": 552521412,
+          "sha256": "aed6fdbc14c63300677e567541834eca2df4c7fd65cd7721a1421e7b74052b49"
+        },
+        {
+          "name": "cudart-llama-b11284-bin-ubuntu-cuda-13.4-x64.tar.gz",
+          "size": 440236615,
+          "sha256": "273038c644f2fed2876f423cec775fdea57303d389094bcc41e7f2f8b5dc186e"
+        },
+        {
+          "name": "llama-b11284-bin-macos-arm64.tar.gz",
+          "size": 11797542,
+          "sha256": "f26782642b52467e1c1f7814349c478d5477d61887aeb237b7fe1ee1527554e5"
+        },
+        {
+          "name": "llama-b11284-bin-macos-x64.tar.gz",
+          "size": 11350092,
+          "sha256": "0d4713e96cda3bdf4718d91a5b4ccaba93fb4b1784e43c73f70050acfeaf87c3"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-arm64.tar.gz",
+          "size": 13530496,
+          "sha256": "c14e00a60e0bf3d1e6c65cad0d60ad08fe6bf014bcadee993184285179e9bf6c"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 171058861,
+          "sha256": "409b69983143dfcdfefb4ad1ae931e318c3ee0210562e7873447ea4573f3199b"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+          "size": 147133119,
+          "sha256": "f3953ebb6211136b25bc71baccf2b8b792784a6d93483f66bfd8a03af1272c60"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-cuda-13.4-x64.tar.gz",
+          "size": 151899372,
+          "sha256": "96819d3f24a1bb25f41a01837cece8ac3f519d43475ffb25e0f557cc82d637cd"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-openvino-2026.4-x64.tar.gz",
+          "size": 109109876,
+          "sha256": "6a0db8cf56c3b73848c1f9b6ec0d9a5713ce261f41ecb1dadc4d037d5b05b298"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-rocm-10.0-x64.tar.gz",
+          "size": 242465842,
+          "sha256": "fc5a2abf5e14355754c29a1be8bf57f3b8b650ed3bf605ceb774af189dbe8279"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-sycl-fp16-x64.tar.gz",
+          "size": 54084225,
+          "sha256": "52d9ed731069115eb303dea01943065d04067cba8b23b98fda0cf20d389591b2"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-sycl-fp32-x64.tar.gz",
+          "size": 53983177,
+          "sha256": "05aa1d3d8a2ad9f8aa87f0f6e649569a3f64e2a6d82e33b7bd74bb8095ddf49a"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-vulkan-arm64.tar.gz",
+          "size": 24690216,
+          "sha256": "81700f1bfaeb7ac302a2f62fc389d5014d4165066dd009270aa0248a24d33faa"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-vulkan-x64.tar.gz",
+          "size": 31384589,
+          "sha256": "3b5ddda5a6f53550cf7740b056f94afdeaa1f86c5b93cbcd619821158ba3c9d3"
+        },
+        {
+          "name": "llama-b11284-bin-ubuntu-x64.tar.gz",
+          "size": 17438632,
+          "sha256": "f53f2534e7ac8df1ef056117d215f1581feb6c426310d6423efac9adcdd5c2c8"
+        }
+      ]
+    }
+  ]
+}

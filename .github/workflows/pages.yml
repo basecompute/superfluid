@@ -1,0 +1,56 @@
+name: Pages
+
+# A push to main publishes the site as "dev", and a tag v* as its major.minor
+# and "latest", to the gh-pages branch that https://superfluid.sh serves,
+# with scripts/install.sh at the root.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths: ["docs/**", "mkdocs.yml", "scripts/install.sh", ".github/workflows/pages.yml"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r docs/requirements-docs.txt
+      - run: mkdocs build --strict
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Publish the version
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF_NAME#v}"
+            mike deploy --push --update-aliases "${v%.*}" latest
+            mike set-default --push latest
+          else
+            mike deploy --push dev
+            mike list | grep -q '\[latest\]' || mike set-default --push dev
+          fi
+      - name: Root files
+        run: |
+          set -euo pipefail
+          git worktree add ../pages gh-pages
+          cp scripts/install.sh ../pages/install.sh
+          echo superfluid.sh > ../pages/CNAME
+          touch ../pages/.nojekyll
+          cd ../pages
+          git add install.sh CNAME .nojekyll
+          git diff --cached --quiet || git commit -m "Root files: install.sh, CNAME"
+          git push origin gh-pages

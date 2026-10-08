@@ -1,0 +1,22 @@
+{
+  "about": "baseRT engines this adapter installs without being told a SHA-256, as basecompute publishes them: each engine with the size and SHA-256 its release lists (the digest GitHub shows and the release's own <name>.sha256 agree). A version not here installs only with --sha256. Add a release here, newest first, after checking both digests.",
+  "release": "https://github.com/basecompute/baseRT/releases/download/v{version}/{name}",
+  "releases": "https://api.github.com/repos/basecompute/baseRT/releases?per_page=50",
+  "pinned": [
+    {
+      "version": "0.2.6",
+      "assets": [
+        {
+          "name": "basert-engine-linux-arm64-cuda-0.2.6.tar.gz",
+          "size": 36512654,
+          "sha256": "c4a71e0d684280929f49ae52101ff44d269db0ba12f3124fba0ff3e9ddda770f"
+        },
+        {
+          "name": "basert-engine-macos-arm64-0.2.6.tar.gz",
+          "size": 18727923,
+          "sha256": "9bcb204b7cca56470edc41323650f97f5b5fb45499825565a476be508237c84a"
+        }
+      ]
+    }
+  ]
+}

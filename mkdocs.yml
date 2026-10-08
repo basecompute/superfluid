@@ -1,0 +1,105 @@
+site_name: superfluid
+site_description: One serving daemon for local LLM inference — across runtimes and machines.
+site_url: https://superfluid.sh/
+repo_url: https://github.com/basecompute/superfluid
+repo_name: GitHub
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  logo: assets/logos/superfluid-wordmark-dark.svg
+  favicon: assets/logos/superfluid-logo.svg
+  font: false
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.highlight
+    - toc.follow
+  palette:
+    scheme: slate
+    primary: custom
+    accent: custom
+
+copyright: '<a href="https://basecompute.co">Base Compute</a> · Melbourne &amp; Berlin'
+
+extra:
+  generator: false
+  version:
+    provider: mike
+  social:
+    - icon: fontawesome/brands/discord
+      link: https://discord.gg/kaYmAGckCq
+      name: Discord
+    - icon: fontawesome/brands/github
+      link: https://github.com/basecompute/superfluid
+      name: GitHub
+    - icon: fontawesome/solid/globe
+      link: https://basecompute.co
+      name: Base Compute
+
+extra_css:
+  - stylesheets/basecompute.css
+
+markdown_extensions:
+  - admonition
+  - tables
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - github-callouts
+
+nav:
+  - Home: README.md
+  - Getting started:
+      - Installation: getting_started/installation.md
+      - Quickstart: getting_started/quickstart.md
+  - Serving:
+      - OpenAI-compatible server: serving/openai_compatible_server.md
+      - OpenAI Responses API: serving/responses_api.md
+      - Anthropic Messages API: serving/anthropic_api.md
+      - Ollama-compatible API: serving/ollama_api.md
+      - Session API: serving/session_api.md
+      - Command-line reference: serving/cli.md
+      - Configuration: serving/configuration.md
+      - Serving multiple models: serving/multiple_models.md
+      - Distributed serving: serving/distributed_serving.md
+  - Integrations:
+      - superfluid launch: integrations/index.md
+      - Claude Code: integrations/claude_code.md
+      - Codex: integrations/codex.md
+      - pi: integrations/pi.md
+      - OpenCode: integrations/opencode.md
+      - Hermes Agent: integrations/hermes.md
+      - Cline: integrations/cline.md
+      - OpenClaw: integrations/openclaw.md
+      - Ollama CLI: integrations/ollama_cli.md
+  - Models:
+      - Supported models: models/supported_models.md
+      - Runtimes: models/runtimes.md
+  - Features:
+      - Tool calling: features/tool_calling.md
+      - Chat templates and reasoning: features/chat_templates.md
+      - Structured outputs: features/structured_outputs.md
+      - Sampling: features/sampling.md
+      - Speculative decoding: features/speculative_decoding.md
+      - Vision and audio: features/multimodal.md
+      - Sessions and prefix caching: features/sessions.md
+      - Scheduling and QoS: features/scheduling.md
+  - Deployment:
+      - Security: deployment/security.md
+      - Observability: deployment/observability.md
+  - Design:
+      - Architecture: design/architecture.md
+      - Writing a runtime adapter: design/adapters.md
+  - Performance:
+      - Benchmarks: performance/benchmarks.md
+  - Contributing:
+      - Development: contributing/development.md

@@ -1,0 +1,18 @@
+[package]
+name = "superfluid-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "IPC frame envelope + Link W / Link F message catalogs and protocol state helpers for superfluid (schema draft 7, §4). Pure protocol crate: no I/O, no sockets."
+
+[dependencies]
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

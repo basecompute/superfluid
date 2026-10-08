@@ -1,0 +1,31 @@
+[package]
+name = "superfluid-adapter-llamacpp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "llama.cpp as a superfluid runtime: RuntimePrimitives over the libllama llama.cpp publishes, loaded at run time, for the generic executor; a vocab-only Tokenizer for GGUF artifacts; and the runtime's worker executable"
+
+[dependencies]
+superfluid-abi = { workspace = true }
+superfluid-adapter-kit = { workspace = true }
+superfluid-engine = { workspace = true }
+superfluid-executor = { workspace = true }
+xxhash-rust = { workspace = true }
+libloading = "0.8"
+serde_json = "1"
+thiserror = { workspace = true }
+
+[[bin]]
+name = "superfluid-worker-llamacpp"
+path = "src/bin/superfluid-worker-llamacpp.rs"
+
+[dev-dependencies]
+superfluid = { path = "../../superfluid-daemon" }
+superfluid-tokenizer-hf = { workspace = true }
+
+[lints]
+workspace = true

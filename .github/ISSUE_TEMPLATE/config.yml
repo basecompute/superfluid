@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Discord
+    url: https://discord.gg/kaYmAGckCq
+    about: Questions, setup help and show-and-tell.
+  - name: Security report
+    url: ../../security/advisories/new
+    about: Report a vulnerability privately; do not open an issue.

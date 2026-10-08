@@ -1,0 +1,21 @@
+[package]
+name = "superfluid-linkf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Link F session layer: head-daemon and node-agent endpoints — epochs, leases, command idempotency, per-generation watermarks, reconcile (schema §4.2/§4.4)"
+
+[dependencies]
+superfluid-proto.workspace = true
+thiserror.workspace = true
+postcard.workspace = true
+serde.workspace = true
+snow = "0.10"
+sha2 = "0.10"
+
+[lints]
+workspace = true

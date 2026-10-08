@@ -1,0 +1,144 @@
+name: Release
+
+# A tag v* builds superfluid for each platform, lays it out as a release
+# (bin/ and libexec/superfluid/, where the daemon looks for the runtime
+# adapters it ships), and attaches one tarball per platform, with its
+# SHA-256, to a draft GitHub release. scripts/install.sh installs from it.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (an existing tag; the release stays a draft)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            manylinux: x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build the daemon
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked -p superfluid
+
+      - name: Build the runtime adapters a release ships
+        if: runner.os == 'macOS'
+        run: scripts/build_runtime_adapters.sh target/adapters
+
+      # Linux builds link glibc 2.28 (manylinux_2_28), so the tarball runs on
+      # Ubuntu 20.04, Debian 11, RHEL 8 and newer; the runner's own glibc would
+      # make it refuse anything older than itself.
+      - name: Build the daemon and adapters against glibc 2.28
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "$HOME/.cargo/registry"
+          docker run --rm -v "$PWD:/work" -w /work -v "$HOME/.cargo/registry:/root/.cargo/registry" \
+            quay.io/pypa/manylinux_2_28_${{ matrix.manylinux }} bash -euo pipefail -c '
+              export PATH=/opt/python/cp312-cp312/bin:$PATH
+              curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
+              . "$HOME/.cargo/env"
+              cargo build --release --locked -p superfluid
+              scripts/build_runtime_adapters.sh target/adapters'
+          sudo chown -R "$(id -u):$(id -g)" target "$HOME/.cargo/registry"
+          for f in target/release/superfluid target/release/superfluid-workerd target/release/superfluid-noded target/adapters/*; do
+            need="$(objdump -T "$f" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+            echo "$f needs glibc $need"
+            [ "$(printf '%s\n' "$need" 2.28 | sort -V | tail -1)" = 2.28 ] || { echo "::error::$f needs glibc $need, newer than 2.28"; exit 1; }
+          done
+
+      - name: Lay out the release
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="superfluid-${{ matrix.target }}"
+          root="dist/$name"
+          mkdir -p "$root/bin" "$root/libexec/superfluid"
+          cp target/release/superfluid target/release/superfluid-workerd target/release/superfluid-noded "$root/bin/"
+          cp target/adapters/* "$root/libexec/superfluid/"
+          if [ -f target/release/superfluid-worker-basert ]; then
+            cp target/release/superfluid-worker-basert "$root/libexec/superfluid/"
+          fi
+          cp LICENSE NOTICE README.md "$root/"
+          # The binary must start and describe itself with nothing installed.
+          env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" --version
+          env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" runtimes
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            dist/${{ steps.pack.outputs.name }}.tar.gz
+            dist/${{ steps.pack.outputs.name }}.tar.gz.sha256
+
+  crates:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          [ -n "$CARGO_REGISTRY_TOKEN" ] || { echo "CARGO_REGISTRY_TOKEN is not set; skipping"; exit 0; }
+          cargo publish --workspace --locked --no-verify
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          cp scripts/install.sh dist/
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --draft --verify-tag --title "superfluid $TAG" --generate-notes
+          fi

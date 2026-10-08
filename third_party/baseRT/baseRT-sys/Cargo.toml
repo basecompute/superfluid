@@ -1,0 +1,25 @@
+[package]
+name = "baseRT-sys"
+version = "0.3.0"
+edition = "2021"
+description = "Raw FFI bindings for the BaseRT LLM inference engine"
+license = "Apache-2.0"
+repository = "https://github.com/basecompute/baseRT"
+links = "baseRT"
+build = "build.rs"
+
+[features]
+default = []
+# Link the static engine archive (libbaseRT_engine.a) + frameworks instead of
+# the single libbaseRT.dylib. Default is dynamic (one self-contained dylib).
+static = []
+# Link nothing: the dependent loads libbaseRT itself at run time (basertd
+# does, so its binaries start without the library and find it by a search).
+# The types stay usable; the extern functions must then not be called.
+no-link = []
+
+[lints.rust]
+non_snake_case = "allow"
+
+[lints.clippy]
+doc_lazy_continuation = "allow"

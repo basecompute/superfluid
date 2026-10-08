@@ -1,0 +1,21 @@
+[package]
+name = "superfluid-adapter-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "What every superfluid runtime adapter is built from: the Runtime trait, the worker executable's main, the check report, installing a runtime from its own project, and the conformance checks each adapter runs on itself"
+
+[dependencies]
+superfluid-engine = { workspace = true }
+superfluid-executor = { workspace = true }
+superfluid-proto = { workspace = true }
+superfluid-worker = { workspace = true }
+serde_json = "1"
+sha2 = "0.10"
+
+[lints]
+workspace = true

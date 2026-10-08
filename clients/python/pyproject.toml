@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "superfluid-client"
+version = "0.1.0"
+description = "Client for superfluid's native session API: durable sessions you can fork, rebase and resume"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/basecompute/superfluid"
+Documentation = "https://github.com/basecompute/superfluid/blob/main/docs/serving/session_api.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]

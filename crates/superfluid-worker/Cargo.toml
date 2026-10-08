@@ -1,0 +1,23 @@
+[package]
+name = "superfluid-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Engine-worker skeleton: Link W server materializing serialized tick plans into the draft-7 ABI against an Engine (mock now, FFI later)"
+
+[dependencies]
+superfluid-abi.workspace = true
+superfluid-engine.workspace = true
+superfluid-proto.workspace = true
+superfluid-shm.workspace = true
+thiserror.workspace = true
+postcard.workspace = true
+serde.workspace = true
+serde_json = "1"
+
+[lints]
+workspace = true

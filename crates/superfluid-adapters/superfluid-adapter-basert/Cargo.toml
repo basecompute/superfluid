@@ -1,0 +1,22 @@
+[package]
+name = "superfluid-adapter-basert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "baseRT's native engine as a superfluid runtime: libbaseRT over its tick ABI (superfluid-engine-ffi), and the runtime's worker executable"
+
+[dependencies]
+superfluid-adapter-kit = { workspace = true }
+superfluid-engine-ffi = { path = "../../superfluid-engine-ffi", version = "0.1.0" }
+serde_json = "1"
+
+[[bin]]
+name = "superfluid-worker-basert"
+path = "src/bin/superfluid-worker-basert.rs"
+
+[lints]
+workspace = true

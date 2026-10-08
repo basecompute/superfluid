@@ -1,0 +1,21 @@
+[package]
+name = "superfluid-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Rust mirror of the superfluid engine ABI (baseRT_tick.h, schema draft 7): repr(C) types, normative BaseRTArray decode rules, arena writers"
+build = "build.rs"
+
+[dependencies]
+baseRT-sys = { workspace = true }
+thiserror.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true

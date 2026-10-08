@@ -1,0 +1,18 @@
+[package]
+name = "superfluid-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Engine trait over the draft-7 ABI plus MockEngine: a pure-Rust engine implementing every tick/state-op/registration semantic for tests and the worker skeleton"
+
+[dependencies]
+superfluid-abi.workspace = true
+thiserror.workspace = true
+xxhash-rust.workspace = true
+
+[lints]
+workspace = true

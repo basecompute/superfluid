@@ -1,0 +1,261 @@
+{
+ "about": "MLX as this adapter installs it: a private CPython from python-build-standalone and, from PyPI, mlx, mlx-metal, mlx-lm and every package they need, each pinned to the wheel and SHA-256 PyPI lists for it (Python 3.12, macOS arm64). A version is tested when the adapter's tests ran on these versions; add one here, newest first.",
+ "python": {
+  "version": "3.12.14",
+  "assets": {
+   "macos-arm64": {
+    "name": "cpython-3.12.14+20260929-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260929/cpython-3.12.14%2B20260929-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "size": 25017608,
+    "sha256": "1bb3e53d231ee2c8881e8daf6426f4dd95bff0dda496af0f3af300357aa998d0"
+   }
+  }
+ },
+ "index": "https://pypi.org/simple",
+ "tested": [
+  {
+   "version": "0.32.2",
+   "mlx_lm": "0.31.3",
+   "wheels": [
+    {
+     "name": "annotated-doc",
+     "version": "0.0.5",
+     "file": "annotated_doc-0.0.5-py3-none-any.whl",
+     "size": 5302,
+     "sha256": "117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101"
+    },
+    {
+     "name": "anyio",
+     "version": "4.15.1",
+     "file": "anyio-4.15.1-py3-none-any.whl",
+     "size": 132079,
+     "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101"
+    },
+    {
+     "name": "certifi",
+     "version": "2026.7.22",
+     "file": "certifi-2026.7.22-py3-none-any.whl",
+     "size": 136983,
+     "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+    },
+    {
+     "name": "click",
+     "version": "8.5.0",
+     "file": "click-8.5.0-py3-none-any.whl",
+     "size": 125251,
+     "sha256": "255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360"
+    },
+    {
+     "name": "filelock",
+     "version": "4.0.1",
+     "file": "filelock-4.0.1-py3-none-any.whl",
+     "size": 106219,
+     "sha256": "481a321a27bef441e23c53371c6abc8d7d16e26b97090074ba44f7538a3fd55a"
+    },
+    {
+     "name": "fsspec",
+     "version": "2026.9.0",
+     "file": "fsspec-2026.9.0-py3-none-any.whl",
+     "size": 221738,
+     "sha256": "8dd6e646e99ea382bd85f97a45e6b526a442d79423a7dc673f1e2756d05fcb5f"
+    },
+    {
+     "name": "h11",
+     "version": "0.16.0",
+     "file": "h11-0.16.0-py3-none-any.whl",
+     "size": 37515,
+     "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86"
+    },
+    {
+     "name": "hf-xet",
+     "version": "1.6.0",
+     "file": "hf_xet-1.6.0-cp38-abi3-macosx_11_0_arm64.whl",
+     "size": 3876287,
+     "sha256": "f0906082d9932ae0c0057fa194041c22b4e2cdb46b2592ef3b91f020d62a081a"
+    },
+    {
+     "name": "httpcore",
+     "version": "1.0.9",
+     "file": "httpcore-1.0.9-py3-none-any.whl",
+     "size": 78784,
+     "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55"
+    },
+    {
+     "name": "httpx",
+     "version": "0.28.1",
+     "file": "httpx-0.28.1-py3-none-any.whl",
+     "size": 73517,
+     "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"
+    },
+    {
+     "name": "huggingface-hub",
+     "version": "1.32.0",
+     "file": "huggingface_hub-1.32.0-py3-none-any.whl",
+     "size": 842906,
+     "sha256": "b0c7c80561969d9cdacdd55fce67ba9584cca0b9d4ea80957a3a5c1445fac5c8"
+    },
+    {
+     "name": "idna",
+     "version": "3.20",
+     "file": "idna-3.20-py3-none-any.whl",
+     "size": 69583,
+     "sha256": "ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c"
+    },
+    {
+     "name": "Jinja2",
+     "version": "3.1.6",
+     "file": "jinja2-3.1.6-py3-none-any.whl",
+     "size": 134899,
+     "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+    },
+    {
+     "name": "markdown-it-py",
+     "version": "4.2.0",
+     "file": "markdown_it_py-4.2.0-py3-none-any.whl",
+     "size": 91687,
+     "sha256": "9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a"
+    },
+    {
+     "name": "MarkupSafe",
+     "version": "3.0.3",
+     "file": "markupsafe-3.0.3-cp312-cp312-macosx_11_0_arm64.whl",
+     "size": 12020,
+     "sha256": "1872df69a4de6aead3491198eaf13810b565bdbeec3ae2dc8780f14458ec73ce"
+    },
+    {
+     "name": "mdurl",
+     "version": "0.1.2",
+     "file": "mdurl-0.1.2-py3-none-any.whl",
+     "size": 9979,
+     "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"
+    },
+    {
+     "name": "mlx",
+     "version": "0.32.2",
+     "file": "mlx-0.32.2-cp312-cp312-macosx_14_0_arm64.whl",
+     "size": 619370,
+     "sha256": "77217798a2b036bae9f213b851d4cde4581893787c9964458b7d471f86036bd6"
+    },
+    {
+     "name": "mlx-lm",
+     "version": "0.31.3",
+     "file": "mlx_lm-0.31.3-py3-none-any.whl",
+     "size": 408890,
+     "sha256": "758cfddf1180053b7613db76fad3d246a331a2a905808e1164a275621fc983b8"
+    },
+    {
+     "name": "mlx-metal",
+     "version": "0.32.2",
+     "file": "mlx_metal-0.32.2-py3-none-macosx_14_0_arm64.whl",
+     "size": 42516623,
+     "sha256": "3825fff379dbc107dd3413e564a06caeaa24819910ec49c0439e454c06a1b9b8"
+    },
+    {
+     "name": "numpy",
+     "version": "2.4.6",
+     "file": "numpy-2.4.6-cp312-cp312-macosx_11_0_arm64.whl",
+     "size": 14699246,
+     "sha256": "ebfb099f8dcf083deef3ac1ca4c1503f387cf76296fcb3816b66f5ecb5f54fdb"
+    },
+    {
+     "name": "packaging",
+     "version": "26.3",
+     "file": "packaging-26.3-py3-none-any.whl",
+     "size": 129956,
+     "sha256": "d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c"
+    },
+    {
+     "name": "protobuf",
+     "version": "7.36.2",
+     "file": "protobuf-7.36.2-cp310-abi3-macosx_10_9_universal2.whl",
+     "size": 456039,
+     "sha256": "cbc70b17ee27e28894c7fee8bb04be1abead49e936bc70eb60052531eee2079e"
+    },
+    {
+     "name": "Pygments",
+     "version": "2.21.0",
+     "file": "pygments-2.21.0-py3-none-any.whl",
+     "size": 1250147,
+     "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"
+    },
+    {
+     "name": "PyYAML",
+     "version": "6.0.3",
+     "file": "pyyaml-6.0.3-cp312-cp312-macosx_11_0_arm64.whl",
+     "size": 173973,
+     "sha256": "fc09d0aa354569bc501d4e787133afc08552722d3ab34836a80547331bb5d4a0"
+    },
+    {
+     "name": "regex",
+     "version": "2026.9.10",
+     "file": "regex-2026.9.10-cp312-cp312-macosx_10_13_universal2.whl",
+     "size": 496609,
+     "sha256": "880ac684c27176464c00c3fdc456116364f5ebc70da07aad0c2d4a7ba45e98db"
+    },
+    {
+     "name": "rich",
+     "version": "15.0.0",
+     "file": "rich-15.0.0-py3-none-any.whl",
+     "size": 310654,
+     "sha256": "33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb"
+    },
+    {
+     "name": "safetensors",
+     "version": "0.8.0",
+     "file": "safetensors-0.8.0-cp310-abi3-macosx_11_0_arm64.whl",
+     "size": 484562,
+     "sha256": "c80201d22cbf405b80647a60ada77bba06c8fba2da2743ba1e89cdcc39a81f25"
+    },
+    {
+     "name": "sentencepiece",
+     "version": "0.2.2",
+     "file": "sentencepiece-0.2.2-cp312-cp312-macosx_10_13_universal2.whl",
+     "size": 2188384,
+     "sha256": "1edb10e520e4bddf74d85b0f5ae74cc2d60c2b448885080bfb618bc2b3a49f6b"
+    },
+    {
+     "name": "shellingham",
+     "version": "1.5.4",
+     "file": "shellingham-1.5.4-py2.py3-none-any.whl",
+     "size": 9755,
+     "sha256": "7ecfff8f2fd72616f7481040475a65b2bf8af90a56c89140852d1120324e8686"
+    },
+    {
+     "name": "tokenizers",
+     "version": "0.23.2",
+     "file": "tokenizers-0.23.2-cp310-abi3-macosx_11_0_arm64.whl",
+     "size": 3101593,
+     "sha256": "986670e43691469dcee610ea0f846f91a8f84e91fc6f7a48d4c064414c0ec2bf"
+    },
+    {
+     "name": "tqdm",
+     "version": "4.70.1",
+     "file": "tqdm-4.70.1-py3-none-any.whl",
+     "size": 80199,
+     "sha256": "c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73"
+    },
+    {
+     "name": "transformers",
+     "version": "5.17.0",
+     "file": "transformers-5.17.0-py3-none-any.whl",
+     "size": 12295140,
+     "sha256": "78ec1ce21579b38dfb83950a0658cd119f87212a2fcfdff478096ce9d6c03801"
+    },
+    {
+     "name": "typer",
+     "version": "0.27.2",
+     "file": "typer-0.27.2-py3-none-any.whl",
+     "size": 123130,
+     "sha256": "b3a5fc4342d5fc8fda8fc3010b1cf117e9249aab7fae800c2eff62fd3842d97d"
+    },
+    {
+     "name": "typing-extensions",
+     "version": "4.16.0",
+     "file": "typing_extensions-4.16.0-py3-none-any.whl",
+     "size": 45571,
+     "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+    }
+   ]
+  }
+ ]
+}

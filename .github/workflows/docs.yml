@@ -1,0 +1,22 @@
+name: Docs
+
+# A pull request that touches the docs builds the site strictly.
+
+on:
+  pull_request:
+    paths: ["docs/**", "mkdocs.yml", "scripts/install.sh", ".github/workflows/docs.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r docs/requirements-docs.txt
+      - run: mkdocs build --strict
+

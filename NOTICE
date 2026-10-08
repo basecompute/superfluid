@@ -1,0 +1,30 @@
+Superfluid
+Copyright 2026 BaseCompute and the Superfluid authors
+
+This product includes software developed by third parties. Each component
+below keeps its own license.
+
+-------------------------------------------------------------------------------
+baseRT C API headers and raw Rust bindings (third_party/baseRT)
+  - License: Apache-2.0
+  - Upstream: https://github.com/basecompute/baseRT
+  - Unmodified. The baseRT engine library these declare is not part of this
+    repository and is distributed under its own license.
+
+-------------------------------------------------------------------------------
+Gerstner Programm webfonts (docs/assets/fonts)
+  - Licensed from Fosh for the superfluid documentation site only; not
+    covered by this repository's license and not for reuse.
+
+-------------------------------------------------------------------------------
+Chat templates (tests/fixtures/chat_templates)
+  - Test fixtures: the Jinja chat templates published with the GLM, gpt-oss,
+    Nemotron and Qwen model families, copied from each model's repository
+    and governed by that model's license.
+
+-------------------------------------------------------------------------------
+Audio sample (tests/fixtures/audio/jfk.wav)
+  - An excerpt of John F. Kennedy's 1961 inaugural address; public domain.
+
+Rust dependencies are fetched by cargo and listed, with versions, in
+Cargo.lock; each is under the license its crate declares.

@@ -1,0 +1,17 @@
+[package]
+name = "superfluid-adapter-mock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "The mock engine as a superfluid runtime: what the daemon's tests and `superfluid-workerd --engine mock` serve, and the kit's reference adapter"
+
+[dependencies]
+superfluid-adapter-kit = { workspace = true }
+superfluid-engine = { workspace = true }
+
+[lints]
+workspace = true

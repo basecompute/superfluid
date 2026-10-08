@@ -1,0 +1,6 @@
+{"session":1,"event_id":0,"epoch":1,"ts_unix_ms":0,"event":{"type":"created","parent":null,"params":{"temperature":0.0,"top_p":0.0,"min_p":0.0,"top_k":0,"seed":0}}}
+{"session":1,"event_id":1,"epoch":1,"ts_unix_ms":0,"event":{"type":"appended","text":{"bytes":3},"tokens":3}}
+{"session":1,"event_id":2,"epoch":1,"ts_unix_ms":0,"event":{"type":"generated","tokens":2,"text":{"bytes":2},"channel":0,"finish":1}}
+{"session":1,"event_id":3,"epoch":1,"ts_unix_ms":0,"event":{"type":"tool_use","name":"get_weather","arguments":{"bytes":16}}}
+{"session":1,"event_id":4,"epoch":1,"ts_unix_ms":0,"event":{"type":"tool_result","call_id":3,"content":{"bytes":3},"tokens":1}}
+{"session":1,"event_id":5,"epoch":1,"ts_unix_ms":0,"event":{"type":"appended","text":null,"tokens":1}}

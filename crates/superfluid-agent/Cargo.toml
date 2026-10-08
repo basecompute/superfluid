@@ -1,0 +1,26 @@
+[package]
+name = "superfluid-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Node-agent skeleton: Link W client (tick planning, host sampling, buffer/ring ownership) driving an engine-worker"
+
+[dependencies]
+superfluid-abi.workspace = true
+superfluid-engine.workspace = true
+superfluid-proto.workspace = true
+superfluid-shm.workspace = true
+thiserror.workspace = true
+postcard.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+superfluid-worker.workspace = true
+
+[lints]
+workspace = true
