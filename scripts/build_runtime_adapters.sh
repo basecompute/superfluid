@@ -113,6 +113,10 @@ EMPTY="$(mktemp -d)"
 trap 'rm -rf "$EMPTY"' EXIT
 bare() { env -i HOME="$EMPTY" SUPERFLUID_HOME="$EMPTY/superfluid" PATH=/usr/bin:/bin "$@"; }
 
+# check_adapter <id> [starts]: the worker starts and reports with no runtime
+# here, and plans its install; "starts" asks for the report only, where a plan
+# cannot be answered on the builder (the baseRT engine for Linux arm64 wants an
+# NVIDIA GPU the builder lacks).
 check_adapter() {
   local id="$1" worker="$STAGE/superfluid-worker-$1" report plans
   if report="$(bare "$worker" check 2>"$EMPTY/check.err")"; then
@@ -131,6 +135,7 @@ assert isinstance(why, str) and f"superfluid runtime install {id}" in why, f"ava
 assert r.get("formats"), "it declares no format"
 print(f"[adapters] {id}: starts with no runtime here, and says: {why}")
 ' "$id" || { cat "$EMPTY/check.err" >&2; fail "$id: the worker does not start and report with no runtime installed (above)"; }
+  [ "${2:-}" = starts ] && return 0
   plans="$(bare "$worker" plan 2>"$EMPTY/plan.err")" \
     || { cat "$EMPTY/plan.err" >&2; fail "$id: the worker cannot plan its install"; }
   printf '%s' "$plans" | python3 -c '
@@ -145,7 +150,9 @@ print(f"[adapters] {id}: plans {install}: {names}")
 }
 
 check_adapter llamacpp
-[ -n "$BASERT" ] && check_adapter basert
+if [ -n "$BASERT" ]; then
+  if [ "$OS" = Darwin ]; then check_adapter basert; else check_adapter basert starts; fi
+fi
 if [ -n "$MLX" ]; then
   check_adapter mlx
   bare "$STAGE/superfluid-worker-mlx" plan | grep -q "\"name\":\"$PY_NAME\"" \
