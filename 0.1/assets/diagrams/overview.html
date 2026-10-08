@@ -1,0 +1,77 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>
+@font-face{font-family:Gerstner;src:url("../fonts/Gerstner-ProgrammLight.woff2") format("woff2");font-weight:300}
+@font-face{font-family:Gerstner;src:url("../fonts/Gerstner-ProgrammRegular.woff2") format("woff2");font-weight:400}
+@font-face{font-family:Gerstner;src:url("../fonts/Gerstner-ProgrammMedium.woff2") format("woff2");font-weight:500}
+:root{--ocean:#00273a;--lime:#e8ffbd;--off:#f3f1ef;--graphite:#272b2d;--turq:#157fa2;--mute:#6a6f71;--line:rgba(0,39,58,.18)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#fff}
+#d{width:1200px;height:700px;position:relative;background:var(--off);color:var(--graphite);font-family:Gerstner,"Helvetica Neue",Arial,sans-serif;font-weight:300;overflow:hidden}
+.rail{position:absolute;left:36px;font-family:"Arial Narrow",Arial,sans-serif;font-size:12px;letter-spacing:.16em;color:var(--turq);text-transform:uppercase}
+.card{position:absolute;background:#fff;border:1px solid var(--ocean);border-radius:8px}
+.card.dash{background:transparent;border:1.5px dashed var(--turq)}
+code{text-transform:none;letter-spacing:0}
+.k{font-family:"Arial Narrow",Arial,sans-serif;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--mute)}
+.k.t{color:var(--turq)}
+code{font-family:Gerstner;font-weight:400}
+/* apps */
+#agents{left:112px;top:36px;width:690px;height:136px;padding:14px 16px}
+.pills{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
+.pill{height:36px;border:1px solid var(--ocean);border-radius:5px;background:var(--off);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:400;color:var(--ocean)}
+#clients{left:826px;top:36px;width:338px;height:136px;padding:14px 16px}
+#clients p{margin-top:16px;font-size:15px;line-height:1.35;color:var(--graphite)}
+/* server */
+#sf{left:340px;top:262px;width:520px;height:118px;background:var(--ocean);border-color:var(--ocean);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+#sf img{height:34px}
+#sf p{font-size:14.5px;color:rgba(243,241,239,.85);line-height:1.35;text-align:center}
+/* machines */
+.node{top:488px;width:250px;height:172px;padding:14px 16px}
+.node h3{font-weight:400;font-size:16px;color:var(--graphite)}
+.node.dash h3{color:var(--turq)}
+.chip{margin-top:12px;height:38px;border-radius:5px;background:var(--lime);display:flex;align-items:center;justify-content:center;font-size:14.5px;font-weight:400;color:var(--ocean)}
+.chip.dash{background:transparent;border:1.5px dashed var(--turq);color:var(--turq);margin-top:8px;font-size:13.5px}
+.node p{margin-top:10px;font-size:13px;line-height:1.35;color:var(--mute)}
+.node.dash p{color:var(--turq)}
+svg#arrows{position:absolute;inset:0;width:1200px;height:700px;pointer-events:none}
+.badge{position:absolute;transform:translate(-50%,-50%);background:var(--off);padding:3px 8px;font-size:12.5px;color:var(--mute);white-space:nowrap;border-radius:3px}
+</style></head><body>
+<div id="d">
+  <div class="rail" style="top:96px">Apps</div>
+  <div class="rail" style="top:314px">Server</div>
+  <div class="rail" style="top:566px">Machines</div>
+
+  <div class="card" id="agents"><div class="k">coding agents &nbsp;·&nbsp; <code>superfluid launch &lt;agent&gt;</code></div>
+    <div class="pills"><div class="pill">Claude Code</div><div class="pill">Codex</div><div class="pill">pi</div><div class="pill">OpenCode</div><div class="pill">Hermes</div><div class="pill">Cline</div><div class="pill">OpenClaw</div><div class="pill">Ollama CLI</div></div></div>
+  <div class="card dash" id="clients"><div class="k t">any client</div><p>your app, IDE or browser on the<br>OpenAI, Anthropic or Ollama API</p></div>
+
+  <div class="card" id="sf"><img src="../logos/superfluid-wordmark-dark.svg" alt="super:fluid"><p>one endpoint: sessions, scheduler,<br>OpenAI · Anthropic · Ollama APIs</p></div>
+
+  <div class="card node" id="n0" style="left:112px"><h3>this machine</h3><div class="chip">baseRT &nbsp;·&nbsp; .base</div><div class="chip dash">+ your runtime · adapter kit</div></div>
+  <div class="card node" id="n1" style="left:392px"><h3>a Linux box</h3><div class="chip">llama.cpp &nbsp;·&nbsp; GGUF</div><p>one engine worker<br>per loaded model</p></div>
+  <div class="card node" id="n2" style="left:672px"><h3>a Mac</h3><div class="chip">MLX</div><p>one engine worker<br>per loaded model</p></div>
+  <div class="card node dash" id="n3" style="left:952px;width:212px"><h3>+ any machine</h3><div class="chip dash" style="margin-top:12px"><code>superfluid node join</code></div><p>joins the head over<br>the local network</p></div>
+
+  <svg id="arrows" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#00273a"/></marker>
+      <marker id="aht" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#157fa2"/></marker>
+    </defs>
+  </svg>
+  <div id="badges"></div>
+</div>
+<script>
+const d=document.getElementById('d'), R=e=>{const r=document.getElementById(e).getBoundingClientRect(), b=d.getBoundingClientRect(); return {x:r.left-b.left,y:r.top-b.top,w:r.width,h:r.height}};
+const svg=document.getElementById('arrows'), badges=document.getElementById('badges');
+function line(x1,y1,x2,y2,dash,label){
+  const p=document.createElementNS('http://www.w3.org/2000/svg','path');
+  p.setAttribute('d',`M${x1} ${y1} L${x2} ${y2}`); p.setAttribute('stroke',dash?'#157fa2':'#00273a'); p.setAttribute('stroke-width','1.5'); p.setAttribute('fill','none');
+  if(dash) p.setAttribute('stroke-dasharray','6 5'); p.setAttribute('marker-end',dash?'url(#aht)':'url(#ah)'); svg.appendChild(p);
+  if(label){const b=document.createElement('div'); b.className='badge'; b.textContent=label; b.style.left=((x1+x2)/2)+'px'; b.style.top=((y1+y2)/2)+'px'; if(dash) b.style.color='#157fa2'; badges.appendChild(b);}
+}
+const ag=R('agents'), cl=R('clients'), sf=R('sf');
+line(ag.x+ag.w*0.55, ag.y+ag.h, sf.x+sf.w*0.33, sf.y, false);
+line(cl.x+cl.w/2, cl.y+cl.h, sf.x+sf.w*0.75, sf.y, true);
+const labels=['Link W · same host','Link F · encrypted','Link F · encrypted',null];
+['n0','n1','n2','n3'].forEach((id,i)=>{const n=R(id); line(sf.x+sf.w*(i+1)/5, sf.y+sf.h, n.x+n.w/2, n.y, i==3, labels[i]);});
+</script>
+</body></html>
