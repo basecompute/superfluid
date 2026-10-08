@@ -232,7 +232,7 @@ fn pick(paths: &[PathBuf], named: bool) -> Result<&PathBuf, String> {
     paths.iter().find(|p| p.is_file()).ok_or_else(|| {
         let tried: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
         format!(
-            "libbaseRT not found (looked for {}; name one with --basert-lib or BASERT_LIB)",
+            "libbaseRT not found (looked for {}): install it with `superfluid runtime install basert` or name one with --basert-lib or BASERT_LIB",
             if tried.is_empty() { "nothing".to_string() } else { tried.join(", ") }
         )
     })
