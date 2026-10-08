@@ -82,6 +82,18 @@ impl Pull {
 }
 
 pub fn run_pull_tool(cmd: &mut std::process::Command, what: &str) -> Result<std::path::PathBuf, String> {
+    let stdout = run_tool(cmd, what)?;
+    stdout
+        .lines()
+        .map(str::trim)
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+        .ok_or_else(|| format!("{what} printed no path to a model: {}", stdout.trim()))
+}
+
+/// Runs a pull tool, showing its stderr as it goes, and returns its stdout; a failure
+/// carries the tail of what it said.
+pub fn run_tool(cmd: &mut std::process::Command, what: &str) -> Result<String, String> {
     use std::io::Read;
     let mut child = cmd
         .stdin(std::process::Stdio::null())
@@ -99,12 +111,7 @@ pub fn run_pull_tool(cmd: &mut std::process::Command, what: &str) -> Result<std:
     if !status.success() {
         return Err(pull_failed(what, &status.to_string(), &stdout, &stderr, std::env::var_os("HF_TOKEN").is_some()));
     }
-    stdout
-        .lines()
-        .map(str::trim)
-        .map(std::path::PathBuf::from)
-        .find(|p| p.exists())
-        .ok_or_else(|| format!("{what} printed no path to a model: {}", stdout.trim()))
+    Ok(stdout)
 }
 
 const KEPT_STDERR: usize = 16 * 1024;

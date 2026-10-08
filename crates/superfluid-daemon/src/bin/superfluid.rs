@@ -86,17 +86,20 @@ fn runtime_cmd(args: &[String]) {
         for (tried, why) in &done.fell_back {
             eprintln!("superfluid: {id} {tried} does not run here ({why}); fell back to the next");
         }
+        // The runtime's own version string may carry the library's path; the name says enough.
+        let version = done.version.split_whitespace().next().unwrap_or_default();
         println!(
-            "{id} {} installed in {} ({}{}){}",
+            "superfluid: {id} {} installed ({version}{}){}",
             done.install.name,
-            done.install.dir.display(),
-            done.version,
             done.device.as_deref().map(|d| format!(", {d}")).unwrap_or_default(),
             if done.replaced { ", replacing the one of that name" } else { "" }
         );
         if let Some(d) = &done.default {
-            let how = if installs::pinned(&catalog, id).is_some() { "pinned with `superfluid runtime use`" } else { "the best-ranked" };
-            println!("{id} serves from {d} by default ({how})");
+            let pinned = installs::pinned(&catalog, id).is_some();
+            if pinned || installs::list(&catalog, id).len() > 1 {
+                let how = if pinned { "pinned with `superfluid runtime use`" } else { "the best-ranked" };
+                println!("superfluid: {id} serves from {d} by default ({how})");
+            }
         }
         done
     };
@@ -119,7 +122,6 @@ fn runtime_cmd(args: &[String]) {
             }
             let installer = installs::installer(&catalog, id).unwrap_or_else(|e| fail(e));
             let plans = installs::plan(&installer, &req).unwrap_or_else(|e| fail(e));
-            eprintln!("superfluid: this machine: {}", plans.host);
             for (i, p) in plans.plans.iter().enumerate() {
                 let size = p.size() + p.extra["wheels_size"].as_u64().unwrap_or(0);
                 eprintln!(
@@ -131,7 +133,9 @@ fn runtime_cmd(args: &[String]) {
                     if p.tested { String::new() } else { " (UNTESTED with this adapter)".to_string() }
                 );
                 for a in &p.assets {
-                    eprintln!("superfluid:     {}{}", a.url, a.sha256.as_deref().map(|s| format!(" (sha256 {s})")).unwrap_or_default());
+                    // The digest is checked either way; it is shown when asked to look before installing.
+                    let digest = a.sha256.as_deref().filter(|_| dry_run).map(|s| format!(" (sha256 {s})")).unwrap_or_default();
+                    eprintln!("superfluid:   from {}{digest}", a.url);
                 }
             }
             if dry_run {

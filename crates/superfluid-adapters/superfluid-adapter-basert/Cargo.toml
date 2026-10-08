@@ -11,7 +11,7 @@ description = "baseRT's native engine as a superfluid runtime: libbaseRT over it
 
 [dependencies]
 superfluid-adapter-kit = { workspace = true }
-superfluid-engine-ffi = { path = "../../superfluid-engine-ffi", version = "0.1.1" }
+superfluid-engine-ffi = { path = "../../superfluid-engine-ffi", version = "0.1.2" }
 serde_json = "1"
 
 [[bin]]
