@@ -335,8 +335,6 @@ pub fn fetch(asset: &Asset, dir: &Path) -> Result<(PathBuf, String), String> {
         std::fs::copy(path, &dest).map_err(|e| format!("{path}: {e}"))?;
     } else if src.starts_with("https://") {
         let part = dir.join(format!("{}.part", asset.name));
-        let size = asset.size.map(|s| format!(" ({:.1} MB)", s as f64 / 1e6)).unwrap_or_default();
-        eprintln!("fetching {src}{size}");
         let out = Command::new("curl")
             .args(["-fSL", "--proto", "=https", "--tlsv1.2", "--retry", "3", "--connect-timeout", "30"])
             .args(["--speed-limit", "1024", "--speed-time", "60", "--progress-bar", "-o"])
