@@ -847,6 +847,36 @@ fn corrupt_park_artifact_resumes_cold() {
 }
 
 #[test]
+fn an_http_requests_prompt_prefix_is_kept_and_starts_the_same_prompt_warm_after_a_restart() {
+    let dir = test_dir();
+    let wal = dir.join("wal.log");
+    let park = dir.join("park");
+    let prompt: Vec<u32> = (0..1100).collect();
+    let ask = |d: &Daemon| {
+        let session = d.create(None, GenParams::default()).unwrap();
+        d.append(session, None, prompt.clone()).unwrap();
+        let extras = superfluid_daemon::scheduler::GenExtras { ephemeral: true, ..Default::default() };
+        let out = d.generate_streaming_ex(session, 8, extras, |_| Ok(())).unwrap();
+        (session, out)
+    };
+    let kept = || std::fs::read_dir(park.join("prefix")).map(|r| r.count()).unwrap_or(0);
+
+    let (session, first) = ask(&kv_only_daemon(&wal, Some(&park)));
+    assert_eq!(first.warm_prefix, 0, "the first request is cold");
+    assert_eq!(kept(), 1, "its prompt prefix is kept");
+    assert!(!park.join(format!("{session}.park")).exists(), "and no artifact for a session nothing will ask for");
+
+    let (_, after) = ask(&kv_only_daemon(&wal, Some(&park)));
+    assert!(after.warm_prefix >= 1024, "after a restart the same prompt starts from it (got {})", after.warm_prefix);
+    assert_eq!(generated_tokens(&after.events), generated_tokens(&first.events), "and continues the exact stream");
+    assert_eq!(kept(), 1, "a prefix kept already is not written again");
+
+    let cold = test_dir();
+    let (_, control) = ask(&kv_only_daemon(&cold.join("wal.log"), None));
+    assert_eq!(control.warm_prefix, 0, "without parking nothing is kept");
+}
+
+#[test]
 fn an_ephemeral_session_writes_no_park_artifact() {
     let dir = test_dir();
     let wal = dir.join("wal.log");

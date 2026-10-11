@@ -100,6 +100,16 @@ const SHARED_PREFIX_MIN_TOKENS: u64 = 1024;
 const SHARED_PREFIX_TAIL_TOKENS: u32 = 64;
 /// Never hold a request longer than this.
 const SHARED_PREFIX_MAX_HOLD_TICKS: u64 = 64;
+/// With parking on, an HTTP request's prompt prefix of at least this many
+/// tokens is kept on disk when it retires, and a later request (after a
+/// restart too) restores it instead of prefilling it: less is cheap to
+/// prefill again.
+const PREFIX_KEEP_MIN_TOKENS: u64 = 1024;
+/// A prefix is not kept when one on disk already covers this share of it
+/// (in quarters): a burst on one system prompt writes it once.
+const PREFIX_KEPT_QUARTERS: u64 = 3;
+/// The prefixes remembered; the park budget sweeps their files.
+const PREFIX_INDEX_MAX: usize = 256;
 /// On a runtime whose state cannot be cut back, a chat's input of at least
 /// this many tokens is checkpointed where it ends (the executor's floor for
 /// the checkpoint where a prompt ends): less costs little to run again.
@@ -1264,6 +1274,8 @@ impl From<&str> for ParkRefused {
 enum ParkTask {
     Write(Box<ParkJob>),
     Remove { dir: PathBuf, session: u64 },
+    /// A prompt prefix kept across restarts, found again by its tokens.
+    WritePrefix { dir: PathBuf, tokens: Vec<u32>, encoding: u8, sealed: Vec<u8> },
 }
 
 struct ParkJob {
@@ -1294,6 +1306,8 @@ pub struct Scheduler {
     trace_scope: crate::otlp::TraceScope,
     park_tx: Option<std::sync::mpsc::SyncSender<ParkTask>>,
     ephemeral_parked: std::collections::HashSet<u64>,
+    /// Prompt prefixes kept on disk (newest first) and the tokens each covers.
+    prefixes: Vec<(PathBuf, Vec<u32>)>,
     park_removals_pending: Vec<u64>,
     park_writer: Option<std::thread::JoinHandle<()>>,
     bus: Arc<SessionBus>,
@@ -1367,6 +1381,10 @@ impl Scheduler {
                     ring_slots(&mut host, superfluid_shm::TOKEN_RING_OUT),
                 );
                 let park_refused = host.park_refused();
+                let prefixes = match (&park_refused, &opts.park_dir) {
+                    (None, Some(dir)) => park::prefix_index(&park::prefix_dir(dir)),
+                    _ => Vec::new(),
+                };
                 let lossy_allowed = host.lossy_park_allowed();
                 let tick_shape = if host.round_granular() { ROUND_TICKS } else { NATIVE_TICKS };
                 let (park_tx, park_writer) = if opts.park_dir.is_some() && park_refused.is_none() {
@@ -1380,6 +1398,15 @@ impl Scheduler {
                                     ParkTask::Write(job) => job,
                                     ParkTask::Remove { dir, session } => {
                                         park::remove(&dir, session);
+                                        continue;
+                                    }
+                                    ParkTask::WritePrefix { dir, tokens, encoding, sealed } => {
+                                        if let Err(e) = park::write_prefix(&dir, &tokens, encoding, &sealed) {
+                                            eprintln!("[superfluid] prefix write failed: {e}");
+                                        }
+                                        if park_budget > 0 {
+                                            park::sweep(&dir, park_budget);
+                                        }
                                         continue;
                                     }
                                 };
@@ -1448,6 +1475,7 @@ impl Scheduler {
                     park_tx,
                     park_writer,
                     ephemeral_parked: std::collections::HashSet::new(),
+                    prefixes,
                     park_removals_pending: Vec::new(),
                     bus,
                     plan_seq: 0,
@@ -2501,7 +2529,7 @@ impl Scheduler {
             return (seed_handle, warm_prefix);
         };
         let Some(p) = park::read(&dir, job.session) else {
-            return (seed_handle, warm_prefix);
+            return self.resume_from_prefix(job, span, page, seed_handle, warm_prefix);
         };
         if p.multi_space {
             if !self.host.multi_space() && self.host.parkable_spaces().len() != p.spaces.len() {
@@ -2564,6 +2592,105 @@ impl Scheduler {
                     "[superfluid] park resume restored but could not seed (session {}): {e}",
                     job.session
                 );
+                (seed_handle, warm_prefix)
+            }
+        }
+    }
+
+    /// Keep a retiring HTTP request's prompt prefix on disk, found again by
+    /// its tokens ([`Self::resume_from_prefix`]), unless it is short or one
+    /// kept already covers most of it.
+    fn persist_prefix(&mut self, i: usize) -> Result<(), ParkRefused> {
+        let (Some(dir), Some(page)) = (self.park_dir.clone(), self.host.page_size()) else {
+            return Ok(());
+        };
+        let lane = &self.lanes[i];
+        if lane.job.completion || !lane.job.media.is_empty() || self.host.multi_space() || self.host.has_unservable_space() {
+            return Ok(());
+        }
+        let n = lane.all_tokens.len() as u64;
+        let aligned = n.saturating_sub(1) / page * page;
+        if aligned < PREFIX_KEEP_MIN_TOKENS {
+            return Ok(());
+        }
+        let covered = self.prefixes.iter().map(|(_, t)| park::common_prefix(t, &lane.all_tokens) as u64).max().unwrap_or(0);
+        if covered * 4 >= aligned * PREFIX_KEPT_QUARTERS {
+            return Ok(());
+        }
+        let Some((aligned, encoding, sealed)) = self.export_lane_kv(i)? else {
+            return Ok(());
+        };
+        let tokens = self.lanes[i].all_tokens[..aligned as usize].to_vec();
+        let dir = park::prefix_dir(&dir);
+        let path = dir.join(format!("{:016x}.park", park::stream_digest(&tokens)));
+        let task = ParkTask::WritePrefix { dir, tokens: tokens.clone(), encoding, sealed };
+        match self.park_tx.as_ref().expect("writer exists with park_dir").try_send(task) {
+            Ok(()) => {
+                self.prefixes.retain(|(p, _)| *p != path);
+                self.prefixes.insert(0, (path, tokens));
+                self.prefixes.truncate(PREFIX_INDEX_MAX);
+                Ok(())
+            }
+            Err(std::sync::mpsc::TrySendError::Full(_)) => Err("park writer backlogged; prefix dropped".into()),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err("park writer gone".into()),
+        }
+    }
+
+    /// Start `job` from the kept prefix that covers most of its prompt, when
+    /// that is more than the cache has: the prefix goes back into the cache
+    /// (as a parked session resumes) and the request is seeded from it.
+    fn resume_from_prefix(
+        &mut self,
+        job: &GenerateJob,
+        span: linkw::TokenRefMsg,
+        page: u64,
+        seed_handle: u64,
+        warm_prefix: u64,
+    ) -> (u64, u64) {
+        if self.prefixes.is_empty() || self.host.multi_space() || !job.media.is_empty() || job.stream.is_empty() {
+            return (seed_handle, warm_prefix);
+        }
+        let align_down = |l: u64| l.checked_div(page).unwrap_or(0) * page;
+        let aligned_cap = align_down(job.stream.len() as u64 - 1);
+        let Some((at, usable)) = self
+            .prefixes
+            .iter()
+            .enumerate()
+            .map(|(at, (_, t))| (at, align_down((park::common_prefix(t, &job.stream) as u64).min(aligned_cap))))
+            .max_by_key(|&(at, usable)| (usable, std::cmp::Reverse(at)))
+        else {
+            return (seed_handle, warm_prefix);
+        };
+        if usable < PREFIX_KEEP_MIN_TOKENS.min(aligned_cap) || usable <= warm_prefix + page {
+            return (seed_handle, warm_prefix);
+        }
+        let (path, tokens) = self.prefixes[at].clone();
+        let Some(p) = park::read_prefix(&path) else {
+            self.prefixes.remove(at);
+            return (seed_handle, warm_prefix);
+        };
+        let kept = match self.stage(&tokens) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[superfluid] prefix restore fell back cold (session {}): stage: {e}", job.session);
+                return (seed_handle, warm_prefix);
+            }
+        };
+        if let Err(msg) = self.restore_to_cache(job.session, &p, kept) {
+            eprintln!("[superfluid] prefix restore fell back cold (session {}): {msg}", job.session);
+            self.prefixes.remove(at);
+            return (seed_handle, warm_prefix);
+        }
+        match self.host.client().seed_acquire(span, usable, 0) {
+            Ok(h) => {
+                if seed_handle != 0 {
+                    let _ = self.host.client().seed_release(seed_handle);
+                }
+                self.stats.resumes.fetch_add(1, Ordering::Relaxed);
+                (h, usable)
+            }
+            Err(e) => {
+                eprintln!("[superfluid] prefix restored but could not seed (session {}): {e}", job.session);
                 (seed_handle, warm_prefix)
             }
         }
@@ -2802,33 +2929,21 @@ impl Scheduler {
         }
     }
 
-    fn park_lane(&mut self, i: usize) -> Result<(), ParkRefused> {
-        let Some(dir) = self.park_dir.clone() else {
-            return Ok(());
-        };
-        if self.lanes[i].job.completion {
-            return Ok(());
-        }
-        if (self.host.multi_space() || !self.lanes[i].job.media.is_empty()) && !self.host.has_unservable_space() {
-            return self.park_lane_multi(i, dir);
-        }
-        if self.host.has_unservable_space() {
-            self.stats
-                .unservable_park_refusals
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(ParkRefused::SpaceUnservable);
-        }
+    /// A lane's KV up to the last whole page before its last token, sealed
+    /// as the park encoding asks: (tokens covered, encoding, payload), or
+    /// None when that is not a page.
+    fn export_lane_kv(&mut self, i: usize) -> Result<Option<(u64, u8, Vec<u8>)>, ParkRefused> {
         let Some(page) = self.host.page_size() else {
-            return Ok(());
+            return Ok(None);
         };
         let (tag, session) = (self.lanes[i].tag, self.lanes[i].session);
         let n = self.lanes[i].all_tokens.len() as u64;
         if n <= 1 {
-            return Ok(());
+            return Ok(None);
         }
         let mut aligned = ((n - 1) / page) * page;
         if aligned < page {
-            return Ok(());
+            return Ok(None);
         }
         let park_encoding = if self.park_lossy {
             encoding::Q8
@@ -2846,10 +2961,9 @@ impl Scheduler {
         {
             aligned = aligned.min(boundary);
             if aligned < page {
-                return Ok(());
+                return Ok(None);
             }
         }
-        let digest = park::stream_digest(&self.lanes[i].all_tokens[..aligned as usize]);
         let _span = tracing::info_span!(
             "park",
             session,
@@ -2917,6 +3031,30 @@ impl Scheduler {
         })();
         let _ = client.buf_release(buf);
         let sealed = result.map_err(ParkRefused::from)?;
+        Ok(Some((aligned, park_encoding, sealed)))
+    }
+
+    fn park_lane(&mut self, i: usize) -> Result<(), ParkRefused> {
+        let Some(dir) = self.park_dir.clone() else {
+            return Ok(());
+        };
+        if self.lanes[i].job.completion {
+            return Ok(());
+        }
+        if (self.host.multi_space() || !self.lanes[i].job.media.is_empty()) && !self.host.has_unservable_space() {
+            return self.park_lane_multi(i, dir);
+        }
+        if self.host.has_unservable_space() {
+            self.stats
+                .unservable_park_refusals
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ParkRefused::SpaceUnservable);
+        }
+        let session = self.lanes[i].session;
+        let Some((aligned, park_encoding, sealed)) = self.export_lane_kv(i)? else {
+            return Ok(());
+        };
+        let digest = park::stream_digest(&self.lanes[i].all_tokens[..aligned as usize]);
         let job = ParkJob {
             dir,
             session,
@@ -3361,6 +3499,14 @@ impl Scheduler {
                             "[superfluid] park skipped (session {}): {msg}",
                             self.lanes[i].session
                         );
+                    }
+                } else if matches!(self.lanes[i].phase, LanePhase::Finishing)
+                    && self.lanes[i].admitted
+                    && !self.lanes[i].parked
+                {
+                    self.lanes[i].parked = true;
+                    if let Err(msg) = self.persist_prefix(i) {
+                        eprintln!("[superfluid] prefix not kept (session {}): {msg}", self.lanes[i].session);
                     }
                 }
             }
