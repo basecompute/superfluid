@@ -282,6 +282,7 @@ Commands:
   node join [<head>]   Serve a model to a fleet head from this machine
   runtimes [<model>]   List the inference runtimes here, or which one serves a model
   runtime <action>     Install, update, repair, remove or pin a runtime
+  compat               What this build was built for: the runtime contracts it checks at load
   session <action>     Inspect or export a session of a running server
   media <action>       Store or garbage-collect media on a running server
   top <host:port>...   Monitor running servers in the terminal
@@ -370,8 +371,9 @@ pub const RUNTIMES_HELP: &str = "List the inference runtimes here, or which one 
 
 Usage: superfluid runtimes [<model>] [--json]
 
-  With no model: one row per runtime and install, its state, version, the formats it reads and
-  its device, then what to do about any that is not ready.
+  With no model: one row per runtime and install, its state, version, the newest version its
+  adapter installs on its own here (INSTALLABLE; `superfluid runtime versions <id>` lists them
+  all), the formats it reads and its device, then what to do about any that is not ready.
   With a model: which runtime reads it and what that runtime serves and refuses (exit 1 if none).
 
 Options:
@@ -381,6 +383,8 @@ Options:
 pub const RUNTIME_HELP: &str = "Install and manage inference runtimes.
 
 Usage:
+  superfluid runtime versions <id> [--json]     List the versions the adapter installs on its own: which install
+                                                here, as what, and which are installed
   superfluid runtime install <id> [options]     Fetch and install a runtime for this machine
   superfluid runtime update <id>                Install the newest tested build beside the current one
   superfluid runtime repair <id> [<install>]    Reinstall an install in place
@@ -398,6 +402,7 @@ Install options:
   --dry-run              Print the plan and stop
 
 Examples:
+  superfluid runtime versions llamacpp
   superfluid runtime install llamacpp
   superfluid runtime install llamacpp --backend vulkan --dry-run
 ";
@@ -445,6 +450,7 @@ pub fn command_help(command: &str) -> Option<String> {
         "serve" => serve_help(),
         "runtimes" => RUNTIMES_HELP.to_string(),
         "runtime" => RUNTIME_HELP.to_string(),
+        "compat" => COMPAT_HELP.to_string(),
         "session" => SESSION_HELP.to_string(),
         "media" => MEDIA_HELP.to_string(),
         "top" => TOP_HELP.to_string(),
@@ -456,7 +462,26 @@ pub fn command_help(command: &str) -> Option<String> {
     })
 }
 
-pub const COMMANDS: &[&str] = &["serve", "launch", "stop", "runtimes", "runtime", "session", "media", "top", "fleet", "node", "help", "version"];
+pub const COMMANDS: &[&str] =
+    &["serve", "launch", "stop", "runtimes", "runtime", "compat", "session", "media", "top", "fleet", "node", "help", "version"];
+
+pub const COMPAT_HELP: &str = "What this build was built and tested for, per runtime.
+
+Usage: superfluid compat [--json]
+
+  basert: the baseRT header version this build carries, the engine ABI number it checks and
+  the line accepted without one (0.3.x), and the engines it installs on its own. A libbaseRT
+  with the same ABI number serves, whatever its version.
+  llamacpp, mlx: the runtime versions each shipped adapter installs on its own, the ones it
+  was built and tested against (`--untested` installs another).
+  A release carries the same data beside its tarball, as compat.json, so a host can choose a
+  release before downloading it. `superfluid runtime versions <id>` lists one runtime's versions
+  with which install on this machine.
+
+Options:
+  --json    Print JSON
+";
+
 
 /// `$SUPERFLUID_HOME/sessions`.
 pub fn default_sessions(home: &Path) -> PathBuf {

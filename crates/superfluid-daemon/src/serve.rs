@@ -601,19 +601,23 @@ pub fn run(args: &[String], embedding: &Embedding) {
         }
     }
     let picked = runtime_pick.explicit(&model).is_some();
-    let runtime = runtime_pick
-        .resolve(&model, &catalog)
-        .map_err(|e| if picked { e } else { not_there(&model).unwrap_or(e) })
-        .and_then(|rt| match (catalog.require(rt), not_there(&model)) {
-            (Ok(rt), _) => Ok(rt),
-            (Err(_), Some(why)) => Err(why),
-            (Err(_), None) => superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline),
-        })
-        .and_then(|rt| refuse_statically(&rt, park_lossy, kv_bits_arg, speculate.as_deref()).map(|()| rt))
-        .unwrap_or_else(|e| {
-            eprintln!("superfluid: {e}");
-            std::process::exit(2);
-        });
+    fn refuse(code: i32, e: String) -> ! {
+        eprintln!("superfluid: {e}");
+        std::process::exit(code)
+    }
+    let runtime = match runtime_pick.resolve(&model, &catalog) {
+        Err(e) => refuse(2, if picked { e } else { not_there(&model).unwrap_or(e) }),
+        Ok(rt) => match (catalog.require(rt), not_there(&model)) {
+            (Ok(rt), _) => rt,
+            (Err(_), Some(why)) => refuse(2, why),
+            // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong.
+            (Err(_), None) => superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline)
+                .unwrap_or_else(|e| refuse(4, e)),
+        },
+    };
+    if let Err(e) = refuse_statically(&runtime, park_lossy, kv_bits_arg, speculate.as_deref()) {
+        refuse(2, e);
+    }
     eprintln!("superfluid: runtime {} serves {} ({})", runtime.id.name(), model.display(), describe_worker(&runtime));
     if let Some(on) = spec_bitexact {
         std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });

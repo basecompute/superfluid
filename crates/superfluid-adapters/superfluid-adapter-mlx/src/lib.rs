@@ -75,6 +75,10 @@ impl Mlx {
 }
 
 impl Runtime for Mlx {
+    fn compat(&self) -> serde_json::Value {
+        serde_json::json!({"tested": crate::recipe::tested(), "python": crate::recipe::python_version()})
+    }
+
     fn info(&self) -> RuntimeInfo {
         RuntimeInfo {
             id: "mlx",
