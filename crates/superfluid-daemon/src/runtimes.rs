@@ -91,11 +91,15 @@ pub struct Runtime {
     pub id: RuntimeId,
     pub worker: Worker,
     pub version: Option<String>,
+    /// The contract number the runtime states and its adapter checked (baseRT's engine ABI).
+    pub abi: Option<u64>,
     pub capabilities: Option<String>,
     pub info: Info,
     pub devices: Vec<Device>,
     pub tokenizer: Option<PathBuf>,
     pub pull: Option<Vec<(String, bool)>>,
+    /// The options it takes on `serve`, as `--<id>-<name> <value>` (see `runtime_options`).
+    pub options: Vec<superfluid_worker::check::OptionDecl>,
 }
 
 impl Runtime {
@@ -113,6 +117,7 @@ impl Runtime {
             args.push("--kv-bits".to_string());
             args.push(kv_bits.to_string());
         }
+        // The runtime's own options are in the worker's prefix, from `locate`.
         args
     }
 
@@ -169,7 +174,7 @@ impl Catalog {
     }
 
     pub fn from_env() -> Catalog {
-        let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+        let beside = beside_this_executable();
         let workerd = beside.clone().unwrap_or_default().join("superfluid-workerd");
         Catalog::new(default_home(), beside, workerd)
     }
@@ -177,8 +182,7 @@ impl Catalog {
     /// [`Catalog::from_env`], with `workerd` running the linked runtimes'
     /// workers in place of the `superfluid-workerd` beside this executable.
     pub fn with_workerd(workerd: PathBuf) -> Catalog {
-        let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-        Catalog::new(default_home(), beside, workerd)
+        Catalog::new(default_home(), beside_this_executable(), workerd)
     }
 
     pub fn home(&self) -> &Path {
@@ -243,7 +247,18 @@ impl Catalog {
         ids
     }
 
+    /// The worker for `id`, started with the runtime's options from the first probe on.
     pub fn locate(&self, id: RuntimeId) -> Option<Worker> {
+        let mut worker = self.locate_plain(id)?;
+        for (flag, value) in crate::runtime_options::for_runtime(id) {
+            worker.prefix.push(flag);
+            worker.prefix.push(value);
+        }
+        Some(worker)
+    }
+
+    /// The worker for `id` as found, with no option of the command line.
+    pub(crate) fn locate_plain(&self, id: RuntimeId) -> Option<Worker> {
         if let Some(install) = id.install() {
             let bin = self.package_dir(id).join(install).join("bin").join(worker_name(id));
             return std::fs::canonicalize(bin).ok().filter(|p| p.is_file()).map(|bin| Worker {
@@ -594,6 +609,13 @@ pub fn sizing_of(rt: &Runtime, model: &Path) -> Result<superfluid_adapter_kit::S
     }
 }
 
+/// This executable's directory with links resolved, so a symlinked `superfluid` still finds its workerd and adapters.
+fn beside_this_executable() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    exe.parent().map(Path::to_path_buf)
+}
+
 fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<Runtime, String> {
     let reported = report["runtime"]["id"].as_str().unwrap_or_default();
     if reported != id.base().name() {
@@ -633,6 +655,7 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
     Ok(Runtime {
         id,
         version: report["runtime"]["version"].as_str().map(str::to_string),
+        abi: report["runtime"]["abi"].as_u64(),
         capabilities: report.get("capabilities").filter(|c| c.as_object().is_some_and(|o| !o.is_empty())).map(Value::to_string),
         info: Info::from_report(report),
         devices: superfluid_worker::check::devices_from(&report["devices"]),
@@ -643,6 +666,7 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
                 .map(|a| a.iter().filter_map(|o| Some((o["name"].as_str()?.to_string(), o["value"].as_bool().unwrap_or(false)))).collect())
                 .unwrap_or_default()
         }),
+        options: superfluid_worker::check::options_from(&report["options"]),
         worker,
     })
 }
@@ -701,6 +725,43 @@ pub(crate) mod tests {
 
     const V: u16 = superfluid_agent::client::PROTO_VERSION;
 
+    #[test]
+    fn a_worker_is_started_with_its_runtime_options_from_the_first_probe_on() {
+        // The options set for this process (first call wins; only this test sets them).
+        crate::runtime_options::set(vec![(RuntimeId::new("optrt"), vec![("--lib".to_string(), "/custom/lib".to_string())])]);
+        let root = std::env::temp_dir().join(format!("superfluid-runtime-options-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (beside, libexec) = (root.join("bin"), root.join("libexec").join("superfluid"));
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::create_dir_all(&libexec).unwrap();
+        let toy = libexec.join("superfluid-worker-optrt");
+        std::fs::write(&toy, "#!/bin/sh\nprintf '{\"runtime\":{\"id\":\"optrt\",\"version\":\"v1\"},\"received\":\"%s\"}\n' \"$*\"\n").unwrap();
+        std::fs::set_permissions(&toy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cat = Catalog::new(root.join("home"), Some(beside.clone()), beside.join("superfluid-workerd"));
+        let id = RuntimeId::new("optrt");
+        let w = cat.locate(id).unwrap();
+        assert_eq!(w.prefix, ["--lib", "/custom/lib"], "the options ride in the prefix");
+        assert!(cat.locate_plain(id).unwrap().prefix.is_empty());
+        let report = run_check_model(&w, None).unwrap();
+        assert_eq!(report["received"], "check --lib /custom/lib", "the first probe already carries them");
+        let rt = Runtime {
+            id,
+            worker: w,
+            version: None,
+            abi: None,
+            capabilities: None,
+            info: Info::default(),
+            devices: Vec::new(),
+            tokenizer: None,
+            pull: None,
+            options: Vec::new(),
+        };
+        let args = rt.serve_args(Path::new("/m"), 4096, 8, 0);
+        assert_eq!(args.iter().filter(|a| *a == "--lib").count(), 1, "once, from the prefix: {args:?}");
+        assert!(cat.locate(RuntimeId::new("otherrt")).is_none_or(|w| w.prefix.is_empty()), "another runtime's worker gets nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     pub(crate) fn toy_report(id: &str, available: &str) -> String {
         format!(
             r#"{{"runtime":{{"id":"{id}","version":"v1"}},"link_w":[{V}],"available":{available},"formats":[{{"id":"toy","describe":"a toy file","file":{{"extensions":["toy"]}}}}],"tokenizer":{{"from":"huggingface"}}}}"#
@@ -728,11 +789,13 @@ pub(crate) mod tests {
             id: RuntimeId::new("llamacpp"),
             worker: Worker { bin: fake_worker(&dir, name, text, 0), prefix: Vec::new(), source: Source::Env },
             version: None,
+            abi: None,
             capabilities: None,
             info: Info::default(),
             devices: Vec::new(),
             tokenizer: None,
             pull: None,
+            options: Vec::new(),
         };
         let model = Path::new("/m.gguf");
         let figures = r#"{"budget_bytes":34000000000,"weight_bytes":600000000,"kv_bytes_per_token":114688,"trained_context":40960}"#;

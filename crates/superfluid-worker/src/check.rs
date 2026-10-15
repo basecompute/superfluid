@@ -12,14 +12,60 @@ pub struct ModelCheck {
     pub sizing: Option<Result<String, String>>,
 }
 
+/// An option the runtime takes on `superfluid serve` as `--<runtime>-<name> <value>`, and its
+/// worker as `--<name> <value>`, as the worker's report declares it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionDecl {
+    pub name: String,
+    /// `int`, `float`, `on-off`, `choice` (one of `choices`) or `text`.
+    pub kind: String,
+    pub choices: Vec<String>,
+    /// The least an `int` takes, when it has a floor.
+    pub least: Option<i64>,
+    /// What the runtime does without it, as words for the help.
+    pub default: String,
+    pub about: String,
+}
+
+impl OptionDecl {
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"name": self.name, "kind": self.kind, "default": self.default, "about": self.about});
+        if !self.choices.is_empty() {
+            v["choices"] = json!(self.choices);
+        }
+        if let Some(least) = self.least {
+            v["least"] = json!(least);
+        }
+        v
+    }
+}
+
+pub fn options_from(v: &Value) -> Vec<OptionDecl> {
+    let one = |o: &Value| {
+        Some(OptionDecl {
+            name: o["name"].as_str()?.to_string(),
+            kind: o["kind"].as_str().unwrap_or("text").to_string(),
+            choices: o["choices"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+            least: o["least"].as_i64(),
+            default: o["default"].as_str().unwrap_or_default().to_string(),
+            about: o["about"].as_str().unwrap_or_default().to_string(),
+        })
+    };
+    v.as_array().map(|a| a.iter().filter_map(one).collect()).unwrap_or_default()
+}
+
 pub struct Report {
     pub info: RuntimeInfo,
     pub version: Option<String>,
+    /// The contract number the adapter checked the runtime against, when it states one.
+    pub abi: Option<u64>,
     pub available: Result<(), String>,
     pub devices: Vec<Device>,
     pub capabilities: String,
     pub model: Option<ModelCheck>,
     pub pull: Option<Vec<(String, bool, String)>>,
+    /// The options it takes on `serve`, as `--<runtime>-<name> <value>`.
+    pub options: Vec<OptionDecl>,
     pub named: Option<String>,
 }
 
@@ -111,10 +157,16 @@ impl Report {
             "devices": self.devices.iter().map(device_json).collect::<Vec<_>>(),
             "capabilities": parsed(&self.capabilities),
         });
+        if let Some(abi) = self.abi {
+            v["runtime"]["abi"] = json!(abi);
+        }
         if let Some(options) = &self.pull {
             v["pull"] = json!({
                 "options": options.iter().map(|(name, value, about)| json!({"name": name, "value": value, "about": about})).collect::<Vec<_>>(),
             });
+        }
+        if !self.options.is_empty() {
+            v["options"] = Value::Array(self.options.iter().map(OptionDecl::to_json).collect());
         }
         if let Some(by) = &self.named {
             v["named"] = json!(by);
@@ -160,11 +212,13 @@ mod tests {
                 tokenizer: TokenizerSource::Library("superfluid_tokenizer_llamacpp".into()),
             },
             version: Some("llama.cpp b11284".into()),
+            abi: None,
             available: Ok(()),
             devices: vec![Device { backend: "Metal".into(), name: "Apple M5 Pro".into(), memory: 1 << 30 }],
             capabilities: r#"{"descriptor_version":1}"#.into(),
             model: None,
             pull: None,
+            options: Vec::new(),
             named: None,
         }
     }
@@ -201,6 +255,28 @@ mod tests {
         }
         assert_eq!(formats_from(&json!([{"id": "x", "describe": "x", "archive": {}}])), vec![]);
         assert_eq!(tokenizer_from(&json!({"from": "sentencepiece"})), None);
+    }
+
+    #[test]
+    fn the_options_a_runtime_takes_read_back() {
+        let mut r = report();
+        assert!(r.to_json().get("options").is_none());
+        r.options = vec![
+            OptionDecl { name: "n-gpu-layers".into(), kind: "int".into(), choices: vec![], least: Some(-1), default: "-1".into(), about: "layers on the device".into() },
+            OptionDecl {
+                name: "flash-attn".into(),
+                kind: "choice".into(),
+                choices: vec!["auto".into(), "on".into(), "off".into()],
+                least: None,
+                default: "auto".into(),
+                about: String::new(),
+            },
+        ];
+        let v = r.to_json();
+        assert_eq!(v["options"][0], json!({"name": "n-gpu-layers", "kind": "int", "least": -1, "default": "-1", "about": "layers on the device"}));
+        assert_eq!(v["options"][1]["choices"], json!(["auto", "on", "off"]));
+        assert_eq!(options_from(&v["options"]), r.options);
+        assert_eq!(options_from(&json!([{"kind": "int"}])), vec![], "an option needs a name");
     }
 
     #[test]
