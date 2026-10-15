@@ -91,6 +91,8 @@ pub struct Runtime {
     pub id: RuntimeId,
     pub worker: Worker,
     pub version: Option<String>,
+    /// The contract number the runtime states and its adapter checked (baseRT's engine ABI).
+    pub abi: Option<u64>,
     pub capabilities: Option<String>,
     pub info: Info,
     pub devices: Vec<Device>,
@@ -169,7 +171,7 @@ impl Catalog {
     }
 
     pub fn from_env() -> Catalog {
-        let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+        let beside = beside_this_executable();
         let workerd = beside.clone().unwrap_or_default().join("superfluid-workerd");
         Catalog::new(default_home(), beside, workerd)
     }
@@ -177,8 +179,7 @@ impl Catalog {
     /// [`Catalog::from_env`], with `workerd` running the linked runtimes'
     /// workers in place of the `superfluid-workerd` beside this executable.
     pub fn with_workerd(workerd: PathBuf) -> Catalog {
-        let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-        Catalog::new(default_home(), beside, workerd)
+        Catalog::new(default_home(), beside_this_executable(), workerd)
     }
 
     pub fn home(&self) -> &Path {
@@ -594,6 +595,13 @@ pub fn sizing_of(rt: &Runtime, model: &Path) -> Result<superfluid_adapter_kit::S
     }
 }
 
+/// This executable's directory with links resolved, so a symlinked `superfluid` still finds its workerd and adapters.
+fn beside_this_executable() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    exe.parent().map(Path::to_path_buf)
+}
+
 fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<Runtime, String> {
     let reported = report["runtime"]["id"].as_str().unwrap_or_default();
     if reported != id.base().name() {
@@ -633,6 +641,7 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
     Ok(Runtime {
         id,
         version: report["runtime"]["version"].as_str().map(str::to_string),
+        abi: report["runtime"]["abi"].as_u64(),
         capabilities: report.get("capabilities").filter(|c| c.as_object().is_some_and(|o| !o.is_empty())).map(Value::to_string),
         info: Info::from_report(report),
         devices: superfluid_worker::check::devices_from(&report["devices"]),
@@ -728,6 +737,7 @@ pub(crate) mod tests {
             id: RuntimeId::new("llamacpp"),
             worker: Worker { bin: fake_worker(&dir, name, text, 0), prefix: Vec::new(), source: Source::Env },
             version: None,
+            abi: None,
             capabilities: None,
             info: Info::default(),
             devices: Vec::new(),

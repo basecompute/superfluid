@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.3
+
+- A libbaseRT is judged by its engine ABI number: baseRT 0.4.0 and later state one (`baseRT_abi_version()`), and a library whose number equals the one this build was built for serves whatever its version says. A 0.3.x library states none and serves as the line that carried this ABI before it was numbered. The check at load still verifies every function; the model configuration is read by size from a library of 0.4.0 or later (`baseRT_get_config_into`), so the struct may grow without a new number, and by value with a size check from an older one.
+- `superfluid runtime install basert` picks an engine by the ABI number baseRT publishes beside each bundle (`basert-engine-abi-<N>.txt`): the newest release with this build's number, or a 0.3.x engine, and another only with `--untested`.
+- `superfluid compat [--json]` prints what this build was built for, and each release carries the same as `compat.json` beside its tarball, so a host can choose a release before downloading it. `superfluid runtimes --json` reports a ready runtime's `abi` and, for `basert`, `requires`.
+- `superfluid self update` installs the newest release that fits this machine beside the current one, under `$SUPERFLUID_HOME/versions/<v>`, proves it starts, and makes it current; the version it replaced stays for `superfluid self use`, older ones are removed, and a running server is never touched. `self check`, `self list` and `self install` go with it; the install script now places a release the same way, and a copy it placed before is migrated by its first `self update`. `superfluid serve` says once a day, after the server is up, when a newer release is out (`SUPERFLUID_NO_UPDATE_CHECK=1` or `--offline` turns it off). Releases carry the engine ABI number in an asset name, `superfluid-basert-abi-<N>.txt`, and `compat.json` is now attached to the release as documented.
+- `superfluid serve` exits 4 when the runtime for the model is not installed or cannot run here, distinct from a usage error (2).
+- superfluid finds its workerd and adapters beside its real executable, so a symlink or a shim on `PATH` keeps the worker process.
+- [Hosting superfluid in another product](docs/serving/hosts.md) documents the contract a host builds on.
+
 ## 0.1.0
 
 First public release.

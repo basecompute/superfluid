@@ -29,7 +29,7 @@ superfluid runtime remove llamacpp b11284-vulkan
 |---|---|
 | `install <id>` | plan, fetch, verify and place an install. Options: `--version V`, `--backend B` (no fallback), `--from <archive>` (a URL or path to your own archive or, for MLX, package index), `--sha256 H`, `--untested`, `--dry-run` |
 | `update <id>` | install the newest tested build for the default install's backend beside it and make it the default |
-| `repair <id> [<install>]` | reinstall the same version and backend; what an upgraded daemon asks for when an install's worker is too old |
+| `repair <id> [<install>]` | reinstall the same version and backend; what a daemon updated with `superfluid self update` asks for when an install's worker is too old |
 | `remove <id> [<install>]` | remove one install, or all of them |
 | `use <id> <install>` / `--auto` | pin the default install / return to ranking |
 
@@ -148,7 +148,7 @@ Requests a model cannot serve are refused with a 400:
 
 ### basert
 
-- The engine library is loaded at run time and must match the major.minor of the headers the daemon was built against.
+- The engine library is loaded at run time. A library of baseRT 0.4.0 or later states an engine ABI number, which must equal the one the daemon was built against, whatever the versions say; a 0.3.x library states none and is accepted as the line that carried that ABI before it was numbered. `superfluid compat` prints what the daemon drives. `superfluid runtime install basert` picks an engine by the number baseRT publishes beside each bundle.
 - What a bundle supports (speculation, media, embeddings, lossy parking) is known only once it is loaded.
 - Serving `.base` bundles needs a daemon built with the default `basert` feature; only the engine tokenizes them.
 - Pulling by id needs the `basert` tool (`BASERT_CLI`, beside libbaseRT, or on `PATH`).

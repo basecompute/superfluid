@@ -136,7 +136,7 @@ impl FfiEngine {
         // SAFETY: model is a live handle from a successful load.
         let (mcfg, page_size, eos, stride, chunk) = unsafe {
             (
-                sys::baseRT_get_config(model),
+                crate::libbasert::config_of(model),
                 sys::baseRT_page_size(model),
                 sys::baseRT_eos_token_id(model),
                 sys::baseRT_batch_logits_stride(model),

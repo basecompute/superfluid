@@ -49,6 +49,7 @@ pub mod installs;
 pub mod pulls;
 pub mod runtimes;
 pub mod runtimes_report;
+pub mod selfupdate;
 pub mod linked;
 pub mod dylib_tokenizer;
 pub mod export;

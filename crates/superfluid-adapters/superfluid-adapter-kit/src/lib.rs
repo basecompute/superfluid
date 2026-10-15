@@ -178,6 +178,8 @@ fn refused_for_access(said: &str) -> bool {
 pub struct Probe {
     pub version: String,
     pub devices: Vec<Device>,
+    /// The contract number the runtime states, when it states one (baseRT's engine ABI).
+    pub abi: Option<u64>,
 }
 
 pub trait Runtime: Send + Sync {
@@ -288,9 +290,9 @@ pub fn model(args: &WorkerArgs) -> Result<&Path, String> {
 }
 
 pub fn check(rt: &dyn Runtime, args: &WorkerArgs) -> Report {
-    let (version, devices, available) = match rt.probe(args) {
-        Ok(p) => (Some(p.version), p.devices, Ok(())),
-        Err(why) => (None, Vec::new(), Err(why)),
+    let (version, abi, devices, available) = match rt.probe(args) {
+        Ok(p) => (Some(p.version), p.abi, p.devices, Ok(())),
+        Err(why) => (None, None, Vec::new(), Err(why)),
     };
     let model = args.model.as_ref().map(|path| {
         let reads = rt.reads(path);
@@ -304,7 +306,7 @@ pub fn check(rt: &dyn Runtime, args: &WorkerArgs) -> Report {
     let pull = rt
         .pull_options()
         .map(|options| options.iter().map(|o| (o.name.to_string(), o.value, o.about.to_string())).collect());
-    Report { info: rt.info(), version, available, devices, capabilities: rt.static_capabilities(), model, pull, named: rt.named(args) }
+    Report { info: rt.info(), version, abi, available, devices, capabilities: rt.static_capabilities(), model, pull, named: rt.named(args) }
 }
 
 pub fn serve_process(rt: &dyn Runtime, mut args: WorkerArgs, name: &str) -> ! {
@@ -492,7 +494,7 @@ mod tests {
         }
         fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
             match self.runs {
-                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0 }] }),
+                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0 }], abi: None }),
                 false => Err("no fake device here".into()),
             }
         }

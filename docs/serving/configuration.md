@@ -8,7 +8,9 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 
 | variable | default | meaning |
 |---|---|---|
-| `SUPERFLUID_HOME` | `~/.superfluid` | Home directory: runtime installs, pull locks, and the default sessions directory and socket. |
+| `SUPERFLUID_HOME` | `~/.superfluid` | Home directory: the installed superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
+| `SUPERFLUID_NO_UPDATE_CHECK` | unset | Set to anything but `0` to stop `serve` from checking once a day whether a newer superfluid is out. See [Updating superfluid](updating.md). |
+| `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |
 | `SUPERFLUID_WORKER_<ID>` | unset | Explicit worker executable for runtime `<ID>` (upper-cased, `-` and `.` as `_`, e.g. `SUPERFLUID_WORKER_LLAMACPP`). Also the installer `runtime install` uses. A runtime named this way is never auto-installed. |
 | `BASERT_LIB` | search | libbaseRT file or directory. Set by `--basert-lib`. When set, nothing else is searched. |
 | `BASERT_CLI` | search | The `basert` tool that pulls `.base` models; else the one beside libbaseRT, else `PATH`. |

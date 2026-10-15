@@ -472,6 +472,14 @@ fn main() {
         session_cmd(&args[1..]);
         return;
     }
+    if command == Some("compat") {
+        if args[1..].iter().any(|a| a == "--json") {
+            println!("{}", serde_json::to_string_pretty(&cli::compat_json()).expect("compat is JSON"));
+        } else {
+            print!("{}", cli::compat_text());
+        }
+        return;
+    }
     #[cfg(feature = "tui")]
     if command == Some("top") {
         top_cmd(&args[1..]);
@@ -484,6 +492,9 @@ fn main() {
     if command == Some("runtimes") {
         runtimes_cmd(&args[1..]);
         return;
+    }
+    if command == Some("self") {
+        std::process::exit(superfluid_daemon::selfupdate::run(&args[1..]));
     }
     if command == Some("runtime") {
         runtime_cmd(&args[1..]);

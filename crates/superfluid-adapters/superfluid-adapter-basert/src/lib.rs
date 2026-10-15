@@ -41,7 +41,7 @@ impl Runtime for Basert {
 
     fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
         let lib = libbasert::load()?;
-        Ok(Probe { version: format!("{} ({})", lib.version, lib.path.display()), devices: devices() })
+        Ok(Probe { version: format!("{} ({})", lib.version, lib.path.display()), devices: devices(), abi: lib.abi.map(u64::from) })
     }
 
     fn reads(&self, path: &Path) -> Result<(), String> {
