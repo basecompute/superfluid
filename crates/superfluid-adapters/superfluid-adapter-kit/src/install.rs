@@ -375,11 +375,16 @@ pub fn fetch_json(url: &str) -> Result<Value, String> {
     if !url.starts_with("https://") {
         return Err(format!("{url}: only https:// URLs are fetched"));
     }
-    let out = Command::new("curl")
-        .args(["-fsSL", "--proto", "=https", "--tlsv1.2", "--retry", "2", "-H", "Accept: application/json"])
-        .arg(url)
-        .output()
-        .map_err(|e| format!("curl: {e}"))?;
+    let mut curl = Command::new("curl");
+    curl.args(["-fsSL", "--proto", "=https", "--tlsv1.2", "--retry", "2", "-H", "Accept: application/json"]);
+    // GitHub's API allows sixty unauthenticated requests an hour per address, which hosted
+    // runners share; a token in the environment lifts that, for the API alone.
+    if url.starts_with("https://api.github.com/") {
+        if let Some(token) = std::env::var_os("GITHUB_TOKEN").filter(|t| !t.is_empty()) {
+            curl.arg("-H").arg(format!("Authorization: Bearer {}", token.to_string_lossy()));
+        }
+    }
+    let out = curl.arg(url).output().map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         return Err(format!("fetching {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
