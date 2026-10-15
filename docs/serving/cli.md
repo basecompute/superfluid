@@ -11,6 +11,7 @@
 | `superfluid node join [<head>] --model <m>` | serve a model to a fleet head from this machine |
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
+| `superfluid compat` | what this build was built for: the runtime contracts it checks at load |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
 | `superfluid media <subcommand>` | store media in, or sweep, a running server's media pool |
 | `superfluid top <host:port>...` | live monitor over one or more servers |
@@ -32,6 +33,7 @@ Flags take their value as `--flag value` or `--flag=value`. The last occurrence 
 | 1 | run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull |
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
+| 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts superfluid can tell this from a flag it got wrong (2) |
 
 ## `superfluid serve`
 
@@ -57,6 +59,7 @@ superfluid serve ./model.gguf --port 9000 --api-key "$KEY" --max-batch 4
 | `--runtime <model>=<id>[@<install>]` | | Runtime for one model, named by path, file stem or id. |
 | `--offline` | off | Fetch nothing: look for an id only where its runtime keeps models, and install no runtime. |
 | `--pull-<name> [value]` | | Pass `--<name>` to the runtime's pull tool (for example `--pull-file model.gguf`). See [Supported models](../models/supported_models.md#pulling-models-by-id). |
+| `--<runtime>-<name> <value>` | the runtime's | A knob of one runtime, for example `--llamacpp-n-gpu-layers 20` or `--mlx-prefill-chunk 512`; `superfluid runtime options <id>` lists them, and [Runtimes](../models/runtimes.md#per-runtime-options) describes them. The value is checked against the runtime's declaration before anything loads; a flag every runtime takes (`--max-context`, `--max-batch`, `--kv-bits`) is never spelled this way. |
 | `--model-dir <dir>` | none | Every model under `<dir>` becomes known and loads on first request. See [Serving multiple models](multiple_models.md). |
 | `--idle-timeout <sec>` | 0 (never) | Unload a model unused this long, if it can be loaded again; never the default model. |
 | `--basert-lib <path>` | search | libbaseRT file or directory for the `basert` runtime (sets `BASERT_LIB`). |
@@ -227,19 +230,31 @@ Sends the server `launch` started SIGTERM and waits for it to drain. A server st
 superfluid runtimes [<model>] [--json]
 ```
 
-Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
+Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
+
+With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
 
 ## `superfluid runtime`
 
 ```sh
+superfluid runtime versions <id> [--json]
 superfluid runtime install <id> [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested] [--dry-run]
 superfluid runtime update <id>
 superfluid runtime repair <id> [<install>]
 superfluid runtime remove <id> [<install>]
 superfluid runtime use <id> <install> | --auto
+superfluid runtime options <id> [--json]
 ```
 
-See [Runtimes](../models/runtimes.md#managing-installs).
+See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default; see [per-runtime options](../models/runtimes.md#per-runtime-options).
+
+## `superfluid compat`
+
+```sh
+superfluid compat [--json]
+```
+
+What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md). For one runtime on this machine, `superfluid runtime versions <id>` says which of those versions install here.
 
 ## `superfluid session`
 

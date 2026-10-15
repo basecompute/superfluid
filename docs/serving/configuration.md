@@ -13,8 +13,8 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 | `BASERT_LIB` | search | libbaseRT file or directory. Set by `--basert-lib`. When set, nothing else is searched. |
 | `BASERT_CLI` | search | The `basert` tool that pulls `.base` models; else the one beside libbaseRT, else `PATH`. |
 | `BASERT_MODELS_DIR` | platform cache | Where `--speculate auto` looks for drafters (default `~/Library/Caches/baseRT/models` on macOS, `$XDG_CACHE_HOME/baseRT/models` or `~/.cache/baseRT/models` elsewhere). |
-| `SUPERFLUID_LLAMA_LIB` | search | Your own llama.cpp build: the `libllama` file or its directory. When set, nothing else is searched. |
-| `SUPERFLUID_MLX_VENV` | the install's `env/` | Python environment with `mlx` and `mlx-lm`, when the worker is not running from an install. |
+| `SUPERFLUID_LLAMA_LIB` | search | Your own llama.cpp build: the `libllama` file or its directory. When set, nothing else is searched. `--llamacpp-lib` on `serve` is the same. |
+| `SUPERFLUID_MLX_VENV` | the install's `env/` | Python environment with `mlx` and `mlx-lm`, when the worker is not running from an install. `--mlx-venv` on `serve` is the same. |
 
 ### Serving
 

@@ -52,7 +52,7 @@ fn runtimes_cmd(args: &[String]) {
     }
     let found = superfluid_daemon::runtimes_report::with_installs(&catalog);
     if json {
-        let rows = superfluid_daemon::runtimes_report::table_json(&found);
+        let rows = superfluid_daemon::runtimes_report::table_json_of(&found, Some(&catalog));
         println!("{}", serde_json::to_string_pretty(&rows).expect("json"));
         return;
     }
@@ -104,6 +104,17 @@ fn runtime_cmd(args: &[String]) {
         done
     };
     match sub.as_str() {
+        "versions" => {
+            if rest.iter().any(|a| a != "--json") {
+                usage();
+            }
+            let listing = superfluid_daemon::versions::of(&catalog, id).unwrap_or_else(|e| fail(e));
+            if rest.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string_pretty(&listing.json()).expect("json"));
+            } else {
+                print!("{}", listing.text());
+            }
+        }
         "install" => {
             let mut req = Request::default();
             let mut dry_run = false;
@@ -142,6 +153,19 @@ fn runtime_cmd(args: &[String]) {
                 return;
             }
             carry_out(&installer, &plans);
+        }
+        "options" => {
+            let json = match rest {
+                [] => false,
+                [flag] if flag == "--json" => true,
+                _ => usage(),
+            };
+            let runtime = catalog.require(id).unwrap_or_else(|e| fail(e));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&superfluid_daemon::runtime_options::json(&runtime)).expect("json"));
+            } else {
+                print!("{}", superfluid_daemon::runtime_options::text(&runtime));
+            }
         }
         "update" => {
             if !rest.is_empty() {
@@ -470,6 +494,15 @@ fn main() {
     }
     if command == Some("session") {
         session_cmd(&args[1..]);
+        return;
+    }
+    if command == Some("compat") {
+        let catalog = superfluid_daemon::runtimes::Catalog::from_env();
+        if args[1..].iter().any(|a| a == "--json") {
+            println!("{}", serde_json::to_string_pretty(&superfluid_daemon::compat::json(&catalog)).expect("compat is JSON"));
+        } else {
+            print!("{}", superfluid_daemon::compat::text(&catalog));
+        }
         return;
     }
     #[cfg(feature = "tui")]

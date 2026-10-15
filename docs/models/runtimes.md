@@ -14,7 +14,8 @@ A runtime runs a model's forward pass: llama.cpp, MLX, the baseRT engine, or the
 ## Managing installs
 
 ```sh
-superfluid runtimes                              # state of every runtime
+superfluid runtimes                              # state of every runtime, and the newest version each installs here
+superfluid runtime versions llamacpp             # every version the adapter installs on its own: which install here, which are installed
 superfluid runtime install llamacpp --dry-run    # print the plan, fetch nothing
 superfluid runtime install llamacpp
 superfluid runtime install llamacpp --backend vulkan
@@ -27,6 +28,7 @@ superfluid runtime remove llamacpp b11284-vulkan
 
 | command | what it does |
 |---|---|
+| `versions <id>` | list the versions the adapter installs on its own (the ones it was tested with), newest first: which install on this machine and as what, with the size, and which are installed; an install of another version (`--untested`, or an archive of your own) is listed as not one the adapter lists. `--json` for scripts. Answered from the adapter's recipe, with no network |
 | `install <id>` | plan, fetch, verify and place an install. Options: `--version V`, `--backend B` (no fallback), `--from <archive>` (a URL or path to your own archive or, for MLX, package index), `--sha256 H`, `--untested`, `--dry-run` |
 | `update <id>` | install the newest tested build for the default install's backend beside it and make it the default |
 | `repair <id> [<install>]` | reinstall the same version and backend; what an upgraded daemon asks for when an install's worker is too old |
@@ -124,19 +126,74 @@ Requests a model cannot serve are refused with a 400:
 | `unsupported_runtime` | a load the runtime cannot serve as asked |
 | `unsupported_parameter` | a request parameter the path does not support |
 
+## Per-runtime options
+
+A knob of one runtime is given to `serve` as `--<runtime>-<name> <value>`, for example `--llamacpp-n-gpu-layers 20`. The adapter declares its options with the shape of each value; `superfluid serve` checks a value against that declaration before a worker starts and forwards it to the runtime's worker as `--<name> <value>`, and `superfluid runtime options <id>` lists them. A flag every runtime takes stays a flag of `serve`: the context window (`--max-context`), the lanes (`--max-batch`), the KV precision (`--kv-bits`), parking and speculation.
+
+### llamacpp options
+
+The knobs of llama.cpp's model and context parameters that keep their meaning under superfluid, named as llama.cpp's own tools name them. The window, the sequence count, the KV layout and sampling are superfluid's.
+
+| option | value | default | meaning |
+|---|---|---|---|
+| `--llamacpp-lib` | path | the install's | A llama.cpp build of your own: the libllama file or its directory (as `SUPERFLUID_LLAMA_LIB`). |
+| `--llamacpp-n-gpu-layers` | N | -1 | Layers kept on the device; -1 is all of them, 0 runs the model on the CPU. |
+| `--llamacpp-main-gpu` | N | 0 | The device that takes the whole model under `split-mode none`, and small tensors otherwise. |
+| `--llamacpp-split-mode` | none, layer, row, tensor | layer | How a model is spread over several devices. |
+| `--llamacpp-tensor-split` | f,f,... | even | The share of the model each device takes (`3,1` gives the first three quarters). |
+| `--llamacpp-load-mode` | auto, none, mmap, mlock, mmap-mlock, direct-io | auto | How weights are read: mmap maps the file, mlock pins them in RAM, direct-io bypasses the page cache. |
+| `--llamacpp-lazy-mode` | off, auto, on | auto | Read the rows of tensors the architecture marks (experts) on demand; needs mmap. |
+| `--llamacpp-repack` | on, off | on | Repack weights into the device's extra buffer types (llama.cpp's `--no-repack` turns it off). |
+| `--llamacpp-threads` | N | 0 | Threads for decoding; 0 is every core. |
+| `--llamacpp-threads-batch` | N | 0 | Threads for prompt batches; 0 is as many as `threads`. |
+| `--llamacpp-batch-size` | N | 2048 | Tokens per decode call (`n_batch`). |
+| `--llamacpp-ubatch-size` | N | 512 | Tokens per micro-batch (`n_ubatch`), at most `batch-size`. |
+| `--llamacpp-flash-attn` | auto, on, off | auto | Flash attention; auto lets llama.cpp decide for the device. |
+| `--llamacpp-cache-type-k` | f16, bf16, f32, q8_0, q4_0, q4_1, q5_0, q5_1, iq4_nl | f16 | The KV cache's K type. |
+| `--llamacpp-cache-type-v` | the same | f16 | The KV cache's V type; a quantized V needs flash attention on. |
+| `--llamacpp-kv-offload` | on, off | on | Keep the KV cache on the device (llama.cpp's `--no-kv-offload` turns it off). |
+| `--llamacpp-op-offload` | on, off | on | Offload operations on host tensors to the device. |
+| `--llamacpp-swa-full` | on, off | on | A full-size cache for sliding-window layers; off keeps only the window and saves memory. |
+| `--llamacpp-rope-scaling` | none, linear, yarn, longrope | model's | RoPE scaling for a context past the trained one. |
+| `--llamacpp-rope-freq-base`, `--llamacpp-rope-freq-scale` | F | model's | RoPE base frequency and frequency scale. |
+| `--llamacpp-yarn-ext-factor`, `--llamacpp-yarn-attn-factor`, `--llamacpp-yarn-beta-fast`, `--llamacpp-yarn-beta-slow` | F | model's | YaRN extrapolation mix (-1 takes the model's), magnitude scale, low and high correction dimensions. |
+| `--llamacpp-yarn-orig-ctx` | N | model's | YaRN original context size. |
+
+Not options, by design: `--ctx-size` and `--parallel` are `--max-context` and `--max-batch`; `--kv-unified` is the adapter's choice of KV layout; metadata and tensor overrides (`--override-kv`, `--override-tensor`, `--cpu-moe`) and `--device` take backend handles the worker does not expose yet.
+
+### mlx options
+
+The worker drives mlx-lm's model classes with an executor of its own, so its knobs are the executor's.
+
+| option | value | default | meaning |
+|---|---|---|---|
+| `--mlx-venv` | path | the install's | A Python environment of your own with `mlx` and `mlx-lm` (as `SUPERFLUID_MLX_VENV`). |
+| `--mlx-prefill-chunk` | N | 2048 | Prompt tokens fed to the model per step. |
+| `--mlx-cache-limit-mb` | N | 1024 | MLX's buffer cache limit (`mx.set_cache_limit`). |
+
+mlx-lm's own `--max-kv-size`, `--kv-bits` and `--adapter-path` are not options: a rotating or quantized cache changes the executor's cache, and a LoRA adapter is a load-time change the worker does not make yet.
+
+### basert
+
+The engine takes no option of its own on `serve`; its knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
+
 ## Per-runtime limits
 
 ### llamacpp
 
-- A build whose C API differs from the tested one is refused by name at load. `SUPERFLUID_LLAMA_LIB` loads your own build instead of an install.
+- `superfluid compat` lists the llama.cpp builds this adapter was built and tested against, which it installs on its own; another build installs with `--untested`, and is still checked at load for the functions and parameter layouts the adapter drives.
+
+- A build whose C API differs from the tested one is refused by name at load. `SUPERFLUID_LLAMA_LIB` or `--llamacpp-lib` loads your own build instead of an install.
 - With no `--max-context`, the window is sized for the device on Metal, and on CUDA with a dedicated GPU; elsewhere it is 8192. Once a context exists, one that left the device short of its reserve is made again with fewer cells; a pool cut below one sequence serves that model at the shorter window.
 - Plain-attention models get a KV buffer per sequence (lanes plus two, at least 4, at most 256), so a decode step attends only over its own sequence. Recurrent, hybrid and sliding-window models (Qwen3.5/3.6-class, gemma) use one shared pool and reuse prefixes only at a sequence's head.
-- The prefix cache keeps at most one lane's context in a shared pool, where every step attends over the cells up to the highest one in use. The rest of the cache, and any entry that gives up its sequence to a lane, is held in host memory as llama.cpp's own state export and imported when a request reuses it: as many tokens as the pool has cells, within 8 GiB and 60% of the memory the model and its context leave free.
+- The prefix cache keeps at most one lane's context in a shared pool, where every step attends over the cells up to the highest one in use. The rest of the cache, and any entry that gives up its sequence to a lane, is held in host memory as llama.cpp's own state export and imported when a request reuses it: as many tokens as the pool has cells, within 8 GiB and 60% of the memory the model and its context leave free. On a host without an accelerator, or with the model on the CPU, the 8 GiB alone bounds it.
 - On Metal, a prompt batch on a shared pool is filled to a multiple of 8 tokens: the attention kernel computes a last group short of 8 queries against every cell in use.
 - No lossy park, no media, no batch invariance. Greedy rounds take llama.cpp's argmax; sampled rounds are sampled on the host.
 - llama.cpp's own log is silenced unless `SUPERFLUID_LLAMA_LOG=1`.
 
 ### mlx
+
+- `superfluid compat` lists the MLX versions this adapter installs on its own and the Python they run on.
 
 - Apple silicon only. Python runs in the worker, so a Metal fault kills the worker, never the daemon.
 - Greedy and sampled rounds run on the device, one step ahead.
@@ -148,7 +205,7 @@ Requests a model cannot serve are refused with a 400:
 
 ### basert
 
-- The engine library is loaded at run time and must match the major.minor of the headers the daemon was built against.
+- The engine library is loaded at run time. A library of baseRT 0.4.0 or later states an engine ABI number, which must equal the one the daemon was built against, whatever the versions say; a 0.3.x library states none and is accepted as the line that carried that ABI before it was numbered. `superfluid compat` prints what the daemon drives. `superfluid runtime install basert` picks an engine by the number baseRT publishes beside each bundle.
 - What a bundle supports (speculation, media, embeddings, lossy parking) is known only once it is loaded.
 - Serving `.base` bundles needs a daemon built with the default `basert` feature; only the engine tokenizes them.
 - Pulling by id needs the `basert` tool (`BASERT_CLI`, beside libbaseRT, or on `PATH`).

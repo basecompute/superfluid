@@ -19,7 +19,7 @@ impl Runtime for Mock {
     }
 
     fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
-        Ok(Probe { version: "mock".into(), devices: Vec::new() })
+        Ok(Probe { version: "mock".into(), devices: Vec::new(), abi: None })
     }
 
     fn open(&self, args: &WorkerArgs) -> Result<Loaded, String> {

@@ -78,6 +78,36 @@ pub type llama_pooling_type = i32;
 pub type llama_attention_type = i32;
 pub type llama_flash_attn_type = i32;
 
+// The values the options map to, as llama.h and ggml.h number them.
+pub const LLAMA_SPLIT_MODE_NONE: llama_split_mode = 0;
+pub const LLAMA_SPLIT_MODE_LAYER: llama_split_mode = 1;
+pub const LLAMA_SPLIT_MODE_ROW: llama_split_mode = 2;
+pub const LLAMA_SPLIT_MODE_TENSOR: llama_split_mode = 3;
+pub const LLAMA_LOAD_MODE_AUTO: llama_load_mode = -1;
+pub const LLAMA_LOAD_MODE_MMAP: llama_load_mode = 1;
+pub const LLAMA_LOAD_MODE_MLOCK: llama_load_mode = 2;
+pub const LLAMA_LOAD_MODE_MMAP_MLOCK: llama_load_mode = 3;
+pub const LLAMA_LOAD_MODE_DIRECT_IO: llama_load_mode = 4;
+pub const LLAMA_LAZY_MODE_OFF: llama_lazy_mode = 0;
+pub const LLAMA_LAZY_MODE_AUTO: llama_lazy_mode = 1;
+pub const LLAMA_LAZY_MODE_ON: llama_lazy_mode = 2;
+pub const LLAMA_ROPE_SCALING_TYPE_NONE: llama_rope_scaling_type = 0;
+pub const LLAMA_ROPE_SCALING_TYPE_LINEAR: llama_rope_scaling_type = 1;
+pub const LLAMA_ROPE_SCALING_TYPE_YARN: llama_rope_scaling_type = 2;
+pub const LLAMA_ROPE_SCALING_TYPE_LONGROPE: llama_rope_scaling_type = 3;
+pub const LLAMA_FLASH_ATTN_TYPE_AUTO: llama_flash_attn_type = -1;
+pub const LLAMA_FLASH_ATTN_TYPE_DISABLED: llama_flash_attn_type = 0;
+pub const LLAMA_FLASH_ATTN_TYPE_ENABLED: llama_flash_attn_type = 1;
+pub const GGML_TYPE_F32: ggml_type = 0;
+pub const GGML_TYPE_F16: ggml_type = 1;
+pub const GGML_TYPE_Q4_0: ggml_type = 2;
+pub const GGML_TYPE_Q4_1: ggml_type = 3;
+pub const GGML_TYPE_Q5_0: ggml_type = 6;
+pub const GGML_TYPE_Q5_1: ggml_type = 7;
+pub const GGML_TYPE_Q8_0: ggml_type = 8;
+pub const GGML_TYPE_IQ4_NL: ggml_type = 20;
+pub const GGML_TYPE_BF16: ggml_type = 30;
+
 pub const GGML_BACKEND_DEVICE_TYPE_CPU: ggml_backend_dev_type = 0;
 pub const GGML_BACKEND_DEVICE_TYPE_GPU: ggml_backend_dev_type = 1;
 pub const GGML_BACKEND_DEVICE_TYPE_IGPU: ggml_backend_dev_type = 2;
@@ -158,6 +188,53 @@ pub struct llama_context_params {
     pub ctx_other: *mut llama_context,
 }
 
+/// `llama_context_params` as llama.cpp lays it out from b11642 on: one field,
+/// `moe_cache_size`, inserted after `type_v` and before the abort callback, which
+/// moves every field after it by eight bytes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct llama_context_params_v2 {
+    pub n_ctx: u32,
+    pub n_batch: u32,
+    pub n_ubatch: u32,
+    pub n_seq_max: u32,
+    pub n_rs_seq: u32,
+    pub n_outputs_max: u32,
+    pub n_outputs_max_per_seq: u32,
+    pub n_threads: i32,
+    pub n_threads_batch: i32,
+    pub ctx_type: llama_context_type,
+    pub rope_scaling_type: llama_rope_scaling_type,
+    pub pooling_type: llama_pooling_type,
+    pub attention_type: llama_attention_type,
+    pub flash_attn_type: llama_flash_attn_type,
+    pub rope_freq_base: f32,
+    pub rope_freq_scale: f32,
+    pub yarn_ext_factor: f32,
+    pub yarn_attn_factor: f32,
+    pub yarn_beta_fast: f32,
+    pub yarn_beta_slow: f32,
+    pub yarn_orig_ctx: u32,
+    pub defrag_thold: f32,
+    pub cb_eval: ggml_backend_sched_eval_callback,
+    pub cb_eval_user_data: *mut c_void,
+    pub type_k: ggml_type,
+    pub type_v: ggml_type,
+    /// b11642 and later: device cache for experts kept in host memory, 0 = off.
+    pub moe_cache_size: usize,
+    pub abort_callback: ggml_abort_callback,
+    pub abort_callback_data: *mut c_void,
+    pub embeddings: bool,
+    pub offload_kqv: bool,
+    pub no_perf: bool,
+    pub op_offload: bool,
+    pub swa_full: bool,
+    pub kv_unified: bool,
+    pub samplers: *mut llama_sampler_seq_config,
+    pub n_samplers: usize,
+    pub ctx_other: *mut llama_context,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct llama_batch {
@@ -178,7 +255,9 @@ pub struct gguf_init_params {
 }
 
 macro_rules! library_api {
-    ($( fn $name:ident ( $($arg:ident : $ty:ty),* $(,)? ) $(-> $ret:ty)? ; )*) => {
+    (@symbol $name:ident) => { concat!(stringify!($name), "\0").as_bytes() };
+    (@symbol $name:ident, $symbol:literal) => { concat!($symbol, "\0").as_bytes() };
+    ($( fn $name:ident ( $($arg:ident : $ty:ty),* $(,)? ) $(-> $ret:ty)? $(= $symbol:literal)? ; )*) => {
         struct Api {
             $( $name: unsafe extern "C" fn($($ty),*) $(-> $ret)?, )*
         }
@@ -188,7 +267,7 @@ macro_rules! library_api {
                 Ok(Api {
                     $(
                         $name: {
-                            let symbol = concat!(stringify!($name), "\0").as_bytes();
+                            let symbol: &[u8] = library_api!(@symbol $name $(, $symbol)?);
                             libs.iter()
                                 // SAFETY: the symbol is llama.cpp's C function of
                                 // this name, whose signature is the header's.
@@ -216,12 +295,17 @@ macro_rules! library_api {
 
 library_api! {
     fn llama_backend_init();
+    fn llama_max_devices() -> usize;
     fn llama_log_set(log_callback: ggml_log_callback, user_data: *mut c_void);
     fn llama_model_default_params() -> llama_model_params;
     fn llama_context_default_params() -> llama_context_params;
     fn llama_model_load_from_file(path_model: *const c_char, params: llama_model_params) -> *mut llama_model;
     fn llama_model_free(model: *mut llama_model);
     fn llama_init_from_model(model: *mut llama_model, params: llama_context_params) -> *mut llama_context;
+    // The same two functions under the b11642 layout: which pair to call is
+    // decided once, from the defaults the library returns (see `ContextLayout`).
+    fn llama_context_default_params_v2() -> llama_context_params_v2 = "llama_context_default_params";
+    fn llama_init_from_model_v2(model: *mut llama_model, params: llama_context_params_v2) -> *mut llama_context = "llama_init_from_model";
     fn llama_free(ctx: *mut llama_context);
     fn llama_model_get_vocab(model: *const llama_model) -> *const llama_vocab;
     fn llama_model_size(model: *const llama_model) -> u64;
@@ -283,6 +367,7 @@ struct Loaded {
     _libs: Vec<libloading::Library>,
     api: Api,
     info: Library,
+    layout: ContextLayout,
 }
 
 static LOADED: OnceLock<Result<Loaded, String>> = OnceLock::new();
@@ -388,13 +473,16 @@ fn open() -> Result<Loaded, String> {
     // SAFETY: the two getters take nothing and return a struct by value
     // (see `returned`).
     let (context, model) = unsafe { (returned(api.llama_context_default_params as *const ()), returned(api.llama_model_default_params as *const ())) };
-    if let Some(differs) = layout_differs(&context.0, &model.0) {
-        return Err(format!(
-            "{} is a llama.cpp this adapter cannot drive: its parameter structs are not laid out as the tested builds' are \
-             ({differs}), so it would be driven through the wrong fields (install a build the adapter lists as tested)",
-            libllama.display()
-        ));
-    }
+    let layout = match (context_layout_of(&context.0), model_layout_differs(&model.0)) {
+        (Ok(layout), None) => layout,
+        (Err(differs), _) | (_, Some(differs)) => {
+            return Err(format!(
+                "{} is a llama.cpp this adapter cannot drive: its parameter structs are not laid out as the tested builds' are \
+                 ({differs}), so it would be driven through the wrong fields (install a build the adapter lists as tested)",
+                libllama.display()
+            ))
+        }
+    };
     // SAFETY: an optional query with no arguments, looked up by name.
     let reported = unsafe {
         libs[0]
@@ -409,7 +497,7 @@ fn open() -> Result<Loaded, String> {
         (None, Some(v)) => format!("llama.cpp {v}"),
         (None, None) => format!("llama.cpp (unversioned build {})", libllama.display()),
     };
-    let loaded = Loaded { _libs: libs, api, info: Library { path: libllama, version } };
+    let loaded = Loaded { _libs: libs, api, info: Library { path: libllama, version }, layout };
     // SAFETY: plain FFI on the library just resolved; the callback keeps
     // error lines and takes no user data.
     unsafe {
@@ -510,32 +598,72 @@ unsafe fn returned(getter: *const ()) -> Returned {
 #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", unix))))]
 compile_error!("superfluid: the llama.cpp adapter reads llama.cpp's parameter defaults on AArch64 and x86-64 System V only");
 
-fn layout_differs(context: &[u8], model: &[u8]) -> Option<String> {
-    macro_rules! field {
-        ($bytes:expr, $s:ty, $f:ident, $t:ty) => {{
-            let at = std::mem::offset_of!($s, $f);
-            <$t>::from_ne_bytes($bytes[at..at + std::mem::size_of::<$t>()].try_into().expect("a field's bytes")) as i64
-        }};
+/// How the library lays out `llama_context_params`: as the builds up to b11641
+/// do, or with the field b11642 inserted. Told from the defaults the library
+/// returns, read at the declared offsets of each layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextLayout {
+    V1,
+    V2,
+}
+
+macro_rules! field {
+    ($bytes:expr, $s:ty, $f:ident, $t:ty) => {{
+        let at = std::mem::offset_of!($s, $f);
+        <$t>::from_ne_bytes($bytes[at..at + std::mem::size_of::<$t>()].try_into().expect("a field's bytes")) as i64
+    }};
+}
+
+/// The context defaults a tested build returns, read as the layout `$s` places them.
+macro_rules! context_fields {
+    ($c:expr, $s:ty) => {
+        [
+            ("llama_context_params.n_ctx", field!($c, $s, n_ctx, u32), 512),
+            ("llama_context_params.n_batch", field!($c, $s, n_batch, u32), 2048),
+            ("llama_context_params.n_ubatch", field!($c, $s, n_ubatch, u32), 512),
+            ("llama_context_params.n_seq_max", field!($c, $s, n_seq_max, u32), 1),
+            ("llama_context_params.rope_scaling_type", field!($c, $s, rope_scaling_type, i32), -1),
+            ("llama_context_params.pooling_type", field!($c, $s, pooling_type, i32), -1),
+            ("llama_context_params.attention_type", field!($c, $s, attention_type, i32), -1),
+            ("llama_context_params.cb_eval", field!($c, $s, cb_eval, usize), 0),
+            ("llama_context_params.type_k", field!($c, $s, type_k, i32), 1),
+            ("llama_context_params.type_v", field!($c, $s, type_v, i32), 1),
+            ("llama_context_params.abort_callback", field!($c, $s, abort_callback, usize), 0),
+            ("llama_context_params.embeddings", field!($c, $s, embeddings, u8), 0),
+            ("llama_context_params.offload_kqv", field!($c, $s, offload_kqv, u8), 1),
+            ("llama_context_params.samplers", field!($c, $s, samplers, usize), 0),
+            ("llama_context_params.n_samplers", field!($c, $s, n_samplers, usize), 0),
+            ("llama_context_params.ctx_other", field!($c, $s, ctx_other, usize), 0),
+        ]
+    };
+}
+
+fn wrong_fields(fields: &[(&str, i64, i64)]) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|(_, got, tested)| got != tested)
+        .map(|(name, got, tested)| format!("{name} defaults to {got} where a tested build's is {tested}"))
+        .collect()
+}
+
+/// The layout the context defaults fit, else what is wrong with them read as
+/// the first layout, which is where a build older than both shows itself.
+fn context_layout_of(context: &[u8]) -> Result<ContextLayout, String> {
+    let v1: [(&str, i64, i64); 16] = context_fields!(context, llama_context_params);
+    let as_v1 = wrong_fields(&v1);
+    if as_v1.is_empty() {
+        return Ok(ContextLayout::V1);
     }
-    let c = context;
+    let v2: [(&str, i64, i64); 16] = context_fields!(context, llama_context_params_v2);
+    if wrong_fields(&v2).is_empty() {
+        return Ok(ContextLayout::V2);
+    }
+    Err(as_v1.join("; "))
+}
+
+fn model_layout_differs(model: &[u8]) -> Option<String> {
     let m = model;
-    let fields: [(&str, i64, i64); 22] = [
-        ("llama_context_params.n_ctx", field!(c, llama_context_params, n_ctx, u32), 512),
-        ("llama_context_params.n_batch", field!(c, llama_context_params, n_batch, u32), 2048),
-        ("llama_context_params.n_ubatch", field!(c, llama_context_params, n_ubatch, u32), 512),
-        ("llama_context_params.n_seq_max", field!(c, llama_context_params, n_seq_max, u32), 1),
-        ("llama_context_params.rope_scaling_type", field!(c, llama_context_params, rope_scaling_type, i32), -1),
-        ("llama_context_params.pooling_type", field!(c, llama_context_params, pooling_type, i32), -1),
-        ("llama_context_params.attention_type", field!(c, llama_context_params, attention_type, i32), -1),
-        ("llama_context_params.cb_eval", field!(c, llama_context_params, cb_eval, usize), 0),
-        ("llama_context_params.type_k", field!(c, llama_context_params, type_k, i32), 1),
-        ("llama_context_params.type_v", field!(c, llama_context_params, type_v, i32), 1),
-        ("llama_context_params.abort_callback", field!(c, llama_context_params, abort_callback, usize), 0),
-        ("llama_context_params.embeddings", field!(c, llama_context_params, embeddings, u8), 0),
-        ("llama_context_params.offload_kqv", field!(c, llama_context_params, offload_kqv, u8), 1),
-        ("llama_context_params.samplers", field!(c, llama_context_params, samplers, usize), 0),
-        ("llama_context_params.n_samplers", field!(c, llama_context_params, n_samplers, usize), 0),
-        ("llama_context_params.ctx_other", field!(c, llama_context_params, ctx_other, usize), 0),
+    let fields: [(&str, i64, i64); 6] = [
         ("llama_model_params.devices", field!(m, llama_model_params, devices, usize), 0),
         ("llama_model_params.split_mode", field!(m, llama_model_params, split_mode, i32), 1),
         ("llama_model_params.main_gpu", field!(m, llama_model_params, main_gpu, i32), 0),
@@ -543,12 +671,22 @@ fn layout_differs(context: &[u8], model: &[u8]) -> Option<String> {
         ("llama_model_params.kv_overrides", field!(m, llama_model_params, kv_overrides, usize), 0),
         ("llama_model_params.vocab_only", field!(m, llama_model_params, vocab_only, u8), 0),
     ];
-    let wrong: Vec<String> = fields
-        .iter()
-        .filter(|(_, got, tested)| got != tested)
-        .map(|(name, got, tested)| format!("{name} defaults to {got} where a tested build's is {tested}"))
-        .collect();
+    let wrong = wrong_fields(&fields);
     (!wrong.is_empty()).then(|| wrong.join("; "))
+}
+
+/// What is wrong with both parameter structs' defaults, when the context fits
+/// neither layout or the model params moved.
+#[cfg(test)]
+fn layout_differs(context: &[u8], model: &[u8]) -> Option<String> {
+    let mut wrong: Vec<String> = context_layout_of(context).err().into_iter().collect();
+    wrong.extend(model_layout_differs(model));
+    (!wrong.is_empty()).then(|| wrong.join("; "))
+}
+
+/// The layout of the library loaded (see [`load`]).
+pub fn context_layout() -> ContextLayout {
+    loaded().layout
 }
 
 fn manifest_version(lib_dir: &Path) -> Option<String> {
@@ -638,6 +776,22 @@ mod tests {
         assert_eq!(std::mem::offset_of!(llama_context_params, samplers), 136);
         assert_eq!(std::mem::offset_of!(llama_context_params, n_samplers), 144);
         assert_eq!(std::mem::offset_of!(llama_context_params, ctx_other), 152);
+        // b11642's layout, as offsetof on its include/llama.h gives: moe_cache_size sits
+        // between type_v and the abort callback. The defaults cannot tell that order (all
+        // three are zero), so it is pinned here.
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, type_v), 108);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, moe_cache_size), 112);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, abort_callback), 120);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, abort_callback_data), 128);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, embeddings), 136);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, offload_kqv), 137);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, no_perf), 138);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, op_offload), 139);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, swa_full), 140);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, kv_unified), 141);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, samplers), 144);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, n_samplers), 152);
+        assert_eq!(std::mem::offset_of!(llama_context_params_v2, ctx_other), 160);
         assert_eq!(std::mem::offset_of!(llama_batch, n_tokens), 0);
         assert_eq!(std::mem::offset_of!(llama_batch, token), 8);
         assert_eq!(std::mem::offset_of!(llama_batch, embd), 16);
@@ -684,6 +838,31 @@ mod tests {
     }
 
     #[test]
+    fn the_layout_a_library_uses_is_told_from_its_defaults() {
+        let (c, m) = tested_defaults();
+        let (context, model) = (bytes_of(&c), bytes_of(&m));
+        assert_eq!(context_layout_of(&context), Ok(ContextLayout::V1));
+        assert_eq!(model_layout_differs(&model), None);
+        // b11642: the same defaults with moe_cache_size (0) after type_v.
+        let at = std::mem::offset_of!(llama_context_params_v2, moe_cache_size);
+        let mut b11642 = context.clone();
+        b11642.splice(at..at, [0u8; 8]);
+        b11642.truncate(RETURN_ROOM);
+        assert_eq!(context_layout_of(&b11642), Ok(ContextLayout::V2));
+        assert_eq!(std::mem::size_of::<llama_context_params_v2>(), std::mem::size_of::<llama_context_params>() + 8);
+        // A build that fits neither is told by the first layout's reading, as before.
+        let at = std::mem::offset_of!(llama_context_params, n_rs_seq);
+        let mut older = context.clone();
+        older.drain(at..at + 12);
+        older.extend_from_slice(&[0xAA; 12]);
+        let why = context_layout_of(&older).unwrap_err();
+        assert!(why.contains("llama_context_params.") && why.contains("where a tested build's is"), "{why}");
+        // A v1 image read as v2 misplaces offload_kqv and samplers: what b11642 showed read as v1.
+        let as_v2: [(&str, i64, i64); 16] = context_fields!(&context, llama_context_params_v2);
+        assert!(wrong_fields(&as_v2).iter().any(|w| w.starts_with("llama_context_params.samplers") || w.starts_with("llama_context_params.offload_kqv")), "{as_v2:?}");
+    }
+
+    #[test]
     fn a_library_with_other_struct_layouts_is_told_by_its_defaults() {
         let (c, m) = tested_defaults();
         let (context, model) = (bytes_of(&c), bytes_of(&m));
@@ -716,11 +895,47 @@ mod tests {
             (returned(loaded().api.llama_context_default_params as *const ()), returned(loaded().api.llama_model_default_params as *const ()))
         };
         assert_eq!(layout_differs(&context.0, &model.0), None, "{}", lib.version);
+        let layout = context_layout();
         let past = |r: &Returned, size: usize| r.0[size..].iter().all(|&b| b == 0xAA);
-        assert!(past(&context, std::mem::size_of::<llama_context_params>()), "the getter wrote past its struct, or the room was not the fill");
+        let context_size = match layout {
+            ContextLayout::V1 => std::mem::size_of::<llama_context_params>(),
+            ContextLayout::V2 => std::mem::size_of::<llama_context_params_v2>(),
+        };
+        assert!(past(&context, context_size), "the getter wrote past its struct, or the room was not the fill");
         assert!(past(&model, std::mem::size_of::<llama_model_params>()), "the getter wrote past its struct, or the room was not the fill");
-        // SAFETY: the library is loaded.
-        let (c, m) = unsafe { (llama_context_default_params(), llama_model_default_params()) };
+        eprintln!("{}: context params laid out as {layout:?}", lib.version);
+        // SAFETY: the library is loaded; the getter of its own layout is the one called,
+        // and a v2 struct is read into the v1 names this test checks.
+        let (c, m) = unsafe {
+            let c = match layout {
+                ContextLayout::V1 => llama_context_default_params(),
+                ContextLayout::V2 => {
+                    let v2 = llama_context_default_params_v2();
+                    assert_eq!(v2.moe_cache_size, 0, "b11642's field, off by default");
+                    let mut c: llama_context_params = std::mem::zeroed();
+                    c.n_ctx = v2.n_ctx;
+                    c.n_batch = v2.n_batch;
+                    c.n_ubatch = v2.n_ubatch;
+                    c.n_seq_max = v2.n_seq_max;
+                    c.type_k = v2.type_k;
+                    c.type_v = v2.type_v;
+                    c.cb_eval = v2.cb_eval;
+                    c.abort_callback = v2.abort_callback;
+                    c.samplers = v2.samplers;
+                    c.ctx_other = v2.ctx_other;
+                    c.n_threads = v2.n_threads;
+                    c.flash_attn_type = v2.flash_attn_type;
+                    c.defrag_thold = v2.defrag_thold;
+                    c.offload_kqv = v2.offload_kqv;
+                    c.no_perf = v2.no_perf;
+                    c.op_offload = v2.op_offload;
+                    c.swa_full = v2.swa_full;
+                    c.kv_unified = v2.kv_unified;
+                    c
+                }
+            };
+            (c, llama_model_default_params())
+        };
         assert_eq!((c.n_ctx, c.n_batch, c.n_ubatch, c.n_seq_max, c.type_k, c.type_v), (512, 2048, 512, 1, 1, 1));
         assert!(c.cb_eval.is_none() && c.abort_callback.is_none() && c.samplers.is_null() && c.ctx_other.is_null());
         assert!(m.devices.is_null() && m.kv_overrides.is_null() && !m.vocab_only);

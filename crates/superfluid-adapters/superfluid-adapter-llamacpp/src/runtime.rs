@@ -41,6 +41,31 @@ pub struct LlamaConfig {
     pub n_ubatch: u32,
     pub n_gpu_layers: i32,
     pub n_threads: i32,
+    /// Threads for prompt batches; `0` = as many as `n_threads`.
+    pub n_threads_batch: i32,
+    /// The device for the whole model under `LLAMA_SPLIT_MODE_NONE`, and for small tensors otherwise.
+    pub main_gpu: i32,
+    /// The share each device takes, one entry per device; empty = llama.cpp's even split.
+    pub tensor_split: Vec<f32>,
+    // `None` leaves llama.cpp's own default (see `options`).
+    pub split_mode: Option<sys::llama_split_mode>,
+    pub load_mode: Option<sys::llama_load_mode>,
+    pub lazy_mode: Option<sys::llama_lazy_mode>,
+    pub repack: Option<bool>,
+    pub flash_attn: Option<sys::llama_flash_attn_type>,
+    pub type_k: Option<sys::ggml_type>,
+    pub type_v: Option<sys::ggml_type>,
+    pub offload_kqv: Option<bool>,
+    pub op_offload: Option<bool>,
+    pub swa_full: Option<bool>,
+    pub rope_scaling: Option<sys::llama_rope_scaling_type>,
+    pub rope_freq_base: Option<f32>,
+    pub rope_freq_scale: Option<f32>,
+    pub yarn_ext_factor: Option<f32>,
+    pub yarn_attn_factor: Option<f32>,
+    pub yarn_beta_fast: Option<f32>,
+    pub yarn_beta_slow: Option<f32>,
+    pub yarn_orig_ctx: Option<u32>,
     pub streams: Option<bool>,
     /// Cells the prefix cache may keep in a shared pool, where every step attends over
     /// them: `0` = one lane's ceiling. Unbounded with a buffer per lane.
@@ -67,6 +92,27 @@ impl Default for LlamaConfig {
             n_ubatch: 512,
             n_gpu_layers: -1,
             n_threads: 0,
+            n_threads_batch: 0,
+            main_gpu: 0,
+            tensor_split: Vec::new(),
+            split_mode: None,
+            load_mode: None,
+            lazy_mode: None,
+            repack: None,
+            flash_attn: None,
+            type_k: None,
+            type_v: None,
+            offload_kqv: None,
+            op_offload: None,
+            swa_full: None,
+            rope_scaling: None,
+            rope_freq_base: None,
+            rope_freq_scale: None,
+            yarn_ext_factor: None,
+            yarn_attn_factor: None,
+            yarn_beta_fast: None,
+            yarn_beta_slow: None,
+            yarn_orig_ctx: None,
             streams: None,
             cache_resident_cells: 0,
             cache_exported_cells: 0,
@@ -83,6 +129,32 @@ fn offload_device(types: &[sys::ggml_backend_dev_type]) -> Option<usize> {
 
 pub fn device_free_bytes() -> u64 {
     offload_memory().map_or(0, |m| m.free)
+}
+
+/// Cells of state the cache may keep beyond the pool as llama.cpp's own export,
+/// with the bound worded for the log. Exports live in host memory: as many cells
+/// as the pool has, within EXPORT_BYTES. With the model on an accelerator
+/// (`device`: its free bytes now, and its total) that memory is the one the pool
+/// was sized in, so the exports also keep to the pool's share of what is free
+/// past its headroom. With the model on the CPU, by choice or because the host
+/// has no accelerator, the host bound is the whole rule: a device the host does
+/// not have reports no free memory, which is no reason to keep nothing.
+fn export_budget(n_ctx: u64, kv_bytes_per_token: u64, device: Option<(u64, u64)>) -> (u64, String) {
+    let affordable = EXPORT_BYTES / kv_bytes_per_token.max(1);
+    let Some((free_now, total)) = device else {
+        return (n_ctx.min(affordable), "at most 8 GiB".to_string());
+    };
+    let headroom = superfluid_executor::sizing::headroom_bytes((superfluid_executor::sizing::PLANNING_SHARE * total as f64) as u64);
+    let free = free_now.saturating_sub(headroom);
+    // budgeted_cells reads 0 free bytes as unknown and grants all.
+    let granted = if free == 0 { 0 } else { superfluid_executor::sizing::budgeted_cells(n_ctx, 0, kv_bytes_per_token, free).min(affordable) };
+    let within = format!(
+        "at most 8 GiB, and {:.0}% of the {:.1} GB free past a {:.1} GB headroom",
+        100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
+        free as f64 / 1e9,
+        headroom as f64 / 1e9
+    );
+    (granted, within)
 }
 
 struct OffloadMemory {
@@ -164,7 +236,11 @@ fn sizes_here(backend: &str, integrated: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn sizing(path: &std::path::Path) -> Result<superfluid_executor::sizing::Sizing, String> {
+pub fn sizing(
+    path: &std::path::Path,
+    type_k: Option<sys::ggml_type>,
+    type_v: Option<sys::ggml_type>,
+) -> Result<superfluid_executor::sizing::Sizing, String> {
     use superfluid_executor::sizing::{Sizing, PLANNING_SHARE};
     let device = offload_memory().ok_or_else(|| {
         "llama.cpp registers no GPU here, so there is no device memory to size a window against".to_string()
@@ -207,7 +283,7 @@ pub fn sizing(path: &std::path::Path) -> Result<superfluid_executor::sizing::Siz
     Ok(Sizing {
         budget_bytes: device.free.min((PLANNING_SHARE * device.total as f64) as u64),
         weight_bytes: weights,
-        kv_bytes_per_token: kv_cell_bytes(model, path),
+        kv_bytes_per_token: kv_cell_bytes(model, path, type_k, type_v),
         trained_context: trained,
     })
 }
@@ -364,6 +440,24 @@ struct KvShape {
     recurrent_layers: Option<Vec<u32>>,
     attention_interval: Option<u64>,
     shared_kv_layers: u64,
+    /// The cache types chosen (`--llamacpp-cache-type-k/-v`); `None` is llama.cpp's f16.
+    type_k: Option<sys::ggml_type>,
+    type_v: Option<sys::ggml_type>,
+}
+
+/// The bytes one row of `elems` takes in the cache type `t`: ggml's row size, by block for the quantized types.
+fn row_bytes(elems: u64, t: Option<sys::ggml_type>) -> u64 {
+    let (block, bytes) = match t {
+        None | Some(sys::GGML_TYPE_F16) | Some(sys::GGML_TYPE_BF16) => (1, 2),
+        Some(sys::GGML_TYPE_F32) => (1, 4),
+        Some(sys::GGML_TYPE_Q8_0) => (32, 34),
+        Some(sys::GGML_TYPE_Q4_0) | Some(sys::GGML_TYPE_IQ4_NL) => (32, 18),
+        Some(sys::GGML_TYPE_Q4_1) => (32, 20),
+        Some(sys::GGML_TYPE_Q5_0) => (32, 22),
+        Some(sys::GGML_TYPE_Q5_1) => (32, 24),
+        Some(_) => (1, 2),
+    };
+    elems.div_ceil(block) * bytes
 }
 
 impl KvShape {
@@ -396,13 +490,13 @@ impl KvShape {
                 (Some(swa), _) => (self.full.0.max(swa.0), self.full.1.max(swa.1)),
                 (None, _) => self.full,
             };
-            bytes += heads * (k + v) * 2;
+            bytes += heads * (row_bytes(k, self.type_k) + row_bytes(v, self.type_v));
         }
         bytes.max(1)
     }
 }
 
-fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path) -> u64 {
+fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path, type_k: Option<sys::ggml_type>, type_v: Option<sys::ggml_type>) -> u64 {
     // SAFETY: the model is live.
     let (n_layer, n_embd, n_head, n_head_kv) = unsafe {
         (
@@ -436,8 +530,42 @@ fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path) -> u64 
         recurrent_layers,
         attention_interval,
         shared_kv_layers: get("attention.shared_kv_layers").unwrap_or(0),
+        type_k,
+        type_v,
     }
     .cell_bytes()
+}
+
+/// What the saved state is keyed by: the weights, and the settings that change what a cached key means (RoPE, YaRN) or
+/// how it is stored (the cache types); with none set, the weights alone, as before.
+fn state_identity(weights: [u8; 32], cfg: &LlamaConfig) -> [u8; 32] {
+    let mut settings: Vec<u8> = Vec::new();
+    let mut put = |tag: u8, v: Option<i64>| {
+        if let Some(v) = v {
+            settings.push(tag);
+            settings.extend_from_slice(&v.to_le_bytes());
+        }
+    };
+    let bits = |f: Option<f32>| f.map(|f| i64::from(f.to_bits()));
+    put(1, cfg.rope_scaling.map(i64::from));
+    put(2, bits(cfg.rope_freq_base));
+    put(3, bits(cfg.rope_freq_scale));
+    put(4, bits(cfg.yarn_ext_factor));
+    put(5, bits(cfg.yarn_attn_factor));
+    put(6, bits(cfg.yarn_beta_fast));
+    put(7, bits(cfg.yarn_beta_slow));
+    put(8, cfg.yarn_orig_ctx.map(i64::from));
+    put(9, cfg.type_k.map(i64::from));
+    put(10, cfg.type_v.map(i64::from));
+    if settings.is_empty() {
+        return weights;
+    }
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    h.update(&weights);
+    h.update(&settings);
+    let mut out = weights;
+    out[..16].copy_from_slice(&h.digest128().to_le_bytes());
+    out
 }
 
 fn reads_recurrent_layout(arch: &str) -> bool {
@@ -537,16 +665,46 @@ impl LlamaRuntime {
         sys::clear_errors();
         // SAFETY: plain FFI initialization.
         unsafe { sys::llama_backend_init() };
-        // SAFETY: default params are plain data; load copies the path.
+        // llama.cpp reads one share per device it can use; a shorter list is padded with zeros.
+        let split: Vec<f32> = if cfg.tensor_split.is_empty() {
+            Vec::new()
+        } else {
+            // SAFETY: a constant query.
+            let most = unsafe { sys::llama_max_devices() };
+            if cfg.tensor_split.len() > most {
+                return Err(LlamaError::Load(format!("--tensor-split names {} devices; this llama.cpp takes at most {most}", cfg.tensor_split.len())));
+            }
+            let mut s = cfg.tensor_split.clone();
+            s.resize(most, 0.0);
+            s
+        };
+        // SAFETY: default params are plain data; load copies the path and reads the split
+        // while it runs, and `split` outlives the call.
         let model = unsafe {
             let mut mp = sys::llama_model_default_params();
             mp.n_gpu_layers = cfg.n_gpu_layers;
+            mp.main_gpu = cfg.main_gpu;
+            if let Some(m) = cfg.split_mode {
+                mp.split_mode = m;
+            }
+            if let Some(m) = cfg.load_mode {
+                mp.load_mode = m;
+            }
+            if let Some(m) = cfg.lazy_mode {
+                mp.lazy_mode = m;
+            }
+            if let Some(on) = cfg.repack {
+                mp.use_extra_bufts = on;
+            }
+            if !split.is_empty() {
+                mp.tensor_split = split.as_ptr();
+            }
             sys::llama_model_load_from_file(path.as_ptr(), mp)
         };
         if model.is_null() {
             return Err(LlamaError::Load(with_reason(cfg.model_path.display().to_string())));
         }
-        let kv_bytes_per_token = kv_cell_bytes(model, &cfg.model_path);
+        let kv_bytes_per_token = kv_cell_bytes(model, &cfg.model_path, cfg.type_k, cfg.type_v);
         // SAFETY: model is live; const reads.
         let recurrent = unsafe { sys::llama_model_is_recurrent(model) || sys::llama_model_is_hybrid(model) };
         let arch = meta(model, "general.architecture").unwrap_or_default();
@@ -605,21 +763,80 @@ impl LlamaRuntime {
             std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4)
         };
         let make_context = |cells: u32| {
-            // SAFETY: model is live; the params are plain data.
+            // The context parameters, filled for whichever layout this llama.cpp has
+            // (see `sys::ContextLayout`): the same assignments, the right struct.
+            macro_rules! fill {
+                ($cp:ident) => {{
+                    $cp.n_ctx = cells;
+                    $cp.n_batch = cfg.n_batch;
+                    $cp.n_ubatch = cfg.n_ubatch.min(cfg.n_batch);
+                    $cp.n_seq_max = n_seq_max;
+                    // Rows for every position of a draft being verified, not only
+                    // its last (`step_rows`).
+                    $cp.n_outputs_max_per_seq = superfluid_executor::primitives::VERIFY_ROWS_MAX;
+                    $cp.n_threads = threads;
+                    $cp.n_threads_batch = if cfg.n_threads_batch > 0 { cfg.n_threads_batch } else { threads };
+                    $cp.kv_unified = !streams;
+                    $cp.no_perf = true;
+                    if let Some(t) = cfg.flash_attn {
+                        $cp.flash_attn_type = t;
+                    }
+                    if let Some(t) = cfg.type_k {
+                        $cp.type_k = t;
+                    }
+                    if let Some(t) = cfg.type_v {
+                        $cp.type_v = t;
+                    }
+                    if let Some(on) = cfg.offload_kqv {
+                        $cp.offload_kqv = on;
+                    }
+                    if let Some(on) = cfg.op_offload {
+                        $cp.op_offload = on;
+                    }
+                    if let Some(on) = cfg.swa_full {
+                        $cp.swa_full = on;
+                    }
+                    if let Some(t) = cfg.rope_scaling {
+                        $cp.rope_scaling_type = t;
+                    }
+                    if let Some(f) = cfg.rope_freq_base {
+                        $cp.rope_freq_base = f;
+                    }
+                    if let Some(f) = cfg.rope_freq_scale {
+                        $cp.rope_freq_scale = f;
+                    }
+                    if let Some(f) = cfg.yarn_ext_factor {
+                        $cp.yarn_ext_factor = f;
+                    }
+                    if let Some(f) = cfg.yarn_attn_factor {
+                        $cp.yarn_attn_factor = f;
+                    }
+                    if let Some(f) = cfg.yarn_beta_fast {
+                        $cp.yarn_beta_fast = f;
+                    }
+                    if let Some(f) = cfg.yarn_beta_slow {
+                        $cp.yarn_beta_slow = f;
+                    }
+                    if let Some(n) = cfg.yarn_orig_ctx {
+                        $cp.yarn_orig_ctx = n;
+                    }
+                }};
+            }
+            // SAFETY: model is live; the params are plain data, read from and handed
+            // back to the library in its own layout.
             let ctx = unsafe {
-                let mut cp = sys::llama_context_default_params();
-                cp.n_ctx = cells;
-                cp.n_batch = cfg.n_batch;
-                cp.n_ubatch = cfg.n_ubatch.min(cfg.n_batch);
-                cp.n_seq_max = n_seq_max;
-                // Rows for every position of a draft being verified, not only
-                // its last (`step_rows`).
-                cp.n_outputs_max_per_seq = superfluid_executor::primitives::VERIFY_ROWS_MAX;
-                cp.n_threads = threads;
-                cp.n_threads_batch = threads;
-                cp.kv_unified = !streams;
-                cp.no_perf = true;
-                sys::llama_init_from_model(model, cp)
+                match sys::context_layout() {
+                    sys::ContextLayout::V1 => {
+                        let mut cp = sys::llama_context_default_params();
+                        fill!(cp);
+                        sys::llama_init_from_model(model, cp)
+                    }
+                    sys::ContextLayout::V2 => {
+                        let mut cp = sys::llama_context_default_params_v2();
+                        fill!(cp);
+                        sys::llama_init_from_model_v2(model, cp)
+                    }
+                }
             };
             if ctx.is_null() {
                 // SAFETY: model is live and owned here.
@@ -656,7 +873,7 @@ impl LlamaRuntime {
             (sys::llama_model_get_vocab(model), sys::llama_get_memory(ctx), sys::llama_n_ctx(ctx), sys::llama_n_ctx_seq(ctx))
         };
         let identity = match identity.join().unwrap_or_else(|_| Err(LlamaError::Load("hashing the weights panicked".into()))) {
-            Ok(id) => id,
+            Ok(id) => state_identity(id, &cfg),
             Err(e) => {
                 // SAFETY: ctx and model are live and owned here, and freed once.
                 unsafe {
@@ -680,41 +897,15 @@ impl LlamaRuntime {
         let cache_exported_cells = if cfg.cache_exported_cells > 0 {
             cfg.cache_exported_cells as u64
         } else {
-            let affordable = EXPORT_BYTES / kv_bytes_per_token.max(1);
-            if cfg.n_gpu_layers == 0 {
-                let granted = (n_ctx as u64).min(affordable);
-                if granted < n_ctx as u64 {
-                    eprintln!(
-                        "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool (at most 8 GiB)",
-                        superfluid_executor::sizing::tokens(granted),
-                    );
-                }
-                granted
-            } else {
-                // Exports live in the memory the pool shares on unified-memory
-                // devices: they leave the headroom the pool was sized to leave.
-                let headroom = device.as_ref().map_or(0, |d| {
-                    superfluid_executor::sizing::headroom_bytes((superfluid_executor::sizing::PLANNING_SHARE * d.total as f64) as u64)
-                });
-                let free = device_free_bytes().saturating_sub(headroom);
-                // budgeted_cells reads 0 free bytes as unknown and grants all.
-                let granted = if free == 0 {
-                    0
-                } else {
-                    superfluid_executor::sizing::budgeted_cells(n_ctx as u64, 0, kv_bytes_per_token, free).min(affordable)
-                };
-                if granted < n_ctx as u64 {
-                    eprintln!(
-                        "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool \
-                         (at most 8 GiB, and {:.0}% of the {:.1} GB free past a {:.1} GB headroom)",
-                        superfluid_executor::sizing::tokens(granted),
-                        100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
-                        free as f64 / 1e9,
-                        headroom as f64 / 1e9,
-                    );
-                }
-                granted
+            let on_device = device.as_ref().map(|d| (device_free_bytes(), d.total));
+            let (granted, within) = export_budget(n_ctx as u64, kv_bytes_per_token, on_device);
+            if granted < n_ctx as u64 {
+                eprintln!(
+                    "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool ({within})",
+                    superfluid_executor::sizing::tokens(granted),
+                );
             }
+            granted
         };
         let desc = RuntimeDescriptor {
             runtime_id: "llamacpp".into(),
@@ -1466,6 +1657,22 @@ impl LlamaRuntime {
 
 #[cfg(test)]
 mod offload_device_tests {
+
+    #[test]
+    fn exports_on_the_cpu_keep_to_host_memory_alone() {
+        // A token costs 1 KiB, so 8 GiB holds 8 Mi cells.
+        let kib = 1024u64;
+        let (cells, within) = super::export_budget(4096, kib, None);
+        assert_eq!((cells, within.as_str()), (4096, "at most 8 GiB"), "on the CPU, by choice or for want of an accelerator: the pool's cells");
+        assert_eq!(super::export_budget(1 << 24, kib, None).0, 1 << 23, "within 8 GiB");
+        // On an accelerator the pool's share of the free memory past its headroom bounds
+        // them too, and no free memory grants nothing.
+        let (none, within) = super::export_budget(4096, kib, Some((0, 16 << 30)));
+        assert_eq!(none, 0, "{within}");
+        assert!(within.contains("free past a"), "{within}");
+        let (some, _) = super::export_budget(4096, kib, Some((8 << 30, 16 << 30)));
+        assert!(some > 0 && some <= 4096, "{some}");
+    }
     use super::{offload_device, sizes_here, sys};
 
     #[test]
@@ -1547,6 +1754,45 @@ mod kv_shape_tests {
         for arch in ["falcon-h1", "lfm2", "llama", "gemma4", "qwen3", "qwen4exp", ""] {
             assert!(!reads_recurrent_layout(arch), "{arch}");
         }
+    }
+
+    #[test]
+    fn a_cell_is_priced_by_the_cache_types_chosen() {
+        use super::{row_bytes, sys};
+        let f16 = KvShape { n_layer: 28, head_kv: 8, full: (128, 128), ..Default::default() };
+        let typed = |k, v| KvShape { type_k: Some(k), type_v: Some(v), ..f16.clone() };
+        assert_eq!(f16.cell_bytes(), 28 * 8 * 256 * 2, "llama.cpp's default, f16");
+        assert_eq!(typed(sys::GGML_TYPE_F32, sys::GGML_TYPE_F32).cell_bytes(), 2 * f16.cell_bytes(), "f32 is twice f16");
+        assert_eq!(typed(sys::GGML_TYPE_BF16, sys::GGML_TYPE_F16).cell_bytes(), f16.cell_bytes());
+        assert_eq!(row_bytes(128, Some(sys::GGML_TYPE_Q8_0)), 4 * 34);
+        assert_eq!(row_bytes(128, Some(sys::GGML_TYPE_Q4_0)), 4 * 18);
+        assert_eq!(row_bytes(100, Some(sys::GGML_TYPE_Q5_1)), 4 * 24, "a partial block is a whole one");
+        assert_eq!(typed(sys::GGML_TYPE_Q8_0, sys::GGML_TYPE_Q4_0).cell_bytes(), 28 * 8 * (4 * 34 + 4 * 18));
+        assert!(typed(sys::GGML_TYPE_Q4_0, sys::GGML_TYPE_Q4_0).cell_bytes() * 3 < f16.cell_bytes(), "q4 is under a third of f16");
+    }
+
+    #[test]
+    fn the_state_identity_changes_with_rope_yarn_and_cache_types_and_not_otherwise() {
+        use super::{state_identity, sys, LlamaConfig};
+        let weights = [7u8; 32];
+        let plain = LlamaConfig::default();
+        assert_eq!(state_identity(weights, &plain), weights, "no setting: the weights alone, as before");
+        let same_meaning = LlamaConfig { n_gpu_layers: 0, flash_attn: Some(sys::LLAMA_FLASH_ATTN_TYPE_ENABLED), ..LlamaConfig::default() };
+        assert_eq!(state_identity(weights, &same_meaning), weights, "settings that do not change what a cached key means");
+        let base = LlamaConfig { rope_freq_base: Some(1_000_000.0), ..LlamaConfig::default() };
+        let other_base = LlamaConfig { rope_freq_base: Some(500_000.0), ..LlamaConfig::default() };
+        let scaled = LlamaConfig { rope_freq_scale: Some(0.25), ..LlamaConfig::default() };
+        let yarn = LlamaConfig { rope_scaling: Some(sys::LLAMA_ROPE_SCALING_TYPE_YARN), yarn_orig_ctx: Some(32768), ..LlamaConfig::default() };
+        let q8 = LlamaConfig { type_k: Some(sys::GGML_TYPE_Q8_0), ..LlamaConfig::default() };
+        let ids = [weights, state_identity(weights, &base), state_identity(weights, &other_base), state_identity(weights, &scaled), state_identity(weights, &yarn), state_identity(weights, &q8)];
+        for (i, a) in ids.iter().enumerate() {
+            for (j, b) in ids.iter().enumerate() {
+                assert_eq!(a == b, i == j, "identities {i} and {j}");
+            }
+        }
+        assert_eq!(state_identity(weights, &base), state_identity(weights, &base.clone()), "the same settings, the same key");
+        assert_eq!(state_identity(weights, &base)[16..], weights[16..], "the size bytes stay");
+        assert_ne!(state_identity([1u8; 32], &base), state_identity(weights, &base), "other weights, another key");
     }
 
     #[test]
