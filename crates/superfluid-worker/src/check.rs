@@ -15,6 +15,8 @@ pub struct ModelCheck {
 pub struct Report {
     pub info: RuntimeInfo,
     pub version: Option<String>,
+    /// The contract number the adapter checked the runtime against, when it states one.
+    pub abi: Option<u64>,
     pub available: Result<(), String>,
     pub devices: Vec<Device>,
     pub capabilities: String,
@@ -111,6 +113,9 @@ impl Report {
             "devices": self.devices.iter().map(device_json).collect::<Vec<_>>(),
             "capabilities": parsed(&self.capabilities),
         });
+        if let Some(abi) = self.abi {
+            v["runtime"]["abi"] = json!(abi);
+        }
         if let Some(options) = &self.pull {
             v["pull"] = json!({
                 "options": options.iter().map(|(name, value, about)| json!({"name": name, "value": value, "about": about})).collect::<Vec<_>>(),
@@ -160,6 +165,7 @@ mod tests {
                 tokenizer: TokenizerSource::Library("superfluid_tokenizer_llamacpp".into()),
             },
             version: Some("llama.cpp b11284".into()),
+            abi: None,
             available: Ok(()),
             devices: vec![Device { backend: "Metal".into(), name: "Apple M5 Pro".into(), memory: 1 << 30 }],
             capabilities: r#"{"descriptor_version":1}"#.into(),

@@ -7,6 +7,7 @@ pub mod atem;
 pub mod bus;
 pub mod capabilities;
 pub mod cli;
+pub mod compat;
 pub mod codec;
 mod exec;
 pub mod completion_bucket;

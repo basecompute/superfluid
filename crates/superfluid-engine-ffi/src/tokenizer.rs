@@ -216,7 +216,7 @@ impl TokenizerHandle {
     pub fn vocab(&self) -> u32 {
         // SAFETY: handle is live; get_config is a const read of the
         // parsed metadata.
-        unsafe { sys::baseRT_get_config(self.handle) }.vocab_size
+        unsafe { crate::libbasert::config_of(self.handle) }.vocab_size
     }
 
     pub fn bos_token(&self) -> u32 {

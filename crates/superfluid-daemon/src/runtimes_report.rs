@@ -104,6 +104,15 @@ pub fn table_json(found: &[Found]) -> Value {
 fn runtime_json(f: &Found) -> Value {
     use superfluid_worker::check::{device_json, format_json, tokenizer_json};
     let mut v = json!({"id": f.id.name(), "state": state(f)});
+    #[cfg(feature = "basert")]
+    if f.id.base().name() == "basert" {
+        // What this build requires of the engine, for a host choosing a library or a release.
+        v["requires"] = json!({
+            "basert_version": superfluid_engine_ffi::libbasert::BUILT_FOR,
+            "basert_abi": superfluid_engine_ffi::libbasert::abi_built_for(),
+            "basert_unnumbered_minor": superfluid_engine_ffi::libbasert::abi_built_for().and_then(superfluid_engine_ffi::libbasert::unnumbered_minor_for),
+        });
+    }
     if let Some(info) = &f.info {
         v["aliases"] = json!(info.aliases);
         v["formats"] = Value::Array(info.formats.iter().map(format_json).collect());
@@ -122,6 +131,9 @@ fn runtime_json(f: &Found) -> Value {
         Ok(rt) => {
             v["ready"] = true.into();
             v["version"] = json!(rt.version);
+            if let Some(abi) = rt.abi {
+                v["abi"] = json!(abi);
+            }
             v["devices"] = Value::Array(rt.devices.iter().map(device_json).collect());
             if let Some(t) = &rt.tokenizer {
                 v["tokenizer"] = json!(t);

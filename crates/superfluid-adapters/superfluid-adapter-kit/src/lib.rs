@@ -178,6 +178,8 @@ fn refused_for_access(said: &str) -> bool {
 pub struct Probe {
     pub version: String,
     pub devices: Vec<Device>,
+    /// The contract number the runtime states, when it states one (baseRT's engine ABI).
+    pub abi: Option<u64>,
 }
 
 pub trait Runtime: Send + Sync {
@@ -189,6 +191,12 @@ pub trait Runtime: Send + Sync {
 
     fn needs_model(&self) -> bool {
         true
+    }
+
+    /// What this adapter was built and tested for, as a release carries it (`superfluid compat`, `compat.json`):
+    /// `tested` names the versions it installs on its own; the rest of the keys are the adapter's to define.
+    fn compat(&self) -> serde_json::Value {
+        serde_json::json!({})
     }
 
     fn prepare(&self, _args: &WorkerArgs) {}
@@ -288,9 +296,9 @@ pub fn model(args: &WorkerArgs) -> Result<&Path, String> {
 }
 
 pub fn check(rt: &dyn Runtime, args: &WorkerArgs) -> Report {
-    let (version, devices, available) = match rt.probe(args) {
-        Ok(p) => (Some(p.version), p.devices, Ok(())),
-        Err(why) => (None, Vec::new(), Err(why)),
+    let (version, abi, devices, available) = match rt.probe(args) {
+        Ok(p) => (Some(p.version), p.abi, p.devices, Ok(())),
+        Err(why) => (None, None, Vec::new(), Err(why)),
     };
     let model = args.model.as_ref().map(|path| {
         let reads = rt.reads(path);
@@ -304,7 +312,7 @@ pub fn check(rt: &dyn Runtime, args: &WorkerArgs) -> Report {
     let pull = rt
         .pull_options()
         .map(|options| options.iter().map(|o| (o.name.to_string(), o.value, o.about.to_string())).collect());
-    Report { info: rt.info(), version, available, devices, capabilities: rt.static_capabilities(), model, pull, named: rt.named(args) }
+    Report { info: rt.info(), version, abi, available, devices, capabilities: rt.static_capabilities(), model, pull, named: rt.named(args) }
 }
 
 pub fn serve_process(rt: &dyn Runtime, mut args: WorkerArgs, name: &str) -> ! {
@@ -342,6 +350,12 @@ pub fn worker_main(rt: &dyn Runtime) -> ! {
     }
     if argv.first().map(String::as_str) == Some("pull") {
         pull_command(rt, &name, &argv[1..]);
+    }
+    if argv.first().map(String::as_str) == Some("compat") {
+        // Always JSON; nothing of the runtime is needed.
+        rt.prepare(&WorkerArgs::default());
+        println!("{}", serde_json::to_string(&rt.compat()).expect("compat is JSON"));
+        std::process::exit(0);
     }
     let (command, rest) = match argv.first().map(String::as_str) {
         Some(c @ ("version" | "check")) => (Some(c), &argv[1..]),
@@ -492,7 +506,7 @@ mod tests {
         }
         fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
             match self.runs {
-                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0 }] }),
+                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0 }], abi: None }),
                 false => Err("no fake device here".into()),
             }
         }

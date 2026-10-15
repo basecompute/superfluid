@@ -128,6 +128,8 @@ Requests a model cannot serve are refused with a 400:
 
 ### llamacpp
 
+- `superfluid compat` lists the llama.cpp builds this adapter was built and tested against, which it installs on its own; another build installs with `--untested`, and is still checked at load for the functions and parameter layouts the adapter drives.
+
 - A build whose C API differs from the tested one is refused by name at load. `SUPERFLUID_LLAMA_LIB` loads your own build instead of an install.
 - With no `--max-context`, the window is sized for the device on Metal, and on CUDA with a dedicated GPU; elsewhere it is 8192. Once a context exists, one that left the device short of its reserve is made again with fewer cells; a pool cut below one sequence serves that model at the shorter window.
 - Plain-attention models get a KV buffer per sequence (lanes plus two, at least 4, at most 256), so a decode step attends only over its own sequence. Recurrent, hybrid and sliding-window models (Qwen3.5/3.6-class, gemma) use one shared pool and reuse prefixes only at a sequence's head.
@@ -137,6 +139,8 @@ Requests a model cannot serve are refused with a 400:
 - llama.cpp's own log is silenced unless `SUPERFLUID_LLAMA_LOG=1`.
 
 ### mlx
+
+- `superfluid compat` lists the MLX versions this adapter installs on its own and the Python they run on.
 
 - Apple silicon only. Python runs in the worker, so a Metal fault kills the worker, never the daemon.
 - Greedy and sampled rounds run on the device, one step ahead.
@@ -148,7 +152,7 @@ Requests a model cannot serve are refused with a 400:
 
 ### basert
 
-- The engine library is loaded at run time and must match the major.minor of the headers the daemon was built against.
+- The engine library is loaded at run time. A library of baseRT 0.4.0 or later states an engine ABI number, which must equal the one the daemon was built against, whatever the versions say; a 0.3.x library states none and is accepted as the line that carried that ABI before it was numbered. `superfluid compat` prints what the daemon drives. `superfluid runtime install basert` picks an engine by the number baseRT publishes beside each bundle.
 - What a bundle supports (speculation, media, embeddings, lossy parking) is known only once it is loaded.
 - Serving `.base` bundles needs a daemon built with the default `basert` feature; only the engine tokenizes them.
 - Pulling by id needs the `basert` tool (`BASERT_CLI`, beside libbaseRT, or on `PATH`).
