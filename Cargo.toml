@@ -52,7 +52,7 @@ keywords = ["llm", "inference", "serving", "llama-cpp", "mlx"]
 categories = ["command-line-utilities", "science"]
 
 [workspace.dependencies]
-baseRT-sys = { path = "third_party/baseRT/baseRT-sys", version = "0.3.0", features = ["no-link"] }
+baseRT-sys = { path = "third_party/baseRT/baseRT-sys", version = "0.4.0", features = ["no-link"] }
 superfluid-abi = { path = "crates/superfluid-abi", version = "0.1.3" }
 superfluid-fingerprint = { path = "crates/superfluid-fingerprint", version = "0.1.3" }
 superfluid-proto = { path = "crates/superfluid-proto", version = "0.1.3" }

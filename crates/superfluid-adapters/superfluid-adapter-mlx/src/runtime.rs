@@ -419,7 +419,7 @@ pub fn probe(venv: Option<&Path>) -> Result<Probe, String> {
                 memory: get("max_recommended_working_set_size").and_then(|v| v.extract::<u64>().ok()).unwrap_or(0),
             });
         }
-        Ok(Probe { version, devices })
+        Ok(Probe { version, devices, abi: None })
     })
     .map_err(|e| py_message(&e))
 }

@@ -71,6 +71,7 @@ nav:
       - Configuration: serving/configuration.md
       - Serving multiple models: serving/multiple_models.md
       - Distributed serving: serving/distributed_serving.md
+      - Hosting superfluid in another product: serving/hosts.md
   - Integrations:
       - superfluid launch: integrations/index.md
       - Claude Code: integrations/claude_code.md

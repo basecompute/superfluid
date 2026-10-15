@@ -11,6 +11,7 @@
 | `superfluid node join [<head>] --model <m>` | serve a model to a fleet head from this machine |
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
+| `superfluid compat` | what this build was built for: the runtime contracts it checks at load |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
 | `superfluid media <subcommand>` | store media in, or sweep, a running server's media pool |
 | `superfluid top <host:port>...` | live monitor over one or more servers |
@@ -32,6 +33,7 @@ Flags take their value as `--flag value` or `--flag=value`. The last occurrence 
 | 1 | run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull |
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
+| 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts superfluid can tell this from a flag it got wrong (2) |
 
 ## `superfluid serve`
 
@@ -229,6 +231,8 @@ superfluid runtimes [<model>] [--json]
 
 Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
 
+With `--json`, a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
+
 ## `superfluid runtime`
 
 ```sh
@@ -240,6 +244,14 @@ superfluid runtime use <id> <install> | --auto
 ```
 
 See [Runtimes](../models/runtimes.md#managing-installs).
+
+## `superfluid compat`
+
+```sh
+superfluid compat [--json]
+```
+
+What this build was built for: for `basert`, the baseRT header version it carries and the engine ABI number it checks at load. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md).
 
 ## `superfluid session`
 

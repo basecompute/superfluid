@@ -45,7 +45,7 @@ impl Runtime for Llamacpp {
 
     fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
         let lib = sys::load()?;
-        Ok(Probe { version: lib.version, devices: devices() })
+        Ok(Probe { version: lib.version, devices: devices(), abi: None })
     }
 
     fn static_capabilities(&self) -> String {

@@ -282,6 +282,7 @@ Commands:
   node join [<head>]   Serve a model to a fleet head from this machine
   runtimes [<model>]   List the inference runtimes here, or which one serves a model
   runtime <action>     Install, update, repair, remove or pin a runtime
+  compat               What this build was built for: the runtime contracts it checks at load
   session <action>     Inspect or export a session of a running server
   media <action>       Store or garbage-collect media on a running server
   top <host:port>...   Monitor running servers in the terminal
@@ -445,6 +446,7 @@ pub fn command_help(command: &str) -> Option<String> {
         "serve" => serve_help(),
         "runtimes" => RUNTIMES_HELP.to_string(),
         "runtime" => RUNTIME_HELP.to_string(),
+        "compat" => COMPAT_HELP.to_string(),
         "session" => SESSION_HELP.to_string(),
         "media" => MEDIA_HELP.to_string(),
         "top" => TOP_HELP.to_string(),
@@ -456,7 +458,59 @@ pub fn command_help(command: &str) -> Option<String> {
     })
 }
 
-pub const COMMANDS: &[&str] = &["serve", "launch", "stop", "runtimes", "runtime", "session", "media", "top", "fleet", "node", "help", "version"];
+pub const COMMANDS: &[&str] =
+    &["serve", "launch", "stop", "runtimes", "runtime", "compat", "session", "media", "top", "fleet", "node", "help", "version"];
+
+pub const COMPAT_HELP: &str = "What this build was built for: the runtime contracts it checks at load.
+
+Usage: superfluid compat [--json]
+
+  basert: the baseRT header version this build carries and the engine ABI number it checks.
+  A libbaseRT with the same ABI number serves, whatever its version; one that states no
+  number (0.3.0 and older) serves if it is of the line that carried this ABI before it was
+  numbered, 0.3.x. A release carries the same data beside its tarball, as compat.json, so a
+  host can choose a release before downloading it.
+
+Options:
+  --json    Print JSON
+";
+
+/// `superfluid compat --json`: what this build was built for, per runtime.
+pub fn compat_json() -> serde_json::Value {
+    #[allow(unused_mut)] // a build without the basert adapter inserts nothing
+    let mut runtimes = serde_json::Map::new();
+    #[cfg(feature = "basert")]
+    runtimes.insert(
+        "basert".into(),
+        serde_json::json!({
+            "basert_version": superfluid_engine_ffi::libbasert::BUILT_FOR,
+            "abi": superfluid_engine_ffi::libbasert::abi_built_for(),
+            "unnumbered_minor": superfluid_engine_ffi::libbasert::abi_built_for().and_then(superfluid_engine_ffi::libbasert::unnumbered_minor_for),
+        }),
+    );
+    serde_json::json!({"superfluid": env!("CARGO_PKG_VERSION"), "runtimes": runtimes})
+}
+
+/// `superfluid compat`, for a person.
+pub fn compat_text() -> String {
+    let mut out = format!("{}\n", version());
+    let c = compat_json();
+    match c["runtimes"].get("basert") {
+        Some(b) => {
+            let abi = b["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.4.0)".into());
+            let unnumbered = match b["unnumbered_minor"].as_str() {
+                Some(minor) => format!("one that states no number serves if it is baseRT {minor}.x"),
+                None => "one that states no number does not serve".to_string(),
+            };
+            out.push_str(&format!(
+                "basert: built against baseRT {} headers, {abi}. A libbaseRT with the same ABI number serves, whatever its version; {unnumbered}.\n",
+                b["basert_version"].as_str().unwrap_or("?"),
+            ));
+        }
+        None => out.push_str("basert: not in this build (no `basert` feature)\n"),
+    }
+    out
+}
 
 /// `$SUPERFLUID_HOME/sessions`.
 pub fn default_sessions(home: &Path) -> PathBuf {
