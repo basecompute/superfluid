@@ -95,6 +95,10 @@ jobs:
           # The binary must start and describe itself with nothing installed.
           env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" --version
           env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" runtimes
+          # What this build was built for, in the tarball and beside it, so a
+          # host can pick a release that fits its engine before downloading.
+          env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" compat --json > "$root/compat.json"
+          cp "$root/compat.json" "dist/$name.compat.json"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "name=$name" >> "$GITHUB_OUTPUT"
@@ -105,6 +109,7 @@ jobs:
           path: |
             dist/${{ steps.pack.outputs.name }}.tar.gz
             dist/${{ steps.pack.outputs.name }}.tar.gz.sha256
+            dist/${{ steps.pack.outputs.name }}.compat.json
 
   crates:
     # Each crate in dependency order, skipping the ones already published, so a

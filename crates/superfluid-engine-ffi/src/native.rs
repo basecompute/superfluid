@@ -88,7 +88,7 @@ impl NativeEngine {
             return Err(FfiError::Load(last_error()));
         }
         // SAFETY: model is live.
-        let (mcfg, page) = unsafe { (sys::baseRT_get_config(model), sys::baseRT_page_size(model)) };
+        let (mcfg, page) = unsafe { (crate::libbasert::config_of(model), sys::baseRT_page_size(model)) };
         // SAFETY: model is live.
         let non_decode =
             unsafe { sys::baseRT_is_whisper(model) || sys::baseRT_is_embedding_model(model) };

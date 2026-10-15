@@ -41,14 +41,17 @@ pub trait Runtime: Send + Sync {
     fn open(&self, args: &WorkerArgs) -> Result<Loaded, String>;          // required
 
     fn flags(&self) -> &'static [&'static str] { &[] }
+    fn options(&self) -> &'static [ServeOption] { &[] }        // knobs of this runtime, --<id>-<name> <value> on serve
     fn needs_model(&self) -> bool { true }
     fn prepare(&self, _args: &WorkerArgs) {}
     fn named(&self, _args: &WorkerArgs) -> Option<String> { None }
     fn static_capabilities(&self) -> String { String::new() }
+    fn compat(&self) -> serde_json::Value { json!({}) }           // what the adapter was built and tested for: `tested` versions, by convention
     fn reads(&self, path: &Path) -> Result<(), String> { /* by info().formats */ }
     fn model_facts(&self, _path: &Path) -> Option<Result<String, String>> { None }
     fn tokenizer(&self, _model: &Path) -> Option<Result<Arc<dyn Tokenizer>, String>> { None }
     fn plan(&self, _req: &Request, _host: &Host) -> Option<Result<Vec<Plan>, String>> { None }
+    fn versions(&self, host: &Host) -> Vec<Candidate> { /* each `tested` version of compat(), planned here */ }
     fn pull_options(&self) -> Option<&'static [PullOption]> { None }
     fn pull(&self, _pull: &Pull, _args: &WorkerArgs) -> Result<PathBuf, String> { /* refuses */ }
     fn install(&self, plan: &Plan, dir: &Path) -> Result<Vec<(String, String)>, String> { /* fetch into dir/lib */ }
@@ -61,6 +64,7 @@ pub trait Runtime: Send + Sync {
 | `probe()` | whether it runs here: version and devices, or why not |
 | `open()` | load the model: `Loaded::primitives(runtime, superfluid_adapter_kit::context(args))` or `Loaded::engine(engine, rings)` |
 | `flags()` | extra worker flags it reads (`--name`); anything else is refused |
+| `options()` | the knobs it takes on `serve` as `--<id>-<name> <value>`, each with a kind (`Int`, `Float`, `OnOff`, `Choice`, `Text`), a default for the help and a description; the daemon checks a value against the kind before the worker starts and forwards it as `--<name> <value>`, the worker refuses a bad one at start, and the adapter reads it with `superfluid_adapter_kit::option(args, name)`. A knob every runtime could take is a flag of `serve` instead |
 | `prepare()` | process-wide setup in the worker (an interpreter home, a library path) |
 | `named()` | the library the operator named, if any; the daemon then installs nothing |
 | `static_capabilities()` | the capability record any model on this runtime has; for primitives, `superfluid_executor::capabilities::static_descriptor` |
@@ -79,6 +83,8 @@ superfluid-worker-<id> version
 superfluid-worker-<id> check [--model <path>]
 superfluid-worker-<id> plan [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested]
 superfluid-worker-<id> install --into <dir> --plan <json>
+superfluid-worker-<id> compat
+superfluid-worker-<id> versions
 superfluid-worker-<id> pull <org/model[:tag]> [--offline] [--<option> [value]]...
 superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-context N] [--max-batch N]
 ```
@@ -87,6 +93,7 @@ superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-con
 |---|---|
 | `version`, `check` | 0 when the runtime runs here (and reads `--model`); 1 otherwise. Neither loads weights |
 | `plan`, `install`, `pull` | 0, or 1 with the reason |
+| `compat`, `versions` | 0, JSON on stdout: what the adapter was built and tested for; the versions it installs on its own, each planned for this host (`superfluid runtime versions`), answered from the recipe alone |
 | serving | 0 on clean close; 2 on a bad command line; 3 when the model does not load; 1 when serving fails |
 
 `check` prints the JSON report the daemon reads: runtime id, version, aliases, Link W versions (8), `available`, formats, tokenizer, devices, static capabilities, pull options, and with `--model` whether it reads the model and its facts.
