@@ -644,16 +644,20 @@ pub fn run(args: &[String], embedding: &Embedding) {
     }
     let runtime = match runtime_pick.resolve(&model, &catalog) {
         Err(e) => refuse(2, if picked { e } else { not_there(&model).unwrap_or(e) }),
-        Ok(rt) => match (catalog.require(rt), not_there(&model)) {
-            (Ok(rt), _) => rt,
-            // The runtime answers without its options and refuses one of them: say which.
-            (Err(_), _) if superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options).is_some() => {
-                refuse(2, superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options).unwrap_or_default())
+        Ok(rt) => match catalog.require(rt) {
+            Ok(rt) => rt,
+            Err(_) => {
+                // The runtime answers without its options and refuses one of them: say which. Asked once, since
+                // asking starts a worker.
+                if let Some(why) = superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options) {
+                    refuse(2, why);
+                }
+                if let Some(why) = not_there(&model) {
+                    refuse(2, why);
+                }
+                // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong.
+                superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline).unwrap_or_else(|e| refuse(4, e))
             }
-            (Err(_), Some(why)) => refuse(2, why),
-            // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong.
-            (Err(_), None) => superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline)
-                .unwrap_or_else(|e| refuse(4, e)),
         },
     };
     if let Err(e) = refuse_statically(&runtime, park_lossy, kv_bits_arg, speculate.as_deref()) {
