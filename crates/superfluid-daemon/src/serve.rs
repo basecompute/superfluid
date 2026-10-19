@@ -597,6 +597,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
             }),
             None => RuntimeId::new(superfluid_daemon::cli::runtime_for_id(&token)),
         };
+        // The runtime first, so one missing exits as it would for a model given by path (4).
+        if let Err(e) = superfluid_daemon::pulls::ensure_installed(&catalog, runtime, pull_flags.offline) {
+            refuse(e.exit_code(), e.to_string());
+        }
         let path = superfluid_daemon::pulls::pull(&catalog, runtime, &token, &pull_flags).unwrap_or_else(|e| {
             eprintln!("superfluid: {e}");
             std::process::exit(1);
@@ -650,9 +654,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 refuse(2, superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options).unwrap_or_default())
             }
             (Err(_), Some(why)) => refuse(2, why),
-            // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong.
+            // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong;
+            // an install tried and failed is 1, a failure along the way (`pulls::Unready`).
             (Err(_), None) => superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline)
-                .unwrap_or_else(|e| refuse(4, e)),
+                .unwrap_or_else(|e| refuse(e.exit_code(), e.to_string())),
         },
     };
     if let Err(e) = refuse_statically(&runtime, park_lossy, kv_bits_arg, speculate.as_deref()) {

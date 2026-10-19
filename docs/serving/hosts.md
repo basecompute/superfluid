@@ -62,4 +62,4 @@ A host that installs superfluid picks the newest release whose `runtimes.basert.
 
 ## Exit codes
 
-`superfluid serve` exits with 4 when the runtime for the model is not installed or cannot run here, which includes an engine library that is missing or of another ABI. A host can tell that from 2, a flag it got wrong, and from 1, a failure after the start. The full list is in the [command-line reference](cli.md#exit-codes).
+`superfluid serve` exits with 4 when the runtime for the model is not installed or cannot run here, which includes an engine library that is missing or of another ABI. A host can tell that from 2, a flag it got wrong, and from 1, a failure along the way: an install superfluid tried that failed, or anything after the start. The full list is in the [command-line reference](cli.md#exit-codes).

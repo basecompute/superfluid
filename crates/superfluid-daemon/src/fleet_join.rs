@@ -235,7 +235,7 @@ pub fn load_node(
     let catalog = Catalog::from_env();
     let runtime = runtime.map(|r| if r == "native" { "basert" } else { r });
     let (path, model_name, id) = resolve_model(&catalog, model, runtime, offline)?;
-    let runtime = catalog.require(id).or_else(|_| crate::pulls::ensure_installed(&catalog, id, offline))?;
+    let runtime = catalog.require(id).or_else(|_| crate::pulls::ensure_installed(&catalog, id, offline).map_err(String::from))?;
     let (ctx, sized) = match max_context {
         Some(n) => (n, format!("--max-context {n}")),
         None => match device_window(&runtime, &path, lanes) {
