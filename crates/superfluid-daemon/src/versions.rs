@@ -53,8 +53,11 @@ fn asked(worker: &Path) -> Result<(String, Vec<Candidate>), String> {
     let out = crate::exec::output_within(&mut cmd, crate::exec::ANSWER_WITHIN)
         .map_err(|e| format!("{} could not start: {e}", worker.display()))?
         .ok_or_else(|| format!("{} versions did not answer within {}s", worker.display(), crate::exec::ANSWER_WITHIN.as_secs()))?;
-    if !out.status.success() {
-        return Err(format!("{} lists no versions ({}): an adapter from before the listing existed", worker.display(), out.status));
+    match out.status.code() {
+        Some(0) => {}
+        // The kit's usage exit: an adapter from before `versions` existed reads it as a flag it does not know.
+        Some(2) => return Err(format!("{} lists no versions ({}): an adapter from before the listing existed", worker.display(), out.status)),
+        _ => return Err(format!("{} versions failed ({}){}", worker.display(), out.status, crate::exec::stderr_tail(&out.stderr))),
     }
     let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("{} versions printed no listing: {e}", worker.display()))?;
     let listed = v["versions"].as_array().ok_or_else(|| format!("{} versions printed no listing", worker.display()))?;
@@ -253,6 +256,12 @@ pub(crate) mod tests {
         let Err(e) = of(&cat, RuntimeId::new("oldrt")) else { panic!("an old worker listed versions") };
         assert!(e.contains("lists no versions"), "{e}");
         assert_eq!(cell(&Err(e)), "-");
+        let fails = libexec.join("superfluid-worker-failrt");
+        std::fs::write(&fails, "#!/bin/sh\necho 'superfluid-worker-failrt: recipe.json is not JSON' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fails, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Err(e) = of(&cat, RuntimeId::new("failrt")) else { panic!("a failing worker listed versions") };
+        assert!(e.contains("versions failed") && e.ends_with(": superfluid-worker-failrt: recipe.json is not JSON"), "{e}");
+        assert!(!e.contains("before the listing existed"), "a new adapter that fails is not an old one: {e}");
         let named = fake_worker_listing(&root.join("elsewhere"), "superfluid-worker-named", "{}", r#"{"describe":"here","versions":[{"version":"n1","error":"not here"}]}"#);
         for id in crate::linked::ids().into_iter().chain([RuntimeId::new("toyrt")]) {
             let l = of_with(&cat, id, Some(&named)).unwrap();

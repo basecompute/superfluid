@@ -93,7 +93,7 @@ superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-con
 |---|---|
 | `version`, `check` | 0 when the runtime runs here (and reads `--model`); 1 otherwise. Neither loads weights |
 | `plan`, `install`, `pull` | 0, or 1 with the reason |
-| `compat`, `versions` | 0, JSON on stdout: what the adapter was built and tested for; the versions it installs on its own, each planned for this host (`superfluid runtime versions`), answered from the recipe alone |
+| `compat`, `versions` | 0, JSON on stdout: what the adapter was built and tested for; the versions it installs on its own, each planned for this host (`superfluid runtime versions`), answered from the recipe alone. 1 with the reason on stderr, which the daemon quotes; an adapter from before them exits 2 at the unknown command |
 | serving | 0 on clean close; 2 on a bad command line; 3 when the model does not load; 1 when serving fails |
 
 `check` prints the JSON report the daemon reads: runtime id, version, aliases, Link W versions (8), `available`, formats, tokenizer, devices, static capabilities, pull options, and with `--model` whether it reads the model and its facts.
