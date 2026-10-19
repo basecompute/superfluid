@@ -95,7 +95,7 @@ _mlx_lm_without_tokenizers()
 import mlx.core as mx
 import mlx_lm
 import numpy as np
-from mlx.utils import tree_flatten, tree_unflatten
+from mlx.utils import tree_flatten, tree_map, tree_unflatten
 from mlx_lm.models import cache as _cache
 
 MAGIC = b"BRTMLX1\x00"
@@ -254,29 +254,54 @@ def _has_meta(c):
 def _is_array(v):
     return isinstance(v, mx.array)
 
-# The caches whose buffers grow in steps past the live tokens and are indexed
-# from 0 to the offset, so the live tokens are a plain cut of them.
-_GROWN = ("KVCache", "QuantizedKVCache")
+def _classes(*names):
+    """The cache classes of these names this mlx-lm has (a match by class
+    takes in a model's own subclasses of them, as a match by name would not)."""
+    return tuple(getattr(_cache, n) for n in names if hasattr(_cache, n))
+
+# The caches whose buffers grow in steps past the live tokens and hold them
+# from slot 0, so the live tokens are a plain cut of them. A class this
+# mlx-lm lacks is left out.
+_GROWN = _classes("KVCache", "QuantizedKVCache")
+_CHUNKED = _classes("ChunkedKVCache")
+_RING = _classes("RotatingKVCache")
+
+def _live_slots(c):
+    """How many slots at the head of a stepped cache's buffers hold its live
+    tokens, or None when every slot does (or the cache is not stepped)."""
+    if isinstance(c, _RING):
+        # A ring buffer allocates a step (256 slots, at most its window) at
+        # its first token, and 0.31 cut it to the offset until it filled: taken
+        # whole, a token was priced as 256 on 0.32, and a model with sliding
+        # window layers (Gemma 2 and 3, gpt-oss) was granted a sliver of its
+        # pool. Once it has wrapped, every slot is live.
+        return c.offset if c.offset < c.keys.shape[2] else None
+    if isinstance(c, _CHUNKED):
+        # Slot 0 holds the token at `start_position`: what the chunk has not
+        # dropped from its front.
+        return c.offset - c.start_position
+    if isinstance(c, _GROWN):
+        return c.offset
+    return None
 
 def _live_state(c):
     """The cache's state cut to its live tokens: what `state` was up to mlx-lm
-    0.31. From 0.32 a grown cache's keys and values are sliced to its offset
-    (lazily; nothing is copied until the copy is asked for), a ring buffer or
-    a cache of another shape is taken as it is, and a `CacheList` member by
-    member."""
+    0.31. From 0.32 a stepped cache's keys and values are sliced to its live
+    slots (lazily; nothing is copied until the copy is asked for), a cache of
+    another shape is taken as it is, and a `CacheList` member by member."""
     if _has_meta(c):
         return c.state
     st = c.state
     caches = getattr(c, "caches", None)
     if isinstance(caches, (tuple, list)):
         return [(_live_state(m), type(m).__name__) for m in caches]
-    if type(c).__name__ in _GROWN and isinstance(st, (tuple, list)) and len(st) >= 3 and st[0] is not None:
-        off = int(st[2])
-        from mlx.utils import tree_map
-
-        cut = lambda a: a[..., :off, :] if _is_array(a) else a
-        return (tree_map(cut, st[0]), tree_map(cut, st[1])) + tuple(st[2:])
-    return st
+    if not isinstance(st, (tuple, list)) or len(st) < 3 or st[0] is None:
+        return st
+    live = _live_slots(c)
+    if live is None:
+        return st
+    cut = lambda a: a[..., :live, :] if _is_array(a) else a
+    return (tree_map(cut, st[0]), tree_map(cut, st[1])) + tuple(st[2:])
 
 def _from_state(cls, state, meta):
     """A cache of `cls` from a state and, for the mlx-lm that keeps one, a meta state."""
