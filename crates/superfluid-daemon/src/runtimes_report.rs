@@ -166,6 +166,9 @@ fn runtime_json(f: &Found) -> Value {
             if let Some(c) = &rt.capabilities {
                 v["capabilities"] = serde_json::from_str(c).unwrap_or_default();
             }
+            if !rt.options.is_empty() {
+                v["options"] = Value::Array(rt.options.iter().map(|o| o.to_json()).collect());
+            }
         }
         Err(why) => v["ready"] = why.clone().into(),
     }

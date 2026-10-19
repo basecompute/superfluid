@@ -29,6 +29,7 @@ pub const SERVE: &[Group] = &[
             f("--runtime", Some("<id>[@<install>]|<model>=<id>"), "by format", "The runtime to serve with (basert, llamacpp, mlx); `auto` clears a pick."),
             f("--offline", None, "", "Fetch nothing: a model id is only looked for in its runtime's cache."),
             f("--pull-<name>", Some("[value]"), "", "An option for the runtime that pulls a model id (e.g. --pull-file, --pull-revision)."),
+            f("--<runtime>-<name>", Some("<value>"), "", "A knob of that runtime, e.g. --llamacpp-n-gpu-layers 20; `superfluid runtime options <id>` lists them."),
             f("--model-dir", Some("<dir>"), "", "Every model in this directory is listed and loaded on first use."),
             f("--idle-timeout", Some("<sec>"), "0 (never)", "Unload a model that has been idle this long (never the default model)."),
             f("--basert-lib", Some("<path>"), "search", "Where libbaseRT is, for the basert runtime."),
@@ -321,7 +322,8 @@ Examples:
   superfluid serve ./Qwen3-4B-Q4_K_M.gguf --port 8000 --api-key secret
   superfluid serve --model a.gguf --model b.gguf --max-batch 16
 
-Every option that takes a value accepts --flag value and --flag=value.
+Every option that takes a value accepts --flag value and --flag=value. A runtime's own knobs are
+--<runtime>-<name> <value>; `superfluid runtime options <id>` lists them.
 ",
     );
     for g in SERVE {
@@ -390,6 +392,7 @@ Usage:
   superfluid runtime repair <id> [<install>]    Reinstall an install in place
   superfluid runtime remove <id> [<install>]    Remove one install, or all of them
   superfluid runtime use <id> <install>|--auto  Pin the default install, or go back to the best-ranked
+  superfluid runtime options <id> [--json]      The knobs it takes on `serve`, as --<id>-<name> <value>
 
   <id> is basert, llamacpp or mlx. Installs live under $SUPERFLUID_HOME/runtimes (~/.superfluid).
 

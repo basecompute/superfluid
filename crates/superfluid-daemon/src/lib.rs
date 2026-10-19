@@ -45,6 +45,7 @@ pub mod fleet_openai;
 pub mod park;
 pub mod pins;
 pub mod runtime;
+pub mod runtime_options;
 pub mod runtime_pick;
 pub mod installs;
 pub mod pulls;

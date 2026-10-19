@@ -1,5 +1,6 @@
 //! llama.cpp as a superfluid runtime.
 
+pub mod options;
 pub mod recipe;
 pub mod runtime;
 pub mod sys;
@@ -9,12 +10,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use superfluid_adapter_kit::install::{Host, Plan, Request};
-use superfluid_adapter_kit::{Format, Loaded, Probe, Pull, PullOption, Runtime, RuntimeInfo, Sizing, Tokenizer, TokenizerSource, WorkerArgs};
+use superfluid_adapter_kit::{
+    Format, Loaded, Probe, Pull, PullOption, Runtime, RuntimeInfo, ServeOption, Sizing, Tokenizer, TokenizerSource, WorkerArgs,
+};
 
 pub use runtime::{devices, model_facts, quiet_logs, LlamaConfig, LlamaError, LlamaRuntime};
 pub use tokenizer::LlamaTokenizer;
 
 pub struct Llamacpp;
+
+/// The library the command line names, by the option or its older spelling.
+fn lib_given(args: &WorkerArgs) -> Option<&str> {
+    superfluid_adapter_kit::option(args, "lib").or_else(|| args.extra("--llama-lib"))
+}
 
 impl Runtime for Llamacpp {
     fn compat(&self) -> serde_json::Value {
@@ -34,15 +42,19 @@ impl Runtime for Llamacpp {
         &["--llama-lib"]
     }
 
+    fn options(&self) -> &'static [ServeOption] {
+        options::OPTIONS
+    }
+
     fn prepare(&self, args: &WorkerArgs) {
-        if let Some(lib) = args.extra("--llama-lib") {
+        if let Some(lib) = lib_given(args) {
             sys::set_library(lib.into());
         }
     }
 
     fn named(&self, args: &WorkerArgs) -> Option<String> {
-        if args.extra("--llama-lib").is_some() {
-            return Some("--llama-lib".into());
+        if lib_given(args).is_some() {
+            return Some("--llamacpp-lib".into());
         }
         std::env::var_os("SUPERFLUID_LLAMA_LIB").filter(|p| !p.is_empty()).map(|_| "SUPERFLUID_LLAMA_LIB".into())
     }
@@ -75,19 +87,20 @@ impl Runtime for Llamacpp {
         Some(model_facts(path).map_err(|e| e.to_string()))
     }
 
-    fn sizing(&self, path: &Path, _args: &WorkerArgs) -> Option<Result<Sizing, String>> {
-        Some(runtime::sizing(path))
+    fn sizing(&self, path: &Path, args: &WorkerArgs) -> Option<Result<Sizing, String>> {
+        Some(options::cache_types(args).and_then(|(k, v)| runtime::sizing(path, k, v)))
     }
 
     fn open(&self, args: &WorkerArgs) -> Result<Loaded, String> {
         let ctx = superfluid_adapter_kit::context(args);
-        let runtime = LlamaRuntime::open(LlamaConfig {
+        let mut cfg = LlamaConfig {
             model_path: superfluid_adapter_kit::model(args)?.to_path_buf(),
             max_seq_len: ctx,
             max_batch: args.max_batch,
             ..Default::default()
-        })
-        .map_err(|e| e.to_string())?;
+        };
+        options::apply(args, &mut cfg)?;
+        let runtime = LlamaRuntime::open(cfg).map_err(|e| e.to_string())?;
         Ok(Loaded::primitives(runtime, ctx))
     }
 

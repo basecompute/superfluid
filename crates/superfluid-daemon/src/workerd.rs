@@ -7,7 +7,7 @@ fn usage(name: &str, why: &str) -> ! {
     eprintln!("{name}: {why}");
     eprintln!(
         "usage: {name} --frames-fd N --fd-channel-fd M --engine mock|native|llamacpp|mlx \
-         [--model <path>] [--max-context N] [--max-batch N] [--kv-bits N] [--venv <env>] [--basert-lib <path>]\n       \
+         [--model <path>] [--max-context N] [--max-batch N] [--kv-bits N] [--venv <env>] [--basert-lib <path>] [--<option> <value>]...\n       \
          {name} check --engine native|llamacpp|mlx [--basert-lib <path>] [--model <path>]"
     );
     std::process::exit(2);
@@ -44,8 +44,9 @@ pub fn main(argv: Vec<String>, name: &str) -> ! {
     let checking = argv.first().map(String::as_str) == Some("check");
     let args = WorkerArgs::parse(if checking { &argv[1..] } else { &argv[..] }).unwrap_or_else(|e| usage(name, &e));
     let runtime = runtime(name, &args, if checking { None } else { Some("mock") });
-    let reads: Vec<&str> = ["--engine"].into_iter().chain(runtime.flags().iter().copied()).collect();
-    args.refuse_unread(&reads).unwrap_or_else(|e| usage(name, &e));
+    let reads: Vec<String> = std::iter::once("--engine".to_string()).chain(superfluid_adapter_kit::worker_flags(runtime)).collect();
+    args.refuse_unread(&reads.iter().map(String::as_str).collect::<Vec<_>>()).unwrap_or_else(|e| usage(name, &e));
+    superfluid_adapter_kit::refuse_bad_options(runtime, &args).unwrap_or_else(|e| usage(name, &e));
     runtime.prepare(&args);
     if checking {
         superfluid_adapter_kit::check(runtime, &args).finish();

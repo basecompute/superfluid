@@ -13,7 +13,7 @@ pub use superfluid_engine::artifact::{valid_id, Device, Format, Rule, RuntimeInf
 pub use superfluid_engine::export_tokenizer;
 pub use superfluid_engine::Tokenizer;
 pub use superfluid_executor::sizing::{self, Sizing};
-pub use superfluid_worker::check::{ModelCheck, Report};
+pub use superfluid_worker::check::{ModelCheck, OptionDecl, Report};
 pub use superfluid_worker::{ring_specs_for, WorkerArgs};
 
 pub mod conformance;
@@ -26,6 +26,158 @@ pub struct PullOption {
     pub name: &'static str,
     pub value: bool,
     pub about: &'static str,
+}
+
+/// An option of one runtime, given to `superfluid serve` as `--<runtime>-<name> <value>` and to the worker as
+/// `--<name> <value>`; a knob every runtime could take is a flag of `serve` instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServeOption {
+    pub name: &'static str,
+    pub kind: OptionKind,
+    /// What the runtime does without it, as words for the help ("" when there is nothing to say).
+    pub default: &'static str,
+    pub about: &'static str,
+}
+
+/// What a value of an option may be; the daemon and the worker both refuse another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionKind {
+    Int,
+    /// An integer at or above this.
+    IntFrom(i64),
+    Float,
+    OnOff,
+    Choice(&'static [&'static str]),
+    Text,
+}
+
+impl OptionKind {
+    /// The kind as a report spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            OptionKind::Int | OptionKind::IntFrom(_) => "int",
+            OptionKind::Float => "float",
+            OptionKind::OnOff => "on-off",
+            OptionKind::Choice(_) => "choice",
+            OptionKind::Text => "text",
+        }
+    }
+
+    pub fn choices(self) -> &'static [&'static str] {
+        match self {
+            OptionKind::Choice(c) => c,
+            _ => &[],
+        }
+    }
+
+    pub fn least(self) -> Option<i64> {
+        match self {
+            OptionKind::IntFrom(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    pub fn check(self, value: &str) -> Result<(), String> {
+        check_value(self.name(), self.choices(), self.least(), value)
+    }
+}
+
+/// Whether `value` is one an option of `kind` takes, with `kind`, `choices` and `least` as a report spells them.
+pub fn check_value(kind: &str, choices: &[impl AsRef<str>], least: Option<i64>, value: &str) -> Result<(), String> {
+    let list = || choices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+    let ok = match kind {
+        "int" => value.parse::<i64>().is_ok_and(|n| least.is_none_or(|l| n >= l)),
+        "float" => value.parse::<f64>().is_ok_and(f64::is_finite),
+        "on-off" => matches!(value, "on" | "off"),
+        "choice" => list().contains(&value),
+        _ => !value.is_empty(),
+    };
+    if ok {
+        return Ok(());
+    }
+    Err(match (kind, least) {
+        ("int", Some(l)) if value.parse::<i64>().is_ok() => format!("at least {l} expected, got {value}"),
+        ("int", _) => format!("an integer expected, got {value:?}"),
+        ("float", _) => format!("a number expected, got {value:?}"),
+        ("on-off", _) => format!("on or off expected, got {value:?}"),
+        ("choice", _) => format!("one of {} expected, got {value:?}", list().join(", ")),
+        _ => "a value expected".to_string(),
+    })
+}
+
+/// The value's place in a usage line: `<N>`, `<F>`, `<on|off>`, the choices, or `<value>`.
+pub fn placeholder(kind: &str, choices: &[impl AsRef<str>]) -> String {
+    match kind {
+        "int" => "<N>".into(),
+        "float" => "<F>".into(),
+        "on-off" => "<on|off>".into(),
+        "choice" => format!("<{}>", choices.iter().map(AsRef::as_ref).collect::<Vec<_>>().join("|")),
+        _ => "<value>".into(),
+    }
+}
+
+/// The value given for the option `name`, if any.
+pub fn option<'a>(args: &'a WorkerArgs, name: &str) -> Option<&'a str> {
+    args.extra(&format!("--{name}"))
+}
+
+/// Flags of every worker an option may not be named after: the parser reads them before an adapter sees them.
+const RESERVED: &[&str] = &["model", "max-context", "max-batch", "kv-bits", "frames-fd", "fd-channel-fd", "engine"];
+
+/// Refuses a declaration the daemon or the worker could not honour.
+pub fn check_declaration(options: &[ServeOption]) -> Result<(), String> {
+    for (i, o) in options.iter().enumerate() {
+        let spelled = !o.name.is_empty()
+            && !o.name.starts_with('-')
+            && !o.name.ends_with('-')
+            && o.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !spelled {
+            return Err(format!("the option {:?} cannot be written --<runtime>-<name>", o.name));
+        }
+        if RESERVED.contains(&o.name) {
+            return Err(format!("the option {} is named after a flag every worker reads", o.name));
+        }
+        if options[..i].iter().any(|p| p.name == o.name) {
+            return Err(format!("the option {} is declared twice", o.name));
+        }
+        if o.kind == OptionKind::Choice(&[]) {
+            return Err(format!("the option {} offers no choice", o.name));
+        }
+        if o.about.is_empty() {
+            return Err(format!("the option {} needs words for the help", o.name));
+        }
+    }
+    Ok(())
+}
+
+/// The flags a worker of `rt` reads besides every worker's: its own, and one per option.
+pub fn worker_flags(rt: &dyn Runtime) -> Vec<String> {
+    rt.flags().iter().map(|f| f.to_string()).chain(rt.options().iter().map(|o| format!("--{}", o.name))).collect()
+}
+
+/// Refuses a value an option does not take, as the daemon does before starting a worker.
+pub fn refuse_bad_options(rt: &dyn Runtime, args: &WorkerArgs) -> Result<(), String> {
+    for o in rt.options() {
+        if let Some(v) = option(args, o.name) {
+            o.kind.check(v).map_err(|e| format!("--{}: {e}", o.name))?;
+        }
+    }
+    Ok(())
+}
+
+/// The declarations as a report carries them.
+pub fn declared(rt: &dyn Runtime) -> Vec<OptionDecl> {
+    rt.options()
+        .iter()
+        .map(|o| OptionDecl {
+            name: o.name.into(),
+            kind: o.kind.name().into(),
+            choices: o.kind.choices().iter().map(|c| c.to_string()).collect(),
+            least: o.kind.least(),
+            default: o.default.into(),
+            about: o.about.into(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -189,6 +341,12 @@ pub trait Runtime: Send + Sync {
         &[]
     }
 
+    /// The options this runtime takes on `superfluid serve`, as `--<id>-<name> <value>`: the daemon checks a value
+    /// against its kind, forwards it as `--<name> <value>`, and lists them in `superfluid runtime options <id>`.
+    fn options(&self) -> &'static [ServeOption] {
+        &[]
+    }
+
     fn needs_model(&self) -> bool {
         true
     }
@@ -332,7 +490,18 @@ pub fn check(rt: &dyn Runtime, args: &WorkerArgs) -> Report {
     let pull = rt
         .pull_options()
         .map(|options| options.iter().map(|o| (o.name.to_string(), o.value, o.about.to_string())).collect());
-    Report { info: rt.info(), version, abi, available, devices, capabilities: rt.static_capabilities(), model, pull, named: rt.named(args) }
+    Report {
+        info: rt.info(),
+        version,
+        abi,
+        available,
+        devices,
+        capabilities: rt.static_capabilities(),
+        model,
+        pull,
+        options: declared(rt),
+        named: rt.named(args),
+    }
 }
 
 pub fn serve_process(rt: &dyn Runtime, mut args: WorkerArgs, name: &str) -> ! {
@@ -393,7 +562,9 @@ pub fn worker_main(rt: &dyn Runtime) -> ! {
         _ => (None, &argv[..]),
     };
     let args = WorkerArgs::parse(rest).unwrap_or_else(|e| usage(rt, &name, &e));
-    args.refuse_unread(rt.flags()).unwrap_or_else(|e| usage(rt, &name, &e));
+    let reads = worker_flags(rt);
+    args.refuse_unread(&reads.iter().map(String::as_str).collect::<Vec<_>>()).unwrap_or_else(|e| usage(rt, &name, &e));
+    refuse_bad_options(rt, &args).unwrap_or_else(|e| usage(rt, &name, &e));
     rt.prepare(&args);
     match command {
         Some("version") => match rt.probe(&args) {
@@ -453,17 +624,9 @@ fn install_command(rt: &dyn Runtime, name: &str, args: &[String]) -> ! {
 
 fn pull_command(rt: &dyn Runtime, name: &str, args: &[String]) -> ! {
     let Some(declared) = rt.pull_options() else { fail(name, &format!("the {} runtime pulls no model by id", rt.info().id)) };
-    let (mut worker, mut pull_args) = (Vec::new(), Vec::new());
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if rt.flags().contains(&a.as_str()) {
-            worker.push(a.clone());
-            worker.extend(it.next().cloned());
-        } else {
-            pull_args.push(a.clone());
-        }
-    }
+    let (worker, pull_args) = split_pull_args(rt, args);
     let wargs = WorkerArgs::parse(&worker).unwrap_or_else(|e| usage(rt, name, &e));
+    refuse_bad_options(rt, &wargs).unwrap_or_else(|e| usage(rt, name, &e));
     let pull = Pull::parse(&pull_args, declared).unwrap_or_else(|e| usage(rt, name, &e));
     rt.prepare(&wargs);
     match rt.pull(&pull, &wargs) {
@@ -473,6 +636,22 @@ fn pull_command(rt: &dyn Runtime, name: &str, args: &[String]) -> ! {
         }
         Err(why) => fail(name, &why),
     }
+}
+
+/// A pull's command line: the worker's own flags and options, which set up the runtime, then the pull's arguments.
+pub fn split_pull_args(rt: &dyn Runtime, args: &[String]) -> (Vec<String>, Vec<String>) {
+    let flags = worker_flags(rt);
+    let (mut worker, mut pull_args) = (Vec::new(), Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if flags.iter().any(|f| f == a) {
+            worker.push(a.clone());
+            worker.extend(it.next().cloned());
+        } else {
+            pull_args.push(a.clone());
+        }
+    }
+    (worker, pull_args)
 }
 
 pub fn install_into(rt: &dyn Runtime, plan: &Plan, dir: &Path) -> Result<Manifest, String> {
@@ -505,14 +684,18 @@ fn fail(name: &str, why: &str) -> ! {
 
 fn usage(rt: &dyn Runtime, name: &str, why: &str) -> ! {
     let flags: String = rt.flags().iter().map(|f| format!(" [{f} <value>]")).collect();
+    let options = if rt.options().is_empty() { "" } else { " [--<option> <value>]..." };
     eprintln!("{name}: {why}");
     eprintln!(
-        "usage: {name} check [--model <path>]{flags}\n       {name} version{flags}\n       \
+        "usage: {name} check [--model <path>]{flags}{options}\n       {name} version{flags}\n       \
          {name} plan [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested]\n       \
          {name} install --into <dir> --plan <json>\n       \
          {name} pull <org/model[:tag]> [--offline] [--<option> [value]]...\n       \
-         {name} --frames-fd N --fd-channel-fd M --model <path> [--max-context N] [--max-batch N]{flags}"
+         {name} --frames-fd N --fd-channel-fd M --model <path> [--max-context N] [--max-batch N]{flags}{options}"
     );
+    if !rt.options().is_empty() {
+        eprintln!("options: {}", rt.options().iter().map(|o| o.name).collect::<Vec<_>>().join(", "));
+    }
     std::process::exit(2);
 }
 
@@ -586,6 +769,34 @@ mod tests {
                 extra: serde_json::json!({"wheels_size": 3}),
             }]))
         }
+    }
+
+    #[test]
+    fn a_pull_takes_the_runtime_options_apart_from_its_own_arguments() {
+        struct WithOptions;
+        impl Runtime for WithOptions {
+            fn info(&self) -> RuntimeInfo {
+                RuntimeInfo { id: "opt", aliases: &[], formats: vec![], tokenizer: TokenizerSource::HuggingFace }
+            }
+            fn flags(&self) -> &'static [&'static str] {
+                &["--venv"]
+            }
+            fn options(&self) -> &'static [ServeOption] {
+                &[ServeOption { name: "lib", kind: OptionKind::Text, default: "", about: "a library" }]
+            }
+            fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
+                Err("never".into())
+            }
+            fn open(&self, _args: &WorkerArgs) -> Result<Loaded, String> {
+                Err("never".into())
+            }
+        }
+        let argv: Vec<String> = ["org/m:q4", "--lib", "/custom/lib", "--offline", "--venv", "/custom/env", "--revision", "main"].iter().map(|s| s.to_string()).collect();
+        let (worker, pull) = split_pull_args(&WithOptions, &argv);
+        assert_eq!(worker, ["--lib", "/custom/lib", "--venv", "/custom/env"], "the flag and the option both set up the runtime");
+        assert_eq!(pull, ["org/m:q4", "--offline", "--revision", "main"]);
+        let wargs = WorkerArgs::parse(&worker).unwrap();
+        assert_eq!((wargs.venv.as_deref(), option(&wargs, "lib")), (Some(Path::new("/custom/env")), Some("/custom/lib")));
     }
 
     #[test]
@@ -709,5 +920,62 @@ mod tests {
         let args = |n| WorkerArgs { max_context: n, ..Default::default() };
         assert_eq!((context(&args(0)), context(&args(4096))), (512, 4096));
         assert_eq!(model(&WorkerArgs::default()).unwrap_err(), "--model is required to serve");
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    #[test]
+    fn a_value_is_judged_by_its_kind() {
+        assert!(OptionKind::Int.check("-3").is_ok());
+        assert_eq!(OptionKind::Int.check("x").unwrap_err(), "an integer expected, got \"x\"");
+        assert!(OptionKind::IntFrom(1).check("1").is_ok());
+        assert_eq!(OptionKind::IntFrom(1).check("0").unwrap_err(), "at least 1 expected, got 0");
+        assert!(OptionKind::Float.check("1e6").is_ok() && OptionKind::Float.check("inf").is_err());
+        assert!(OptionKind::OnOff.check("on").is_ok() && OptionKind::OnOff.check("true").is_err());
+        assert_eq!(OptionKind::Choice(&["a", "b"]).check("c").unwrap_err(), "one of a, b expected, got \"c\"");
+        assert!(OptionKind::Text.check("").is_err() && OptionKind::Text.check("x").is_ok());
+        assert_eq!(placeholder("choice", &["a", "b"]), "<a|b>");
+        assert_eq!((placeholder("int", &[] as &[&str]), placeholder("on-off", &[] as &[&str])), ("<N>".into(), "<on|off>".into()));
+    }
+
+    const OK: ServeOption = ServeOption { name: "n-gpu-layers", kind: OptionKind::IntFrom(-1), default: "-1", about: "layers" };
+    static ONE: [ServeOption; 1] = [OK];
+
+    #[test]
+    fn a_declaration_the_daemon_could_not_honour_is_refused() {
+        let ok = OK;
+        assert!(check_declaration(&[ok]).is_ok());
+        for (bad, said) in [
+            (ServeOption { name: "Threads", ..ok }, "cannot be written"),
+            (ServeOption { name: "max-context", ..ok }, "a flag every worker reads"),
+            (ServeOption { kind: OptionKind::Choice(&[]), ..ok }, "offers no choice"),
+            (ServeOption { about: "", ..ok }, "needs words"),
+        ] {
+            assert!(check_declaration(&[bad]).unwrap_err().contains(said), "{bad:?}");
+        }
+        assert!(check_declaration(&[ok, ok]).unwrap_err().contains("declared twice"));
+        assert_eq!(declared_of(&ONE)[0].least, Some(-1));
+    }
+
+    fn declared_of(options: &'static [ServeOption]) -> Vec<OptionDecl> {
+        struct Toy(&'static [ServeOption]);
+        impl Runtime for Toy {
+            fn info(&self) -> RuntimeInfo {
+                RuntimeInfo { id: "toy", aliases: &[], formats: Vec::new(), tokenizer: TokenizerSource::Engine }
+            }
+            fn options(&self) -> &'static [ServeOption] {
+                self.0
+            }
+            fn probe(&self, _: &WorkerArgs) -> Result<Probe, String> {
+                Err("toy".into())
+            }
+            fn open(&self, _: &WorkerArgs) -> Result<Loaded, String> {
+                Err("toy".into())
+            }
+        }
+        declared(&Toy(options))
     }
 }

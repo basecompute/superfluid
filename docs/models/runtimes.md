@@ -126,13 +126,64 @@ Requests a model cannot serve are refused with a 400:
 | `unsupported_runtime` | a load the runtime cannot serve as asked |
 | `unsupported_parameter` | a request parameter the path does not support |
 
+## Per-runtime options
+
+A knob of one runtime is given to `serve` as `--<runtime>-<name> <value>`, for example `--llamacpp-n-gpu-layers 20`. The adapter declares its options with the shape of each value; `superfluid serve` checks a value against that declaration before a worker starts and forwards it to the runtime's worker as `--<name> <value>`, and `superfluid runtime options <id>` lists them. A flag every runtime takes stays a flag of `serve`: the context window (`--max-context`), the lanes (`--max-batch`), the KV precision (`--kv-bits`), parking and speculation.
+
+### llamacpp options
+
+The knobs of llama.cpp's model and context parameters that keep their meaning under superfluid, named as llama.cpp's own tools name them. The window, the sequence count, the KV layout and sampling are superfluid's.
+
+| option | value | default | meaning |
+|---|---|---|---|
+| `--llamacpp-lib` | path | the install's | A llama.cpp build of your own: the libllama file or its directory (as `SUPERFLUID_LLAMA_LIB`). |
+| `--llamacpp-n-gpu-layers` | N | -1 | Layers kept on the device; -1 is all of them, 0 runs the model on the CPU. |
+| `--llamacpp-main-gpu` | N | 0 | The device that takes the whole model under `split-mode none`, and small tensors otherwise. |
+| `--llamacpp-split-mode` | none, layer, row, tensor | layer | How a model is spread over several devices. |
+| `--llamacpp-tensor-split` | f,f,... | even | The share of the model each device takes (`3,1` gives the first three quarters). |
+| `--llamacpp-load-mode` | auto, none, mmap, mlock, mmap-mlock, direct-io | auto | How weights are read: mmap maps the file, mlock pins them in RAM, direct-io bypasses the page cache. |
+| `--llamacpp-lazy-mode` | off, auto, on | auto | Read the rows of tensors the architecture marks (experts) on demand; needs mmap. |
+| `--llamacpp-repack` | on, off | on | Repack weights into the device's extra buffer types (llama.cpp's `--no-repack` turns it off). |
+| `--llamacpp-threads` | N | 0 | Threads for decoding; 0 is every core. |
+| `--llamacpp-threads-batch` | N | 0 | Threads for prompt batches; 0 is as many as `threads`. |
+| `--llamacpp-batch-size` | N | 2048 | Tokens per decode call (`n_batch`). |
+| `--llamacpp-ubatch-size` | N | 512 | Tokens per micro-batch (`n_ubatch`), at most `batch-size`. |
+| `--llamacpp-flash-attn` | auto, on, off | auto | Flash attention; auto lets llama.cpp decide for the device. |
+| `--llamacpp-cache-type-k` | f16, bf16, f32, q8_0, q4_0, q4_1, q5_0, q5_1, iq4_nl | f16 | The KV cache's K type. |
+| `--llamacpp-cache-type-v` | the same | f16 | The KV cache's V type; a quantized V needs flash attention on. |
+| `--llamacpp-kv-offload` | on, off | on | Keep the KV cache on the device (llama.cpp's `--no-kv-offload` turns it off). |
+| `--llamacpp-op-offload` | on, off | on | Offload operations on host tensors to the device. |
+| `--llamacpp-swa-full` | on, off | on | A full-size cache for sliding-window layers; off keeps only the window and saves memory. |
+| `--llamacpp-rope-scaling` | none, linear, yarn, longrope | model's | RoPE scaling for a context past the trained one. |
+| `--llamacpp-rope-freq-base`, `--llamacpp-rope-freq-scale` | F | model's | RoPE base frequency and frequency scale. |
+| `--llamacpp-yarn-ext-factor`, `--llamacpp-yarn-attn-factor`, `--llamacpp-yarn-beta-fast`, `--llamacpp-yarn-beta-slow` | F | model's | YaRN extrapolation mix (-1 takes the model's), magnitude scale, low and high correction dimensions. |
+| `--llamacpp-yarn-orig-ctx` | N | model's | YaRN original context size. |
+
+Not options, by design: `--ctx-size` and `--parallel` are `--max-context` and `--max-batch`; `--kv-unified` is the adapter's choice of KV layout; metadata and tensor overrides (`--override-kv`, `--override-tensor`, `--cpu-moe`) and `--device` take backend handles the worker does not expose yet.
+
+### mlx options
+
+The worker drives mlx-lm's model classes with an executor of its own, so its knobs are the executor's.
+
+| option | value | default | meaning |
+|---|---|---|---|
+| `--mlx-venv` | path | the install's | A Python environment of your own with `mlx` and `mlx-lm` (as `SUPERFLUID_MLX_VENV`). |
+| `--mlx-prefill-chunk` | N | 2048 | Prompt tokens fed to the model per step. |
+| `--mlx-cache-limit-mb` | N | 1024 | MLX's buffer cache limit (`mx.set_cache_limit`). |
+
+mlx-lm's own `--max-kv-size`, `--kv-bits` and `--adapter-path` are not options: a rotating or quantized cache changes the executor's cache, and a LoRA adapter is a load-time change the worker does not make yet.
+
+### basert
+
+The engine takes no option of its own on `serve`; its knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
+
 ## Per-runtime limits
 
 ### llamacpp
 
 - `superfluid compat` lists the llama.cpp builds this adapter was built and tested against, which it installs on its own; another build installs with `--untested`, and is still checked at load for the functions and parameter layouts the adapter drives.
 
-- A build whose C API differs from the tested one is refused by name at load. `SUPERFLUID_LLAMA_LIB` loads your own build instead of an install.
+- A build whose C API differs from the tested one is refused by name at load. `SUPERFLUID_LLAMA_LIB` or `--llamacpp-lib` loads your own build instead of an install.
 - With no `--max-context`, the window is sized for the device on Metal, and on CUDA with a dedicated GPU; elsewhere it is 8192. Once a context exists, one that left the device short of its reserve is made again with fewer cells; a pool cut below one sequence serves that model at the shorter window.
 - Plain-attention models get a KV buffer per sequence (lanes plus two, at least 4, at most 256), so a decode step attends only over its own sequence. Recurrent, hybrid and sliding-window models (Qwen3.5/3.6-class, gemma) use one shared pool and reuse prefixes only at a sequence's head.
 - The prefix cache keeps at most one lane's context in a shared pool, where every step attends over the cells up to the highest one in use. The rest of the cache, and any entry that gives up its sequence to a lane, is held in host memory as llama.cpp's own state export and imported when a request reuses it: as many tokens as the pool has cells, within 8 GiB and 60% of the memory the model and its context leave free.
