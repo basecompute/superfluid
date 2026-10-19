@@ -5,6 +5,15 @@ name: Nightly runtimes
 # a PR, with the digests its project lists, and one that fails opens an issue.
 # `workflow_dispatch` tests a named release. A schedule fires only from the
 # default branch, and a release the recipe already lists is a no-op.
+#
+# Two things this file cannot do for itself. A PR opened with the job's
+# GITHUB_TOKEN starts no workflow, so CI does not run on the nightly's PRs
+# until someone pushes to them; if required checks gate merging, the record
+# jobs need a GitHub App token or a PAT instead. And the macOS leg's runner is
+# self-hosted on a public repository, where a fork's PR can edit a workflow to
+# run on it: require approval to run workflows from outside contributors
+# (Settings > Actions > General), and limit the runner's group to this
+# workflow.
 
 on:
   schedule:
@@ -20,41 +29,54 @@ on:
         required: false
         default: ""
 
+# Read-only by default: the test jobs build and run upstream code nobody has
+# tested yet, so they get no token that writes. The record jobs, which run only
+# this repository's code, get the write scopes they need.
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
-
-concurrency:
-  group: nightly-runtimes
-  cancel-in-progress: false
+  contents: read
 
 env:
   # A small GGUF the llama.cpp adapter's model tests run on; without one they
-  # skip, and a pass would say little.
-  TEST_GGUF_URL: https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
+  # skip, and a pass would say little. Pinned to a commit of the repository, so
+  # the SHA-256 it is checked against stays the file's.
+  TEST_GGUF_URL: https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/50968a4468ef4233ed78cd7c3de230dd1d61a56b/Qwen3-0.6B-Q4_K_M.gguf
+  TEST_GGUF_SHA256: ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a
 
 jobs:
   pick:
     name: What is new upstream
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # pull-requests: to leave out a release whose PR was closed unmerged.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       llamacpp: ${{ steps.llamacpp.outputs.version }}
       mlx: ${{ steps.mlx.outputs.version }}
+      mlx_lm: ${{ steps.mlx.outputs.mlx_lm }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # pipefail: without it tee's success hides a pick that failed, and an empty
+      # version reads as nothing new.
       - name: llama.cpp
         id: llamacpp
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.llamacpp }}
-        run: python3 scripts/nightly_runtimes.py llamacpp pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          set -o pipefail
+          python3 scripts/nightly_runtimes.py llamacpp pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
       - name: MLX
         id: mlx
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.mlx }}
-        run: python3 scripts/nightly_runtimes.py mlx pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          set -o pipefail
+          python3 scripts/nightly_runtimes.py mlx pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
 
   llamacpp:
     name: llama.cpp ${{ needs.pick.outputs.llamacpp }} on ${{ matrix.os }}
@@ -78,7 +100,13 @@ jobs:
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
     steps:
+      # The tests run an untested llama.cpp: the job's token is not left in .git/config for it.
+      # A self-hosted runner's checkout is not cleaned, so target/ outlives the job (see
+      # rust-cache below); tracked files are still checked out as the commit has them.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: ${{ runner.environment == 'github-hosted' }}
       # A self-hosted runner keeps the toolchain it has, where rustup puts it;
       # its PATH does not say so unless its owner's shell did.
       - uses: dtolnay/rust-toolchain@stable
@@ -87,16 +115,19 @@ jobs:
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # Never on a self-hosted runner: its save step deletes every file in
       # ~/.cargo/bin that cargo did not install during the job, rustup
-      # included. A self-hosted runner keeps its target directory anyway.
+      # included. A self-hosted runner keeps its target directory instead.
       - uses: Swatinem/rust-cache@v2
         if: runner.environment == 'github-hosted'
 
-      - name: Build the worker and plan the untested install
+      - name: Build the worker
+        run: cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+      # The plan reads the build's release from GitHub's API, whose unauthenticated
+      # limit hosted runners share; the token, read-only here, is for that step alone.
+      - name: Plan the untested install
         id: plan
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
           plan=$(target/debug/superfluid-worker-llamacpp plan --version "$BUILD" --untested \
             | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
           {
@@ -122,7 +153,14 @@ jobs:
         run: |
           mkdir -p ~/.cache/superfluid-nightly/models
           model=~/.cache/superfluid-nightly/models/$(basename "$TEST_GGUF_URL")
-          [ -s "$model" ] || curl -fsSL --retry 3 -o "$model" "$TEST_GGUF_URL"
+          # Checked, not just present: a download cut short would stay in the cache, and on
+          # the self-hosted runner, a model every later night's tests fail on.
+          if ! echo "$TEST_GGUF_SHA256  $model" | shasum -a 256 -c --status 2>/dev/null; then
+            curl -fsSL --retry 3 -o "$model.part" "$TEST_GGUF_URL"
+            echo "$TEST_GGUF_SHA256  $model.part" | shasum -a 256 -c --status \
+              || { echo "::error::$TEST_GGUF_URL does not have the SHA-256 the workflow pins"; exit 1; }
+            mv "$model.part" "$model"
+          fi
           echo "SUPERFLUID_TEST_GGUF=$model" >> "$GITHUB_ENV"
 
       - name: The adapter's tests on it
@@ -146,8 +184,19 @@ jobs:
     if: always() && needs.pick.outputs.llamacpp != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    # Runs overlap, not their records: a run waits only to write a runtime's PR or
+    # issue, so a macOS leg queued for a day (its runner offline) holds up no other
+    # run, nor the MLX record.
+    concurrency:
+      group: nightly-record-llamacpp
+      cancel-in-progress: false
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
+      RESULT: ${{ needs.llamacpp.result }}
       GH_TOKEN: ${{ github.token }}
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       BASE: ${{ github.ref_name }}
@@ -158,30 +207,52 @@ jobs:
         if: needs.llamacpp.result == 'success'
         run: |
           set -euo pipefail
-          branch="nightly/llamacpp-$BUILD"
-          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
-          if [ "$open" != 0 ]; then
-            echo "a PR from $branch is already open"
+          # One branch and one open PR per runtime: llama.cpp tags several builds a day and
+          # each PR edits the same lines, so a newer build that passes replaces the one the
+          # open PR proposes. The title is the one `pick` looks for among closed PRs.
+          branch=nightly/llamacpp
+          title="llamacpp: tested with $BUILD"
+          open=$(gh pr list --head "$branch" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          number=${open%% *}
+          if [ -n "$open" ] && [ "${open#* }" = "$title" ]; then
+            echo "PR #$number already proposes $BUILD"
             exit 0
           fi
-          git switch -c "$branch"
+          git switch -C "$branch"
           GITHUB_TOKEN="$GH_TOKEN" python3 scripts/nightly_runtimes.py llamacpp append "$BUILD"
+          if git diff --quiet; then
+            echo "the recipe on $BASE already lists $BUILD"
+            exit 0
+          fi
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -am "llamacpp: tested with $BUILD"
+            commit -am "$title"
           git push -f origin "$branch"
           p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it on Apple silicon (Metal) and ubuntu-24.04 (CPU): $RUN"
           p2="This adds the build to the adapter's recipe as a tested build, with the size and SHA-256 GitHub lists for each of its assets, so the next release installs it on its own. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
           body="$p1"$'\n\n'"$p2"
-          gh pr create --base "$BASE" --head "$branch" --title "llamacpp: tested with $BUILD" --body "$body"
+          if [ -n "$open" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" --silent
+            echo "PR #$number now proposes $BUILD"
+          else
+            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body"
+          fi
+
+      # Only a failure says the build breaks the adapter. A cancelled run, or the macOS
+      # leg expiring in the queue with its runner offline (GitHub cancels it after a
+      # day), says nothing about it, and the next night tests the newest build again.
+      - name: Did not finish, so record nothing
+        if: needs.llamacpp.result != 'success' && needs.llamacpp.result != 'failure'
+        run: echo "::warning::the tests on llama.cpp $BUILD did not finish ($RESULT); nothing is recorded"
 
       - name: Failed, so open an issue
-        if: needs.llamacpp.result != 'success'
+        if: needs.llamacpp.result == 'failure'
         run: |
           set -euo pipefail
           title="llama.cpp $BUILD breaks the adapter"
           # One open issue per runtime: a later build that fails too is a comment on it, since
           # the newest build is tested every night and the adapter may take days to catch up.
-          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          # With none open, `.[0]` is null and would print "null null": `// empty` prints nothing.
+          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
           if [ -n "$existing" ]; then
             number=${existing%% *}
             case "$existing" in *"$title"*) echo "an issue for $BUILD is already open: #$number"; exit 0;; esac
@@ -202,8 +273,14 @@ jobs:
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
+      # The mlx-lm to test with: a release of it alone is new upstream too. Empty
+      # for a requested mlx, which gets whichever mlx-lm pip resolves for it.
+      MLX_LM: ${{ needs.pick.outputs.mlx_lm }}
     steps:
+      # The tests run an untested MLX from PyPI: the job's token is not left in .git/config for it.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
@@ -237,8 +314,11 @@ jobs:
           py="$SUPERFLUID_MLX_VENV/bin/python"
           [ -x "$py" ] || py="$SUPERFLUID_MLX_VENV/bin/python3"
           "$py" -m pip --version >/dev/null 2>&1 || "$py" -m ensurepip --upgrade >/dev/null
+          # An mlx the recipe lists installed its pinned mlx-lm above; --ignore-installed
+          # would lay a newer one over it and leave both versions' metadata.
+          "$py" -m pip uninstall -y mlx-lm >/dev/null
           "$py" -m pip install --ignore-installed --only-binary=:all: \
-            --report "$RUNNER_TEMP/mlx-report.json" "mlx==$VERSION" mlx-lm >/dev/null
+            --report "$RUNNER_TEMP/mlx-report.json" "mlx==$VERSION" "mlx-lm${MLX_LM:+==$MLX_LM}" >/dev/null
           "$py" -c 'import mlx.core, mlx_lm' || { echo "::error::the reinstalled environment does not import mlx and mlx-lm"; exit 1; }
           python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["install"]), "distributions installed and reported")' "$RUNNER_TEMP/mlx-report.json"
 
@@ -269,8 +349,16 @@ jobs:
     if: always() && needs.pick.outputs.mlx != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    concurrency:
+      group: nightly-record-mlx
+      cancel-in-progress: false
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
+      MLX_LM: ${{ needs.pick.outputs.mlx_lm }}
       RESULT: ${{ needs.mlx.result }}
       GH_TOKEN: ${{ github.token }}
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -288,39 +376,59 @@ jobs:
           BASE: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          branch="nightly/mlx-$VERSION"
-          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
-          if [ "$open" != 0 ]; then
-            echo "a PR from $branch is already open"
+          # One branch and one open PR, as for llama.cpp: a newer version that passes
+          # replaces the one the open PR proposes. The mlx-lm is the one the tests ran with.
+          report="$RUNNER_TEMP/mlx/mlx-report.json"
+          mlx_lm=$(jq -r '.install[].metadata | select(.name | ascii_downcase | gsub("[-_.]+"; "-") == "mlx-lm") | .version' "$report")
+          branch=nightly/mlx
+          title="mlx: tested with $VERSION and mlx-lm $mlx_lm"
+          open=$(gh pr list --head "$branch" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          number=${open%% *}
+          if [ -n "$open" ] && [ "${open#* }" = "$title" ]; then
+            echo "PR #$number already proposes MLX $VERSION with mlx-lm $mlx_lm"
             exit 0
           fi
-          git switch -c "$branch"
-          python3 scripts/nightly_runtimes.py mlx append "$VERSION" --report "$RUNNER_TEMP/mlx/mlx-report.json"
+          git switch -C "$branch"
+          python3 scripts/nightly_runtimes.py mlx append "$VERSION" --report "$report"
+          if git diff --quiet; then
+            echo "the recipe on $BASE already lists MLX $VERSION with mlx-lm $mlx_lm"
+            exit 0
+          fi
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -am "mlx: tested with $VERSION"
+            commit -am "$title"
           git push -f origin "$branch"
-          p1="The nightly job installed MLX $VERSION untested on macos-14 and ran the adapter's tests on it: $RUN"
-          p2="This adds the version to the adapter's recipe as a tested one: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
+          p1="The nightly job installed MLX $VERSION with mlx-lm $mlx_lm untested on macos-14 and ran the adapter's tests on it: $RUN"
+          p2="This adds the version to the adapter's recipe as a tested one, or replaces its entry for the newer mlx-lm: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
           body="$p1"$'\n\n'"$p2"
-          gh pr create --base "$BASE" --head "$branch" --title "mlx: tested with $VERSION" --body "$body"
+          if [ -n "$open" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" --silent
+            echo "PR #$number now proposes MLX $VERSION with mlx-lm $mlx_lm"
+          else
+            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body"
+          fi
+
+      - name: Did not finish, so record nothing
+        if: needs.mlx.result != 'success' && needs.mlx.result != 'failure'
+        run: echo "::warning::the tests on MLX $VERSION${MLX_LM:+ with mlx-lm $MLX_LM} did not finish ($RESULT); nothing is recorded"
 
       - name: Failed, so open an issue
-        if: needs.mlx.result != 'success'
+        if: needs.mlx.result == 'failure'
         # Among the failures: an MLX that needs a newer Python than the
         # adapter ships, which is a change to the worker's build, not a pin.
         run: |
           set -euo pipefail
-          title="MLX $VERSION breaks the adapter"
+          what="MLX $VERSION${MLX_LM:+ with mlx-lm $MLX_LM}"
+          title="$what breaks the adapter"
           # One open issue per runtime: a later version that fails too is a comment on it.
-          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
           if [ -n "$existing" ]; then
             number=${existing%% *}
-            case "$existing" in *"$title"*) echo "an issue for MLX $VERSION is already open: #$number"; exit 0;; esac
-            gh issue comment "$number" --body "MLX $VERSION fails too: $RUN"
-            echo "noted MLX $VERSION on the open issue #$number"
+            case "$existing" in *"$title"*) echo "an issue for $what is already open: #$number"; exit 0;; esac
+            gh issue comment "$number" --body "$what fails too: $RUN"
+            echo "noted $what on the open issue #$number"
             exit 0
           fi
-          p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests did not pass on it: $RUN"
+          p1="The nightly job installed $what untested on macos-14 and the adapter's tests did not pass on it: $RUN"
           p2="The test log is the run's artifact. Until the adapter is fixed, or the version is found to be at fault, the recipe keeps its last tested version. A version that needs a newer Python than the adapter ships fails here too: that is a change to the worker's build, not a pin."
           body="$p1"$'\n\n'"$p2"
           gh issue create --title "$title" --body "$body"
