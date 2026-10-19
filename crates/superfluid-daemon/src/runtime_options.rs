@@ -19,11 +19,16 @@ pub struct Given {
     pub value: String,
 }
 
-/// Whether `flag` is shaped as a runtime option, `--<x>-<y>`; only then does `serve` keep it for [`resolve`].
+/// Whether `flag` is shaped as a runtime option, `--<id>-<name>`, spelled as a runtime id and an option name can be
+/// (an id may hold '.' and '_', a name never does); only then does `serve` keep it for [`resolve`].
 pub fn looks_like(flag: &str) -> bool {
     let Some(body) = flag.strip_prefix("--") else { return false };
-    let shaped = body.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_'));
-    shaped && body.split_once('-').is_some_and(|(id, name)| !id.is_empty() && !name.is_empty())
+    let id_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_');
+    let name_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    body.match_indices('-').any(|(i, _)| {
+        let (id, name) = (&body[..i], &body[i + 1..]);
+        !id.is_empty() && id.chars().all(id_char) && !name.is_empty() && name.chars().all(name_char)
+    })
 }
 
 /// The runtime among `ids` that `flag` names, the longest id winning (`--mlx-x-y` is mlx's `x-y`
@@ -320,6 +325,9 @@ mod tests {
         assert!(!looks_like("--port"), "no '-' after the runtime");
         assert!(!looks_like("--llamacpp-"), "an empty name");
         assert!(!looks_like("-ngl") && !looks_like("--Llamacpp-x") && !looks_like("--llamacpp-x=1"));
+        assert!(!looks_like("--llamacpp-cache_type_k") && !looks_like("--llamacpp-rope.freq"), "no option name holds '_' or '.'");
+        assert!(looks_like("--my_rt.2-threads"), "a runtime id may");
+        assert!(!looks_like("--my_rt.2-"));
     }
 
     #[test]
