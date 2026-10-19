@@ -36,6 +36,10 @@ jobs:
     name: What is new upstream
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # pull-requests: to leave out a release whose PR was closed unmerged.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       llamacpp: ${{ steps.llamacpp.outputs.version }}
       mlx: ${{ steps.mlx.outputs.version }}
@@ -52,6 +56,7 @@ jobs:
       - name: MLX
         id: mlx
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.mlx }}
         run: python3 scripts/nightly_runtimes.py mlx pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
 
@@ -174,21 +179,35 @@ jobs:
         if: needs.llamacpp.result == 'success'
         run: |
           set -euo pipefail
-          branch="nightly/llamacpp-$BUILD"
-          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
-          if [ "$open" != 0 ]; then
-            echo "a PR from $branch is already open"
+          # One branch and one open PR per runtime: llama.cpp tags several builds a day and
+          # each PR edits the same lines, so a newer build that passes replaces the one the
+          # open PR proposes. The title is the one `pick` looks for among closed PRs.
+          branch=nightly/llamacpp
+          title="llamacpp: tested with $BUILD"
+          open=$(gh pr list --head "$branch" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          number=${open%% *}
+          if [ -n "$open" ] && [ "${open#* }" = "$title" ]; then
+            echo "PR #$number already proposes $BUILD"
             exit 0
           fi
-          git switch -c "$branch"
+          git switch -C "$branch"
           GITHUB_TOKEN="$GH_TOKEN" python3 scripts/nightly_runtimes.py llamacpp append "$BUILD"
+          if git diff --quiet; then
+            echo "the recipe on $BASE already lists $BUILD"
+            exit 0
+          fi
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -am "llamacpp: tested with $BUILD"
+            commit -am "$title"
           git push -f origin "$branch"
           p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it on Apple silicon (Metal) and ubuntu-24.04 (CPU): $RUN"
           p2="This adds the build to the adapter's recipe as a tested build, with the size and SHA-256 GitHub lists for each of its assets, so the next release installs it on its own. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
           body="$p1"$'\n\n'"$p2"
-          gh pr create --base "$BASE" --head "$branch" --title "llamacpp: tested with $BUILD" --body "$body"
+          if [ -n "$open" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" --silent
+            echo "PR #$number now proposes $BUILD"
+          else
+            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body"
+          fi
 
       # Only a failure says the build breaks the adapter. A cancelled run, or the macOS
       # leg expiring in the queue with its runner offline (GitHub cancels it after a
@@ -322,21 +341,34 @@ jobs:
           BASE: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          branch="nightly/mlx-$VERSION"
-          open=$(gh pr list --head "$branch" --state open --json number --jq 'length') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
-          if [ "$open" != 0 ]; then
-            echo "a PR from $branch is already open"
+          # One branch and one open PR, as for llama.cpp: a newer version that passes
+          # replaces the one the open PR proposes.
+          branch=nightly/mlx
+          title="mlx: tested with $VERSION"
+          open=$(gh pr list --head "$branch" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          number=${open%% *}
+          if [ -n "$open" ] && [ "${open#* }" = "$title" ]; then
+            echo "PR #$number already proposes MLX $VERSION"
             exit 0
           fi
-          git switch -c "$branch"
+          git switch -C "$branch"
           python3 scripts/nightly_runtimes.py mlx append "$VERSION" --report "$RUNNER_TEMP/mlx/mlx-report.json"
+          if git diff --quiet; then
+            echo "the recipe on $BASE already lists MLX $VERSION"
+            exit 0
+          fi
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -am "mlx: tested with $VERSION"
+            commit -am "$title"
           git push -f origin "$branch"
           p1="The nightly job installed MLX $VERSION untested on macos-14 and ran the adapter's tests on it: $RUN"
           p2="This adds the version to the adapter's recipe as a tested one: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
           body="$p1"$'\n\n'"$p2"
-          gh pr create --base "$BASE" --head "$branch" --title "mlx: tested with $VERSION" --body "$body"
+          if [ -n "$open" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" --silent
+            echo "PR #$number now proposes MLX $VERSION"
+          else
+            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body"
+          fi
 
       - name: Did not finish, so record nothing
         if: needs.mlx.result != 'success' && needs.mlx.result != 'failure'

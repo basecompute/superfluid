@@ -10,14 +10,16 @@ and how to record one that passed.
 `pick` prints `version=<v>` for the newest upstream release the adapter's
 recipe does not list yet, or `version=` when there is nothing new (or when
 `--requested` names a release already listed); the workflow reads it from
-$GITHUB_OUTPUT. `append` adds a release to the adapter's recipe as a tested
-one, newest first, so a human reviews a PR rather than typing digests. For
-llama.cpp that is the same asset names the previous tested build carries,
-with the size and SHA-256 GitHub lists for each. For MLX it is the whole
-environment pip resolved for the version on the runner, read from pip's
-install report (`pip install --dry-run --report`): every distribution's
-wheel, with the size and SHA-256 PyPI lists for it, which must agree with
-the digest pip reported.
+$GITHUB_OUTPUT. A newest release whose PR was closed unmerged is not picked
+again: someone said no to it, and only a `--requested` one asks again.
+`append` adds a release to the adapter's recipe as a tested one, newest
+first, so a human reviews a PR rather than typing digests. For llama.cpp
+that is the same asset names the previous tested build carries, with the
+size and SHA-256 GitHub lists for each. For MLX it is the whole environment
+pip resolved for the version on the runner, read from pip's install report
+(`pip install --dry-run --report`): every distribution's wheel, with the
+size and SHA-256 PyPI lists for it, which must agree with the digest pip
+reported.
 
 Only the standard library; GITHUB_TOKEN is used when set, for the API rate
 limit.
@@ -41,6 +43,8 @@ RECIPES = {
 LLAMACPP_RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30"
 LLAMACPP_RELEASE = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}"
 MLX_PYPI = "https://pypi.org/pypi/mlx/json"
+# The record jobs' PRs come from one branch per runtime, newest first in this listing.
+CLOSED_PRS = "https://api.github.com/repos/{repo}/pulls?state=closed&head={owner}:nightly/{runtime}&per_page=100"
 PYPI_RELEASE = "https://pypi.org/pypi/{name}/{version}/json"
 BUILD = re.compile(r"^b(\d+)$")
 
@@ -87,6 +91,22 @@ def newest_llamacpp_build() -> dict:
     return max(builds, key=lambda r: build_number(r["tag_name"]))
 
 
+def pr_title(runtime: str, version: str) -> str:
+    """The title the record job gives the PR that adds `version`; the two must agree."""
+    return f"{runtime}: tested with {version}"
+
+
+def declined(runtime: str, version: str) -> bool:
+    """Whether a PR adding `version` was closed without being merged. Outside
+    Actions (no GITHUB_REPOSITORY) there is no repository to ask, and nothing was."""
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not repo:
+        return False
+    pulls = fetch_json(CLOSED_PRS.format(repo=repo, owner=repo.split("/")[0], runtime=runtime))
+    title = pr_title(runtime, version)
+    return any(p["title"] == title and not p.get("merged_at") for p in pulls)
+
+
 def pick(runtime: str, requested: str | None) -> str:
     listed = tested_versions(runtime)
     if requested:
@@ -94,9 +114,16 @@ def pick(runtime: str, requested: str | None) -> str:
     if runtime == "llamacpp":
         newest = newest_llamacpp_build()["tag_name"]
         have = max((build_number(v) for v in listed), default=-1)
-        return newest if build_number(newest) > have else ""
-    info = fetch_json(MLX_PYPI)["info"]["version"]
-    return "" if info in listed else info
+        if build_number(newest) <= have:
+            return ""
+    else:
+        newest = fetch_json(MLX_PYPI)["info"]["version"]
+        if newest in listed:
+            return ""
+    if declined(runtime, newest):
+        print(f"note: the PR adding {runtime} {newest} was closed unmerged; not proposing it again", file=sys.stderr)
+        return ""
+    return newest
 
 
 def append_llamacpp(version: str) -> None:
