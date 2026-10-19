@@ -19,10 +19,11 @@ pub fn json(catalog: &Catalog) -> Value {
         let Some(worker) = catalog.shipped(id) else { continue };
         let mut cmd = Command::new(&worker);
         crate::exec::without_secrets(&mut cmd).args(["compat", "--json"]);
-        let answer = match cmd.output() {
-            Ok(out) if out.status.success() => serde_json::from_slice::<Value>(&out.stdout)
+        let answer = match crate::exec::output_within(&mut cmd, crate::exec::ANSWER_WITHIN) {
+            Ok(None) => json!({"error": format!("{} compat did not answer within {}s", worker.display(), crate::exec::ANSWER_WITHIN.as_secs())}),
+            Ok(Some(out)) if out.status.success() => serde_json::from_slice::<Value>(&out.stdout)
                 .unwrap_or_else(|e| json!({"error": format!("{}: compat is not JSON: {e}", worker.display())})),
-            Ok(out) => json!({"error": format!("{} compat exited {}", worker.display(), out.status)}),
+            Ok(Some(out)) => json!({"error": format!("{} compat exited {}", worker.display(), out.status)}),
             Err(e) => json!({"error": format!("{}: {e}", worker.display())}),
         };
         runtimes.insert(id.name().into(), answer);

@@ -1,7 +1,7 @@
 //! `superfluid runtime versions <id> [--json]`, and the INSTALLABLE column of `superfluid runtimes`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use serde_json::{json, Value};
 use superfluid_adapter_kit::install::{Candidate, Host};
@@ -49,8 +49,10 @@ pub fn of_with(catalog: &Catalog, id: RuntimeId, named: Option<&Path>) -> Result
 
 fn asked(worker: &Path) -> Result<(String, Vec<Candidate>), String> {
     let mut cmd = Command::new(worker);
-    crate::exec::without_secrets(&mut cmd).arg("versions").stdin(Stdio::null());
-    let out = crate::exec::when_not_busy(|| cmd.output()).map_err(|e| format!("{} could not start: {e}", worker.display()))?;
+    crate::exec::without_secrets(&mut cmd).arg("versions");
+    let out = crate::exec::output_within(&mut cmd, crate::exec::ANSWER_WITHIN)
+        .map_err(|e| format!("{} could not start: {e}", worker.display()))?
+        .ok_or_else(|| format!("{} versions did not answer within {}s", worker.display(), crate::exec::ANSWER_WITHIN.as_secs()))?;
     if !out.status.success() {
         return Err(format!("{} lists no versions ({}): an adapter from before the listing existed", worker.display(), out.status));
     }
