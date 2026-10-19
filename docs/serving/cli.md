@@ -34,7 +34,7 @@ Flags take their value as `--flag value` or `--flag=value`. The last occurrence 
 | 1 | run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull, a shipped adapter that did not answer `compat` |
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
-| 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts superfluid can tell this from a flag it got wrong (2) |
+| 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts superfluid can tell this from a flag it got wrong (2), and from an install superfluid tried that failed (1) |
 
 ## `superfluid serve`
 

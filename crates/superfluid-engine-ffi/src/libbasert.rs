@@ -323,10 +323,12 @@ fn open_at(path: &Path) -> Result<Loaded, String> {
     }
     .ok()
     .map(|f| *f);
-    if get_config_into.is_none() {
-        // By value, the layout must match; by size, any layout that only appends does.
-        // SAFETY: a query with no arguments.
-        same_config_layout(unsafe { (sys.baseRT_model_config_sizeof)() }, &version, path)?;
+    // By value, the layout must match; by size, any layout that only appends does.
+    // SAFETY: a query with no arguments.
+    let theirs = unsafe { (sys.baseRT_model_config_sizeof)() };
+    match get_config_into {
+        None => same_config_layout(theirs, &version, path)?,
+        Some(_) => config_by_size_holds(theirs, &version, path)?,
     }
     Ok(Loaded { _lib: lib, sys, tick, get_config_into, info: Library { path: path.to_path_buf(), version, abi } })
 }
@@ -342,7 +344,11 @@ pub unsafe fn config_of(model: sys::baseRT_model_t) -> sys::BaseRTModelConfig {
         // byte arrays), and the library writes at most the size given.
         Some(read) => unsafe {
             let mut out: sys::BaseRTModelConfig = std::mem::zeroed();
-            read(model, (&mut out as *mut sys::BaseRTModelConfig).cast(), std::mem::size_of::<sys::BaseRTModelConfig>());
+            let theirs = read(model, (&mut out as *mut sys::BaseRTModelConfig).cast(), std::mem::size_of::<sys::BaseRTModelConfig>());
+            // A shorter struct than ours leaves zeros past its end, which the header has every
+            // field read as "not applicable"; the load refused one shorter than 0.4.0's, and
+            // the library answers the size it answered then.
+            debug_assert!(theirs >= CONFIG_BY_SIZE_FLOOR, "libbaseRT's configuration shrank to {theirs} bytes after the load checked it");
             out
         },
         // SAFETY: per this function's contract.
@@ -375,6 +381,22 @@ pub fn compatible(have: Option<u32>, want: Option<u32>, version: &str) -> Result
             "is {version}; this superfluid was built for {BUILT_FOR} (a different minor version may change the ABI)"
         )),
     }
+}
+
+/// `BaseRTModelConfig` as 0.4.0 lays it out, the first release read by size. Within one ABI
+/// the struct only grows from it, so a library that reads by size and has less is not of the
+/// ABI it states, and the zeros it would leave would stand for fields it should have.
+const CONFIG_BY_SIZE_FLOOR: usize = 1792;
+
+fn config_by_size_holds(theirs: usize, version: &str, path: &Path) -> Result<(), String> {
+    if theirs >= CONFIG_BY_SIZE_FLOOR {
+        return Ok(());
+    }
+    Err(format!(
+        "libbaseRT at {} ({version}) lays out a model's configuration in {theirs} bytes, fewer than the {CONFIG_BY_SIZE_FLOOR} \
+         of 0.4.0, the first to share it by size: it is not the library superfluid was built for ({BUILT_FOR})",
+        path.display()
+    ))
 }
 
 fn same_config_layout(theirs: usize, version: &str, path: &Path) -> Result<(), String> {
@@ -417,6 +439,17 @@ mod tests {
         let e = same_config_layout(ours + 20, "0.3.1", at).unwrap_err();
         assert!(e.starts_with("libbaseRT at /opt/x/libbaseRT.dylib (0.3.1) lays out a model's configuration in"), "{e}");
         assert!(e.contains(&format!("{} bytes where this superfluid expects {ours}", ours + 20)), "{e}");
+    }
+
+    #[test]
+    fn a_library_read_by_size_has_at_least_the_first_such_configuration() {
+        let at = Path::new("/opt/x/libbaseRT.dylib");
+        let ours = std::mem::size_of::<sys::BaseRTModelConfig>();
+        assert!(ours >= CONFIG_BY_SIZE_FLOOR, "the header only appends to 0.4.0's struct");
+        assert_eq!(config_by_size_holds(CONFIG_BY_SIZE_FLOOR, "0.4.0", at), Ok(()));
+        assert_eq!(config_by_size_holds(ours + 64, "0.4.9", at), Ok(()), "a newer library appended fields");
+        let e = config_by_size_holds(CONFIG_BY_SIZE_FLOOR - 4, "0.4.0", at).unwrap_err();
+        assert!(e.starts_with("libbaseRT at /opt/x/libbaseRT.dylib (0.4.0) lays out a model's configuration in"), "{e}");
     }
 
     #[test]

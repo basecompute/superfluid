@@ -16,4 +16,6 @@ They are here so the workspace builds with no engine on the machine:
 
 Update them together, from one engine release; the local changes in `build.rs` are the
 `cargo:include` line and a warning, not a panic, when the library directory is
-missing (a package verifies without the engine).
+missing (a package verifies without the engine), and in `baseRT.h` the note on
+`baseRT_abi_version`, which says 0.4.0, the release that brought it, where the
+copy taken said 0.3.1.

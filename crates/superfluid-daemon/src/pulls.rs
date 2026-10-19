@@ -50,18 +50,52 @@ impl PullFlags {
     }
 }
 
+/// Why [`ensure_installed`] has no runtime to give. A host that starts `serve` tells the two
+/// apart by exit code: a runtime not here, or that cannot run here, is a state of the machine
+/// (4); an install that was tried and failed, a download or an unpack, is a failure along the
+/// way (1), as a failed pull is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unready {
+    NotHere(String),
+    InstallFailed(String),
+}
+
+impl Unready {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Unready::NotHere(_) => 4,
+            Unready::InstallFailed(_) => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for Unready {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unready::NotHere(why) | Unready::InstallFailed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<Unready> for String {
+    fn from(u: Unready) -> String {
+        u.to_string()
+    }
+}
+
 /// The runtime, installed first when it never was (and `offline` does not forbid it), as
 /// `superfluid runtime install <id>` would.
-pub fn ensure_installed(catalog: &Catalog, runtime: RuntimeId, offline: bool) -> Result<crate::runtimes::Runtime, String> {
+pub fn ensure_installed(catalog: &Catalog, runtime: RuntimeId, offline: bool) -> Result<crate::runtimes::Runtime, Unready> {
     match catalog.require(runtime) {
         Ok(rt) => Ok(rt),
-        Err(why) if !never_installed(catalog, runtime) => Err(why),
-        Err(why) if offline => Err(format!("{why} (offline: nothing was installed)")),
+        Err(why) if !never_installed(catalog, runtime) => Err(Unready::NotHere(why)),
+        Err(why) if offline => Err(Unready::NotHere(format!("{why} (offline: nothing was installed)"))),
         Err(why) => match named_by_the_operator(catalog, runtime) {
-            Some(by) => Err(format!("{why} ({by} names the runtime to load, so none was installed)")),
+            Some(by) => Err(Unready::NotHere(format!("{why} ({by} names the runtime to load, so none was installed)"))),
             None => {
-                install(catalog, runtime).map_err(|e| format!("{why}; and installing it failed: {e}"))?;
-                catalog.require(runtime)
+                install(catalog, runtime).map_err(|e| Unready::InstallFailed(format!("{why}; and installing it failed: {e}")))?;
+                // Installed, yet not usable: what it found here, not the install, is why.
+                catalog.require(runtime).map_err(Unready::NotHere)
             }
         },
     }
@@ -254,6 +288,7 @@ case "$1" in
     fi ;;
   plan) echo '{{"describe":"a test machine","plans":[{{"id":"toyrt","version":"b1","backend":"cpu","install":"b1-cpu","assets":[],"tested":true,"why":"a test","extra":null}}]}}' ;;
   install)
+    [ -e "$self/failing-install" ] && exit 1
     dir="$3"
     mkdir -p "$dir/bin" "$dir/lib"
     echo payload > "$dir/lib/payload"
@@ -289,6 +324,14 @@ esac
         let cat = catalog();
         let e = pull(&cat, toy, "org/m", &PullFlags { offline: true, options: Vec::new() }).unwrap_err();
         assert!(e.contains("toyrt not found") && e.ends_with("(offline: nothing was installed)"), "{e}");
+        assert!(installed(&cat).is_empty());
+        // Not here is a state of the machine (4); an install tried and failed is a failure along the way (1).
+        assert_eq!(ensure_installed(&cat, toy, true).unwrap_err().exit_code(), 4);
+        std::fs::write(beside.join("failing-install"), b"").unwrap();
+        let e = ensure_installed(&cat, toy, false).unwrap_err();
+        assert!(matches!(&e, Unready::InstallFailed(why) if why.contains("installing it failed")), "{e:?}");
+        assert_eq!(e.exit_code(), 1);
+        std::fs::remove_file(beside.join("failing-install")).unwrap();
         assert!(installed(&cat).is_empty());
         let e = pull(&cat, RuntimeId::new("toyrt@b9-cpu"), "org/m", &online).unwrap_err();
         assert!(e.contains("b9-cpu"), "{e}");

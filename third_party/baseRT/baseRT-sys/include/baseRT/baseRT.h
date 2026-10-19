@@ -87,8 +87,8 @@ const char *baseRT_version_string(void);
 #define BASERT_ABI_VERSION 1
 
 /// Runtime-resolved ABI number of the loaded library (its
-/// BASERT_ABI_VERSION). Since 0.3.1: a library without this function is
-/// 0.3.0 or older, and its ABI is told by its major.minor alone.
+/// BASERT_ABI_VERSION). Since 0.4.0: a library without this function is
+/// 0.3.x or older, and its ABI is told by its major.minor alone.
 unsigned int baseRT_abi_version(void);
 
 /// Opaque model handle.

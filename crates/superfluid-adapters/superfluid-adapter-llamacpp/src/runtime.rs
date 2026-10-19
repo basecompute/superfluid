@@ -1664,6 +1664,7 @@ impl LlamaRuntime {
 
 #[cfg(test)]
 mod offload_device_tests {
+    use super::{offload_device, sizes_here, sys};
 
     #[test]
     fn exports_on_the_cpu_keep_to_host_memory_alone() {
@@ -1680,7 +1681,6 @@ mod offload_device_tests {
         let (some, _) = super::export_budget(4096, kib, Some((8 << 30, 16 << 30)));
         assert!(some > 0 && some <= 4096, "{some}");
     }
-    use super::{offload_device, sizes_here, sys};
 
     #[test]
     fn a_window_is_sized_on_a_checked_dedicated_gpu_only() {
