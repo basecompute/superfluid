@@ -23,7 +23,7 @@ pub fn json(catalog: &Catalog) -> Value {
             Ok(None) => json!({"error": format!("{} compat did not answer within {}s", worker.display(), crate::exec::ANSWER_WITHIN.as_secs())}),
             Ok(Some(out)) if out.status.success() => serde_json::from_slice::<Value>(&out.stdout)
                 .unwrap_or_else(|e| json!({"error": format!("{}: compat is not JSON: {e}", worker.display())})),
-            Ok(Some(out)) => json!({"error": format!("{} compat exited {}", worker.display(), out.status)}),
+            Ok(Some(out)) => json!({"error": format!("{} compat exited {}{}", worker.display(), out.status, crate::exec::stderr_tail(&out.stderr))}),
             Err(e) => json!({"error": format!("{}: {e}", worker.display())}),
         };
         runtimes.insert(id.name().into(), answer);
@@ -31,9 +31,14 @@ pub fn json(catalog: &Catalog) -> Value {
     json!({"superfluid": env!("CARGO_PKG_VERSION"), "runtimes": runtimes})
 }
 
+/// The runtimes whose shipped adapter did not answer. `superfluid compat` exits 1 when there is one, so a release
+/// whose adapter is broken fails where it writes compat.json instead of publishing an error for a host to read.
+pub fn unanswered(c: &Value) -> Vec<&str> {
+    c["runtimes"].as_object().map(|r| r.iter().filter(|(_, v)| v["error"].is_string()).map(|(id, _)| id.as_str()).collect()).unwrap_or_default()
+}
+
 /// `superfluid compat`, for a person.
-pub fn text(catalog: &Catalog) -> String {
-    let c = json(catalog);
+pub fn text(c: &Value) -> String {
     let mut out = format!("{}\n", crate::cli::version());
     let Some(runtimes) = c["runtimes"].as_object() else { return out };
     for (id, r) in runtimes {
@@ -98,6 +103,9 @@ mod tests {
         let broken = libexec.join("superfluid-worker-oldrt");
         std::fs::write(&broken, "#!/bin/sh\nexit 2\n").unwrap();
         std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fails = libexec.join("superfluid-worker-failrt");
+        std::fs::write(&fails, "#!/bin/sh\necho 'superfluid-worker-failrt: no recipe.json beside the adapter' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fails, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cat = Catalog::new(root.join("home"), Some(beside.clone()), beside.join("superfluid-workerd"));
         std::env::set_var("SUPERFLUID_COMPAT_SENTINEL_TOKEN", "hunter2");
         let c = json(&cat);
@@ -109,14 +117,17 @@ mod tests {
             assert!(c["runtimes"][id.name()].is_object(), "the linked {} adapter answers in process: {c}", id.name());
         }
         assert!(c["runtimes"]["oldrt"]["error"].as_str().unwrap().contains("exited"), "{c}");
+        assert_eq!(c["runtimes"]["failrt"]["error"].as_str().unwrap().rsplit(": ").next(), Some("no recipe.json beside the adapter"), "{c}");
+        assert_eq!(unanswered(&c), ["failrt", "oldrt"], "{c}");
         #[cfg(feature = "basert")]
         {
             assert!(c["runtimes"]["basert"]["basert_version"].is_string(), "{c}");
             assert!(c["runtimes"]["basert"]["pinned_engines"].is_array(), "{c}");
         }
-        let t = text(&cat);
+        let t = text(&c);
         assert!(t.contains("toyrt: installs on its own: t2, t1"), "{t}");
         assert!(t.contains("oldrt: ") && t.contains("exited"), "{t}");
+        assert!(unanswered(&json!({"runtimes": {"toyrt": {"tested": []}}})).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

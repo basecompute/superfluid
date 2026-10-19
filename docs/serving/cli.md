@@ -31,7 +31,7 @@ Flags take their value as `--flag value` or `--flag=value`. The last occurrence 
 | code | meaning |
 |---|---|
 | 0 | normal exit (closed socket, quit monitor, finished drain) |
-| 1 | run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull |
+| 1 | run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull, a shipped adapter that did not answer `compat` |
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
 | 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts superfluid can tell this from a flag it got wrong (2) |
@@ -255,7 +255,7 @@ See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the kno
 superfluid compat [--json]
 ```
 
-What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md). For one runtime on this machine, `superfluid runtime versions <id>` says which of those versions install here.
+What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part; one that fails or does not answer within a minute is reported under its runtime as `error`, with the last lines it wrote to stderr, and `superfluid compat` then exits 1 after printing the rest. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md). For one runtime on this machine, `superfluid runtime versions <id>` says which of those versions install here.
 
 ## `superfluid self`
 
