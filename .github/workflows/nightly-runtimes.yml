@@ -26,10 +26,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: nightly-runtimes
-  cancel-in-progress: false
-
 env:
   # A small GGUF the llama.cpp adapter's model tests run on; without one they
   # skip, and a pass would say little.
@@ -159,8 +155,15 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+    # Runs overlap, not their records: a run waits only to write a runtime's PR or
+    # issue, so a macOS leg queued for a day (its runner offline) holds up no other
+    # run, nor the MLX record.
+    concurrency:
+      group: nightly-record-llamacpp
+      cancel-in-progress: false
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
+      RESULT: ${{ needs.llamacpp.result }}
       GH_TOKEN: ${{ github.token }}
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       BASE: ${{ github.ref_name }}
@@ -187,8 +190,15 @@ jobs:
           body="$p1"$'\n\n'"$p2"
           gh pr create --base "$BASE" --head "$branch" --title "llamacpp: tested with $BUILD" --body "$body"
 
+      # Only a failure says the build breaks the adapter. A cancelled run, or the macOS
+      # leg expiring in the queue with its runner offline (GitHub cancels it after a
+      # day), says nothing about it, and the next night tests the newest build again.
+      - name: Did not finish, so record nothing
+        if: needs.llamacpp.result != 'success' && needs.llamacpp.result != 'failure'
+        run: echo "::warning::the tests on llama.cpp $BUILD did not finish ($RESULT); nothing is recorded"
+
       - name: Failed, so open an issue
-        if: needs.llamacpp.result != 'success'
+        if: needs.llamacpp.result == 'failure'
         run: |
           set -euo pipefail
           title="llama.cpp $BUILD breaks the adapter"
@@ -290,6 +300,9 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+    concurrency:
+      group: nightly-record-mlx
+      cancel-in-progress: false
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
       RESULT: ${{ needs.mlx.result }}
@@ -325,8 +338,12 @@ jobs:
           body="$p1"$'\n\n'"$p2"
           gh pr create --base "$BASE" --head "$branch" --title "mlx: tested with $VERSION" --body "$body"
 
+      - name: Did not finish, so record nothing
+        if: needs.mlx.result != 'success' && needs.mlx.result != 'failure'
+        run: echo "::warning::the tests on MLX $VERSION did not finish ($RESULT); nothing is recorded"
+
       - name: Failed, so open an issue
-        if: needs.mlx.result != 'success'
+        if: needs.mlx.result == 'failure'
         # Among the failures: an MLX that needs a newer Python than the
         # adapter ships, which is a change to the worker's build, not a pin.
         run: |
