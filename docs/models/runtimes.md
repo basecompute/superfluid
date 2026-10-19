@@ -159,6 +159,8 @@ The knobs of llama.cpp's model and context parameters that keep their meaning un
 | `--llamacpp-yarn-ext-factor`, `--llamacpp-yarn-attn-factor`, `--llamacpp-yarn-beta-fast`, `--llamacpp-yarn-beta-slow` | F | model's | YaRN extrapolation mix, magnitude scale, low and high correction dimensions; a negative value takes the model's, as in llama.cpp. |
 | `--llamacpp-yarn-orig-ctx` | N | model's | YaRN original context size; 0 takes the model's. |
 
+KV state saved from a run (a parked session) is keyed by the weights and by the RoPE, YaRN and cache-type settings in effect, so a run with other settings never reads it. A setting given as llama.cpp's default (`--llamacpp-cache-type-k f16`) or as its "the model's" (`--llamacpp-rope-freq-base 0`) runs as a plain run does and reads a plain run's state.
+
 Not options, by design: `--ctx-size` and `--parallel` are `--max-context` and `--max-batch`; `--kv-unified` is the adapter's choice of KV layout; metadata and tensor overrides (`--override-kv`, `--override-tensor`, `--cpu-moe`) and `--device` take backend handles the worker does not expose yet.
 
 ### mlx options
