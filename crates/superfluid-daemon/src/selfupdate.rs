@@ -64,6 +64,12 @@ pub fn running() -> &'static str {
 }
 
 
+/// Whether `v` can name a version directory: it starts with a digit and holds only what a version does, so it is one
+/// path component and never empty, `.` or `..`, which would make the version's directory the layout or above it.
+fn is_version(v: &str) -> bool {
+    v.starts_with(|c: char| c.is_ascii_digit()) && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
 /// `$SUPERFLUID_HOME/versions`: a directory per release, `current`, `previous`, and `prefix` naming the bin directory that links here.
 pub struct Versions {
     pub dir: PathBuf,
@@ -319,6 +325,9 @@ fn release_of(r: &Value, tar: &str, target: &str) -> Option<Release> {
         return None;
     }
     let version = r["tag_name"].as_str()?.trim_start_matches('v').to_string();
+    if !is_version(&version) {
+        return None;
+    }
     let assets = r["assets"].as_array()?;
     let url = |name: &str| assets.iter().find(|a| a["name"] == name).and_then(|a| a["browser_download_url"].as_str()).map(str::to_string);
     let size = assets.iter().find(|a| a["name"] == tar).and_then(|a| a["size"].as_u64());
@@ -574,7 +583,7 @@ fn output_within(cmd: &mut Command, limit: Duration) -> Result<Output, String> {
 fn version_of(binary: &Path) -> Result<String, String> {
     let out = output_within(Command::new(binary).arg("--version"), PROBE_TIMEOUT)?;
     let text = String::from_utf8_lossy(&out.stdout);
-    text.split_whitespace().nth(1).map(str::to_string).filter(|_| out.status.success()).ok_or_else(|| {
+    text.split_whitespace().nth(1).map(str::to_string).filter(|v| out.status.success() && is_version(v)).ok_or_else(|| {
         format!("{} did not say its version ({}): {}", binary.display(), out.status, String::from_utf8_lossy(&out.stderr).trim())
     })
 }
@@ -861,6 +870,9 @@ pub fn use_version(home: &Path, catalog: &Catalog, exe: &Path, v: &str) -> Resul
         _ => Versions::of(home),
     };
     let v = v.trim_start_matches('v');
+    if !is_version(v) {
+        return Err(format!("{v:?} is not a version (see `superfluid self list`)"));
+    }
     let mut report = Report::default();
     std::fs::create_dir_all(&versions.dir).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
     let _one_at_a_time = crate::pulls::Lock::take(&versions.dir, "self", "switch of superfluid")?;
@@ -1212,6 +1224,10 @@ mod tests {
         assert_eq!(found.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(), ["0.2.0", "0.1.3", "0.1.2"], "newest first, the draft left out");
         assert_eq!((found[0].abi, found[1].abi, found[2].abi), (Some(2), Some(1), None));
         assert_eq!(found[1].published, "2026-10-01");
+        let odd = json!([{"tag_name": "v", "assets": []}, {"tag_name": "v../..", "assets": []}, {"tag_name": "vnext", "assets": []}]);
+        assert_eq!(odd.as_array().unwrap().iter().filter_map(|r| release_of(r, "x.tar.gz", target().unwrap())).count(), 0, "a tag that is no version names no directory");
+        assert!(["0.1.3", "0.2.0-rc.1", "1.0.0+build.5"].iter().all(|v| is_version(v)));
+        assert!(["", ".", "..", "../0.1.3", "0.1.3/..", "v0.1.3"].iter().all(|v| !is_version(v)));
         let compat = |url: &str| get_json(url, 1).ok();
         assert_eq!(newest(&found, &Engine::None, None, &no_compat).map(|r| r.version.as_str()), Some("0.2.0"));
         assert_eq!(newest(&found, &Engine::Abi(1), None, &no_compat).map(|r| r.version.as_str()), Some("0.1.3"), "by the marker alone");
@@ -1293,6 +1309,7 @@ mod tests {
         std::fs::write(versions.version_dir("0.1.3").join("keep"), "").unwrap();
         let r = use_version(&home, &catalog, &exe, "0.1.3").unwrap();
         assert!(r.changed && versions.current().as_deref() == Some("0.1.3"));
+        assert!(use_version(&home, &catalog, &exe, "..").unwrap_err().contains("is not a version"));
         assert_eq!(list(&home, &exe).lines().filter(|l| l.contains("current") || l.contains("previous")).count(), 2);
         let unreachable = Options { source: Some("/nonexistent/releases.json".into()), ..Options::default() };
         assert!(update(&home, &catalog, &exe, &unreachable).unwrap_err().contains("releases.json"), "the listing is needed for an update");
@@ -1606,6 +1623,8 @@ mod tests {
         assert!(probe(&versions, "0.5.0", &home, &Engine::None).is_ok(), "no engine in use: starting is enough");
         let e = probe(&versions, "0.5.0", &home, &Engine::Abi(1)).unwrap_err();
         assert!(e.contains("cannot drive the engine here: libbaseRT states ABI 2"), "{e}");
+        std::fs::write(tree.join("bin").join("superfluid"), "#!/bin/sh\necho 'superfluid ..'\n").unwrap();
+        assert!(probe(&versions, "0.5.0", &home, &Engine::None).unwrap_err().contains("did not say its version"));
         std::fs::write(tree.join("bin").join("superfluid"), "#!/bin/sh\necho 'superfluid 0.4.9'\n").unwrap();
         assert!(probe(&versions, "0.5.0", &home, &Engine::None).unwrap_err().contains("says it is 0.4.9"));
         // A copy that hangs is killed, so the lock it runs under is let go.
