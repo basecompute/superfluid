@@ -565,6 +565,10 @@ fn probe(versions: &Versions, v: &str, home: &Path, engine: &Engine) -> Result<(
 
 /// The same proof of a copy wherever it is, so a replacement is proved before anything it replaces is touched.
 fn probe_binary(binary: &Path, v: &str, home: &Path, engine: &Engine) -> Result<(), String> {
+    // A copy cut short can hold the command and nothing beside it; it starts, and its server finds no workerd.
+    if !binary.with_file_name("superfluid-workerd").is_file() {
+        return Err(format!("{} has no superfluid-workerd beside it", binary.display()));
+    }
     let said = version_of(binary)?;
     if said != v {
         return Err(format!("{} says it is {said}, not {v}", binary.display()));
@@ -643,27 +647,46 @@ fn place(versions: &Versions, release: &Release, report: &mut Report) -> Result<
     Ok(())
 }
 
-/// The install script's in-place copy, kept under the layout as the version to go back to.
+/// The install script's in-place copy, kept under the layout as the version to go back to. It is copied beside the
+/// layout and moved in whole, so a copy cut short (a full disk, an interrupt) is never taken for the version and its
+/// original workers are not removed for it; a version missing a file of the copy is copied again.
 fn keep_in_place(versions: &Versions, prefix: &Path) -> Result<String, String> {
     let bin = prefix.join("bin");
+    let libexec = prefix.join("libexec").join("superfluid");
     let old = version_of(&bin.join("superfluid"))?;
-    if versions.binary(&old).is_file() {
+    let dest = versions.version_dir(&old);
+    if holds_in_place(&dest, &bin, &libexec) {
         return Ok(old);
     }
-    let dest = versions.version_dir(&old);
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::create_dir_all(dest.join("bin")).map_err(|e| format!("{}: {e}", dest.display()))?;
-    for name in LINKED {
-        let src = bin.join(name);
-        if src.is_file() {
-            std::fs::copy(&src, dest.join("bin").join(name)).map_err(|e| format!("{}: {e}", src.display()))?;
+    let staging = versions.dir.join(".staging").join(format!("kept-{old}"));
+    let _ = std::fs::remove_dir_all(&staging);
+    let copied = (|| {
+        std::fs::create_dir_all(staging.join("bin")).map_err(|e| format!("{}: {e}", staging.display()))?;
+        for name in LINKED {
+            let src = bin.join(name);
+            if src.is_file() {
+                std::fs::copy(&src, staging.join("bin").join(name)).map_err(|e| format!("{}: {e}", src.display()))?;
+            }
         }
+        if libexec.is_dir() {
+            copy_tree(&libexec, &staging.join("libexec").join("superfluid"))?;
+        }
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::rename(&staging, &dest).map_err(|e| format!("{} -> {}: {e}", staging.display(), dest.display()))
+    })();
+    if copied.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
     }
-    let libexec = prefix.join("libexec").join("superfluid");
-    if libexec.is_dir() {
-        copy_tree(&libexec, &dest.join("libexec").join("superfluid"))?;
-    }
-    Ok(old)
+    copied.map(|()| old)
+}
+
+/// Whether `dest` holds every command and worker of the in-place copy in `bin` and `libexec`.
+fn holds_in_place(dest: &Path, bin: &Path, libexec: &Path) -> bool {
+    let commands = LINKED.iter().filter(|name| bin.join(name).is_file()).all(|name| dest.join("bin").join(name).is_file());
+    let workers = std::fs::read_dir(libexec)
+        .map(|rd| rd.flatten().all(|e| dest.join("libexec").join("superfluid").join(e.file_name()).exists()))
+        .unwrap_or(true);
+    dest.join("bin").join("superfluid").is_file() && commands && workers
 }
 
 /// The install script's in-place copies become links into the layout (see `Versions::link` for a running server).
@@ -1434,6 +1457,29 @@ mod tests {
         }
         assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists());
         assert!(r.lines.iter().any(|l| l.contains("kept as 0.1.2")), "{:?}", r.lines);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_half_finished_copy_of_the_install_scripts_copy_is_copied_again_not_taken_for_it() {
+        let dir = scratch("half-kept");
+        let (home, prefix) = (dir.join("home"), dir.join("local"));
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let versions = Versions::of(&home);
+        release_tree(&prefix, "0.1.2");
+        // What a copy cut short leaves: the command and nothing beside it.
+        std::fs::create_dir_all(versions.version_dir("0.1.2").join("bin")).unwrap();
+        std::fs::copy(prefix.join("bin").join("superfluid"), versions.binary("0.1.2")).unwrap();
+        let e = use_version(&home, &catalog, &versions.binary("0.1.2"), "0.1.2").unwrap_err();
+        assert!(e.contains("no superfluid-workerd"), "{e}");
+        let tree = release_tree(&dir.join("unpacked").join("superfluid-x"), "0.1.3");
+        let r = install_from(&home, &catalog, &tree, Some(&prefix.join("bin"))).unwrap();
+        assert_eq!(versions.previous().as_deref(), Some("0.1.2"), "{:?}", r.lines);
+        assert!(versions.version_dir("0.1.2").join("bin").join("superfluid-workerd").is_file(), "{:?}", r.lines);
+        assert!(versions.version_dir("0.1.2").join("libexec").join("superfluid").join("superfluid-worker-toy").exists(), "the workers came along before the originals went");
+        assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists());
+        assert!(!versions.dir.join(".staging").join("kept-0.1.2").exists());
+        assert!(use_version(&home, &catalog, &versions.binary("0.1.3"), "0.1.2").unwrap().changed);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
