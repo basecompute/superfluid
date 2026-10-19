@@ -21,6 +21,8 @@ VERSION="${SUPERFLUID_VERSION:-latest}"
 
 say() { printf 'superfluid: %s\n' "$*"; }
 fail() { printf 'superfluid: %s\n' "$*" >&2; exit 1; }
+# The prefix as a person reads it, ~ for $HOME; spelled out, as bash's ${PREFIX/#$HOME/~} stops dash.
+shown() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) target=aarch64-apple-darwin ;;
@@ -77,7 +79,7 @@ elif [ -L "$PREFIX/bin/superfluid" ]; then
     || fail "the installed superfluid did not place the release (see above)"
   say "placed by the installed superfluid, since this release cannot place itself"
 else
-  say "this release places itself the old way: copied into ${PREFIX/#$HOME/~}/bin"
+  say "this release places itself the old way: copied into $(shown "$PREFIX")/bin"
   mkdir -p "$PREFIX/bin" "$PREFIX/libexec/superfluid"
   for f in "$tmp/$name"/bin/*; do
     [ -L "$PREFIX/bin/$(basename "$f")" ] && rm -f "$PREFIX/bin/$(basename "$f")"
@@ -87,7 +89,7 @@ else
   chmod +x "$PREFIX"/bin/superfluid* "$PREFIX"/libexec/superfluid/superfluid-worker-*
 fi
 
-say "installed $("$PREFIX/bin/superfluid" --version) to ${PREFIX/#$HOME/~}/bin"
+say "installed $("$PREFIX/bin/superfluid" --version) to $(shown "$PREFIX")/bin"
 
 # The baseRT engine ships for Apple silicon and Linux arm64 (CUDA); install it
 # where it runs so .base bundles serve without a first-use wait. llama.cpp and
