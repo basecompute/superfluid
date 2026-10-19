@@ -131,6 +131,32 @@ pub fn device_free_bytes() -> u64 {
     offload_memory().map_or(0, |m| m.free)
 }
 
+/// Cells of state the cache may keep beyond the pool as llama.cpp's own export,
+/// with the bound worded for the log. Exports live in host memory: as many cells
+/// as the pool has, within EXPORT_BYTES. With the model on an accelerator
+/// (`device`: its free bytes now, and its total) that memory is the one the pool
+/// was sized in, so the exports also keep to the pool's share of what is free
+/// past its headroom. With the model on the CPU, by choice or because the host
+/// has no accelerator, the host bound is the whole rule: a device the host does
+/// not have reports no free memory, which is no reason to keep nothing.
+fn export_budget(n_ctx: u64, kv_bytes_per_token: u64, device: Option<(u64, u64)>) -> (u64, String) {
+    let affordable = EXPORT_BYTES / kv_bytes_per_token.max(1);
+    let Some((free_now, total)) = device else {
+        return (n_ctx.min(affordable), "at most 8 GiB".to_string());
+    };
+    let headroom = superfluid_executor::sizing::headroom_bytes((superfluid_executor::sizing::PLANNING_SHARE * total as f64) as u64);
+    let free = free_now.saturating_sub(headroom);
+    // budgeted_cells reads 0 free bytes as unknown and grants all.
+    let granted = if free == 0 { 0 } else { superfluid_executor::sizing::budgeted_cells(n_ctx, 0, kv_bytes_per_token, free).min(affordable) };
+    let within = format!(
+        "at most 8 GiB, and {:.0}% of the {:.1} GB free past a {:.1} GB headroom",
+        100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
+        free as f64 / 1e9,
+        headroom as f64 / 1e9
+    );
+    (granted, within)
+}
+
 struct OffloadMemory {
     backend: String,
     integrated: bool,
@@ -737,63 +763,80 @@ impl LlamaRuntime {
             std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4)
         };
         let make_context = |cells: u32| {
-            // SAFETY: model is live; the params are plain data.
+            // The context parameters, filled for whichever layout this llama.cpp has
+            // (see `sys::ContextLayout`): the same assignments, the right struct.
+            macro_rules! fill {
+                ($cp:ident) => {{
+                    $cp.n_ctx = cells;
+                    $cp.n_batch = cfg.n_batch;
+                    $cp.n_ubatch = cfg.n_ubatch.min(cfg.n_batch);
+                    $cp.n_seq_max = n_seq_max;
+                    // Rows for every position of a draft being verified, not only
+                    // its last (`step_rows`).
+                    $cp.n_outputs_max_per_seq = superfluid_executor::primitives::VERIFY_ROWS_MAX;
+                    $cp.n_threads = threads;
+                    $cp.n_threads_batch = if cfg.n_threads_batch > 0 { cfg.n_threads_batch } else { threads };
+                    $cp.kv_unified = !streams;
+                    $cp.no_perf = true;
+                    if let Some(t) = cfg.flash_attn {
+                        $cp.flash_attn_type = t;
+                    }
+                    if let Some(t) = cfg.type_k {
+                        $cp.type_k = t;
+                    }
+                    if let Some(t) = cfg.type_v {
+                        $cp.type_v = t;
+                    }
+                    if let Some(on) = cfg.offload_kqv {
+                        $cp.offload_kqv = on;
+                    }
+                    if let Some(on) = cfg.op_offload {
+                        $cp.op_offload = on;
+                    }
+                    if let Some(on) = cfg.swa_full {
+                        $cp.swa_full = on;
+                    }
+                    if let Some(t) = cfg.rope_scaling {
+                        $cp.rope_scaling_type = t;
+                    }
+                    if let Some(f) = cfg.rope_freq_base {
+                        $cp.rope_freq_base = f;
+                    }
+                    if let Some(f) = cfg.rope_freq_scale {
+                        $cp.rope_freq_scale = f;
+                    }
+                    if let Some(f) = cfg.yarn_ext_factor {
+                        $cp.yarn_ext_factor = f;
+                    }
+                    if let Some(f) = cfg.yarn_attn_factor {
+                        $cp.yarn_attn_factor = f;
+                    }
+                    if let Some(f) = cfg.yarn_beta_fast {
+                        $cp.yarn_beta_fast = f;
+                    }
+                    if let Some(f) = cfg.yarn_beta_slow {
+                        $cp.yarn_beta_slow = f;
+                    }
+                    if let Some(n) = cfg.yarn_orig_ctx {
+                        $cp.yarn_orig_ctx = n;
+                    }
+                }};
+            }
+            // SAFETY: model is live; the params are plain data, read from and handed
+            // back to the library in its own layout.
             let ctx = unsafe {
-                let mut cp = sys::llama_context_default_params();
-                cp.n_ctx = cells;
-                cp.n_batch = cfg.n_batch;
-                cp.n_ubatch = cfg.n_ubatch.min(cfg.n_batch);
-                cp.n_seq_max = n_seq_max;
-                // Rows for every position of a draft being verified, not only
-                // its last (`step_rows`).
-                cp.n_outputs_max_per_seq = superfluid_executor::primitives::VERIFY_ROWS_MAX;
-                cp.n_threads = threads;
-                cp.n_threads_batch = if cfg.n_threads_batch > 0 { cfg.n_threads_batch } else { threads };
-                cp.kv_unified = !streams;
-                cp.no_perf = true;
-                if let Some(t) = cfg.flash_attn {
-                    cp.flash_attn_type = t;
+                match sys::context_layout() {
+                    sys::ContextLayout::V1 => {
+                        let mut cp = sys::llama_context_default_params();
+                        fill!(cp);
+                        sys::llama_init_from_model(model, cp)
+                    }
+                    sys::ContextLayout::V2 => {
+                        let mut cp = sys::llama_context_default_params_v2();
+                        fill!(cp);
+                        sys::llama_init_from_model_v2(model, cp)
+                    }
                 }
-                if let Some(t) = cfg.type_k {
-                    cp.type_k = t;
-                }
-                if let Some(t) = cfg.type_v {
-                    cp.type_v = t;
-                }
-                if let Some(on) = cfg.offload_kqv {
-                    cp.offload_kqv = on;
-                }
-                if let Some(on) = cfg.op_offload {
-                    cp.op_offload = on;
-                }
-                if let Some(on) = cfg.swa_full {
-                    cp.swa_full = on;
-                }
-                if let Some(t) = cfg.rope_scaling {
-                    cp.rope_scaling_type = t;
-                }
-                if let Some(f) = cfg.rope_freq_base {
-                    cp.rope_freq_base = f;
-                }
-                if let Some(f) = cfg.rope_freq_scale {
-                    cp.rope_freq_scale = f;
-                }
-                if let Some(f) = cfg.yarn_ext_factor {
-                    cp.yarn_ext_factor = f;
-                }
-                if let Some(f) = cfg.yarn_attn_factor {
-                    cp.yarn_attn_factor = f;
-                }
-                if let Some(f) = cfg.yarn_beta_fast {
-                    cp.yarn_beta_fast = f;
-                }
-                if let Some(f) = cfg.yarn_beta_slow {
-                    cp.yarn_beta_slow = f;
-                }
-                if let Some(n) = cfg.yarn_orig_ctx {
-                    cp.yarn_orig_ctx = n;
-                }
-                sys::llama_init_from_model(model, cp)
             };
             if ctx.is_null() {
                 // SAFETY: model is live and owned here.
@@ -854,41 +897,15 @@ impl LlamaRuntime {
         let cache_exported_cells = if cfg.cache_exported_cells > 0 {
             cfg.cache_exported_cells as u64
         } else {
-            let affordable = EXPORT_BYTES / kv_bytes_per_token.max(1);
-            if cfg.n_gpu_layers == 0 {
-                let granted = (n_ctx as u64).min(affordable);
-                if granted < n_ctx as u64 {
-                    eprintln!(
-                        "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool (at most 8 GiB)",
-                        superfluid_executor::sizing::tokens(granted),
-                    );
-                }
-                granted
-            } else {
-                // Exports live in the memory the pool shares on unified-memory
-                // devices: they leave the headroom the pool was sized to leave.
-                let headroom = device.as_ref().map_or(0, |d| {
-                    superfluid_executor::sizing::headroom_bytes((superfluid_executor::sizing::PLANNING_SHARE * d.total as f64) as u64)
-                });
-                let free = device_free_bytes().saturating_sub(headroom);
-                // budgeted_cells reads 0 free bytes as unknown and grants all.
-                let granted = if free == 0 {
-                    0
-                } else {
-                    superfluid_executor::sizing::budgeted_cells(n_ctx as u64, 0, kv_bytes_per_token, free).min(affordable)
-                };
-                if granted < n_ctx as u64 {
-                    eprintln!(
-                        "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool \
-                         (at most 8 GiB, and {:.0}% of the {:.1} GB free past a {:.1} GB headroom)",
-                        superfluid_executor::sizing::tokens(granted),
-                        100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
-                        free as f64 / 1e9,
-                        headroom as f64 / 1e9,
-                    );
-                }
-                granted
+            let on_device = device.as_ref().map(|d| (device_free_bytes(), d.total));
+            let (granted, within) = export_budget(n_ctx as u64, kv_bytes_per_token, on_device);
+            if granted < n_ctx as u64 {
+                eprintln!(
+                    "superfluid-workerd: llamacpp prefix cache: up to {} tokens kept in host memory beyond the pool ({within})",
+                    superfluid_executor::sizing::tokens(granted),
+                );
             }
+            granted
         };
         let desc = RuntimeDescriptor {
             runtime_id: "llamacpp".into(),
@@ -1640,6 +1657,22 @@ impl LlamaRuntime {
 
 #[cfg(test)]
 mod offload_device_tests {
+
+    #[test]
+    fn exports_on_the_cpu_keep_to_host_memory_alone() {
+        // A token costs 1 KiB, so 8 GiB holds 8 Mi cells.
+        let kib = 1024u64;
+        let (cells, within) = super::export_budget(4096, kib, None);
+        assert_eq!((cells, within.as_str()), (4096, "at most 8 GiB"), "on the CPU, by choice or for want of an accelerator: the pool's cells");
+        assert_eq!(super::export_budget(1 << 24, kib, None).0, 1 << 23, "within 8 GiB");
+        // On an accelerator the pool's share of the free memory past its headroom bounds
+        // them too, and no free memory grants nothing.
+        let (none, within) = super::export_budget(4096, kib, Some((0, 16 << 30)));
+        assert_eq!(none, 0, "{within}");
+        assert!(within.contains("free past a"), "{within}");
+        let (some, _) = super::export_budget(4096, kib, Some((8 << 30, 16 << 30)));
+        assert!(some > 0 && some <= 4096, "{some}");
+    }
     use super::{offload_device, sizes_here, sys};
 
     #[test]

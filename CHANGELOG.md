@@ -9,6 +9,7 @@
 - `superfluid serve` exits 4 when the runtime for the model is not installed or cannot run here, distinct from a usage error (2).
 - A runtime's own knobs are given to `serve` as `--<runtime>-<name> <value>`: llama.cpp's model and context parameters (`--llamacpp-n-gpu-layers`, `--llamacpp-flash-attn`, `--llamacpp-cache-type-k`, `--llamacpp-load-mode`, the RoPE and YaRN settings, 26 in all) and the MLX executor's (`--mlx-prefill-chunk`, `--mlx-cache-limit-mb`, `--mlx-venv`). An adapter declares them with `Runtime::options`, the daemon checks each value against the declaration before a worker starts, and `superfluid runtime options <id>` lists them; `superfluid runtimes --json` carries them as `options`.
 - superfluid finds its workerd and adapters beside its real executable, so a symlink or a shim on `PATH` keeps the worker process.
+- On a host without an accelerator, llama.cpp's prefix cache keeps state beyond the pool in host memory within 8 GiB, as it does with the model on the CPU by choice; it kept nothing, having read the free memory of a device the host does not have as none.
 - [Hosting superfluid in another product](docs/serving/hosts.md) documents the contract a host builds on.
 
 ## 0.1.0
