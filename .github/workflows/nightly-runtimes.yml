@@ -43,6 +43,7 @@ jobs:
     outputs:
       llamacpp: ${{ steps.llamacpp.outputs.version }}
       mlx: ${{ steps.mlx.outputs.version }}
+      mlx_lm: ${{ steps.mlx.outputs.mlx_lm }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -245,6 +246,9 @@ jobs:
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
+      # The mlx-lm to test with: a release of it alone is new upstream too. Empty
+      # for a requested mlx, which gets whichever mlx-lm pip resolves for it.
+      MLX_LM: ${{ needs.pick.outputs.mlx_lm }}
     steps:
       # The tests run an untested MLX from PyPI: the job's token is not left in .git/config for it.
       - uses: actions/checkout@v4
@@ -283,8 +287,11 @@ jobs:
           py="$SUPERFLUID_MLX_VENV/bin/python"
           [ -x "$py" ] || py="$SUPERFLUID_MLX_VENV/bin/python3"
           "$py" -m pip --version >/dev/null 2>&1 || "$py" -m ensurepip --upgrade >/dev/null
+          # An mlx the recipe lists installed its pinned mlx-lm above; --ignore-installed
+          # would lay a newer one over it and leave both versions' metadata.
+          "$py" -m pip uninstall -y mlx-lm >/dev/null
           "$py" -m pip install --ignore-installed --only-binary=:all: \
-            --report "$RUNNER_TEMP/mlx-report.json" "mlx==$VERSION" mlx-lm >/dev/null
+            --report "$RUNNER_TEMP/mlx-report.json" "mlx==$VERSION" "mlx-lm${MLX_LM:+==$MLX_LM}" >/dev/null
           "$py" -c 'import mlx.core, mlx_lm' || { echo "::error::the reinstalled environment does not import mlx and mlx-lm"; exit 1; }
           python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["install"]), "distributions installed and reported")' "$RUNNER_TEMP/mlx-report.json"
 
@@ -324,6 +331,7 @@ jobs:
       cancel-in-progress: false
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
+      MLX_LM: ${{ needs.pick.outputs.mlx_lm }}
       RESULT: ${{ needs.mlx.result }}
       GH_TOKEN: ${{ github.token }}
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -342,37 +350,39 @@ jobs:
         run: |
           set -euo pipefail
           # One branch and one open PR, as for llama.cpp: a newer version that passes
-          # replaces the one the open PR proposes.
+          # replaces the one the open PR proposes. The mlx-lm is the one the tests ran with.
+          report="$RUNNER_TEMP/mlx/mlx-report.json"
+          mlx_lm=$(jq -r '.install[].metadata | select(.name | ascii_downcase | gsub("[-_.]+"; "-") == "mlx-lm") | .version' "$report")
           branch=nightly/mlx
-          title="mlx: tested with $VERSION"
+          title="mlx: tested with $VERSION and mlx-lm $mlx_lm"
           open=$(gh pr list --head "$branch" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
           number=${open%% *}
           if [ -n "$open" ] && [ "${open#* }" = "$title" ]; then
-            echo "PR #$number already proposes MLX $VERSION"
+            echo "PR #$number already proposes MLX $VERSION with mlx-lm $mlx_lm"
             exit 0
           fi
           git switch -C "$branch"
-          python3 scripts/nightly_runtimes.py mlx append "$VERSION" --report "$RUNNER_TEMP/mlx/mlx-report.json"
+          python3 scripts/nightly_runtimes.py mlx append "$VERSION" --report "$report"
           if git diff --quiet; then
-            echo "the recipe on $BASE already lists MLX $VERSION"
+            echo "the recipe on $BASE already lists MLX $VERSION with mlx-lm $mlx_lm"
             exit 0
           fi
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "$title"
           git push -f origin "$branch"
-          p1="The nightly job installed MLX $VERSION untested on macos-14 and ran the adapter's tests on it: $RUN"
-          p2="This adds the version to the adapter's recipe as a tested one: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
+          p1="The nightly job installed MLX $VERSION with mlx-lm $mlx_lm untested on macos-14 and ran the adapter's tests on it: $RUN"
+          p2="This adds the version to the adapter's recipe as a tested one, or replaces its entry for the newer mlx-lm: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
           body="$p1"$'\n\n'"$p2"
           if [ -n "$open" ]; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" --silent
-            echo "PR #$number now proposes MLX $VERSION"
+            echo "PR #$number now proposes MLX $VERSION with mlx-lm $mlx_lm"
           else
             gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body"
           fi
 
       - name: Did not finish, so record nothing
         if: needs.mlx.result != 'success' && needs.mlx.result != 'failure'
-        run: echo "::warning::the tests on MLX $VERSION did not finish ($RESULT); nothing is recorded"
+        run: echo "::warning::the tests on MLX $VERSION${MLX_LM:+ with mlx-lm $MLX_LM} did not finish ($RESULT); nothing is recorded"
 
       - name: Failed, so open an issue
         if: needs.mlx.result == 'failure'
@@ -380,17 +390,18 @@ jobs:
         # adapter ships, which is a change to the worker's build, not a pin.
         run: |
           set -euo pipefail
-          title="MLX $VERSION breaks the adapter"
+          what="MLX $VERSION${MLX_LM:+ with mlx-lm $MLX_LM}"
+          title="$what breaks the adapter"
           # One open issue per runtime: a later version that fails too is a comment on it.
           existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
           if [ -n "$existing" ]; then
             number=${existing%% *}
-            case "$existing" in *"$title"*) echo "an issue for MLX $VERSION is already open: #$number"; exit 0;; esac
-            gh issue comment "$number" --body "MLX $VERSION fails too: $RUN"
-            echo "noted MLX $VERSION on the open issue #$number"
+            case "$existing" in *"$title"*) echo "an issue for $what is already open: #$number"; exit 0;; esac
+            gh issue comment "$number" --body "$what fails too: $RUN"
+            echo "noted $what on the open issue #$number"
             exit 0
           fi
-          p1="The nightly job installed MLX $VERSION untested on macos-14 and the adapter's tests did not pass on it: $RUN"
+          p1="The nightly job installed $what untested on macos-14 and the adapter's tests did not pass on it: $RUN"
           p2="The test log is the run's artifact. Until the adapter is fixed, or the version is found to be at fault, the recipe keeps its last tested version. A version that needs a newer Python than the adapter ships fails here too: that is a change to the worker's build, not a pin."
           body="$p1"$'\n\n'"$p2"
           gh issue create --title "$title" --body "$body"

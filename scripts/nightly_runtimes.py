@@ -10,8 +10,11 @@ and how to record one that passed.
 `pick` prints `version=<v>` for the newest upstream release the adapter's
 recipe does not list yet, or `version=` when there is nothing new (or when
 `--requested` names a release already listed); the workflow reads it from
-$GITHUB_OUTPUT. A newest release whose PR was closed unmerged is not picked
-again: someone said no to it, and only a `--requested` one asks again.
+$GITHUB_OUTPUT. For MLX a release is the pair of mlx and mlx-lm, and `pick`
+also prints `mlx_lm=<v>`: a new mlx-lm on the newest mlx is tested as well
+(a requested mlx gets whichever mlx-lm pip resolves, `mlx_lm=`). A newest
+release whose PR was closed unmerged is not picked again: someone said no to
+it, and only a `--requested` one asks again.
 `append` adds a release to the adapter's recipe as a tested one, newest
 first, so a human reviews a PR rather than typing digests. For llama.cpp
 that is the same asset names the previous tested build carries, with the
@@ -19,7 +22,7 @@ size and SHA-256 GitHub lists for each. For MLX it is the whole environment
 pip resolved for the version on the runner, read from pip's install report
 (`pip install --dry-run --report`): every distribution's wheel, with the
 size and SHA-256 PyPI lists for it, which must agree with the digest pip
-reported.
+reported; an mlx already listed has its entry replaced, for the newer mlx-lm.
 
 Only the standard library; GITHUB_TOKEN is used when set, for the API rate
 limit.
@@ -43,6 +46,7 @@ RECIPES = {
 LLAMACPP_RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30"
 LLAMACPP_RELEASE = "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}"
 MLX_PYPI = "https://pypi.org/pypi/mlx/json"
+MLX_LM_PYPI = "https://pypi.org/pypi/mlx-lm/json"
 # The record jobs' PRs come from one branch per runtime, newest first in this listing.
 CLOSED_PRS = "https://api.github.com/repos/{repo}/pulls?state=closed&head={owner}:nightly/{runtime}&per_page=100"
 PYPI_RELEASE = "https://pypi.org/pypi/{name}/{version}/json"
@@ -91,39 +95,47 @@ def newest_llamacpp_build() -> dict:
     return max(builds, key=lambda r: build_number(r["tag_name"]))
 
 
-def pr_title(runtime: str, version: str) -> str:
+def pr_title(runtime: str, version: str, mlx_lm: str = "") -> str:
     """The title the record job gives the PR that adds `version`; the two must agree."""
-    return f"{runtime}: tested with {version}"
+    return f"{runtime}: tested with {version}" + (f" and mlx-lm {mlx_lm}" if mlx_lm else "")
 
 
-def declined(runtime: str, version: str) -> bool:
+def declined(runtime: str, version: str, mlx_lm: str = "") -> bool:
     """Whether a PR adding `version` was closed without being merged. Outside
     Actions (no GITHUB_REPOSITORY) there is no repository to ask, and nothing was."""
     repo = os.environ.get("GITHUB_REPOSITORY")
     if not repo:
         return False
     pulls = fetch_json(CLOSED_PRS.format(repo=repo, owner=repo.split("/")[0], runtime=runtime))
-    title = pr_title(runtime, version)
+    title = pr_title(runtime, version, mlx_lm)
     return any(p["title"] == title and not p.get("merged_at") for p in pulls)
 
 
-def pick(runtime: str, requested: str | None) -> str:
-    listed = tested_versions(runtime)
+def pick(runtime: str, requested: str | None) -> dict[str, str]:
+    """The workflow's outputs: `version`, and for MLX `mlx_lm`, all empty when there is nothing to test."""
+    out = {"version": ""} if runtime == "llamacpp" else {"version": "", "mlx_lm": ""}
     if requested:
-        return "" if requested in listed else requested
+        if requested not in tested_versions(runtime):
+            out["version"] = requested
+        return out
     if runtime == "llamacpp":
         newest = newest_llamacpp_build()["tag_name"]
-        have = max((build_number(v) for v in listed), default=-1)
+        have = max((build_number(v) for v in tested_versions(runtime)), default=-1)
         if build_number(newest) <= have:
-            return ""
+            return out
+        mlx_lm = ""
     else:
+        # A release of either package is a change the adapter's tests should see.
         newest = fetch_json(MLX_PYPI)["info"]["version"]
-        if newest in listed:
-            return ""
-    if declined(runtime, newest):
-        print(f"note: the PR adding {runtime} {newest} was closed unmerged; not proposing it again", file=sys.stderr)
-        return ""
-    return newest
+        mlx_lm = fetch_json(MLX_LM_PYPI)["info"]["version"]
+        if any(t["version"] == newest and t.get("mlx_lm") == mlx_lm for t in recipe(runtime).get("tested", [])):
+            return out
+        out["mlx_lm"] = mlx_lm
+    if declined(runtime, newest, mlx_lm):
+        print(f"note: the PR titled {pr_title(runtime, newest, mlx_lm)!r} was closed unmerged; not proposing it again", file=sys.stderr)
+        return {k: "" for k in out}
+    out["version"] = newest
+    return out
 
 
 def append_llamacpp(version: str) -> None:
@@ -204,9 +216,6 @@ def append_mlx(version: str, report_path: Path) -> None:
     path = RECIPES["mlx"]
     r = recipe("mlx")
     tested = r.setdefault("tested", [])
-    if any(t["version"] == version for t in tested):
-        print(f"{version} is already a tested version", file=sys.stderr)
-        return
     report = json.loads(report_path.read_text(encoding="utf-8"))
     wheels, mlx_lm = [], None
     for item in report.get("install", []):
@@ -230,7 +239,17 @@ def append_mlx(version: str, report_path: Path) -> None:
     if not any(canonical(w["name"]) == "mlx" for w in wheels) or mlx_lm is None:
         raise SystemExit("the report holds no mlx or no mlx-lm wheel")
     wheels.sort(key=lambda w: canonical(w["name"]))
-    tested.insert(0, {"version": version, "mlx_lm": mlx_lm, "wheels": wheels})
+    entry = {"version": version, "mlx_lm": mlx_lm, "wheels": wheels}
+    # One entry per mlx, which the adapter looks up by version: a newer mlx-lm
+    # tested on an mlx already listed takes its entry's place.
+    at = next((i for i, t in enumerate(tested) if t["version"] == version), None)
+    if at is not None and tested[at].get("mlx_lm") == mlx_lm:
+        print(f"mlx {version} with mlx-lm {mlx_lm} is already a tested version", file=sys.stderr)
+        return
+    if at is None:
+        tested.insert(0, entry)
+    else:
+        tested[at] = entry
     path.write_text(json.dumps(r, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"recorded mlx {version} (mlx-lm {mlx_lm}) with {len(wheels)} wheels in {path.relative_to(ROOT)}")
 
@@ -246,7 +265,8 @@ def main() -> int:
     a.add_argument("--report", help="mlx: pip's install report (--dry-run --report) for the version on the runner")
     args = ap.parse_args()
     if args.action == "pick":
-        print(f"version={pick(args.runtime, args.requested.strip() or None)}")
+        for key, value in pick(args.runtime, args.requested.strip() or None).items():
+            print(f"{key}={value}")
         return 0
     if args.runtime == "llamacpp":
         append_llamacpp(args.version)
