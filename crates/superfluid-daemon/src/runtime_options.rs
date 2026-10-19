@@ -5,10 +5,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
-use superfluid_adapter_kit::{check_value, placeholder, WorkerArgs};
+use superfluid_adapter_kit::{check_value, placeholder, OptionDecl, WorkerArgs};
 
 use crate::runtime_pick::RuntimeId;
-use crate::runtimes::{Catalog, Runtime};
+use crate::runtimes::{Catalog, Runtime, Source, Worker};
 
 /// One `--<runtime>-<name> <value>` as given, resolved to the runtime it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,14 +184,32 @@ pub fn for_runtime(id: RuntimeId) -> Vec<(String, String)> {
     SET.get().and_then(|all| all.iter().find(|(r, _)| *r == id.base()).map(|(_, o)| o.clone())).unwrap_or_default()
 }
 
+/// What `superfluid runtime options <id>` lists: a usable runtime's declaration, else the one its adapter makes before
+/// an install, asked as `runtime versions` asks it (the worker named for it, the linked adapter, the worker that would
+/// install it): the options, `--llamacpp-lib` among them, are what one reads before the runtime runs here.
+pub fn declared_by(catalog: &Catalog, id: RuntimeId) -> Result<Vec<OptionDecl>, String> {
+    let id = id.base();
+    let not_usable = match catalog.require(id) {
+        Ok(runtime) => return Ok(runtime.options),
+        Err(why) => why,
+    };
+    let named = std::env::var_os(crate::runtimes::worker_env(id)).is_some();
+    if let Some(rt) = crate::linked::get(id).filter(|_| !named) {
+        return Ok(superfluid_adapter_kit::declared(rt));
+    }
+    // A worker's report declares its options whether or not the runtime runs here.
+    let bin = crate::installs::installer(catalog, id).map_err(|_| not_usable.clone())?;
+    let report = crate::runtimes::run_check_model(&Worker { bin, prefix: Vec::new(), source: Source::Shipped }, None).map_err(|_| not_usable)?;
+    Ok(superfluid_worker::check::options_from(&report["options"]))
+}
+
 /// `superfluid runtime options <id>`, for a person.
-pub fn text(runtime: &Runtime) -> String {
-    let id = runtime.id.base().name();
-    if runtime.options.is_empty() {
+pub fn text(id: RuntimeId, options: &[OptionDecl]) -> String {
+    let id = id.base().name();
+    if options.is_empty() {
         return format!("the {id} runtime takes no option of its own; `superfluid serve --help` lists the flags every runtime takes\n");
     }
-    let rows: Vec<(String, String, String)> = runtime
-        .options
+    let rows: Vec<(String, String, String)> = options
         .iter()
         .map(|o| {
             let default = if o.default.is_empty() { "-".to_string() } else { o.default.clone() };
@@ -208,15 +226,14 @@ pub fn text(runtime: &Runtime) -> String {
 }
 
 /// `superfluid runtime options <id> --json`.
-pub fn json(runtime: &Runtime) -> Value {
-    json!({"runtime": runtime.id.base().name(), "options": runtime.options.iter().map(|o| o.to_json()).collect::<Vec<_>>()})
+pub fn json(id: RuntimeId, options: &[OptionDecl]) -> Value {
+    json!({"runtime": id.base().name(), "options": options.iter().map(|o| o.to_json()).collect::<Vec<_>>()})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtimes::{Info, Source, Worker};
-    use superfluid_worker::check::OptionDecl;
+    use crate::runtimes::Info;
 
     fn runtime(id: &str, options: Vec<OptionDecl>) -> Runtime {
         Runtime {
@@ -341,13 +358,38 @@ mod tests {
     }
 
     #[test]
+    fn the_options_are_listed_before_the_runtime_runs_here() {
+        let root = std::env::temp_dir().join(format!("superfluid-runtime-options-declared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (beside, libexec) = (root.join("bin"), root.join("libexec").join("superfluid"));
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::create_dir_all(&libexec).unwrap();
+        // A shipped adapter whose library is not here: not usable, and still declaring what it takes.
+        let report = r#"{"runtime":{"id":"toyopt","version":"v1"},"available":"no libtoy here","options":[{"name":"lib","kind":"text","default":"the install's","about":"a library of your own"}]}"#;
+        crate::runtimes::tests::fake_worker(&libexec, "superfluid-worker-toyopt", report, 1);
+        let cat = Catalog::new(root.join("home"), Some(beside.clone()), beside.join("superfluid-workerd"));
+        let id = RuntimeId::new("toyopt");
+        assert!(cat.require(id).is_err(), "the runtime does not run here");
+        let options = declared_by(&cat, id).unwrap();
+        assert_eq!(options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["lib"]);
+        assert!(text(id, &options).contains("--toyopt-lib <value>"));
+        let nowhere = RuntimeId::new("nort");
+        assert_eq!(declared_by(&cat, nowhere).unwrap_err(), cat.require(nowhere).unwrap_err(), "nothing declares it: the runtime's own error");
+        for id in crate::linked::ids().into_iter().filter(|id| std::env::var_os(crate::runtimes::worker_env(*id)).is_none()) {
+            let linked = superfluid_adapter_kit::declared(crate::linked::get(id).unwrap());
+            assert_eq!(declared_by(&cat, id).unwrap(), linked, "{}: a linked adapter answers in process", id.name());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_listing_shows_each_option_with_its_value_shape_and_default() {
         let rt = runtime("llamacpp", vec![decl("n-gpu-layers", "int", &[], "-1"), decl("flash-attn", "choice", &["auto", "on", "off"], ""), decl("lib", "text", &[], "the install's")]);
-        let t = text(&rt);
+        let t = text(rt.id, &rt.options);
         assert!(t.contains("--llamacpp-n-gpu-layers <N>"), "{t}");
         assert!(t.contains("--llamacpp-flash-attn <auto|on|off>"), "{t}");
         assert!(t.contains("--llamacpp-lib <value>") && t.contains("the install's") && t.contains("about lib"), "{t}");
-        assert!(text(&runtime("basert", Vec::new())).starts_with("the basert runtime takes no option of its own"));
-        assert_eq!(json(&rt)["options"][1]["choices"], json!(["auto", "on", "off"]));
+        assert!(text(RuntimeId::new("basert"), &[]).starts_with("the basert runtime takes no option of its own"));
+        assert_eq!(json(rt.id, &rt.options)["options"][1]["choices"], json!(["auto", "on", "off"]));
     }
 }

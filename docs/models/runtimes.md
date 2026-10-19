@@ -128,7 +128,7 @@ Requests a model cannot serve are refused with a 400:
 
 ## Per-runtime options
 
-A knob of one runtime is given to `serve` as `--<runtime>-<name> <value>`, for example `--llamacpp-n-gpu-layers 20`. The adapter declares its options with the shape of each value; `superfluid serve` checks a value against that declaration before a worker starts and forwards it to the runtime's worker as `--<name> <value>`, and `superfluid runtime options <id>` lists them. Each is given once: a second `--llamacpp-lib` is a usage error (exit 2), not an override. A flag every runtime takes stays a flag of `serve`: the context window (`--max-context`), the lanes (`--max-batch`), the KV precision (`--kv-bits`), parking and speculation.
+A knob of one runtime is given to `serve` as `--<runtime>-<name> <value>`, for example `--llamacpp-n-gpu-layers 20`. The adapter declares its options with the shape of each value; `superfluid serve` checks a value against that declaration before a worker starts and forwards it to the runtime's worker as `--<name> <value>`, and `superfluid runtime options <id>` lists them, before an install too. Each is given once: a second `--llamacpp-lib` is a usage error (exit 2), not an override. A flag every runtime takes stays a flag of `serve`: the context window (`--max-context`), the lanes (`--max-batch`), the KV precision (`--kv-bits`), parking and speculation.
 
 ### llamacpp options
 

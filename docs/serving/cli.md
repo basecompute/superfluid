@@ -247,7 +247,7 @@ superfluid runtime use <id> <install> | --auto
 superfluid runtime options <id> [--json]
 ```
 
-See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default; see [per-runtime options](../models/runtimes.md#per-runtime-options).
+See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](../models/runtimes.md#per-runtime-options).
 
 ## `superfluid compat`
 
