@@ -14,7 +14,8 @@ A runtime runs a model's forward pass: llama.cpp, MLX, the baseRT engine, or the
 ## Managing installs
 
 ```sh
-superfluid runtimes                              # state of every runtime
+superfluid runtimes                              # state of every runtime, and the newest version each installs here
+superfluid runtime versions llamacpp             # every version the adapter installs on its own: which install here, which are installed
 superfluid runtime install llamacpp --dry-run    # print the plan, fetch nothing
 superfluid runtime install llamacpp
 superfluid runtime install llamacpp --backend vulkan
@@ -27,6 +28,7 @@ superfluid runtime remove llamacpp b11284-vulkan
 
 | command | what it does |
 |---|---|
+| `versions <id>` | list the versions the adapter installs on its own (the ones it was tested with), newest first: which install on this machine and as what, with the size, and which are installed; an install of another version (`--untested`, or an archive of your own) is listed as not one the adapter lists. `--json` for scripts. Answered from the adapter's recipe, with no network |
 | `install <id>` | plan, fetch, verify and place an install. Options: `--version V`, `--backend B` (no fallback), `--from <archive>` (a URL or path to your own archive or, for MLX, package index), `--sha256 H`, `--untested`, `--dry-run` |
 | `update <id>` | install the newest tested build for the default install's backend beside it and make it the default |
 | `repair <id> [<install>]` | reinstall the same version and backend; what an upgraded daemon asks for when an install's worker is too old |

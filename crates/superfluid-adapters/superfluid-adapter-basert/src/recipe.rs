@@ -1,6 +1,6 @@
 //! What installing basert fetches.
 
-use superfluid_adapter_kit::install::{fetch_json, version_key, Asset, Host, Plan, Request};
+use superfluid_adapter_kit::install::{fetch_json, version_key, Asset, Candidate, Host, Plan, Request};
 use serde_json::Value;
 
 fn recipe() -> Value {
@@ -73,6 +73,45 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
         let releases = fetch_json(recipe()["releases"].as_str().unwrap_or_default())?;
         plan_with(req, host, &pins, &releases)
     })
+}
+
+/// The pinned engines, newest first, each planned from the pins alone: the driven ones install, the others say why not.
+pub fn versions(host: &Host) -> Vec<Candidate> {
+    versions_with(host, &pinned())
+}
+
+pub fn versions_with(host: &Host, pins: &[Pin]) -> Vec<Candidate> {
+    use superfluid_engine_ffi::libbasert::{abi_built_for, compatible, unnumbered_minor_for, BUILT_FOR};
+    let mut pins: Vec<&Pin> = pins.iter().collect();
+    pins.sort_by_key(|p| std::cmp::Reverse(version_key(&p.version)));
+    let not_driven = |abi: Option<u32>| -> String {
+        let why = match (abi, abi_built_for()) {
+            (Some(n), Some(w)) => format!("states engine ABI {n}; this build drives ABI {w}"),
+            (None, Some(w)) => match unnumbered_minor_for(w) {
+                Some(minor) => format!("states no engine ABI and is not a {minor}.x engine; this build drives ABI {w}"),
+                None => format!("states no engine ABI; this build drives ABI {w}"),
+            },
+            (_, None) => format!("is not a baseRT {}.x engine, which this build drives", minor(BUILT_FOR).iter().map(u64::to_string).collect::<Vec<_>>().join(".")),
+        };
+        format!("{why} (--untested installs it anyway)")
+    };
+    pins.into_iter()
+        .map(|pin| {
+            let version = pin.version.clone();
+            let here = if compatible(pin.abi, abi_built_for(), &version).is_err() {
+                Err(not_driven(pin.abi))
+            } else {
+                let req = Request { version: Some(version.clone()), ..Request::default() };
+                plan_with(&req, host, std::slice::from_ref(pin), &Value::Null).and_then(|mut plans| {
+                    if plans.is_empty() {
+                        return Err("nothing to install here".to_string());
+                    }
+                    Ok(plans.remove(0))
+                })
+            };
+            Candidate { version, here }
+        })
+        .collect()
 }
 
 pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> Result<Vec<Plan>, String> {
@@ -246,6 +285,27 @@ mod tests {
         }
         let e = plan_with(&Request::default(), &mac(), &[], &json!([release("0.5.0", Some(other))])).unwrap_err();
         assert!(e.contains(&format!("engine ABI {same}, or a 0.3.x engine that states none")) && e.contains("the newest is 0.5.0"), "{e}");
+    }
+
+    #[test]
+    fn the_versions_listed_are_the_pins_newest_first_and_only_the_driven_ones_install() {
+        let (same, other) = (abi(), abi() + 1);
+        let pins = [pin("0.2.0", None, "ab"), pin("0.4.5", Some(same), "ef"), pin("0.5.0", Some(other), "01"), pin("0.3.9", None, "cd")];
+        let listed = versions_with(&mac(), &pins);
+        assert_eq!(listed.iter().map(|c| c.version.as_str()).collect::<Vec<_>>(), ["0.5.0", "0.4.5", "0.3.9", "0.2.0"]);
+        assert_eq!(listed[0].here, Err(format!("states engine ABI {other}; this build drives ABI {same} (--untested installs it anyway)")));
+        assert_eq!(listed[3].here, Err(format!("states no engine ABI and is not a 0.3.x engine; this build drives ABI {same} (--untested installs it anyway)")));
+        assert_eq!(listed[1].here.as_ref().map(|p| (p.install.as_str(), p.tested)), Ok(("0.4.5-metal", true)));
+        assert_eq!(listed[1].here.as_ref().unwrap().assets[0].url, "https://pinned/basert-engine-macos-arm64-0.4.5.tar.gz", "no release listing was needed");
+        assert_eq!(listed[2].here.as_ref().map(|p| p.install.as_str()), Ok("0.3.9-metal"), "the unnumbered line");
+        let linux = Host { os: "linux".into(), arch: "x64".into(), ..Host::default() };
+        let elsewhere = versions_with(&linux, &pins);
+        for (i, driven) in [(0, false), (1, true), (2, true), (3, false)] {
+            let e = elsewhere[i].here.as_ref().unwrap_err();
+            assert_eq!(e.contains("baseRT publishes engines for"), driven, "{e}");
+            assert_eq!(e.contains("this build drives ABI"), !driven, "{e}");
+        }
+        assert!(versions(&mac()).iter().any(|c| c.here.is_ok()), "the recipe pins an engine this build drives");
     }
 
     #[test]

@@ -221,6 +221,36 @@ impl Plan {
     }
 }
 
+/// A version an adapter installs on its own, planned for a host: the first plan, or why it does not install there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub version: String,
+    pub here: Result<Plan, String>,
+}
+
+impl Candidate {
+    pub fn to_json(&self) -> Value {
+        match &self.here {
+            Ok(p) => json!({"version": self.version, "plan": p.to_json()}),
+            Err(why) => json!({"version": self.version, "error": why}),
+        }
+    }
+
+    pub fn from_json(v: &Value) -> Result<Candidate, String> {
+        let version = v["version"].as_str().ok_or("a listed version without \"version\"")?.to_string();
+        let here = match v["error"].as_str() {
+            Some(why) => Err(why.to_string()),
+            None => Ok(Plan::from_json(&v["plan"])?),
+        };
+        Ok(Candidate { version, here })
+    }
+
+    /// What the install fetches, wheels included.
+    pub fn size(&self) -> u64 {
+        self.here.as_ref().map(|p| p.size() + p.extra["wheels_size"].as_u64().unwrap_or(0)).unwrap_or(0)
+    }
+}
+
 pub fn backend_rank(backend: &str) -> u32 {
     let family = backend.split(['-', '_']).next().unwrap_or(backend);
     match family {
