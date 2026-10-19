@@ -22,6 +22,8 @@ The install script unpacks a release under `$SUPERFLUID_HOME/versions/<version>/
 ~/.superfluid/versions/0.1.3/
 ```
 
+The install script places the release it downloaded with that release's own `superfluid self install`, which proves it the way an update does; a release that is refused stops the script, and nothing is copied in its place. Only a release from before `self install` existed is copied into `~/.local/bin` the old way.
+
 Each version finds its workers beside its own real executable, so a server started from 0.1.3 keeps spawning 0.1.3's workers after 0.1.4 became current. The `superfluid-<version>` names run a specific copy.
 
 ## What an update does

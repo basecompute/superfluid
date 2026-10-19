@@ -61,11 +61,20 @@ have="$(sha256 "$tmp/$name.tar.gz")"
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 chmod +x "$tmp/$name"/bin/superfluid* "$tmp/$name"/libexec/superfluid/superfluid-worker-*
-# A release from before `self install` is placed by the installed superfluid
-# when there is one, else copied in place, never through a link.
-if "$tmp/$name/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin"; then
+# A release from before `self install` has no `self` command and exits 2 with
+# its usage; only that release is placed by the installed superfluid when there
+# is one, else copied in place, never through a link. Any other failure (a copy
+# that does not start, a lock not taken) stops here: copying that release in
+# place would install exactly what was refused.
+status=0
+"$tmp/$name/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin" || status=$?
+if [ "$status" -eq 0 ]; then
   :
-elif [ -L "$PREFIX/bin/superfluid" ] && "$PREFIX/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin"; then
+elif [ "$status" -ne 2 ]; then
+  fail "the release was not installed (see above)"
+elif [ -L "$PREFIX/bin/superfluid" ]; then
+  "$PREFIX/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin" \
+    || fail "the installed superfluid did not place the release (see above)"
   say "placed by the installed superfluid, since this release cannot place itself"
 else
   say "this release places itself the old way: copied into ${PREFIX/#$HOME/~}/bin"
