@@ -635,19 +635,26 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Download, check and unpack `release` into the layout; nothing is placed until the whole tree is verified.
+/// Download, check and unpack `release` into the layout; nothing is placed until the whole tree is verified, and what
+/// was downloaded goes whether or not it was placed.
 fn place(versions: &Versions, release: &Release, report: &mut Report) -> Result<(), String> {
-    let v = &release.version;
-    let staging = versions.dir.join(".staging").join(v);
+    let staging = versions.dir.join(".staging").join(&release.version);
     let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
+    let placed = place_through(versions, release, &staging, report);
+    let _ = std::fs::remove_dir_all(&staging);
+    placed
+}
+
+fn place_through(versions: &Versions, release: &Release, staging: &Path, report: &mut Report) -> Result<(), String> {
+    let v = &release.version;
+    std::fs::create_dir_all(staging).map_err(|e| format!("{}: {e}", staging.display()))?;
     let want = get_text(&release.sha256_url, 30)?.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
     if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("{}: not a SHA-256", release.sha256_url));
     }
     let asset = Asset { sha256: Some(want), ..release.tarball.clone() };
     report.say(format!("downloading {} ({})", asset.name, asset.size.map(|s| format!("{:.1} MB", s as f64 / 1e6)).unwrap_or_else(|| "size unknown".into())));
-    let (archive, _) = fetch(&asset, &staging)?;
+    let (archive, _) = fetch(&asset, staging)?;
     let unpacked = staging.join("unpacked");
     unpack(&archive, &unpacked)?;
     let top = single_top(&unpacked)?;
@@ -658,9 +665,10 @@ fn place(versions: &Versions, release: &Release, report: &mut Report) -> Result<
     }
     let dest = versions.version_dir(v);
     let _ = std::fs::remove_dir_all(&dest);
-    move_tree(&top, &dest)?;
-    let _ = std::fs::remove_dir_all(&staging);
-    Ok(())
+    // A move cut short across filesystems leaves part of a tree, which is not a version.
+    move_tree(&top, &dest).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&dest);
+    })
 }
 
 /// The install script's in-place copy, kept under the layout as the version to go back to. It is copied beside the
@@ -1500,6 +1508,23 @@ mod tests {
         assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists());
         assert!(!versions.dir.join(".staging").join("kept-0.1.2").exists());
         assert!(use_version(&home, &catalog, &versions.binary("0.1.3"), "0.1.2").unwrap().changed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_download_that_does_not_check_out_leaves_nothing_behind() {
+        let dir = scratch("bad-download");
+        let home = dir.join("home");
+        let p = listing(&dir, &[("0.1.3", "2026-10-01", None)]);
+        std::fs::write(dir.join(format!("superfluid-{}-0.1.3.tar.gz.sha256", target().unwrap())), format!("{}  x\n", "0".repeat(64))).unwrap();
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let versions = Versions::of(&home);
+        release_tree(&versions.version_dir("0.1.2"), "0.1.2");
+        versions.set_current("0.1.2").unwrap();
+        let opts = Options { source: Some(p.to_string_lossy().to_string()), ..Options::default() };
+        let e = update(&home, &catalog, &versions.binary("0.1.2"), &opts).unwrap_err();
+        assert!(!versions.dir.join(".staging").join("0.1.3").exists(), "{e}");
+        assert!(!versions.version_dir("0.1.3").exists() && versions.current().as_deref() == Some("0.1.2"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
