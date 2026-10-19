@@ -12,6 +12,7 @@
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
 | `superfluid compat` | what this build was built for: the runtime contracts it checks at load |
+| `superfluid self <subcommand>` | update superfluid itself, or switch between the versions installed here |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
 | `superfluid media <subcommand>` | store media in, or sweep, a running server's media pool |
 | `superfluid top <host:port>...` | live monitor over one or more servers |
@@ -255,6 +256,18 @@ superfluid compat [--json]
 ```
 
 What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md). For one runtime on this machine, `superfluid runtime versions <id>` says which of those versions install here.
+
+## `superfluid self`
+
+```sh
+superfluid self update [--version <v>] [--dry-run]
+superfluid self check
+superfluid self list
+superfluid self use <v>
+superfluid self install --from <dir> [--prefix <dir>]
+```
+
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating superfluid](updating.md).
 
 ## `superfluid session`
 

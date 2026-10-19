@@ -99,6 +99,10 @@ jobs:
           # host can pick a release that fits its engine before downloading.
           env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" compat --json > "$root/compat.json"
           cp "$root/compat.json" "dist/$name.compat.json"
+          # The engine ABI number in an asset name, so `superfluid self update`
+          # and a host pick a release from the listing without a download.
+          abi="$(jq -r '.runtimes.basert.abi // empty' "$root/compat.json")"
+          if [ -n "$abi" ]; then echo "$abi" > "dist/superfluid-basert-abi-$abi.txt"; fi
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "name=$name" >> "$GITHUB_OUTPUT"
@@ -110,6 +114,7 @@ jobs:
             dist/${{ steps.pack.outputs.name }}.tar.gz
             dist/${{ steps.pack.outputs.name }}.tar.gz.sha256
             dist/${{ steps.pack.outputs.name }}.compat.json
+            dist/superfluid-basert-abi-*.txt
 
   crates:
     # Each crate in dependency order, skipping the ones already published, so a

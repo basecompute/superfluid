@@ -518,6 +518,9 @@ fn main() {
         runtimes_cmd(&args[1..]);
         return;
     }
+    if command == Some("self") {
+        std::process::exit(superfluid_daemon::selfupdate::run(&args[1..]));
+    }
     if command == Some("runtime") {
         runtime_cmd(&args[1..]);
         return;

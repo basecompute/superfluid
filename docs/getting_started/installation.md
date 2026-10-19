@@ -22,7 +22,7 @@ Prebuilt tarballs exist for macOS arm64 and Linux x86-64 and arm64 (glibc 2.28 o
 | variable | default | meaning |
 |---|---|---|
 | `SUPERFLUID_VERSION` | latest release | a release tag, e.g. `v0.1.0` |
-| `SUPERFLUID_PREFIX` | `~/.local` | install prefix (`bin/` and `libexec/superfluid/` under it) |
+| `SUPERFLUID_PREFIX` | `~/.local` | where the `superfluid` command goes (its `bin/`); the release itself is kept under `$SUPERFLUID_HOME/versions` (`~/.superfluid`), so `superfluid self update` can install the next one beside it |
 
 Add `~/.local/bin` to your `PATH` if the script says it is missing.
 
