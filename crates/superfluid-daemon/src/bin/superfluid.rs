@@ -52,7 +52,7 @@ fn runtimes_cmd(args: &[String]) {
     }
     let found = superfluid_daemon::runtimes_report::with_installs(&catalog);
     if json {
-        let rows = superfluid_daemon::runtimes_report::table_json(&found);
+        let rows = superfluid_daemon::runtimes_report::table_json_of(&found, Some(&catalog));
         println!("{}", serde_json::to_string_pretty(&rows).expect("json"));
         return;
     }
@@ -104,6 +104,17 @@ fn runtime_cmd(args: &[String]) {
         done
     };
     match sub.as_str() {
+        "versions" => {
+            if rest.iter().any(|a| a != "--json") {
+                usage();
+            }
+            let listing = superfluid_daemon::versions::of(&catalog, id).unwrap_or_else(|e| fail(e));
+            if rest.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string_pretty(&listing.json()).expect("json"));
+            } else {
+                print!("{}", listing.text());
+            }
+        }
         "install" => {
             let mut req = Request::default();
             let mut dry_run = false;

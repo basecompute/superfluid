@@ -50,6 +50,7 @@ pub trait Runtime: Send + Sync {
     fn model_facts(&self, _path: &Path) -> Option<Result<String, String>> { None }
     fn tokenizer(&self, _model: &Path) -> Option<Result<Arc<dyn Tokenizer>, String>> { None }
     fn plan(&self, _req: &Request, _host: &Host) -> Option<Result<Vec<Plan>, String>> { None }
+    fn versions(&self, host: &Host) -> Vec<Candidate> { /* each `tested` version of compat(), planned here */ }
     fn pull_options(&self) -> Option<&'static [PullOption]> { None }
     fn pull(&self, _pull: &Pull, _args: &WorkerArgs) -> Result<PathBuf, String> { /* refuses */ }
     fn install(&self, plan: &Plan, dir: &Path) -> Result<Vec<(String, String)>, String> { /* fetch into dir/lib */ }
@@ -80,6 +81,8 @@ superfluid-worker-<id> version
 superfluid-worker-<id> check [--model <path>]
 superfluid-worker-<id> plan [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested]
 superfluid-worker-<id> install --into <dir> --plan <json>
+superfluid-worker-<id> compat
+superfluid-worker-<id> versions
 superfluid-worker-<id> pull <org/model[:tag]> [--offline] [--<option> [value]]...
 superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-context N] [--max-batch N]
 ```
@@ -88,6 +91,7 @@ superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-con
 |---|---|
 | `version`, `check` | 0 when the runtime runs here (and reads `--model`); 1 otherwise. Neither loads weights |
 | `plan`, `install`, `pull` | 0, or 1 with the reason |
+| `compat`, `versions` | 0, JSON on stdout: what the adapter was built and tested for; the versions it installs on its own, each planned for this host (`superfluid runtime versions`), answered from the recipe alone |
 | serving | 0 on clean close; 2 on a bad command line; 3 when the model does not load; 1 when serving fails |
 
 `check` prints the JSON report the daemon reads: runtime id, version, aliases, Link W versions (8), `available`, formats, tokenizer, devices, static capabilities, pull options, and with `--model` whether it reads the model and its facts.

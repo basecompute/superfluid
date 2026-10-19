@@ -19,7 +19,7 @@ pub use superfluid_worker::{ring_specs_for, WorkerArgs};
 pub mod conformance;
 pub mod install;
 
-use install::{Host, Manifest, Plan, Request};
+use install::{Candidate, Host, Manifest, Plan, Request};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PullOption {
@@ -237,6 +237,26 @@ pub trait Runtime: Send + Sync {
         None
     }
 
+    /// The versions this adapter installs on its own, newest first, each planned for `host` as `plan` would (`superfluid runtime
+    /// versions`). Answered from the recipe alone, never the network: by default every `tested` version `compat` names.
+    fn versions(&self, host: &Host) -> Vec<Candidate> {
+        let tested: Vec<String> =
+            self.compat()["tested"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        tested
+            .into_iter()
+            .map(|version| {
+                let req = Request { version: Some(version.clone()), ..Request::default() };
+                let here = match self.plan(&req, host) {
+                    Some(Ok(mut plans)) if !plans.is_empty() => Ok(plans.remove(0)),
+                    Some(Ok(_)) => Err("nothing to install here".to_string()),
+                    Some(Err(why)) => Err(why),
+                    None => Err(format!("the {} runtime is not installed from a project", self.info().id)),
+                };
+                Candidate { version, here }
+            })
+            .collect()
+    }
+
     fn pull_options(&self) -> Option<&'static [PullOption]> {
         None
     }
@@ -355,6 +375,17 @@ pub fn worker_main(rt: &dyn Runtime) -> ! {
         // Always JSON; nothing of the runtime is needed.
         rt.prepare(&WorkerArgs::default());
         println!("{}", serde_json::to_string(&rt.compat()).expect("compat is JSON"));
+        std::process::exit(0);
+    }
+    if argv.first().map(String::as_str) == Some("versions") {
+        rt.prepare(&WorkerArgs::default());
+        let host = Host::detect();
+        let v = serde_json::json!({
+            "host": host.to_json(),
+            "describe": host.describe(),
+            "versions": rt.versions(&host).iter().map(Candidate::to_json).collect::<Vec<_>>(),
+        });
+        println!("{v}");
         std::process::exit(0);
     }
     let (command, rest) = match argv.first().map(String::as_str) {
@@ -521,6 +552,55 @@ mod tests {
 
     fn fake(runs: bool) -> Fake {
         Fake { runs, asked_facts: AtomicBool::new(false) }
+    }
+
+    /// A runtime that installs two versions of itself, the older one nowhere.
+    struct Installs;
+
+    impl Runtime for Installs {
+        fn info(&self) -> RuntimeInfo {
+            RuntimeInfo { id: "inst", aliases: &[], formats: vec![], tokenizer: TokenizerSource::HuggingFace }
+        }
+        fn compat(&self) -> serde_json::Value {
+            serde_json::json!({"tested": ["2.0", "1.0"]})
+        }
+        fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
+            Err("never".into())
+        }
+        fn open(&self, _args: &WorkerArgs) -> Result<Loaded, String> {
+            Err("never".into())
+        }
+        fn plan(&self, req: &Request, host: &Host) -> Option<Result<Vec<Plan>, String>> {
+            let version = req.version.clone().unwrap_or_else(|| "2.0".into());
+            if version == "1.0" {
+                return Some(Err(format!("inst 1.0 publishes no build for {}", host.platform())));
+            }
+            Some(Ok(vec![Plan {
+                id: "inst".into(),
+                install: format!("{version}-cpu"),
+                backend: "cpu".into(),
+                assets: vec![install::Asset { name: "a.tgz".into(), url: "https://x/a.tgz".into(), sha256: None, size: Some(7) }],
+                tested: true,
+                why: "a test".into(),
+                version,
+                extra: serde_json::json!({"wheels_size": 3}),
+            }]))
+        }
+    }
+
+    #[test]
+    fn the_versions_listed_are_the_tested_ones_each_planned_here() {
+        let host = Host { os: "linux".into(), arch: "x64".into(), ..Host::default() };
+        let listed = Installs.versions(&host);
+        assert_eq!(listed.iter().map(|c| c.version.as_str()).collect::<Vec<_>>(), ["2.0", "1.0"], "the adapter's order");
+        assert_eq!(listed[0].here.as_ref().map(|p| p.install.as_str()), Ok("2.0-cpu"));
+        assert_eq!(listed[0].size(), 10, "the assets and the wheels");
+        assert_eq!(listed[1].here, Err("inst 1.0 publishes no build for linux-x64".to_string()));
+        assert_eq!(listed[1].size(), 0);
+        for c in &listed {
+            assert_eq!(&Candidate::from_json(&c.to_json()).unwrap(), c);
+        }
+        assert!(Fake { runs: true, asked_facts: AtomicBool::new(false) }.versions(&host).is_empty(), "no compat, no versions");
     }
 
     #[test]

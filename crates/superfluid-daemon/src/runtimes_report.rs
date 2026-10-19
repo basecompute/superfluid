@@ -20,7 +20,7 @@ fn state(f: &Found) -> &'static str {
     }
 }
 
-fn columns(rows: &[Vec<String>]) -> String {
+pub(crate) fn columns(rows: &[Vec<String>]) -> String {
     let n = rows.iter().map(Vec::len).max().unwrap_or(0);
     let widths: Vec<usize> = (0..n).map(|c| rows.iter().filter_map(|r| r.get(c)).map(|s| s.chars().count()).max().unwrap_or(0)).collect();
     let mut out = String::new();
@@ -69,9 +69,13 @@ pub fn table(found: &[Found], packages: &Path) -> String {
 }
 
 pub fn table_of(found: &[Found], packages: &Path, catalog: Option<&Catalog>) -> String {
-    let mut rows = vec![["RUNTIME", "STATE", "INSTALL", "VERSION", "READS", "DEVICE", "WORKER"].map(String::from).to_vec()];
+    let mut rows = vec![["RUNTIME", "STATE", "INSTALL", "VERSION", "INSTALLABLE", "READS", "DEVICE", "WORKER"].map(String::from).to_vec()];
     let mut problems = Vec::new();
     for f in found {
+        let installable = match (catalog, f.id.install()) {
+            (Some(c), None) => crate::versions::cell(&crate::versions::of(c, f.id)),
+            _ => "-".to_string(),
+        };
         let reads = f
             .info
             .as_ref()
@@ -86,19 +90,40 @@ pub fn table_of(found: &[Found], packages: &Path, catalog: Option<&Catalog>) -> 
             }
         };
         let worker = f.worker.as_ref().map(|w| format!("{}: {}", w.source.name(), w.bin.display())).unwrap_or_else(|| "-".into());
-        rows.push(vec![f.id.to_string(), state(f).into(), install_cell(f, catalog), version, reads, device, worker]);
+        rows.push(vec![f.id.to_string(), state(f).into(), install_cell(f, catalog), version, installable, reads, device, worker]);
     }
     let mut out = if found.is_empty() { "no runtime is installed here\n".to_string() } else { columns(&rows) };
     for p in problems {
         out.push_str(&p);
         out.push('\n');
     }
+    if catalog.is_some() && !found.is_empty() {
+        out.push_str("`superfluid runtime versions <id>` lists every version an adapter installs on its own\n");
+    }
     out.push_str(&format!("installed runtimes: {}\n", packages.display()));
     out
 }
 
 pub fn table_json(found: &[Found]) -> Value {
-    Value::Array(found.iter().map(runtime_json).collect())
+    table_json_of(found, None)
+}
+
+/// With a catalog, a runtime's row carries `installable`, the versions its adapter installs here.
+pub fn table_json_of(found: &[Found], catalog: Option<&Catalog>) -> Value {
+    Value::Array(
+        found
+            .iter()
+            .map(|f| {
+                let mut v = runtime_json(f);
+                if let (Some(c), None) = (catalog, f.id.install()) {
+                    if let Ok(listing) = crate::versions::of(c, f.id) {
+                        v["installable"] = json!(crate::versions::here(&listing));
+                    }
+                }
+                v
+            })
+            .collect(),
+    )
 }
 
 fn runtime_json(f: &Found) -> Value {
@@ -312,9 +337,9 @@ mod tests {
         let cat = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         let text = table(&cat.survey(), &home.join("runtimes"));
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[0].starts_with("RUNTIME   STATE   INSTALL             VERSION  READS  DEVICE"), "{text}");
-        assert!(lines[1].starts_with("llamacpp  ready   v1-metal (default)  v1       gguf   Metal: Apple M5 Pro, 36.0 GB  installed: "), "{text}");
-        assert!(lines[2].starts_with("mlx       broken  v1-metal (default)  -        mlx    -"), "{text}");
+        assert!(lines[0].starts_with("RUNTIME   STATE   INSTALL             VERSION  INSTALLABLE  READS  DEVICE"), "{text}");
+        assert!(lines[1].starts_with("llamacpp  ready   v1-metal (default)  v1       -            gguf   Metal: Apple M5 Pro, 36.0 GB  installed: "), "{text}");
+        assert!(lines[2].starts_with("mlx       broken  v1-metal (default)  -        -            mlx    -"), "{text}");
         assert!(lines[3].starts_with("mlx: the mlx runtime at ") && lines[3].contains("`superfluid runtime repair mlx`"), "{text}");
         let json = table_json(&cat.survey());
         assert_eq!(json[0]["formats"][0]["id"], "gguf");
@@ -338,7 +363,7 @@ mod tests {
         let cat = Catalog::new(home.clone(), Some(beside.clone()), beside.join("superfluid-workerd"));
         let text = table(&cat.survey(), &home.join("runtimes"));
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[1].starts_with("llamacpp  not installed  -        -        gguf   -       shipped with superfluid: "), "{text}");
+        assert!(lines[1].starts_with("llamacpp  not installed  -        -        -            gguf   -       shipped with superfluid: "), "{text}");
         assert_eq!(
             lines[2],
             "llamacpp: the llamacpp runtime is not installed: llama.cpp not found: install it with `superfluid runtime install llamacpp`",
@@ -348,6 +373,33 @@ mod tests {
         assert_eq!(json[0]["state"], "not installed");
         assert_eq!(json[0]["worker"]["source"], "shipped with superfluid");
         assert_eq!(json[0]["formats"][0]["id"], "gguf");
+    }
+
+    #[test]
+    fn with_a_catalog_the_table_says_what_installs_here() {
+        if !crate::linked::ids().is_empty() {
+            return;
+        }
+        use crate::versions::tests::{fake_worker_listing, manifest, LISTING};
+        let home = scratch("installable");
+        let dir = manifest(&home, "llamacpp", "v1-metal", "t1", "metal", true);
+        fake_worker_listing(&dir.join("bin"), "superfluid-worker-llamacpp", &report("llamacpp", V, "true"), LISTING);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::write(dir.join("lib").join(crate::dylib_tokenizer::library_file("superfluid_tokenizer_llamacpp")), b"").unwrap();
+        std::os::unix::fs::symlink("v1-metal", home.join("runtimes").join("llamacpp").join("current")).unwrap();
+        install(&home, "mlx", &report("mlx", V, "true"), 0);
+        let cat = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let found = with_installs(&cat);
+        let text = table_of(&found, &home.join("runtimes"), Some(&cat));
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("RUNTIME   STATE  INSTALL             VERSION  INSTALLABLE     READS  DEVICE"), "{text}");
+        assert!(lines[1].starts_with("llamacpp  ready  v1-metal (default)  v1       t1 (installed)  gguf   Metal"), "{text}");
+        assert!(lines[2].starts_with("mlx       ready  v1-metal (default)  v1       -               mlx    Metal"), "{text}");
+        assert!(text.contains("\n`superfluid runtime versions <id>` lists every version an adapter installs on its own\ninstalled runtimes: "), "{text}");
+        let json = table_json_of(&found, Some(&cat));
+        assert_eq!(json[0]["installable"], json!(["t1"]));
+        assert!(json[1]["installable"].is_null());
+        assert!(table_json(&found)[0]["installable"].is_null(), "without a catalog nothing is asked");
     }
 
     #[test]

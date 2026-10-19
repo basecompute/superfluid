@@ -5,7 +5,7 @@ pub mod recipe;
 use std::path::Path;
 use std::sync::Arc;
 
-use superfluid_adapter_kit::install::{Host, Plan, Request};
+use superfluid_adapter_kit::install::{Candidate, Host, Plan, Request};
 use superfluid_adapter_kit::{Pull, PullOption};
 use superfluid_adapter_kit::{ring_specs_for, Device, Format, Loaded, Probe, Runtime, RuntimeInfo, Tokenizer, TokenizerSource, WorkerArgs};
 use superfluid_engine_ffi::{libbasert, FfiEngineConfig, NativeEngine, TokenizerHandle};
@@ -124,6 +124,11 @@ impl Runtime for Basert {
 
     fn plan(&self, req: &Request, host: &Host) -> Option<Result<Vec<Plan>, String>> {
         Some(recipe::plan(req, host))
+    }
+
+    fn versions(&self, host: &Host) -> Vec<Candidate> {
+        // The pins alone, offline: `plan` would consult the release listing when a pin fails.
+        recipe::versions(host)
     }
 }
 

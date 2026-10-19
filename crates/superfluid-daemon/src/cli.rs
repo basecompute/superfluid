@@ -371,8 +371,9 @@ pub const RUNTIMES_HELP: &str = "List the inference runtimes here, or which one 
 
 Usage: superfluid runtimes [<model>] [--json]
 
-  With no model: one row per runtime and install, its state, version, the formats it reads and
-  its device, then what to do about any that is not ready.
+  With no model: one row per runtime and install, its state, version, the newest version its
+  adapter installs on its own here (INSTALLABLE; `superfluid runtime versions <id>` lists them
+  all), the formats it reads and its device, then what to do about any that is not ready.
   With a model: which runtime reads it and what that runtime serves and refuses (exit 1 if none).
 
 Options:
@@ -382,6 +383,8 @@ Options:
 pub const RUNTIME_HELP: &str = "Install and manage inference runtimes.
 
 Usage:
+  superfluid runtime versions <id> [--json]     List the versions the adapter installs on its own: which install
+                                                here, as what, and which are installed
   superfluid runtime install <id> [options]     Fetch and install a runtime for this machine
   superfluid runtime update <id>                Install the newest tested build beside the current one
   superfluid runtime repair <id> [<install>]    Reinstall an install in place
@@ -399,6 +402,7 @@ Install options:
   --dry-run              Print the plan and stop
 
 Examples:
+  superfluid runtime versions llamacpp
   superfluid runtime install llamacpp
   superfluid runtime install llamacpp --backend vulkan --dry-run
 ";
@@ -471,7 +475,8 @@ Usage: superfluid compat [--json]
   llamacpp, mlx: the runtime versions each shipped adapter installs on its own, the ones it
   was built and tested against (`--untested` installs another).
   A release carries the same data beside its tarball, as compat.json, so a host can choose a
-  release before downloading it.
+  release before downloading it. `superfluid runtime versions <id>` lists one runtime's versions
+  with which install on this machine.
 
 Options:
   --json    Print JSON

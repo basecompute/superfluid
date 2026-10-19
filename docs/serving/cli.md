@@ -229,13 +229,14 @@ Sends the server `launch` started SIGTERM and waits for it to drain. A server st
 superfluid runtimes [<model>] [--json]
 ```
 
-Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
+Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
 
-With `--json`, a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
+With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
 
 ## `superfluid runtime`
 
 ```sh
+superfluid runtime versions <id> [--json]
 superfluid runtime install <id> [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested] [--dry-run]
 superfluid runtime update <id>
 superfluid runtime repair <id> [<install>]
@@ -251,7 +252,7 @@ See [Runtimes](../models/runtimes.md#managing-installs).
 superfluid compat [--json]
 ```
 
-What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md).
+What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md). For one runtime on this machine, `superfluid runtime versions <id>` says which of those versions install here.
 
 ## `superfluid session`
 
