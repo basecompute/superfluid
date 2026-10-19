@@ -40,6 +40,17 @@ pub fn resolve(flag: &str, value: &str, ids: &[RuntimeId]) -> Option<Given> {
     best.map(|(runtime, name)| Given { flag: flag.to_string(), runtime, name: name.to_string(), value: value.to_string() })
 }
 
+/// Refuses an option given twice: the worker reads the last value and this process the first (`daemon_environment`),
+/// so a repeat would split one knob between two values; serve refuses it as a usage error before anything starts.
+pub fn refuse_repeats(given: &[Given]) -> Result<(), String> {
+    for (i, g) in given.iter().enumerate() {
+        if let Some(first) = given[..i].iter().find(|p| p.runtime == g.runtime && p.name == g.name) {
+            return Err(format!("{}: given twice ({:?}, then {:?}); give it once", g.flag, first.value, g.value));
+        }
+    }
+    Ok(())
+}
+
 /// The options among `given` for `runtime`, checked against its declarations, as the pairs its worker takes.
 pub fn check(given: &[Given], runtime: &Runtime) -> Result<Vec<(String, String)>, String> {
     let id = runtime.id.base();
@@ -246,6 +257,18 @@ mod tests {
         assert_eq!(pairs[0], (ids[0], vec![("--lib".to_string(), "/custom/lib".to_string()), ("--n-gpu-layers".to_string(), "20".to_string())]));
         assert_eq!(pairs[1], (ids[1], vec![("--venv".to_string(), "/custom/env".to_string())]));
         assert!(given_pairs(&[]).is_empty());
+    }
+
+    #[test]
+    fn an_option_given_twice_is_refused() {
+        let ids = [RuntimeId::new("llamacpp"), RuntimeId::new("mlx")];
+        let given = |flags: &[(&str, &str)]| flags.iter().map(|(f, v)| resolve(f, v, &ids).unwrap()).collect::<Vec<_>>();
+        let twice = given(&[("--llamacpp-lib", "/a"), ("--mlx-venv", "/e"), ("--llamacpp-lib", "/b")]);
+        assert_eq!(refuse_repeats(&twice).unwrap_err(), "--llamacpp-lib: given twice (\"/a\", then \"/b\"); give it once");
+        let same = given(&[("--llamacpp-threads", "8"), ("--llamacpp-threads", "8")]);
+        assert!(refuse_repeats(&same).is_err(), "the same value twice is still a repeat");
+        assert!(refuse_repeats(&given(&[("--llamacpp-lib", "/a"), ("--mlx-venv", "/a"), ("--llamacpp-threads", "8")])).is_ok());
+        assert!(refuse_repeats(&[]).is_ok());
     }
 
     #[test]

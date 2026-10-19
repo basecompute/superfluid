@@ -565,6 +565,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             })
             .collect()
     };
+    superfluid_daemon::runtime_options::refuse_repeats(&runtime_options).unwrap_or_else(|e| usage_error(&e, "serve"));
     // Set before the runtime is required, so an option that makes it usable here counts for the first probe.
     superfluid_daemon::runtime_options::set(superfluid_daemon::runtime_options::given_pairs(&runtime_options));
     // The llama.cpp tokenizer this process loads finds its library the way the worker does.
