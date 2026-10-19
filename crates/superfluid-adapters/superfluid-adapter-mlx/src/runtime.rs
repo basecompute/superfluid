@@ -1169,8 +1169,9 @@ rt.seqs[1], rt.lens[1] = [C.CacheList(C.KVCache(), C.RotatingKVCache(max_size=64
 imported = rt.seq_import(1, payload)
 back = rt.seqs[1][0]
 kinds = int([type(c).__name__ for c in back.caches] == ['KVCache', 'RotatingKVCache'])
-same_meta = int(back.meta_state == both.meta_state)
-same_state = int(all(bool(mx.array_equal(a, b)) for (_, a), (_, b) in zip(shim.tree_flatten(back.state), shim.tree_flatten(both.state))))
+same_meta = int(getattr(back, 'meta_state', None) == getattr(both, 'meta_state', None))
+arrays = lambda c: [a for _, a in shim.tree_flatten(shim._live_state(c)) if isinstance(a, mx.array)]
+same_state = int(len(arrays(back)) == len(arrays(both)) and all(bool(mx.array_equal(a, b)) for a, b in zip(arrays(back), arrays(both))))
 flat = int(shim._meta_in({'kind': 'tuple', 'v': ['4', '64', '12', '12']}) == ('4', '64', '12', '12'))
 ",
             &["imported", "kinds", "same_meta", "same_state", "flat"],
@@ -1208,5 +1209,45 @@ bound = (128 + 256) * rt.kv_bytes_per_token
         };
         let (held, bound) = (v[0], v[1]);
         assert!(held <= bound, "many small cuts leave under a growth step of slack: {held} > {bound} bytes");
+    }
+
+    #[test]
+    fn a_runtime_built_as_usual_prices_a_token_by_its_live_state() {
+        let Some(v) = probe(
+            c"import mlx.nn as nn
+from types import SimpleNamespace
+
+# One attention layer with one KV head of four halves: a token leaves 16 bytes of keys and values.
+class Tiny(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.args = SimpleNamespace(num_attention_heads=1, num_key_value_heads=1, head_dim=4, hidden_size=4, vocab_size=V)
+        self.embed = mx.ones((V, 4), dtype=mx.float16)
+        self.layers = [nn.Identity()]
+    def __call__(self, x, cache=None):
+        B, T = x.shape
+        k = mx.ones((B, 1, T, 4), dtype=mx.float16)
+        ks, vs = cache[0].update_and_fetch(k, k)
+        return mx.zeros((B, T, V), dtype=mx.float32) + (ks[:, 0, -1:, :1] * 0).astype(mx.float32)
+
+shim._load_model = lambda path: Tiny()
+rt = shim.Runtime('tiny', 1, 1 << 20)
+priced, price = rt.kv_bytes_priced, rt.kv_bytes_per_token
+kv = C.KVCache()
+z = mx.ones((1, 1, 8192, 4), dtype=mx.float16)
+kv.update_and_fetch(z, z)
+mx.eval(kv.keys, kv.values)
+rt.seqs[0], rt.lens[0] = [kv], 8192
+rt.seq_truncate(0, 128)
+slots = rt.seqs[0][0].keys.shape[2]
+",
+            &["priced", "price", "slots"],
+        ) else {
+            return;
+        };
+        let (priced, price, slots) = (v[0], v[1], v[2]);
+        assert_eq!(priced, 16, "one KV head of four halves, keys and values");
+        assert_eq!(price, priced, "the price measured at construction is one token's, not the growth step its buffer holds");
+        assert!(slots <= 128 + 256, "a cut from 8192 to 128 tokens compacts the buffer, which the price decides: {slots} slots kept");
     }
 }
