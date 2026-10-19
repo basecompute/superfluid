@@ -483,6 +483,16 @@ fn open() -> Result<Loaded, String> {
             ))
         }
     };
+    // A build that appends a field keeps every default where it was, so the
+    // reading above passes it; but its getter would write past the struct
+    // declared here, and its init would read past the one handed to it.
+    if let Some(longer) = longer_than_declared(&context, layout, &model) {
+        return Err(format!(
+            "{} is a llama.cpp this adapter cannot drive: its {longer} is longer than the tested builds', so its \
+             functions would write and read past the struct the adapter passes (install a build the adapter lists as tested)",
+            libllama.display()
+        ));
+    }
     // SAFETY: an optional query with no arguments, looked up by name.
     let reported = unsafe {
         libs[0]
@@ -564,11 +574,12 @@ pub fn last_error() -> String {
 }
 
 const RETURN_ROOM: usize = 1024;
+const FILL: u8 = 0xAA;
 
 #[repr(C)]
 struct Returned([u8; RETURN_ROOM]);
 
-/// Calls `getter` with [`RETURN_ROOM`] bytes of 0xAA as its result buffer.
+/// Calls `getter` with [`RETURN_ROOM`] bytes of [`FILL`] as its result buffer.
 /// The struct may be laid out differently from the one declared here, so the
 /// call is made at the machine level, where a by-value struct of more than
 /// two words is written through a caller-supplied pointer: a larger struct
@@ -580,7 +591,7 @@ struct Returned([u8; RETURN_ROOM]);
 /// struct larger than two machine words and no larger than [`RETURN_ROOM`].
 #[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", unix)))]
 unsafe fn returned(getter: *const ()) -> Returned {
-    let mut room = Returned([0xAA; RETURN_ROOM]);
+    let mut room = Returned([FILL; RETURN_ROOM]);
     let out = room.0.as_mut_ptr();
     // SAFETY: per the caller's contract the getter writes at most
     // RETURN_ROOM bytes through the indirect-result register (x8 on AArch64,
@@ -682,6 +693,23 @@ fn layout_differs(context: &[u8], model: &[u8]) -> Option<String> {
     let mut wrong: Vec<String> = context_layout_of(context).err().into_iter().collect();
     wrong.extend(model_layout_differs(model));
     (!wrong.is_empty()).then(|| wrong.join("; "))
+}
+
+/// Which getter wrote past the struct its layout declares, as [`returned`]'s
+/// fill shows: a struct of the declared size leaves every byte past it as filled.
+fn longer_than_declared(context: &Returned, layout: ContextLayout, model: &Returned) -> Option<&'static str> {
+    let context_size = match layout {
+        ContextLayout::V1 => std::mem::size_of::<llama_context_params>(),
+        ContextLayout::V2 => std::mem::size_of::<llama_context_params_v2>(),
+    };
+    let past = |r: &Returned, size: usize| r.0[size..].iter().any(|&b| b != FILL);
+    if past(context, context_size) {
+        Some("llama_context_params")
+    } else if past(model, std::mem::size_of::<llama_model_params>()) {
+        Some("llama_model_params")
+    } else {
+        None
+    }
 }
 
 /// The layout of the library loaded (see [`load`]).
@@ -884,6 +912,26 @@ mod tests {
     }
 
     #[test]
+    fn a_library_whose_struct_grew_at_the_end_is_refused() {
+        let (c, m) = tested_defaults();
+        let room = |bytes: Vec<u8>| Returned(bytes.try_into().expect("the room's size"));
+        let (context, model) = (bytes_of(&c), bytes_of(&m));
+        assert_eq!(longer_than_declared(&room(context.clone()), ContextLayout::V1, &room(model.clone())), None);
+        // A field appended with a zero default: every default the layouts are told
+        // by stays put, so only the bytes past the struct show it.
+        let mut grown = context.clone();
+        let end = std::mem::size_of::<llama_context_params>();
+        grown[end..end + 8].fill(0);
+        assert_eq!(context_layout_of(&grown), Ok(ContextLayout::V1));
+        assert_eq!(longer_than_declared(&room(grown), ContextLayout::V1, &room(model.clone())), Some("llama_context_params"));
+        let mut grown = model.clone();
+        let end = std::mem::size_of::<llama_model_params>();
+        grown[end] = 0;
+        assert_eq!(model_layout_differs(&grown), None);
+        assert_eq!(longer_than_declared(&room(context), ContextLayout::V1, &room(grown)), Some("llama_model_params"));
+    }
+
+    #[test]
     fn the_tested_build_is_laid_out_as_declared() {
         if std::env::var_os("SUPERFLUID_LLAMA_LIB").is_none() {
             eprintln!("SKIP: set SUPERFLUID_LLAMA_LIB to a tested llama.cpp");
@@ -896,13 +944,7 @@ mod tests {
         };
         assert_eq!(layout_differs(&context.0, &model.0), None, "{}", lib.version);
         let layout = context_layout();
-        let past = |r: &Returned, size: usize| r.0[size..].iter().all(|&b| b == 0xAA);
-        let context_size = match layout {
-            ContextLayout::V1 => std::mem::size_of::<llama_context_params>(),
-            ContextLayout::V2 => std::mem::size_of::<llama_context_params_v2>(),
-        };
-        assert!(past(&context, context_size), "the getter wrote past its struct, or the room was not the fill");
-        assert!(past(&model, std::mem::size_of::<llama_model_params>()), "the getter wrote past its struct, or the room was not the fill");
+        assert_eq!(longer_than_declared(&context, layout, &model), None, "the getter wrote past its struct, or the room was not the fill");
         eprintln!("{}: context params laid out as {layout:?}", lib.version);
         // SAFETY: the library is loaded; the getter of its own layout is the one called,
         // and a v2 struct is read into the v1 names this test checks.
