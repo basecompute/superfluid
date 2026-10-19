@@ -144,10 +144,10 @@ The knobs of llama.cpp's model and context parameters that keep their meaning un
 | `--llamacpp-load-mode` | auto, none, mmap, mlock, mmap-mlock, direct-io | auto | How weights are read: mmap maps the file, mlock pins them in RAM, direct-io bypasses the page cache. |
 | `--llamacpp-lazy-mode` | off, auto, on | auto | Read the rows of tensors the architecture marks (experts) on demand; needs mmap. |
 | `--llamacpp-repack` | on, off | on | Repack weights into the device's extra buffer types (llama.cpp's `--no-repack` turns it off). |
-| `--llamacpp-threads` | N | 0 | Threads for decoding; 0 is every core. |
-| `--llamacpp-threads-batch` | N | 0 | Threads for prompt batches; 0 is as many as `threads`. |
-| `--llamacpp-batch-size` | N | 2048 | Tokens per decode call (`n_batch`). |
-| `--llamacpp-ubatch-size` | N | 512 | Tokens per micro-batch (`n_ubatch`), at most `batch-size`. |
+| `--llamacpp-threads` | N, 0 to 512 | 0 | Threads for decoding; 0 is every core. |
+| `--llamacpp-threads-batch` | N, 0 to 512 | 0 | Threads for prompt batches; 0 is as many as `threads`. |
+| `--llamacpp-batch-size` | N, 1 to 1048576 | 2048 | Tokens per decode call (`n_batch`). |
+| `--llamacpp-ubatch-size` | N, 1 to 1048576 | 512 | Tokens per micro-batch (`n_ubatch`), at most `batch-size`. |
 | `--llamacpp-flash-attn` | auto, on, off | auto | Flash attention; auto lets llama.cpp decide for the device. |
 | `--llamacpp-cache-type-k` | f16, bf16, f32, q8_0, q4_0, q4_1, q5_0, q5_1, iq4_nl | f16 | The KV cache's K type. |
 | `--llamacpp-cache-type-v` | the same | f16 | The KV cache's V type; a quantized V needs flash attention on. |
@@ -155,9 +155,9 @@ The knobs of llama.cpp's model and context parameters that keep their meaning un
 | `--llamacpp-op-offload` | on, off | on | Offload operations on host tensors to the device. |
 | `--llamacpp-swa-full` | on, off | on | A full-size cache for sliding-window layers; off keeps only the window and saves memory. |
 | `--llamacpp-rope-scaling` | none, linear, yarn, longrope | model's | RoPE scaling for a context past the trained one. |
-| `--llamacpp-rope-freq-base`, `--llamacpp-rope-freq-scale` | F | model's | RoPE base frequency and frequency scale. |
-| `--llamacpp-yarn-ext-factor`, `--llamacpp-yarn-attn-factor`, `--llamacpp-yarn-beta-fast`, `--llamacpp-yarn-beta-slow` | F | model's | YaRN extrapolation mix (-1 takes the model's), magnitude scale, low and high correction dimensions. |
-| `--llamacpp-yarn-orig-ctx` | N | model's | YaRN original context size. |
+| `--llamacpp-rope-freq-base`, `--llamacpp-rope-freq-scale` | F, at least 0 | model's | RoPE base frequency and frequency scale; 0 takes the model's, as in llama.cpp. |
+| `--llamacpp-yarn-ext-factor`, `--llamacpp-yarn-attn-factor`, `--llamacpp-yarn-beta-fast`, `--llamacpp-yarn-beta-slow` | F | model's | YaRN extrapolation mix, magnitude scale, low and high correction dimensions; a negative value takes the model's, as in llama.cpp. |
+| `--llamacpp-yarn-orig-ctx` | N | model's | YaRN original context size; 0 takes the model's. |
 
 Not options, by design: `--ctx-size` and `--parallel` are `--max-context` and `--max-batch`; `--kv-unified` is the adapter's choice of KV layout; metadata and tensor overrides (`--override-kv`, `--override-tensor`, `--cpu-moe`) and `--device` take backend handles the worker does not expose yet.
 
@@ -168,7 +168,7 @@ The worker drives mlx-lm's model classes with an executor of its own, so its kno
 | option | value | default | meaning |
 |---|---|---|---|
 | `--mlx-venv` | path | the install's | A Python environment of your own with `mlx` and `mlx-lm` (as `SUPERFLUID_MLX_VENV`). |
-| `--mlx-prefill-chunk` | N | 2048 | Prompt tokens fed to the model per step. |
+| `--mlx-prefill-chunk` | N, 1 to 1048576 | 2048 | Prompt tokens fed to the model per step. |
 | `--mlx-cache-limit-mb` | N | 1024 | MLX's buffer cache limit (`mx.set_cache_limit`). |
 
 mlx-lm's own `--max-kv-size`, `--kv-bits` and `--adapter-path` are not options: a rotating or quantized cache changes the executor's cache, and a LoRA adapter is a load-time change the worker does not make yet.

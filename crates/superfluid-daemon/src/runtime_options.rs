@@ -64,7 +64,7 @@ pub fn check(given: &[Given], runtime: &Runtime) -> Result<Vec<(String, String)>
                 format!("{}: the {} runtime takes no such option (it takes: {})", g.flag, id.name(), takes.join(", "))
             });
         };
-        check_value(&decl.kind, &decl.choices, decl.least, &g.value).map_err(|e| format!("{}: {e}", g.flag))?;
+        check_value(&decl.kind, &decl.choices, decl.least, decl.most, &g.value).map_err(|e| format!("{}: {e}", g.flag))?;
         out.push((format!("--{}", g.name), g.value.clone()));
     }
     Ok(out)
@@ -256,6 +256,7 @@ mod tests {
             kind: kind.into(),
             choices: choices.iter().map(|c| c.to_string()).collect(),
             least: None,
+            most: None,
             default: default.into(),
             about: format!("about {name}"),
         }
@@ -346,6 +347,16 @@ mod tests {
         floored.options[0].least = Some(1);
         let zero = [resolve("--llamacpp-batch-size", "0", &[floored.id]).unwrap()];
         assert_eq!(check(&zero, &floored).unwrap_err(), "--llamacpp-batch-size: at least 1 expected, got 0");
+        let mut bounded = runtime("llamacpp", vec![decl("threads", "int", &[], "0"), decl("rope-freq-base", "float", &[], "model's")]);
+        (bounded.options[0].least, bounded.options[0].most, bounded.options[1].least) = (Some(0), Some(512), Some(0));
+        let ids = [bounded.id];
+        let many = [resolve("--llamacpp-threads", "2147483647", &ids).unwrap()];
+        assert_eq!(check(&many, &bounded).unwrap_err(), "--llamacpp-threads: 0 to 512 expected, got 2147483647");
+        let below = [resolve("--llamacpp-rope-freq-base", "-1", &ids).unwrap()];
+        assert_eq!(check(&below, &bounded).unwrap_err(), "--llamacpp-rope-freq-base: at least 0 expected, got -1");
+        let fine = [resolve("--llamacpp-threads", "512", &ids).unwrap(), resolve("--llamacpp-rope-freq-base", "0", &ids).unwrap()];
+        assert_eq!(check(&fine, &bounded).unwrap().len(), 2);
+        let ids = [rt.id];
         let unknown = [resolve("--llamacpp-ngl", "20", &ids).unwrap()];
         assert_eq!(
             check(&unknown, &rt).unwrap_err(),

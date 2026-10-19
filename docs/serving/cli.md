@@ -233,7 +233,7 @@ superfluid runtimes [<model>] [--json]
 
 Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
 
-With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
+With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `least` and `most` when the value is bounded, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
 
 ## `superfluid runtime`
 
