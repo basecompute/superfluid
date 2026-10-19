@@ -84,9 +84,12 @@ jobs:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
     steps:
       # The tests run an untested llama.cpp: the job's token is not left in .git/config for it.
+      # A self-hosted runner's checkout is not cleaned, so target/ outlives the job (see
+      # rust-cache below); tracked files are still checked out as the commit has them.
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          clean: ${{ runner.environment == 'github-hosted' }}
       # A self-hosted runner keeps the toolchain it has, where rustup puts it;
       # its PATH does not say so unless its owner's shell did.
       - uses: dtolnay/rust-toolchain@stable
@@ -95,7 +98,7 @@ jobs:
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # Never on a self-hosted runner: its save step deletes every file in
       # ~/.cargo/bin that cargo did not install during the job, rustup
-      # included. A self-hosted runner keeps its target directory anyway.
+      # included. A self-hosted runner keeps its target directory instead.
       - uses: Swatinem/rust-cache@v2
         if: runner.environment == 'github-hosted'
 
