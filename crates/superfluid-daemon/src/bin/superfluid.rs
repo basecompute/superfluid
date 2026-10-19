@@ -473,10 +473,11 @@ fn main() {
         return;
     }
     if command == Some("compat") {
+        let catalog = superfluid_daemon::runtimes::Catalog::from_env();
         if args[1..].iter().any(|a| a == "--json") {
-            println!("{}", serde_json::to_string_pretty(&cli::compat_json()).expect("compat is JSON"));
+            println!("{}", serde_json::to_string_pretty(&superfluid_daemon::compat::json(&catalog)).expect("compat is JSON"));
         } else {
-            print!("{}", cli::compat_text());
+            print!("{}", superfluid_daemon::compat::text(&catalog));
         }
         return;
     }

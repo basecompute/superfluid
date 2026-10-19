@@ -45,8 +45,18 @@ The `basert` row answers:
 Each release carries `compat.json` beside its tarball (and inside it), the same data as `superfluid compat --json`:
 
 ```json
-{"superfluid": "0.1.3", "runtimes": {"basert": {"basert_version": "0.4.0", "abi": 1, "unnumbered_minor": "0.3"}}}
+{
+  "superfluid": "0.1.3",
+  "runtimes": {
+    "basert": {"basert_version": "0.4.0", "abi": 1, "unnumbered_minor": "0.3",
+               "pinned_engines": [{"version": "0.3.0", "abi": null}]},
+    "llamacpp": {"tested": ["b11284"]},
+    "mlx": {"tested": ["0.32.2"], "python": "3.12"}
+  }
+}
 ```
+
+Every adapter the release ships answers for its runtime: for llama.cpp and MLX, `tested` is the upstream versions the adapter was built and tested against, which `superfluid runtime install` installs on its own (another version only with `--untested`).
 
 A host that installs superfluid picks the newest release whose `runtimes.basert.abi` equals its engine's number; a superfluid release that states no number (0.1.2 and older) serves 0.3.x engines only. The verdict above remains the final word once the release is installed. The other direction works the same way: baseRT's releases carry the engine's number beside each bundle, as `basert-engine-abi-<N>.txt`, and `superfluid runtime install basert` picks the newest engine with this build's number, or a 0.3.x engine, from the release listing alone.
 

@@ -193,6 +193,12 @@ pub trait Runtime: Send + Sync {
         true
     }
 
+    /// What this adapter was built and tested for, as a release carries it (`superfluid compat`, `compat.json`):
+    /// `tested` names the versions it installs on its own; the rest of the keys are the adapter's to define.
+    fn compat(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+
     fn prepare(&self, _args: &WorkerArgs) {}
 
     fn probe(&self, args: &WorkerArgs) -> Result<Probe, String>;
@@ -344,6 +350,12 @@ pub fn worker_main(rt: &dyn Runtime) -> ! {
     }
     if argv.first().map(String::as_str) == Some("pull") {
         pull_command(rt, &name, &argv[1..]);
+    }
+    if argv.first().map(String::as_str) == Some("compat") {
+        // Always JSON; nothing of the runtime is needed.
+        rt.prepare(&WorkerArgs::default());
+        println!("{}", serde_json::to_string(&rt.compat()).expect("compat is JSON"));
+        std::process::exit(0);
     }
     let (command, rest) = match argv.first().map(String::as_str) {
         Some(c @ ("version" | "check")) => (Some(c), &argv[1..]),
