@@ -32,7 +32,7 @@ Each version finds its workers beside its own real executable, so a server start
 2. Downloads the tarball and its `.sha256` into a staging directory and checks the digest, then unpacks with the same rules as a runtime install (no member may land outside the tree).
 3. Runs the new copy's `--version` and `runtimes --json`: it must start, find its workers, and, when an engine is in use, report the `basert` runtime ready. A copy that fails is removed and the current version is untouched.
 4. Makes it current by replacing the `current` link in one step, and remembers the version it replaced.
-5. Removes older versions. Kept: current, the one it replaced, any version with a `keep` file inside its directory, and any version a running superfluid process started from.
+5. Removes older versions. Kept: current, the one it replaced, any version with a `keep` file inside its directory, and any version a running superfluid process started from. A version that cannot be removed is said and left for the next update; the update itself has succeeded.
 
 A running server keeps the version it started with; its next start uses the new one. A server started by `superfluid launch` is stopped with `superfluid stop`. One update, install or switch runs at a time: a second waits for the first and then decides on what it left. An installed version is never written to: a release placed again over a working copy is kept as it is, and only a copy that is proved first replaces one that no longer works.
 

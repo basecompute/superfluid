@@ -739,6 +739,16 @@ fn replace_tree(from: &Path, dest: &Path, aside: &Path, mover: impl Fn(&Path, &P
     }
 }
 
+/// The older versions removed, once the new one is current: one that cannot be removed is said, not an error, since
+/// the update itself is done; the next prune tries it again.
+fn prune_older(versions: &Versions, report: &mut Report) {
+    match versions.prune() {
+        Ok(gone) if !gone.is_empty() => report.say(format!("removed {}", gone.join(", "))),
+        Ok(_) => {}
+        Err(e) => report.say(format!("an older version was not removed ({e}); the next update tries again")),
+    }
+}
+
 /// `self update`: the newest release that fits, or the one named.
 pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Result<Report, String> {
     let mut report = Report::default();
@@ -820,19 +830,17 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
     }
     report.changed = true;
     report.say(format!("superfluid {v} is current ({})", versions.dir.join("current").display()));
+    if let Some(prev) = versions.previous() {
+        report.say(format!("{prev} stays installed: `superfluid self use {prev}` goes back to it"));
+    }
+    // Pruned before the links are made, so a removed version's `superfluid-<v>` goes with it.
+    prune_older(&versions, &mut report);
     if let Some(prefix) = &migrating {
         migrate(&versions, prefix, &mut report)?;
     } else if let Some(prefix) = versions.prefix() {
         for note in versions.link(&prefix, false)? {
             report.say(note);
         }
-    }
-    if let Some(prev) = versions.previous() {
-        report.say(format!("{prev} stays installed: `superfluid self use {prev}` goes back to it"));
-    }
-    let gone = versions.prune()?;
-    if !gone.is_empty() {
-        report.say(format!("removed {}", gone.join(", ")));
     }
     report.say("a running server keeps the version it started with; starting it again uses the new one");
     Ok(report)
@@ -899,15 +907,12 @@ pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<
     }
     report.changed = true;
     report.say(format!("superfluid {v} is current ({})", versions.dir.join("current").display()));
+    prune_older(&versions, &mut report);
     if let Some(prefix) = prefix.map(Path::to_path_buf).or_else(|| versions.prefix()) {
         for note in versions.link(&prefix, true)? {
             report.say(note);
         }
         report.say(format!("{} links to it", prefix.join("superfluid").display()));
-    }
-    let gone = versions.prune()?;
-    if !gone.is_empty() {
-        report.say(format!("removed {}", gone.join(", ")));
     }
     Ok(report)
 }
@@ -1276,7 +1281,7 @@ mod tests {
         let r = update(&home, &catalog, &exe, &from(Some("0.1.4"), false)).unwrap();
         assert_eq!((versions.current().as_deref(), versions.previous().as_deref()), (Some("0.1.4"), Some("0.1.3")));
         assert_eq!(versions.on_disk(), ["0.1.4", "0.1.3"], "0.1.5 was neither current nor previous: {:?}", r.lines);
-        assert!(!prefix.join("bin").join("superfluid-0.1.5").exists(), "its link went with it");
+        assert!(prefix.join("bin").join("superfluid-0.1.5").symlink_metadata().is_err(), "its link went with it, not left dangling");
         std::fs::write(versions.version_dir("0.1.3").join("keep"), "").unwrap();
         let r = use_version(&home, &catalog, &exe, "0.1.3").unwrap();
         assert!(r.changed && versions.current().as_deref() == Some("0.1.3"));
@@ -1495,6 +1500,25 @@ mod tests {
         assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists());
         assert!(!versions.dir.join(".staging").join("kept-0.1.2").exists());
         assert!(use_version(&home, &catalog, &versions.binary("0.1.3"), "0.1.2").unwrap().changed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_version_that_cannot_be_removed_does_not_fail_the_install() {
+        let dir = scratch("prune-fails");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let versions = Versions::of(&home);
+        release_tree(&versions.version_dir("0.1.0"), "0.1.0");
+        release_tree(&versions.version_dir("0.1.1"), "0.1.1");
+        versions.set_current("0.1.1").unwrap();
+        let stuck = versions.version_dir("0.1.0").join("bin");
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = install_from(&home, &catalog, &release_tree(&dir.join("unpacked").join("superfluid-x"), "0.1.2"), None);
+        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = r.unwrap();
+        assert!(r.changed && versions.current().as_deref() == Some("0.1.2"), "{:?}", r.lines);
+        assert!(r.lines.iter().any(|l| l.starts_with("an older version was not removed (")), "{:?}", r.lines);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
