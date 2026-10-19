@@ -510,8 +510,11 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     "superfluid accepts only data: image URLs and never reads a local path, so there is nothing to allow-list",
                 );
             }
-            "--metallib" | "--prefill-chunk" | "--gpu-wait-timeout-ms"
-            | "--decode-replay" => {
+            "--prefill-chunk" => {
+                let _ = val();
+                retired(a, "an engine-level knob; a runtime takes its own, --mlx-prefill-chunk or --llamacpp-ubatch-size");
+            }
+            "--metallib" | "--gpu-wait-timeout-ms" | "--decode-replay" => {
                 let _ = val();
                 retired(a, "an engine-level knob superfluid does not expose");
             }
