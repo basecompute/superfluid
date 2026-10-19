@@ -145,7 +145,9 @@ impl Versions {
 
     /// The links in `prefix`: the three commands through `current`, and `superfluid-<v>` per version. The install script's
     /// real files are replaced on a migration, except `superfluid-workerd` while a server still runs from it (it starts its
-    /// workers by that path), which a `migrating` note has the next link finish once nothing runs from there.
+    /// workers by that path), which a `migrating` note has the next link finish once nothing runs from there. The note
+    /// names the processes that ran from there, by pid and start time: once a link is renamed over a server's own
+    /// executable, macOS may give no path for it, and a server found by its path alone would be missed.
     pub fn link(&self, prefix: &Path, replace_files: bool) -> Result<Vec<String>, String> {
         std::fs::create_dir_all(prefix).map_err(|e| format!("{}: {e}", prefix.display()))?;
         std::fs::write(self.dir.join("prefix"), format!("{}\n", prefix.display())).map_err(|e| format!("{}: {e}", self.dir.display()))?;
@@ -153,7 +155,25 @@ impl Versions {
         let pending = self.dir.join("migrating");
         let legacy = self.legacy_files(prefix);
         let migrating = !legacy.is_empty() && (replace_files || pending.exists());
-        let in_use = migrating && running_from(prefix);
+        // A process the note names counts while it is the one that started then, whatever path is given for it now.
+        let mut holding: Vec<(i32, u64)> = match migrating {
+            true => std::fs::read_to_string(&pending)
+                .unwrap_or_default()
+                .lines()
+                .skip(1)
+                .filter_map(|l| l.split_once(' ').and_then(|(p, at)| Some((p.parse().ok()?, at.parse().ok()?))))
+                .filter(|&(p, at)| started_at(p) == Some(at))
+                .collect(),
+            false => Vec::new(),
+        };
+        if migrating {
+            for p in processes_from(prefix) {
+                if !holding.contains(&p) {
+                    holding.push(p);
+                }
+            }
+        }
+        let in_use = !holding.is_empty();
         let replace: Vec<&str> = match (migrating, in_use) {
             (true, true) => vec!["superfluid"],
             (true, false) => LINKED.to_vec(),
@@ -183,7 +203,8 @@ impl Versions {
         if migrating {
             let libexec = prefix.join("..").join("libexec").join("superfluid");
             if in_use {
-                std::fs::write(&pending, format!("{}\n", prefix.display())).map_err(|e| format!("{}: {e}", pending.display()))?;
+                let note: String = holding.iter().map(|(p, at)| format!("{p} {at}\n")).collect();
+                std::fs::write(&pending, format!("{}\n{note}", prefix.display())).map_err(|e| format!("{}: {e}", pending.display()))?;
                 notes.push(format!(
                     "a server still runs from the copy the install script placed in {}: its superfluid-workerd, superfluid-noded and workers stay until it stops; the next update, switch or install finishes the move",
                     prefix.display()
@@ -429,22 +450,30 @@ fn now_secs() -> u64 {
 }
 
 
-/// The executables of the other processes on this machine, as real paths.
+/// The other processes on this machine, each with its executable as a real path.
 #[cfg(target_os = "linux")]
-fn other_executables() -> Vec<PathBuf> {
-    let me = std::process::id().to_string();
+fn other_processes() -> Vec<(i32, PathBuf)> {
+    let me = std::process::id() as i32;
     std::fs::read_dir("/proc")
         .map(|rd| {
             rd.flatten()
-                .filter(|e| e.file_name().to_str().is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()) && n != me))
-                .filter_map(|e| std::fs::read_link(e.path().join("exe")).ok())
+                .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok().filter(|&p| p != me).map(|p| (p, e.path())))
+                .filter_map(|(p, dir)| Some((p, std::fs::read_link(dir.join("exe")).ok()?)))
                 .collect()
         })
         .unwrap_or_default()
 }
 
+/// When `pid` started, in clock ticks since boot: with the pid, what tells a process from a later one given its number.
+#[cfg(target_os = "linux")]
+fn started_at(pid: i32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name, in parentheses, may hold spaces; the start time is the 20th field after it.
+    stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.parse().ok()
+}
+
 #[cfg(target_os = "macos")]
-fn other_executables() -> Vec<PathBuf> {
+fn other_processes() -> Vec<(i32, PathBuf)> {
     let me = std::process::id() as libc::c_int;
     // SAFETY: with a null buffer, proc_listallpids only reports how many pids there are.
     let n = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
@@ -462,20 +491,41 @@ fn other_executables() -> Vec<PathBuf> {
             let mut buf = vec![0u8; 4096];
             // SAFETY: proc_pidpath writes at most the buffer's length, which it is told.
             let len = unsafe { libc::proc_pidpath(p, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32) };
-            (len > 0).then(|| PathBuf::from(String::from_utf8_lossy(&buf[..len as usize]).to_string()))
+            (len > 0).then(|| (p, PathBuf::from(String::from_utf8_lossy(&buf[..len as usize]).to_string())))
         })
         .collect()
 }
 
+/// When `pid` started, in microseconds since the epoch.
+#[cfg(target_os = "macos")]
+fn started_at(pid: i32) -> Option<u64> {
+    // SAFETY: proc_bsdinfo is plain data, for which all zeroes is a value.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: proc_pidinfo writes at most `size` bytes into `info`, which is that big.
+    let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
+    (got == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn other_executables() -> Vec<PathBuf> {
+fn other_processes() -> Vec<(i32, PathBuf)> {
     Vec::new()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn started_at(_pid: i32) -> Option<u64> {
+    None
 }
 
 /// Whether another process runs an executable under `dir`.
 pub fn running_from(dir: &Path) -> bool {
-    let Ok(dir) = std::fs::canonicalize(dir) else { return false };
-    other_executables().iter().any(|exe| exe.starts_with(&dir))
+    !processes_from(dir).is_empty()
+}
+
+/// The other processes running an executable under `dir`, by pid and when each started.
+fn processes_from(dir: &Path) -> Vec<(i32, u64)> {
+    let Ok(dir) = std::fs::canonicalize(dir) else { return Vec::new() };
+    other_processes().into_iter().filter(|(_, exe)| exe.starts_with(&dir)).map(|(p, _)| (p, started_at(p).unwrap_or(0))).collect()
 }
 
 
@@ -1264,6 +1314,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Killed and waited for on every way out of a test.
+    struct Sleeper(std::process::Child);
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// This test binary copied to `exe` and run from there, asleep: a server running from the install script's layout.
+    /// A copy of this test binary rather than a system one: macOS kills a platform binary run from elsewhere.
+    fn sleeper_at(exe: &Path) -> Sleeper {
+        std::fs::copy(std::env::current_exe().unwrap(), exe).unwrap();
+        Sleeper(
+            Command::new(exe)
+                .args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
+                .env(SLEEP_ENV, "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        )
+    }
+
+    /// Whether a process is seen running from `dir` within five seconds.
+    fn seen_running_from(dir: &Path) -> bool {
+        (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            running_from(dir)
+        })
+    }
+
     #[test]
     fn a_server_still_running_from_the_install_scripts_copy_keeps_its_workerd_until_it_stops() {
         let dir = scratch("legacy-running");
@@ -1271,35 +1354,9 @@ mod tests {
         let p = listing(&dir, &[("0.1.3", "2026-10-01", None)]);
         let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         release_tree(&prefix, "0.1.2");
-        // A copy of this test binary rather than a system one: macOS kills a platform binary run from elsewhere.
         let bin = prefix.join("bin");
-        std::fs::copy(std::env::current_exe().unwrap(), bin.join("superfluid-workerd")).unwrap();
-        // Killed and waited for on every way out of this test.
-        struct Sleeper(std::process::Child);
-        impl Drop for Sleeper {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let mut sleeper = Sleeper(
-            Command::new(bin.join("superfluid-workerd"))
-                .args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
-                .env(SLEEP_ENV, "1")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        );
-        let mut seen = false;
-        for _ in 0..50 {
-            std::thread::sleep(Duration::from_millis(100));
-            if running_from(&bin) {
-                seen = true;
-                break;
-            }
-        }
-        if !seen {
+        let mut sleeper = sleeper_at(&bin.join("superfluid-workerd"));
+        if !seen_running_from(&bin) {
             eprintln!("SKIP: this platform does not report the sleeper's executable");
             return;
         }
@@ -1323,6 +1380,41 @@ mod tests {
         assert!(!prefix.join("libexec").join("superfluid").join("superfluid-worker-toy").exists());
         assert!(!versions.dir.join("migrating").exists());
         assert!(notes.iter().any(|n| n.contains("now links into")), "{notes:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_server_whose_own_command_became_a_link_still_holds_the_install_scripts_copy() {
+        let dir = scratch("legacy-server");
+        let (home, prefix) = (dir.join("home"), dir.join("local"));
+        let versions = Versions::of(&home);
+        release_tree(&versions.version_dir("0.1.3"), "0.1.3");
+        versions.set_current("0.1.3").unwrap();
+        release_tree(&prefix, "0.1.2");
+        let bin = prefix.join("bin");
+        let toy = prefix.join("libexec").join("superfluid").join("superfluid-worker-toy");
+        let mut sleeper = sleeper_at(&bin.join("superfluid"));
+        if !seen_running_from(&bin) {
+            eprintln!("SKIP: this platform does not report the sleeper's executable");
+            return;
+        }
+        let notes = versions.link(&bin, true).unwrap();
+        assert!(bin.join("superfluid").symlink_metadata().unwrap().file_type().is_symlink(), "the command moved: {notes:?}");
+        assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_file() && toy.exists(), "{notes:?}");
+        // macOS gives the path of an executable a link was renamed over only while that name still leads somewhere: with
+        // the link dangling it gives none, and the server is known by the note alone.
+        std::fs::remove_file(versions.binary("0.1.3")).unwrap();
+        let notes = versions.link(&bin, false).unwrap();
+        assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_file(), "the server's workerd stayed a file: {notes:?}");
+        assert!(toy.exists() && versions.dir.join("migrating").exists(), "and its workers: {notes:?}");
+        assert!(notes.iter().any(|n| n.contains("still runs from the copy")), "{notes:?}");
+        drop(std::mem::replace(&mut sleeper, Sleeper(Command::new("true").spawn().unwrap())));
+        // A process that took a recorded id later is not the one recorded.
+        let note = std::fs::read_to_string(versions.dir.join("migrating")).unwrap();
+        std::fs::write(versions.dir.join("migrating"), format!("{note}{} 1\n", std::process::id())).unwrap();
+        let notes = versions.link(&bin, false).unwrap();
+        assert!(bin.join("superfluid-workerd").symlink_metadata().unwrap().file_type().is_symlink(), "{notes:?}");
+        assert!(!toy.exists() && !versions.dir.join("migrating").exists(), "{notes:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
