@@ -399,8 +399,10 @@ pub trait Runtime: Send + Sync {
     /// The versions this adapter installs on its own, newest first, each planned for `host` as `plan` would (`superfluid runtime
     /// versions`). Answered from the recipe alone, never the network: by default every `tested` version `compat` names.
     fn versions(&self, host: &Host) -> Vec<Candidate> {
-        let tested: Vec<String> =
+        let mut tested: Vec<String> =
             self.compat()["tested"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        // A recipe lists its versions in whatever order it was written; the listing is newest first whatever that was.
+        tested.sort_by_key(|v| std::cmp::Reverse(install::version_key(v)));
         tested
             .into_iter()
             .map(|version| {
@@ -746,7 +748,7 @@ mod tests {
             RuntimeInfo { id: "inst", aliases: &[], formats: vec![], tokenizer: TokenizerSource::HuggingFace }
         }
         fn compat(&self) -> serde_json::Value {
-            serde_json::json!({"tested": ["2.0", "1.0"]})
+            serde_json::json!({"tested": ["1.0", "2.0"]})
         }
         fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
             Err("never".into())
@@ -804,7 +806,7 @@ mod tests {
     fn the_versions_listed_are_the_tested_ones_each_planned_here() {
         let host = Host { os: "linux".into(), arch: "x64".into(), ..Host::default() };
         let listed = Installs.versions(&host);
-        assert_eq!(listed.iter().map(|c| c.version.as_str()).collect::<Vec<_>>(), ["2.0", "1.0"], "the adapter's order");
+        assert_eq!(listed.iter().map(|c| c.version.as_str()).collect::<Vec<_>>(), ["2.0", "1.0"], "newest first, not the recipe's order");
         assert_eq!(listed[0].here.as_ref().map(|p| p.install.as_str()), Ok("2.0-cpu"));
         assert_eq!(listed[0].size(), 10, "the assets and the wheels");
         assert_eq!(listed[1].here, Err("inst 1.0 publishes no build for linux-x64".to_string()));
