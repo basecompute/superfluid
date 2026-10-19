@@ -1169,7 +1169,13 @@ rt.seqs[1], rt.lens[1] = [C.CacheList(C.KVCache(), C.RotatingKVCache(max_size=64
 imported = rt.seq_import(1, payload)
 back = rt.seqs[1][0]
 kinds = int([type(c).__name__ for c in back.caches] == ['KVCache', 'RotatingKVCache'])
-same_meta = int(getattr(back, 'meta_state', None) == getattr(both, 'meta_state', None))
+# What a cache carries besides its arrays: its meta state up to mlx-lm 0.31,
+# the plain values of its state (offsets, window, member names) from 0.32.
+def settings(c):
+    if shim._has_meta(c):
+        return c.meta_state
+    return [v for _, v in shim.tree_flatten(c.state) if not isinstance(v, mx.array)]
+same_meta = int(bool(settings(both)) and settings(back) == settings(both))
 arrays = lambda c: [a for _, a in shim.tree_flatten(shim._live_state(c)) if isinstance(a, mx.array)]
 same_state = int(len(arrays(back)) == len(arrays(both)) and all(bool(mx.array_equal(a, b)) for a, b in zip(arrays(back), arrays(both))))
 flat = int(shim._meta_in({'kind': 'tuple', 'v': ['4', '64', '12', '12']}) == ('4', '64', '12', '12'))
@@ -1179,6 +1185,71 @@ flat = int(shim._meta_in({'kind': 'tuple', 'v': ['4', '64', '12', '12']}) == ('4
             return;
         };
         assert_eq!(v, vec![12, 1, 1, 1, 1], "tokens imported, member classes, meta state, arrays, the flat form");
+    }
+
+    #[test]
+    fn a_sliding_window_or_chunked_layer_is_priced_and_copied_by_the_tokens_it_holds() {
+        let Some(v) = probe(
+            c"import mlx.nn as nn
+from types import SimpleNamespace
+
+# A grown, a sliding-window and a chunked layer, one KV head of four halves
+# each: a token leaves 16 bytes of keys and values in every one. From mlx-lm
+# 0.32 the window and the chunk hand out their whole stepped buffer as state
+# (256 slots at the first token).
+class Tiny(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.args = SimpleNamespace(num_attention_heads=1, num_key_value_heads=1, head_dim=4, hidden_size=4, vocab_size=V)
+        self.embed = mx.ones((V, 4), dtype=mx.float16)
+        self.layers = [nn.Identity()] * 3
+    def make_cache(self):
+        return [C.KVCache(), C.RotatingKVCache(max_size=1024), C.ChunkedKVCache(chunk_size=512)]
+    def __call__(self, x, cache=None):
+        B, T = x.shape
+        out = mx.zeros((B, T, V), dtype=mx.float32)
+        for i, c in enumerate(cache):
+            k = mx.full((B, 1, T, 4), float(i + 1), dtype=mx.float16)
+            ks, vs = c.update_and_fetch(k, k)
+            out = out + (ks[:, 0, -1:, :1] * 0).astype(mx.float32)
+        return out
+
+shim._load_model = lambda path: Tiny()
+rt = shim.Runtime('tiny', 1, 1 << 20)
+priced, price = rt.kv_bytes_priced, rt.kv_bytes_per_token
+
+# Ten tokens, one at a time, leave each layer a buffer of a step; a copy and
+# an export hold the ten.
+src, dst, back = rt.seq_create(), rt.seq_create(), rt.seq_create()
+for _ in range(10):
+    rt.step([(src, [1], False)])
+rt.seq_copy(src, dst, 10)
+copied = max(c.keys.shape[2] for c in rt.seqs[dst])
+payload = rt.seq_export(src, 10)
+header = shim.json.loads(payload[12 : 12 + int.from_bytes(payload[8:12], 'little')])
+exported = max(a['shape'][2] for layer in header['layers'] for a in layer['arrays'])
+imported = rt.seq_import(back, payload)
+rt.step([(src, [1], False), (back, [1], False)])
+keys = lambda s: [shim._live_state(c)[0] for c in rt.seqs[s]]
+same = int(all(a.shape == b.shape and bool(mx.array_equal(a, b)) for a, b in zip(keys(src), keys(back))))
+
+# A window that has wrapped is live in every slot, and travels whole.
+ring = C.RotatingKVCache(max_size=16)
+for i in range(40):
+    z = mx.full((1, 1, 1, 4), float(i), dtype=mx.float16)
+    ring.update_and_fetch(z, z)
+wrapped = int(shim._live_bytes(ring) == shim._held_bytes(ring) == 16 * 16)
+",
+            &["priced", "price", "copied", "exported", "imported", "same", "wrapped"],
+        ) else {
+            return;
+        };
+        let (priced, price) = (v[0], v[1]);
+        assert_eq!(priced, 48, "three layers of one KV head of four halves, keys and values");
+        assert_eq!(price, priced, "a window's or a chunk's token is priced by the token, not the step its buffer holds");
+        assert_eq!((v[2], v[3]), (10, 10), "a copy and an export hold the ten tokens, not the buffer's slack");
+        assert_eq!((v[4], v[5]), (10, 1), "the import holds the ten and decodes as the sequence it came from");
+        assert_eq!(v[6], 1, "a wrapped window is live in every slot");
     }
 
     #[test]
