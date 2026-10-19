@@ -1169,7 +1169,13 @@ rt.seqs[1], rt.lens[1] = [C.CacheList(C.KVCache(), C.RotatingKVCache(max_size=64
 imported = rt.seq_import(1, payload)
 back = rt.seqs[1][0]
 kinds = int([type(c).__name__ for c in back.caches] == ['KVCache', 'RotatingKVCache'])
-same_meta = int(getattr(back, 'meta_state', None) == getattr(both, 'meta_state', None))
+# What a cache carries besides its arrays: its meta state up to mlx-lm 0.31,
+# the plain values of its state (offsets, window, member names) from 0.32.
+def settings(c):
+    if shim._has_meta(c):
+        return c.meta_state
+    return [v for _, v in shim.tree_flatten(c.state) if not isinstance(v, mx.array)]
+same_meta = int(bool(settings(both)) and settings(back) == settings(both))
 arrays = lambda c: [a for _, a in shim.tree_flatten(shim._live_state(c)) if isinstance(a, mx.array)]
 same_state = int(len(arrays(back)) == len(arrays(both)) and all(bool(mx.array_equal(a, b)) for a, b in zip(arrays(back), arrays(both))))
 flat = int(shim._meta_in({'kind': 'tuple', 'v': ['4', '64', '12', '12']}) == ('4', '64', '12', '12'))
