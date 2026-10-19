@@ -154,6 +154,19 @@ fn runtime_cmd(args: &[String]) {
             }
             carry_out(&installer, &plans);
         }
+        "options" => {
+            let json = match rest {
+                [] => false,
+                [flag] if flag == "--json" => true,
+                _ => usage(),
+            };
+            let runtime = catalog.require(id).unwrap_or_else(|e| fail(e));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&superfluid_daemon::runtime_options::json(&runtime)).expect("json"));
+            } else {
+                print!("{}", superfluid_daemon::runtime_options::text(&runtime));
+            }
+        }
         "update" => {
             if !rest.is_empty() {
                 usage();

@@ -78,6 +78,36 @@ pub type llama_pooling_type = i32;
 pub type llama_attention_type = i32;
 pub type llama_flash_attn_type = i32;
 
+// The values the options map to, as llama.h and ggml.h number them.
+pub const LLAMA_SPLIT_MODE_NONE: llama_split_mode = 0;
+pub const LLAMA_SPLIT_MODE_LAYER: llama_split_mode = 1;
+pub const LLAMA_SPLIT_MODE_ROW: llama_split_mode = 2;
+pub const LLAMA_SPLIT_MODE_TENSOR: llama_split_mode = 3;
+pub const LLAMA_LOAD_MODE_AUTO: llama_load_mode = -1;
+pub const LLAMA_LOAD_MODE_MMAP: llama_load_mode = 1;
+pub const LLAMA_LOAD_MODE_MLOCK: llama_load_mode = 2;
+pub const LLAMA_LOAD_MODE_MMAP_MLOCK: llama_load_mode = 3;
+pub const LLAMA_LOAD_MODE_DIRECT_IO: llama_load_mode = 4;
+pub const LLAMA_LAZY_MODE_OFF: llama_lazy_mode = 0;
+pub const LLAMA_LAZY_MODE_AUTO: llama_lazy_mode = 1;
+pub const LLAMA_LAZY_MODE_ON: llama_lazy_mode = 2;
+pub const LLAMA_ROPE_SCALING_TYPE_NONE: llama_rope_scaling_type = 0;
+pub const LLAMA_ROPE_SCALING_TYPE_LINEAR: llama_rope_scaling_type = 1;
+pub const LLAMA_ROPE_SCALING_TYPE_YARN: llama_rope_scaling_type = 2;
+pub const LLAMA_ROPE_SCALING_TYPE_LONGROPE: llama_rope_scaling_type = 3;
+pub const LLAMA_FLASH_ATTN_TYPE_AUTO: llama_flash_attn_type = -1;
+pub const LLAMA_FLASH_ATTN_TYPE_DISABLED: llama_flash_attn_type = 0;
+pub const LLAMA_FLASH_ATTN_TYPE_ENABLED: llama_flash_attn_type = 1;
+pub const GGML_TYPE_F32: ggml_type = 0;
+pub const GGML_TYPE_F16: ggml_type = 1;
+pub const GGML_TYPE_Q4_0: ggml_type = 2;
+pub const GGML_TYPE_Q4_1: ggml_type = 3;
+pub const GGML_TYPE_Q5_0: ggml_type = 6;
+pub const GGML_TYPE_Q5_1: ggml_type = 7;
+pub const GGML_TYPE_Q8_0: ggml_type = 8;
+pub const GGML_TYPE_IQ4_NL: ggml_type = 20;
+pub const GGML_TYPE_BF16: ggml_type = 30;
+
 pub const GGML_BACKEND_DEVICE_TYPE_CPU: ggml_backend_dev_type = 0;
 pub const GGML_BACKEND_DEVICE_TYPE_GPU: ggml_backend_dev_type = 1;
 pub const GGML_BACKEND_DEVICE_TYPE_IGPU: ggml_backend_dev_type = 2;
@@ -216,6 +246,7 @@ macro_rules! library_api {
 
 library_api! {
     fn llama_backend_init();
+    fn llama_max_devices() -> usize;
     fn llama_log_set(log_callback: ggml_log_callback, user_data: *mut c_void);
     fn llama_model_default_params() -> llama_model_params;
     fn llama_context_default_params() -> llama_context_params;

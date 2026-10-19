@@ -228,6 +228,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut fleet_policy = String::from("load-aware");
     let mut fleet_pool_high: u32 = superfluid_daemon::fleet_manager::DEFAULT_POOL_HIGH_PCT;
     let mut fleet_conns: usize = superfluid_daemon::fleet_manager::DEFAULT_CONNS_PER_NODE;
+    // A runtime's option, kept as given and resolved once the catalog says which runtimes are here.
+    let mut option_candidates: Vec<(String, Option<String>)> = Vec::new();
     let args = superfluid_daemon::cli::split_equals(args, superfluid_daemon::cli::serve_takes_value);
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -517,7 +519,26 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 retired(a, "an engine-level knob superfluid does not expose")
             }
             other if !other.starts_with('-') => models.push(PathBuf::from(other)),
-            _ => unknown_serve_flag(a),
+            _ => {
+                let (flag, given) = match a.split_once('=') {
+                    Some((f, v)) => (f, Some(v.to_string())),
+                    None => (a.as_str(), None),
+                };
+                if !superfluid_daemon::runtime_options::looks_like(flag) {
+                    unknown_serve_flag(a);
+                }
+                let value = match given {
+                    Some(v) => Some(v),
+                    None => match it.clone().next() {
+                        Some(v) if !v.starts_with("--") => {
+                            it.next();
+                            Some(v.clone())
+                        }
+                        _ => None,
+                    },
+                };
+                option_candidates.push((flag.to_string(), value));
+            }
         }
         // SERVE-FLAGS-END
     }
@@ -533,6 +554,21 @@ pub fn run(args: &[String], embedding: &Embedding) {
         Some(workerd) => superfluid_daemon::runtimes::Catalog::with_workerd(workerd.clone()),
         None => superfluid_daemon::runtimes::Catalog::from_env(),
     });
+    let runtime_options: Vec<superfluid_daemon::runtime_options::Given> = {
+        let ids = catalog.ids();
+        option_candidates
+            .iter()
+            .map(|(flag, value)| match superfluid_daemon::runtime_options::resolve(flag, value.as_deref().unwrap_or_default(), &ids) {
+                None => unknown_serve_flag(flag),
+                Some(_) if value.is_none() => needs_value(flag),
+                Some(given) => given,
+            })
+            .collect()
+    };
+    // Set before the runtime is required, so an option that makes it usable here counts for the first probe.
+    superfluid_daemon::runtime_options::set(superfluid_daemon::runtime_options::given_pairs(&runtime_options));
+    // The llama.cpp tokenizer this process loads finds its library the way the worker does.
+    superfluid_daemon::runtime_options::export_to_daemon();
     let sessions = Some(sessions.unwrap_or_else(|| superfluid_daemon::cli::default_sessions(catalog.home())));
     let socket = if embedding.session_socket {
         Some(socket.unwrap_or_else(|| superfluid_daemon::cli::default_socket(catalog.home(), SUN_PATH_LEN)))
@@ -609,6 +645,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
         Err(e) => refuse(2, if picked { e } else { not_there(&model).unwrap_or(e) }),
         Ok(rt) => match (catalog.require(rt), not_there(&model)) {
             (Ok(rt), _) => rt,
+            // The runtime answers without its options and refuses one of them: say which.
+            (Err(_), _) if superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options).is_some() => {
+                refuse(2, superfluid_daemon::runtime_options::blamed(&catalog, rt, &runtime_options).unwrap_or_default())
+            }
             (Err(_), Some(why)) => refuse(2, why),
             // Not here, or cannot run here: exit 4, so a host can tell it from a flag it got wrong.
             (Err(_), None) => superfluid_daemon::pulls::ensure_installed(&catalog, rt, pull_flags.offline)
@@ -618,6 +658,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
     if let Err(e) = refuse_statically(&runtime, park_lossy, kv_bits_arg, speculate.as_deref()) {
         refuse(2, e);
     }
+    // Each runtime's options are checked against what its worker declares before any model loads.
+    superfluid_daemon::runtime_options::settle(&runtime_options, &runtime, &catalog).unwrap_or_else(|e| refuse(2, e));
     eprintln!("superfluid: runtime {} serves {} ({})", runtime.id.name(), model.display(), describe_worker(&runtime));
     if let Some(on) = spec_bitexact {
         std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });

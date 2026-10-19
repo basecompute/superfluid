@@ -59,6 +59,7 @@ superfluid serve ./model.gguf --port 9000 --api-key "$KEY" --max-batch 4
 | `--runtime <model>=<id>[@<install>]` | | Runtime for one model, named by path, file stem or id. |
 | `--offline` | off | Fetch nothing: look for an id only where its runtime keeps models, and install no runtime. |
 | `--pull-<name> [value]` | | Pass `--<name>` to the runtime's pull tool (for example `--pull-file model.gguf`). See [Supported models](../models/supported_models.md#pulling-models-by-id). |
+| `--<runtime>-<name> <value>` | the runtime's | A knob of one runtime, for example `--llamacpp-n-gpu-layers 20` or `--mlx-prefill-chunk 512`; `superfluid runtime options <id>` lists them, and [Runtimes](../models/runtimes.md#per-runtime-options) describes them. The value is checked against the runtime's declaration before anything loads; a flag every runtime takes (`--max-context`, `--max-batch`, `--kv-bits`) is never spelled this way. |
 | `--model-dir <dir>` | none | Every model under `<dir>` becomes known and loads on first request. See [Serving multiple models](multiple_models.md). |
 | `--idle-timeout <sec>` | 0 (never) | Unload a model unused this long, if it can be loaded again; never the default model. |
 | `--basert-lib <path>` | search | libbaseRT file or directory for the `basert` runtime (sets `BASERT_LIB`). |
@@ -231,7 +232,7 @@ superfluid runtimes [<model>] [--json]
 
 Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
 
-With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
+With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
 
 ## `superfluid runtime`
 
@@ -242,9 +243,10 @@ superfluid runtime update <id>
 superfluid runtime repair <id> [<install>]
 superfluid runtime remove <id> [<install>]
 superfluid runtime use <id> <install> | --auto
+superfluid runtime options <id> [--json]
 ```
 
-See [Runtimes](../models/runtimes.md#managing-installs).
+See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default; see [per-runtime options](../models/runtimes.md#per-runtime-options).
 
 ## `superfluid compat`
 

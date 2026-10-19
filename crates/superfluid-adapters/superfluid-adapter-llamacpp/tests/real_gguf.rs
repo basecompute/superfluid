@@ -871,7 +871,7 @@ fn a_window_is_sized_from_the_header_without_the_weights() {
         eprintln!("SKIP: no GGUF model");
         return;
     };
-    let sized = match superfluid_adapter_llamacpp::runtime::sizing(&path) {
+    let sized = match superfluid_adapter_llamacpp::runtime::sizing(&path, None, None) {
         Ok(s) => s,
         Err(why) if why.contains("sizes no window on") || why.contains("registers no GPU") => {
             eprintln!("SKIP: {why}");

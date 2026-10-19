@@ -33,6 +33,8 @@ pub struct MlxConfig {
     pub max_batch: u32,
     pub cells_total: u32,
     pub prefill_chunk: u32,
+    /// MLX's buffer cache limit (`mx.set_cache_limit`).
+    pub cache_limit_bytes: u64,
     pub venv: Option<PathBuf>,
     pub python_site: Vec<PathBuf>,
 }
@@ -45,6 +47,7 @@ impl Default for MlxConfig {
             max_batch: 8,
             cells_total: 0,
             prefill_chunk: 2048,
+            cache_limit_bytes: 1 << 30,
             venv: None,
             python_site: Vec::new(),
         }
@@ -253,6 +256,7 @@ impl MlxRuntime {
                 cfg.max_batch,
                 cfg.max_seq_len,
                 cfg.prefill_chunk,
+                cfg.cache_limit_bytes,
             ))?;
             let d = rt.call_method0("describe")?;
             let d = d.cast::<PyDict>()?;

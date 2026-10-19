@@ -253,12 +253,7 @@ pub fn load_node(
     } else {
         let rt = crate::linked::engine(runtime.id.name())
             .ok_or_else(|| format!("the {} runtime has no worker here", runtime.id.name()))?;
-        let args = superfluid_adapter_kit::WorkerArgs {
-            model: Some(path.clone()),
-            max_context: ctx,
-            max_batch: lanes,
-            ..Default::default()
-        };
+        let args = crate::runtime_options::worker_args(runtime.id, &path, ctx, lanes, 0).map_err(|e| format!("model load failed: {e}"))?;
         EngineHost::try_spawn_loaded(move || rt.open(&args))
     }
     .map_err(|e| format!("model load failed: {e}"))?;
