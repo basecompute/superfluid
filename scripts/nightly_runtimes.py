@@ -51,6 +51,8 @@ MLX_LM_PYPI = "https://pypi.org/pypi/mlx-lm/json"
 CLOSED_PRS = "https://api.github.com/repos/{repo}/pulls?state=closed&head={owner}:nightly/{runtime}&per_page=100"
 PYPI_RELEASE = "https://pypi.org/pypi/{name}/{version}/json"
 BUILD = re.compile(r"^b(\d+)$")
+# A PyPI release as mlx and mlx-lm number theirs (PEP 440's public versions, short of epochs).
+PYPI_VERSION = re.compile(r"^\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?$")
 
 
 def fetch_json(url: str) -> object:
@@ -74,7 +76,7 @@ def tested_versions(runtime: str) -> list[str]:
 
 
 def build_number(tag: str) -> int:
-    m = BUILD.match(tag)
+    m = BUILD.fullmatch(tag)
     return int(m.group(1)) if m else -1
 
 
@@ -111,10 +113,21 @@ def declined(runtime: str, version: str, mlx_lm: str = "") -> bool:
     return any(p["title"] == title and not p.get("merged_at") for p in pulls)
 
 
+def checked(runtime: str, version: str, source: str) -> str:
+    """`version`, if it looks like one of `runtime`'s; it goes on into job names,
+    PR titles and pip requirements, so anything else stops the run here."""
+    pattern = BUILD if runtime == "llamacpp" else PYPI_VERSION
+    if not pattern.fullmatch(version):
+        shape = "bNNNN" if runtime == "llamacpp" else "a PEP 440 version, X.Y.Z"
+        raise SystemExit(f"{source} {version!r} is not a release of {runtime} ({shape})")
+    return version
+
+
 def pick(runtime: str, requested: str | None) -> dict[str, str]:
     """The workflow's outputs: `version`, and for MLX `mlx_lm`, all empty when there is nothing to test."""
     out = {"version": ""} if runtime == "llamacpp" else {"version": "", "mlx_lm": ""}
     if requested:
+        checked(runtime, requested, "the requested release")
         if requested not in tested_versions(runtime):
             out["version"] = requested
         return out
@@ -126,8 +139,8 @@ def pick(runtime: str, requested: str | None) -> dict[str, str]:
         mlx_lm = ""
     else:
         # A release of either package is a change the adapter's tests should see.
-        newest = fetch_json(MLX_PYPI)["info"]["version"]
-        mlx_lm = fetch_json(MLX_LM_PYPI)["info"]["version"]
+        newest = checked(runtime, fetch_json(MLX_PYPI)["info"]["version"], "PyPI's newest mlx")
+        mlx_lm = checked(runtime, fetch_json(MLX_LM_PYPI)["info"]["version"], "PyPI's newest mlx-lm")
         if any(t["version"] == newest and t.get("mlx_lm") == mlx_lm for t in recipe(runtime).get("tested", [])):
             return out
         out["mlx_lm"] = mlx_lm
