@@ -13,6 +13,16 @@ use superfluid_engine_ffi::{libbasert, FfiEngineConfig, NativeEngine, TokenizerH
 pub struct Basert;
 
 impl Runtime for Basert {
+    fn compat(&self) -> serde_json::Value {
+        let abi = libbasert::abi_built_for();
+        serde_json::json!({
+            "basert_version": libbasert::BUILT_FOR,
+            "abi": abi,
+            "unnumbered_minor": abi.and_then(libbasert::unnumbered_minor_for),
+            "pinned_engines": recipe::pinned().iter().map(|p| serde_json::json!({"version": p.version, "abi": p.abi})).collect::<Vec<_>>(),
+        })
+    }
+
     fn info(&self) -> RuntimeInfo {
         RuntimeInfo {
             id: "basert",

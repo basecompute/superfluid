@@ -17,6 +17,10 @@ pub use tokenizer::LlamaTokenizer;
 pub struct Llamacpp;
 
 impl Runtime for Llamacpp {
+    fn compat(&self) -> serde_json::Value {
+        serde_json::json!({"tested": crate::recipe::tested().into_iter().map(|(v, _)| v).collect::<Vec<_>>()})
+    }
+
     fn info(&self) -> RuntimeInfo {
         RuntimeInfo {
             id: "llamacpp",

@@ -251,7 +251,7 @@ See [Runtimes](../models/runtimes.md#managing-installs).
 superfluid compat [--json]
 ```
 
-What this build was built for: for `basert`, the baseRT header version it carries and the engine ABI number it checks at load. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md).
+What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md).
 
 ## `superfluid session`
 

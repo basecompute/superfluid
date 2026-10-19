@@ -461,56 +461,22 @@ pub fn command_help(command: &str) -> Option<String> {
 pub const COMMANDS: &[&str] =
     &["serve", "launch", "stop", "runtimes", "runtime", "compat", "session", "media", "top", "fleet", "node", "help", "version"];
 
-pub const COMPAT_HELP: &str = "What this build was built for: the runtime contracts it checks at load.
+pub const COMPAT_HELP: &str = "What this build was built and tested for, per runtime.
 
 Usage: superfluid compat [--json]
 
-  basert: the baseRT header version this build carries and the engine ABI number it checks.
-  A libbaseRT with the same ABI number serves, whatever its version; one that states no
-  number (0.3.0 and older) serves if it is of the line that carried this ABI before it was
-  numbered, 0.3.x. A release carries the same data beside its tarball, as compat.json, so a
-  host can choose a release before downloading it.
+  basert: the baseRT header version this build carries, the engine ABI number it checks and
+  the line accepted without one (0.3.x), and the engines it installs on its own. A libbaseRT
+  with the same ABI number serves, whatever its version.
+  llamacpp, mlx: the runtime versions each shipped adapter installs on its own, the ones it
+  was built and tested against (`--untested` installs another).
+  A release carries the same data beside its tarball, as compat.json, so a host can choose a
+  release before downloading it.
 
 Options:
   --json    Print JSON
 ";
 
-/// `superfluid compat --json`: what this build was built for, per runtime.
-pub fn compat_json() -> serde_json::Value {
-    #[allow(unused_mut)] // a build without the basert adapter inserts nothing
-    let mut runtimes = serde_json::Map::new();
-    #[cfg(feature = "basert")]
-    runtimes.insert(
-        "basert".into(),
-        serde_json::json!({
-            "basert_version": superfluid_engine_ffi::libbasert::BUILT_FOR,
-            "abi": superfluid_engine_ffi::libbasert::abi_built_for(),
-            "unnumbered_minor": superfluid_engine_ffi::libbasert::abi_built_for().and_then(superfluid_engine_ffi::libbasert::unnumbered_minor_for),
-        }),
-    );
-    serde_json::json!({"superfluid": env!("CARGO_PKG_VERSION"), "runtimes": runtimes})
-}
-
-/// `superfluid compat`, for a person.
-pub fn compat_text() -> String {
-    let mut out = format!("{}\n", version());
-    let c = compat_json();
-    match c["runtimes"].get("basert") {
-        Some(b) => {
-            let abi = b["abi"].as_u64().map(|n| format!("engine ABI {n}")).unwrap_or_else(|| "no engine ABI number (a header before 0.4.0)".into());
-            let unnumbered = match b["unnumbered_minor"].as_str() {
-                Some(minor) => format!("one that states no number serves if it is baseRT {minor}.x"),
-                None => "one that states no number does not serve".to_string(),
-            };
-            out.push_str(&format!(
-                "basert: built against baseRT {} headers, {abi}. A libbaseRT with the same ABI number serves, whatever its version; {unnumbered}.\n",
-                b["basert_version"].as_str().unwrap_or("?"),
-            ));
-        }
-        None => out.push_str("basert: not in this build (no `basert` feature)\n"),
-    }
-    out
-}
 
 /// `$SUPERFLUID_HOME/sessions`.
 pub fn default_sessions(home: &Path) -> PathBuf {
