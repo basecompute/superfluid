@@ -28,8 +28,10 @@ permissions:
 
 env:
   # A small GGUF the llama.cpp adapter's model tests run on; without one they
-  # skip, and a pass would say little.
-  TEST_GGUF_URL: https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
+  # skip, and a pass would say little. Pinned to a commit of the repository, so
+  # the SHA-256 it is checked against stays the file's.
+  TEST_GGUF_URL: https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/50968a4468ef4233ed78cd7c3de230dd1d61a56b/Qwen3-0.6B-Q4_K_M.gguf
+  TEST_GGUF_SHA256: ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a
 
 jobs:
   pick:
@@ -136,7 +138,14 @@ jobs:
         run: |
           mkdir -p ~/.cache/superfluid-nightly/models
           model=~/.cache/superfluid-nightly/models/$(basename "$TEST_GGUF_URL")
-          [ -s "$model" ] || curl -fsSL --retry 3 -o "$model" "$TEST_GGUF_URL"
+          # Checked, not just present: a download cut short would stay in the cache, and on
+          # the self-hosted runner, a model every later night's tests fail on.
+          if ! echo "$TEST_GGUF_SHA256  $model" | shasum -a 256 -c --status 2>/dev/null; then
+            curl -fsSL --retry 3 -o "$model.part" "$TEST_GGUF_URL"
+            echo "$TEST_GGUF_SHA256  $model.part" | shasum -a 256 -c --status \
+              || { echo "::error::$TEST_GGUF_URL does not have the SHA-256 the workflow pins"; exit 1; }
+            mv "$model.part" "$model"
+          fi
           echo "SUPERFLUID_TEST_GGUF=$model" >> "$GITHUB_ENV"
 
       - name: The adapter's tests on it
