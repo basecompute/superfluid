@@ -59,18 +59,24 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # pipefail: without it tee's success hides a pick that failed, and an empty
+      # version reads as nothing new.
       - name: llama.cpp
         id: llamacpp
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.llamacpp }}
-        run: python3 scripts/nightly_runtimes.py llamacpp pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          set -o pipefail
+          python3 scripts/nightly_runtimes.py llamacpp pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
       - name: MLX
         id: mlx
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.mlx }}
-        run: python3 scripts/nightly_runtimes.py mlx pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+        run: |
+          set -o pipefail
+          python3 scripts/nightly_runtimes.py mlx pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
 
   llamacpp:
     name: llama.cpp ${{ needs.pick.outputs.llamacpp }} on ${{ matrix.os }}
