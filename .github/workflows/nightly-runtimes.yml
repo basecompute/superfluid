@@ -181,7 +181,8 @@ jobs:
           title="llama.cpp $BUILD breaks the adapter"
           # One open issue per runtime: a later build that fails too is a comment on it, since
           # the newest build is tested every night and the adapter may take days to catch up.
-          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          # With none open, `.[0]` is null and would print "null null": `// empty` prints nothing.
+          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
           if [ -n "$existing" ]; then
             number=${existing%% *}
             case "$existing" in *"$title"*) echo "an issue for $BUILD is already open: #$number"; exit 0;; esac
@@ -312,7 +313,7 @@ jobs:
           set -euo pipefail
           title="MLX $VERSION breaks the adapter"
           # One open issue per runtime: a later version that fails too is a comment on it.
-          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
           if [ -n "$existing" ]; then
             number=${existing%% *}
             case "$existing" in *"$title"*) echo "an issue for MLX $VERSION is already open: #$number"; exit 0;; esac
