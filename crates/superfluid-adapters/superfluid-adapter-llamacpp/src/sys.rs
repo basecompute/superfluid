@@ -188,9 +188,9 @@ pub struct llama_context_params {
     pub ctx_other: *mut llama_context,
 }
 
-/// `llama_context_params` as llama.cpp lays it out from b11642 on: one field,
+/// `llama_context_params` as llama.cpp lays it out from b11480 on: one field,
 /// `moe_cache_size`, inserted after `type_v` and before the abort callback, which
-/// moves every field after it by eight bytes.
+/// moves every field after it by eight bytes. (b11479's struct is still b11284's.)
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct llama_context_params_v2 {
@@ -220,7 +220,7 @@ pub struct llama_context_params_v2 {
     pub cb_eval_user_data: *mut c_void,
     pub type_k: ggml_type,
     pub type_v: ggml_type,
-    /// b11642 and later: device cache for experts kept in host memory, 0 = off.
+    /// b11480 and later: device cache for experts kept in host memory, 0 = off.
     pub moe_cache_size: usize,
     pub abort_callback: ggml_abort_callback,
     pub abort_callback_data: *mut c_void,
@@ -302,7 +302,7 @@ library_api! {
     fn llama_model_load_from_file(path_model: *const c_char, params: llama_model_params) -> *mut llama_model;
     fn llama_model_free(model: *mut llama_model);
     fn llama_init_from_model(model: *mut llama_model, params: llama_context_params) -> *mut llama_context;
-    // The same two functions under the b11642 layout: which pair to call is
+    // The same two functions under the b11480 layout: which pair to call is
     // decided once, from the defaults the library returns (see `ContextLayout`).
     fn llama_context_default_params_v2() -> llama_context_params_v2 = "llama_context_default_params";
     fn llama_init_from_model_v2(model: *mut llama_model, params: llama_context_params_v2) -> *mut llama_context = "llama_init_from_model";
@@ -598,8 +598,8 @@ unsafe fn returned(getter: *const ()) -> Returned {
 #[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", unix))))]
 compile_error!("superfluid: the llama.cpp adapter reads llama.cpp's parameter defaults on AArch64 and x86-64 System V only");
 
-/// How the library lays out `llama_context_params`: as the builds up to b11641
-/// do, or with the field b11642 inserted. Told from the defaults the library
+/// How the library lays out `llama_context_params`: as the builds up to b11479
+/// do, or with the field b11480 inserted. Told from the defaults the library
 /// returns, read at the declared offsets of each layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextLayout {
@@ -843,12 +843,12 @@ mod tests {
         let (context, model) = (bytes_of(&c), bytes_of(&m));
         assert_eq!(context_layout_of(&context), Ok(ContextLayout::V1));
         assert_eq!(model_layout_differs(&model), None);
-        // b11642: the same defaults with moe_cache_size (0) after type_v.
+        // b11480 on: the same defaults with moe_cache_size (0) after type_v.
         let at = std::mem::offset_of!(llama_context_params_v2, moe_cache_size);
-        let mut b11642 = context.clone();
-        b11642.splice(at..at, [0u8; 8]);
-        b11642.truncate(RETURN_ROOM);
-        assert_eq!(context_layout_of(&b11642), Ok(ContextLayout::V2));
+        let mut b11480 = context.clone();
+        b11480.splice(at..at, [0u8; 8]);
+        b11480.truncate(RETURN_ROOM);
+        assert_eq!(context_layout_of(&b11480), Ok(ContextLayout::V2));
         assert_eq!(std::mem::size_of::<llama_context_params_v2>(), std::mem::size_of::<llama_context_params>() + 8);
         // A build that fits neither is told by the first layout's reading, as before.
         let at = std::mem::offset_of!(llama_context_params, n_rs_seq);
@@ -911,7 +911,7 @@ mod tests {
                 ContextLayout::V1 => llama_context_default_params(),
                 ContextLayout::V2 => {
                     let v2 = llama_context_default_params_v2();
-                    assert_eq!(v2.moe_cache_size, 0, "b11642's field, off by default");
+                    assert_eq!(v2.moe_cache_size, 0, "b11480's field, off by default");
                     let mut c: llama_context_params = std::mem::zeroed();
                     c.n_ctx = v2.n_ctx;
                     c.n_batch = v2.n_batch;
