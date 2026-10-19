@@ -69,6 +69,7 @@ nav:
       - Session API: serving/session_api.md
       - Command-line reference: serving/cli.md
       - Configuration: serving/configuration.md
+      - Updating superfluid: serving/updating.md
       - Serving multiple models: serving/multiple_models.md
       - Distributed serving: serving/distributed_serving.md
       - Hosting superfluid in another product: serving/hosts.md

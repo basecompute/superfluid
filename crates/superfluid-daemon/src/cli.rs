@@ -284,6 +284,7 @@ Commands:
   runtimes [<model>]   List the inference runtimes here, or which one serves a model
   runtime <action>     Install, update, repair, remove or pin a runtime
   compat               What this build was built for: the runtime contracts it checks at load
+  self <action>        Update superfluid itself, or switch between the versions installed here
   session <action>     Inspect or export a session of a running server
   media <action>       Store or garbage-collect media on a running server
   top <host:port>...   Monitor running servers in the terminal
@@ -454,6 +455,7 @@ pub fn command_help(command: &str) -> Option<String> {
         "runtimes" => RUNTIMES_HELP.to_string(),
         "runtime" => RUNTIME_HELP.to_string(),
         "compat" => COMPAT_HELP.to_string(),
+        "self" => crate::selfupdate::HELP.to_string(),
         "session" => SESSION_HELP.to_string(),
         "media" => MEDIA_HELP.to_string(),
         "top" => TOP_HELP.to_string(),
@@ -466,7 +468,7 @@ pub fn command_help(command: &str) -> Option<String> {
 }
 
 pub const COMMANDS: &[&str] =
-    &["serve", "launch", "stop", "runtimes", "runtime", "compat", "session", "media", "top", "fleet", "node", "help", "version"];
+    &["serve", "launch", "stop", "runtimes", "runtime", "compat", "self", "session", "media", "top", "fleet", "node", "help", "version"];
 
 pub const COMPAT_HELP: &str = "What this build was built and tested for, per runtime.
 
