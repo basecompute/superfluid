@@ -671,7 +671,7 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
     })
 }
 
-fn kill_hard(pid: i32) {
+pub(crate) fn kill_hard(pid: i32) {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
     }

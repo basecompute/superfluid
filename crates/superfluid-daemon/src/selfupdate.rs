@@ -3,7 +3,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -21,6 +21,9 @@ pub const NO_CHECK_ENV: &str = "SUPERFLUID_NO_UPDATE_CHECK";
 /// Where the release listing is read from, for a mirror or a test: a URL or a file.
 pub const LISTING_ENV: &str = "SUPERFLUID_RELEASES";
 const LINKED: &[&str] = &["superfluid", "superfluid-workerd", "superfluid-noded"];
+/// How long a new copy's `--version` or `runtimes --json` may take: it runs under the lock, which a copy that hangs
+/// would hold for every later update. Longer than the runtime checks `runtimes --json` makes, a minute each at most.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 pub const HELP: &str = "Update superfluid itself, or switch between the versions installed here.
 
@@ -550,8 +553,26 @@ impl Report {
     }
 }
 
+/// `cmd`'s output, or an error once it has run for `limit`, when it is killed.
+fn output_within(cmd: &mut Command, limit: Duration) -> Result<Output, String> {
+    let what = cmd.get_program().to_string_lossy().to_string();
+    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("{what}: {e}"))?;
+    let pid = child.id() as i32;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(limit) {
+        Ok(out) => out.map_err(|e| format!("{what}: {e}")),
+        Err(_) => {
+            crate::runtimes::kill_hard(pid);
+            Err(format!("{what} did not answer within {}s", limit.as_secs()))
+        }
+    }
+}
+
 fn version_of(binary: &Path) -> Result<String, String> {
-    let out = Command::new(binary).arg("--version").output().map_err(|e| format!("{}: {e}", binary.display()))?;
+    let out = output_within(Command::new(binary).arg("--version"), PROBE_TIMEOUT)?;
     let text = String::from_utf8_lossy(&out.stdout);
     text.split_whitespace().nth(1).map(str::to_string).filter(|_| out.status.success()).ok_or_else(|| {
         format!("{} did not say its version ({}): {}", binary.display(), out.status, String::from_utf8_lossy(&out.stderr).trim())
@@ -573,12 +594,7 @@ fn probe_binary(binary: &Path, v: &str, home: &Path, engine: &Engine) -> Result<
     if said != v {
         return Err(format!("{} says it is {said}, not {v}", binary.display()));
     }
-    let out = Command::new(binary)
-        .args(["runtimes", "--json"])
-        .env("SUPERFLUID_HOME", home)
-        .env(NO_CHECK_ENV, "1")
-        .output()
-        .map_err(|e| format!("{}: {e}", binary.display()))?;
+    let out = output_within(Command::new(binary).args(["runtimes", "--json"]).env("SUPERFLUID_HOME", home).env(NO_CHECK_ENV, "1"), PROBE_TIMEOUT)?;
     if !out.status.success() {
         return Err(format!("{} runtimes --json failed ({}): {}", binary.display(), out.status, String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -1113,7 +1129,6 @@ pub fn run(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
-    use std::process::Stdio;
     use superfluid_adapter_kit::install::sha256_of;
 
     fn scratch(tag: &str) -> PathBuf {
@@ -1544,6 +1559,11 @@ mod tests {
         assert!(e.contains("cannot drive the engine here: libbaseRT states ABI 2"), "{e}");
         std::fs::write(tree.join("bin").join("superfluid"), "#!/bin/sh\necho 'superfluid 0.4.9'\n").unwrap();
         assert!(probe(&versions, "0.5.0", &home, &Engine::None).unwrap_err().contains("says it is 0.4.9"));
+        // A copy that hangs is killed, so the lock it runs under is let go.
+        std::fs::write(tree.join("bin").join("superfluid"), "#!/bin/sh\nexec sleep 30\n").unwrap();
+        let began = std::time::Instant::now();
+        let e = output_within(Command::new(versions.binary("0.5.0")).arg("--version"), Duration::from_secs(1)).unwrap_err();
+        assert!(e.contains("did not answer within 1s") && began.elapsed() < Duration::from_secs(10), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
