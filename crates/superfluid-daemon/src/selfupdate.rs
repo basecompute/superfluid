@@ -70,6 +70,28 @@ fn is_version(v: &str) -> bool {
     v.starts_with(|c: char| c.is_ascii_digit()) && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
+/// A part of a pre-release, `rc` or `1` in `0.2.0-rc.1`: a number comes before a word, as semver orders them.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum PreRelease {
+    Number(u64),
+    Word(String),
+}
+
+/// A version's place in release order: by its numbers, then a release after the pre-releases that lead to it
+/// (`0.2.0-rc.1` before `0.2.0`, which the numbers alone put the other way), then the pre-release part by part; build
+/// metadata after a `+` counts for nothing.
+fn release_order(v: &str) -> (Vec<u64>, bool, Vec<PreRelease>) {
+    let v = v.split('+').next().unwrap_or(v);
+    let (numbers, pre) = match v.split_once('-') {
+        Some((numbers, pre)) => (numbers, Some(pre)),
+        None => (v, None),
+    };
+    let parts = pre
+        .map(|p| p.split('.').map(|id| id.parse().map(PreRelease::Number).unwrap_or_else(|_| PreRelease::Word(id.to_string()))).collect())
+        .unwrap_or_default();
+    (version_key(numbers), pre.is_none(), parts)
+}
+
 /// `$SUPERFLUID_HOME/versions`: a directory per release, `current`, `previous`, and `prefix` naming the bin directory that links here.
 pub struct Versions {
     pub dir: PathBuf,
@@ -109,7 +131,7 @@ impl Versions {
                     .collect()
             })
             .unwrap_or_default();
-        all.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
+        all.sort_by_key(|v| std::cmp::Reverse(release_order(v)));
         all
     }
 
@@ -316,7 +338,7 @@ pub fn releases(listing: &Value, target: &str) -> Vec<Release> {
         .as_array()
         .map(|a| a.iter().filter_map(|r| release_of(r, &tar, target)).collect())
         .unwrap_or_default();
-    out.sort_by_key(|r| std::cmp::Reverse(version_key(&r.version)));
+    out.sort_by_key(|r| std::cmp::Reverse(release_order(&r.version)));
     out
 }
 
@@ -810,7 +832,7 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
     }
     // Without a version named an update only moves forward: a build newer than every release stays.
     let here = current.clone().unwrap_or_else(|| running().to_string());
-    if opts.version.is_none() && migrating.is_none() && version_key(&v) < version_key(&here) {
+    if opts.version.is_none() && migrating.is_none() && release_order(&v) < release_order(&here) {
         report.say(format!("superfluid {here} is current; the newest release that fits is {v} ({}), and `--version {v}` goes to it", engine.describe()));
         return Ok(report);
     }
@@ -1012,7 +1034,7 @@ impl Check {
 
     /// The newest release known, when it is newer than this one.
     pub fn newer(&self) -> Option<&str> {
-        self.newest.as_deref().filter(|n| version_key(n) > version_key(running()))
+        self.newest.as_deref().filter(|n| release_order(n) > release_order(running()))
     }
 
     pub fn describe(&self) -> String {
@@ -1227,6 +1249,9 @@ mod tests {
         let odd = json!([{"tag_name": "v", "assets": []}, {"tag_name": "v../..", "assets": []}, {"tag_name": "vnext", "assets": []}]);
         assert_eq!(odd.as_array().unwrap().iter().filter_map(|r| release_of(r, "x.tar.gz", target().unwrap())).count(), 0, "a tag that is no version names no directory");
         assert!(["0.1.3", "0.2.0-rc.1", "1.0.0+build.5"].iter().all(|v| is_version(v)));
+        let mut order = ["0.2.0-rc.1", "0.1.9", "0.2.0", "0.2.0-rc.10", "0.2.1-alpha", "0.2.0-beta", "0.2.0-rc.2", "0.2.0-rc", "0.10.0+build.5"];
+        order.sort_by_key(|v| std::cmp::Reverse(release_order(v)));
+        assert_eq!(order, ["0.10.0+build.5", "0.2.1-alpha", "0.2.0", "0.2.0-rc.10", "0.2.0-rc.2", "0.2.0-rc.1", "0.2.0-rc", "0.2.0-beta", "0.1.9"]);
         assert!(["", ".", "..", "../0.1.3", "0.1.3/..", "v0.1.3"].iter().all(|v| !is_version(v)));
         let compat = |url: &str| get_json(url, 1).ok();
         assert_eq!(newest(&found, &Engine::None, None, &no_compat).map(|r| r.version.as_str()), Some("0.2.0"));
