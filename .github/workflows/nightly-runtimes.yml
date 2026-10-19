@@ -20,10 +20,11 @@ on:
         required: false
         default: ""
 
+# Read-only by default: the test jobs build and run upstream code nobody has
+# tested yet, so they get no token that writes. The record jobs, which run only
+# this repository's code, get the write scopes they need.
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 concurrency:
   group: nightly-runtimes
@@ -44,6 +45,8 @@ jobs:
       mlx: ${{ steps.mlx.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: llama.cpp
         id: llamacpp
         env:
@@ -78,7 +81,10 @@ jobs:
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
     steps:
+      # The tests run an untested llama.cpp: the job's token is not left in .git/config for it.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # A self-hosted runner keeps the toolchain it has, where rustup puts it;
       # its PATH does not say so unless its owner's shell did.
       - uses: dtolnay/rust-toolchain@stable
@@ -91,12 +97,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: runner.environment == 'github-hosted'
 
-      - name: Build the worker and plan the untested install
+      - name: Build the worker
+        run: cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+      # The plan reads the build's release from GitHub's API, whose unauthenticated
+      # limit hosted runners share; the token, read-only here, is for that step alone.
+      - name: Plan the untested install
         id: plan
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
           plan=$(target/debug/superfluid-worker-llamacpp plan --version "$BUILD" --untested \
             | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
           {
@@ -146,6 +155,10 @@ jobs:
     if: always() && needs.pick.outputs.llamacpp != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
       GH_TOKEN: ${{ github.token }}
@@ -204,7 +217,10 @@ jobs:
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
     steps:
+      # The tests run an untested MLX from PyPI: the job's token is not left in .git/config for it.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
@@ -270,6 +286,10 @@ jobs:
     if: always() && needs.pick.outputs.mlx != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
       RESULT: ${{ needs.mlx.result }}
