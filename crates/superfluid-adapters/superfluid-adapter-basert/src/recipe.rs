@@ -39,6 +39,17 @@ pub fn pinned() -> Vec<Pin> {
         .unwrap_or_default()
 }
 
+/// The first baseRT whose engine states an ABI number. A release from it on with no
+/// number in its metadata is missing the marker, not stating none.
+const FIRST_NUMBERED: &str = "0.4.0";
+
+fn marker_missing(version: &str, abi: Option<u32>) -> bool {
+    abi.is_none() && version_key(version) >= version_key(FIRST_NUMBERED)
+}
+
+const NO_MARKER: &str = "its release metadata carries no engine ABI (no `basert-engine-abi-<N>.txt` beside its bundles, \
+                         nor an `abi` in this superfluid's pin), which every baseRT from 0.4.0 on states";
+
 /// The ABI number a release states beside its bundles, as `basert-engine-abi-<N>.txt`.
 fn abi_marked(release: &Value) -> Option<u32> {
     release["assets"].as_array()?.iter().find_map(|a| a["name"].as_str()?.strip_prefix("basert-engine-abi-")?.strip_suffix(".txt")?.parse().ok())
@@ -84,9 +95,10 @@ pub fn versions_with(host: &Host, pins: &[Pin]) -> Vec<Candidate> {
     use superfluid_engine_ffi::libbasert::{abi_built_for, compatible, unnumbered_minor_for, BUILT_FOR};
     let mut pins: Vec<&Pin> = pins.iter().collect();
     pins.sort_by_key(|p| std::cmp::Reverse(version_key(&p.version)));
-    let not_driven = |abi: Option<u32>| -> String {
+    let not_driven = |version: &str, abi: Option<u32>| -> String {
         let why = match (abi, abi_built_for()) {
             (Some(n), Some(w)) => format!("states engine ABI {n}; this build drives ABI {w}"),
+            (None, Some(w)) if marker_missing(version, abi) => format!("{NO_MARKER}; this build drives ABI {w}"),
             (None, Some(w)) => match unnumbered_minor_for(w) {
                 Some(minor) => format!("states no engine ABI and is not a {minor}.x engine; this build drives ABI {w}"),
                 None => format!("states no engine ABI; this build drives ABI {w}"),
@@ -99,7 +111,7 @@ pub fn versions_with(host: &Host, pins: &[Pin]) -> Vec<Candidate> {
         .map(|pin| {
             let version = pin.version.clone();
             let here = if compatible(pin.abi, abi_built_for(), &version).is_err() {
-                Err(not_driven(pin.abi))
+                Err(not_driven(&version, pin.abi))
             } else {
                 let req = Request { version: Some(version.clone()), ..Request::default() };
                 plan_with(&req, host, std::slice::from_ref(pin), &Value::Null).and_then(|mut plans| {
@@ -127,6 +139,10 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
         match compatible(abi, abi_built_for(), v) {
             Ok(()) => Ok(()),
             Err(_) if req.untested => Ok(()),
+            // The library was never asked: the number is missing from what was published about it.
+            Err(_) if marker_missing(v, abi) => {
+                Err(format!("basert {v} is not an engine this adapter can tell it drives: {NO_MARKER}; pass --untested to install it anyway"))
+            }
             Err(why) => Err(format!("basert {v} is not an engine this adapter drives (libbaseRT {why}); pass --untested to install it anyway")),
         }
     };
@@ -324,11 +340,32 @@ mod tests {
     }
 
     #[test]
+    fn a_numbered_release_without_its_marker_is_blamed_on_the_metadata() {
+        let unmarked = "0.4.7";
+        let releases = json!([release(unmarked, None)]);
+        let pins = [pin(unmarked, None, "ab")];
+        let asked = Request { version: Some(unmarked.into()), ..Request::default() };
+        for (pins, releases) in [(&pins[..], &Value::Null), (&[][..], &releases)] {
+            let e = plan_with(&asked, &mac(), pins, releases).unwrap_err();
+            assert!(e.contains("its release metadata carries no engine ABI") && e.contains("--untested"), "{e}");
+            assert!(!e.contains("libbaseRT"), "the library was never asked: {e}");
+        }
+        let from = Request { from: Some(format!("/x/basert-engine-macos-arm64-{unmarked}.tar.gz")), ..Request::default() };
+        assert!(plan_with(&from, &mac(), &[], &Value::Null).unwrap_err().contains("its release metadata carries no engine ABI"));
+        let listed = versions_with(&mac(), &pins);
+        assert!(listed[0].here.as_ref().unwrap_err().starts_with("its release metadata carries no engine ABI"), "{listed:?}");
+        // The line before the number states none of its own: that is not a missing marker.
+        let e = plan_with(&Request { version: Some("0.2.0".into()), ..Request::default() }, &mac(), &[], &json!([release("0.2.0", None)])).unwrap_err();
+        assert!(e.contains("libbaseRT is 0.2.0 and states no engine ABI"), "{e}");
+    }
+
+    #[test]
     fn the_pins_are_whole() {
         let pins = pinned();
         assert!(!pins.is_empty());
-        for Pin { version: v, assets, .. } in &pins {
+        for Pin { version: v, abi, assets } in &pins {
             assert_eq!(assets.len(), 2, "{v}: an engine for each platform baseRT builds");
+            assert!(!marker_missing(v, *abi), "{v}: a pin from {FIRST_NUMBERED} on states its engine's ABI, as its release does");
             for a in assets {
                 assert_eq!(version_of(&a.name).as_deref(), Some(v.as_str()));
                 assert!(a.sha256.as_ref().is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())), "{a:?}");
