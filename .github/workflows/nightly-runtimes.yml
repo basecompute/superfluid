@@ -5,6 +5,15 @@ name: Nightly runtimes
 # a PR, with the digests its project lists, and one that fails opens an issue.
 # `workflow_dispatch` tests a named release. A schedule fires only from the
 # default branch, and a release the recipe already lists is a no-op.
+#
+# Two things this file cannot do for itself. A PR opened with the job's
+# GITHUB_TOKEN starts no workflow, so CI does not run on the nightly's PRs
+# until someone pushes to them; if required checks gate merging, the record
+# jobs need a GitHub App token or a PAT instead. And the macOS leg's runner is
+# self-hosted on a public repository, where a fork's PR can edit a workflow to
+# run on it: require approval to run workflows from outside contributors
+# (Settings > Actions > General), and limit the runner's group to this
+# workflow.
 
 on:
   schedule:
