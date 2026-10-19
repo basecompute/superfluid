@@ -15,11 +15,13 @@ pub struct Basert;
 impl Runtime for Basert {
     fn compat(&self) -> serde_json::Value {
         let abi = libbasert::abi_built_for();
+        let pins = recipe::pinned();
+        // Named `pinned_engines`, not `tested`, as each carries the ABI number it states; `versions` lists them itself.
         serde_json::json!({
             "basert_version": libbasert::BUILT_FOR,
             "abi": abi,
             "unnumbered_minor": abi.and_then(libbasert::unnumbered_minor_for),
-            "pinned_engines": recipe::pinned().iter().map(|p| serde_json::json!({"version": p.version, "abi": p.abi})).collect::<Vec<_>>(),
+            "pinned_engines": recipe::driven(&pins).iter().map(|p| serde_json::json!({"version": p.version, "abi": p.abi})).collect::<Vec<_>>(),
         })
     }
 
@@ -246,6 +248,22 @@ fn named(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compat_names_only_the_engines_that_install_without_untested() {
+        let named: Vec<String> =
+            Basert.compat()["pinned_engines"].as_array().unwrap().iter().map(|p| p["version"].as_str().unwrap().to_string()).collect();
+        let installs: Vec<String> = recipe::versions(&Host { os: "macos".into(), arch: "arm64".into(), ..Host::default() })
+            .into_iter()
+            .filter(|c| c.here.is_ok())
+            .map(|c| c.version)
+            .collect();
+        assert!(!named.is_empty(), "the recipe pins an engine this build drives");
+        let mut sorted = named.clone();
+        sorted.sort_by_key(|v| std::cmp::Reverse(superfluid_adapter_kit::install::version_key(v)));
+        // The recipe also pins 0.2.6, of a line this build does not drive: listed with why, and not named.
+        assert_eq!(sorted, installs, "what compat names is what installs on its own");
+    }
 
     #[test]
     fn a_bundle_is_read_by_its_magic_and_its_format_names_it() {

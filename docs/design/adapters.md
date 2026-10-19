@@ -46,7 +46,7 @@ pub trait Runtime: Send + Sync {
     fn prepare(&self, _args: &WorkerArgs) {}
     fn named(&self, _args: &WorkerArgs) -> Option<String> { None }
     fn static_capabilities(&self) -> String { String::new() }
-    fn compat(&self) -> serde_json::Value { json!({}) }           // what the adapter was built and tested for: `tested` versions, by convention
+    fn compat(&self) -> serde_json::Value { json!({}) }           // what the adapter was built and tested for: `tested` versions, by convention (basert: `pinned_engines`, with their ABI)
     fn reads(&self, path: &Path) -> Result<(), String> { /* by info().formats */ }
     fn model_facts(&self, _path: &Path) -> Option<Result<String, String>> { None }
     fn tokenizer(&self, _model: &Path) -> Option<Result<Arc<dyn Tokenizer>, String>> { None }

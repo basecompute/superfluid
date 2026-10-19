@@ -352,7 +352,8 @@ pub trait Runtime: Send + Sync {
     }
 
     /// What this adapter was built and tested for, as a release carries it (`superfluid compat`, `compat.json`):
-    /// `tested` names the versions it installs on its own; the rest of the keys are the adapter's to define.
+    /// `tested` names the versions it installs on its own; the rest of the keys are the adapter's to define. An adapter
+    /// that overrides `versions` may name them otherwise, as basert's `pinned_engines` carries each with its ABI number.
     fn compat(&self) -> serde_json::Value {
         serde_json::json!({})
     }
