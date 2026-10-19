@@ -20,8 +20,10 @@ pub struct OptionDecl {
     /// `int`, `float`, `on-off`, `choice` (one of `choices`) or `text`.
     pub kind: String,
     pub choices: Vec<String>,
-    /// The least an `int` takes, when it has a floor.
+    /// The least an `int` or a `float` takes, when it has a floor.
     pub least: Option<i64>,
+    /// The most an `int` takes, when it has a ceiling.
+    pub most: Option<i64>,
     /// What the runtime does without it, as words for the help.
     pub default: String,
     pub about: String,
@@ -36,6 +38,9 @@ impl OptionDecl {
         if let Some(least) = self.least {
             v["least"] = json!(least);
         }
+        if let Some(most) = self.most {
+            v["most"] = json!(most);
+        }
         v
     }
 }
@@ -47,6 +52,7 @@ pub fn options_from(v: &Value) -> Vec<OptionDecl> {
             kind: o["kind"].as_str().unwrap_or("text").to_string(),
             choices: o["choices"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect()).unwrap_or_default(),
             least: o["least"].as_i64(),
+            most: o["most"].as_i64(),
             default: o["default"].as_str().unwrap_or_default().to_string(),
             about: o["about"].as_str().unwrap_or_default().to_string(),
         })
@@ -262,19 +268,22 @@ mod tests {
         let mut r = report();
         assert!(r.to_json().get("options").is_none());
         r.options = vec![
-            OptionDecl { name: "n-gpu-layers".into(), kind: "int".into(), choices: vec![], least: Some(-1), default: "-1".into(), about: "layers on the device".into() },
+            OptionDecl { name: "n-gpu-layers".into(), kind: "int".into(), choices: vec![], least: Some(-1), most: None, default: "-1".into(), about: "layers on the device".into() },
+            OptionDecl { name: "threads".into(), kind: "int".into(), choices: vec![], least: Some(0), most: Some(512), default: "0".into(), about: "threads".into() },
             OptionDecl {
                 name: "flash-attn".into(),
                 kind: "choice".into(),
                 choices: vec!["auto".into(), "on".into(), "off".into()],
                 least: None,
+                most: None,
                 default: "auto".into(),
                 about: String::new(),
             },
         ];
         let v = r.to_json();
         assert_eq!(v["options"][0], json!({"name": "n-gpu-layers", "kind": "int", "least": -1, "default": "-1", "about": "layers on the device"}));
-        assert_eq!(v["options"][1]["choices"], json!(["auto", "on", "off"]));
+        assert_eq!(v["options"][1]["most"], 512);
+        assert_eq!(v["options"][2]["choices"], json!(["auto", "on", "off"]));
         assert_eq!(options_from(&v["options"]), r.options);
         assert_eq!(options_from(&json!([{"kind": "int"}])), vec![], "an option needs a name");
     }

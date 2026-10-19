@@ -184,22 +184,27 @@ pub mod options {
             default: "the install's",
             about: "A Python environment of your own with mlx and mlx-lm (as SUPERFLUID_MLX_VENV).",
         },
-        ServeOption { name: "prefill-chunk", kind: OptionKind::IntFrom(1), default: "2048", about: "Prompt tokens fed to the model per step." },
-        ServeOption { name: "cache-limit-mb", kind: OptionKind::IntFrom(0), default: "1024", about: "MLX's buffer cache limit (mx.set_cache_limit)." },
+        // A chunk past any context window is a slip of the keyboard, as llama.cpp's batch is.
+        ServeOption { name: "prefill-chunk", kind: OptionKind::IntIn(1, 1 << 20), default: "2048", about: "Prompt tokens fed to the model per step." },
+        ServeOption {
+            name: "cache-limit-mb",
+            kind: OptionKind::IntIn(0, (u64::MAX >> 20) as i64),
+            default: "1024",
+            about: "MLX's buffer cache limit (mx.set_cache_limit).",
+        },
     ];
 
-    /// The prefill chunk and the cache limit in bytes, as given or as the defaults.
+    /// The prefill chunk and the cache limit in bytes, as given or as the defaults; the bounds are the declaration's,
+    /// which an in-process worker is held to here.
     pub fn given(args: &WorkerArgs) -> Result<(u32, u64), String> {
-        let int = |name: &str, least: i64, most: i64| -> Result<Option<i64>, String> {
+        let int = |name: &str| -> Result<Option<i64>, String> {
             let Some(v) = option(args, name) else { return Ok(None) };
-            let n: i64 = v.parse().map_err(|_| format!("--{name}: an integer expected, got {v:?}"))?;
-            if n < least || n > most {
-                return Err(format!("--{name}: {least} to {most} expected, got {n}"));
-            }
-            Ok(Some(n))
+            let o = OPTIONS.iter().find(|o| o.name == name).ok_or_else(|| format!("--{name}: not an option of this runtime"))?;
+            o.kind.check(v).map_err(|e| format!("--{name}: {e}"))?;
+            v.parse().map(Some).map_err(|_| format!("--{name}: an integer expected, got {v:?}"))
         };
-        let prefill = int("prefill-chunk", 1, u32::MAX as i64)?.map(|n| n as u32).unwrap_or(2048);
-        let cache = int("cache-limit-mb", 0, (u64::MAX >> 20) as i64)?.map(|n| (n as u64) << 20).unwrap_or(1 << 30);
+        let prefill = int("prefill-chunk")?.map(|n| n as u32).unwrap_or(2048);
+        let cache = int("cache-limit-mb")?.map(|n| (n as u64) << 20).unwrap_or(1 << 30);
         Ok((prefill, cache))
     }
 
@@ -217,6 +222,8 @@ pub mod options {
             assert_eq!(given(&args(&[])).unwrap(), (2048, 1 << 30));
             assert_eq!(given(&args(&["--prefill-chunk", "512", "--cache-limit-mb", "256"])).unwrap(), (512, 256 << 20));
             assert!(given(&args(&["--prefill-chunk", "0"])).unwrap_err().contains("--prefill-chunk: 1 to"));
+            assert_eq!(given(&args(&["--prefill-chunk", "4294967296"])).unwrap_err(), "--prefill-chunk: 1 to 1048576 expected, got 4294967296");
+            assert_eq!(given(&args(&["--prefill-chunk", "1048576"])).unwrap().0, 1 << 20);
             assert!(given(&args(&["--cache-limit-mb", "lots"])).unwrap_err().contains("an integer expected"));
         }
     }

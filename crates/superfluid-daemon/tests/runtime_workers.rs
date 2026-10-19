@@ -166,6 +166,22 @@ fn a_serve_line_is_checked_before_a_model_is_pulled() {
 }
 
 #[test]
+fn a_runtime_option_given_twice_is_a_usage_error() {
+    let dir = scratch("option-twice");
+    // A worker named for llamacpp makes it a runtime here, so its options resolve; nothing starts it.
+    let out = superfluid(&dir.join("home"), &[("SUPERFLUID_WORKER_LLAMACPP", Path::new("/nonexistent/superfluid-worker-llamacpp"))])
+        .args(["serve", "--runtime", "llamacpp", "--model", "unsloth/Qwen3-0.6B-GGUF:Q4_K_M", "--offline", "--no-tui"])
+        .args(["--llamacpp-lib", "/a", "--llamacpp-lib=/b"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.starts_with("superfluid: --llamacpp-lib: given twice (\"/a\", then \"/b\"); give it once"), "{err}");
+    assert!(!err.contains("unsloth/"), "nothing was looked for: {err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_model_id_names_its_runtime_and_nothing_else_is_needed() {
     let dir = scratch("zero-flags");
     let out = superfluid(&dir.join("home"), &[])

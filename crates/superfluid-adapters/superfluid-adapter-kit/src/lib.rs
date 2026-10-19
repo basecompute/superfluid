@@ -45,7 +45,11 @@ pub enum OptionKind {
     Int,
     /// An integer at or above this.
     IntFrom(i64),
+    /// An integer from the first to the second, both taken: a bound past which the runtime would fail or clamp.
+    IntIn(i64, i64),
     Float,
+    /// A number at or above this.
+    FloatFrom(i64),
     OnOff,
     Choice(&'static [&'static str]),
     Text,
@@ -55,8 +59,8 @@ impl OptionKind {
     /// The kind as a report spells it.
     pub fn name(self) -> &'static str {
         match self {
-            OptionKind::Int | OptionKind::IntFrom(_) => "int",
-            OptionKind::Float => "float",
+            OptionKind::Int | OptionKind::IntFrom(_) | OptionKind::IntIn(..) => "int",
+            OptionKind::Float | OptionKind::FloatFrom(_) => "float",
             OptionKind::OnOff => "on-off",
             OptionKind::Choice(_) => "choice",
             OptionKind::Text => "text",
@@ -72,22 +76,35 @@ impl OptionKind {
 
     pub fn least(self) -> Option<i64> {
         match self {
-            OptionKind::IntFrom(n) => Some(n),
+            OptionKind::IntFrom(n) | OptionKind::IntIn(n, _) | OptionKind::FloatFrom(n) => Some(n),
+            _ => None,
+        }
+    }
+
+    pub fn most(self) -> Option<i64> {
+        match self {
+            OptionKind::IntIn(_, n) => Some(n),
             _ => None,
         }
     }
 
     pub fn check(self, value: &str) -> Result<(), String> {
-        check_value(self.name(), self.choices(), self.least(), value)
+        check_value(self.name(), self.choices(), self.least(), self.most(), value)
     }
 }
 
-/// Whether `value` is one an option of `kind` takes, with `kind`, `choices` and `least` as a report spells them.
-pub fn check_value(kind: &str, choices: &[impl AsRef<str>], least: Option<i64>, value: &str) -> Result<(), String> {
+/// Whether `value` is one an option of `kind` takes, with `kind`, `choices`, `least` and `most` as a report spells them.
+pub fn check_value(kind: &str, choices: &[impl AsRef<str>], least: Option<i64>, most: Option<i64>, value: &str) -> Result<(), String> {
     let list = || choices.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+    let within = |n: f64| least.is_none_or(|l| n >= l as f64) && most.is_none_or(|m| n <= m as f64);
+    let number = match kind {
+        "int" => value.parse::<i64>().ok().map(|n| n as f64),
+        "float" => value.parse::<f64>().ok().filter(|f| f.is_finite()),
+        _ => None,
+    };
     let ok = match kind {
-        "int" => value.parse::<i64>().is_ok_and(|n| least.is_none_or(|l| n >= l)),
-        "float" => value.parse::<f64>().is_ok_and(f64::is_finite),
+        "int" => value.parse::<i64>().is_ok_and(|n| least.is_none_or(|l| n >= l) && most.is_none_or(|m| n <= m)),
+        "float" => number.is_some_and(within),
         "on-off" => matches!(value, "on" | "off"),
         "choice" => list().contains(&value),
         _ => !value.is_empty(),
@@ -95,12 +112,18 @@ pub fn check_value(kind: &str, choices: &[impl AsRef<str>], least: Option<i64>, 
     if ok {
         return Ok(());
     }
-    Err(match (kind, least) {
-        ("int", Some(l)) if value.parse::<i64>().is_ok() => format!("at least {l} expected, got {value}"),
-        ("int", _) => format!("an integer expected, got {value:?}"),
-        ("float", _) => format!("a number expected, got {value:?}"),
-        ("on-off", _) => format!("on or off expected, got {value:?}"),
-        ("choice", _) => format!("one of {} expected, got {value:?}", list().join(", ")),
+    let range = match (least, most) {
+        (Some(l), Some(m)) => format!("{l} to {m}"),
+        (Some(l), None) => format!("at least {l}"),
+        (None, Some(m)) => format!("at most {m}"),
+        (None, None) => String::new(),
+    };
+    Err(match kind {
+        "int" | "float" if number.is_some() && !range.is_empty() => format!("{range} expected, got {value}"),
+        "int" => format!("an integer expected, got {value:?}"),
+        "float" => format!("a number expected, got {value:?}"),
+        "on-off" => format!("on or off expected, got {value:?}"),
+        "choice" => format!("one of {} expected, got {value:?}", list().join(", ")),
         _ => "a value expected".to_string(),
     })
 }
@@ -143,6 +166,11 @@ pub fn check_declaration(options: &[ServeOption]) -> Result<(), String> {
         if o.kind == OptionKind::Choice(&[]) {
             return Err(format!("the option {} offers no choice", o.name));
         }
+        if let OptionKind::IntIn(least, most) = o.kind {
+            if least > most {
+                return Err(format!("the option {} takes nothing: {least} to {most}", o.name));
+            }
+        }
         if o.about.is_empty() {
             return Err(format!("the option {} needs words for the help", o.name));
         }
@@ -174,6 +202,7 @@ pub fn declared(rt: &dyn Runtime) -> Vec<OptionDecl> {
             kind: o.kind.name().into(),
             choices: o.kind.choices().iter().map(|c| c.to_string()).collect(),
             least: o.kind.least(),
+            most: o.kind.most(),
             default: o.default.into(),
             about: o.about.into(),
         })
@@ -936,7 +965,16 @@ mod option_tests {
         assert_eq!(OptionKind::Int.check("x").unwrap_err(), "an integer expected, got \"x\"");
         assert!(OptionKind::IntFrom(1).check("1").is_ok());
         assert_eq!(OptionKind::IntFrom(1).check("0").unwrap_err(), "at least 1 expected, got 0");
+        assert!(OptionKind::IntIn(0, 512).check("512").is_ok() && OptionKind::IntIn(0, 512).check("0").is_ok());
+        assert_eq!(OptionKind::IntIn(0, 512).check("2147483647").unwrap_err(), "0 to 512 expected, got 2147483647");
+        assert_eq!(OptionKind::IntIn(0, 512).check("-1").unwrap_err(), "0 to 512 expected, got -1");
+        assert_eq!(OptionKind::IntIn(0, 512).check("99999999999999999999").unwrap_err(), "an integer expected, got \"99999999999999999999\"");
         assert!(OptionKind::Float.check("1e6").is_ok() && OptionKind::Float.check("inf").is_err());
+        assert!(OptionKind::FloatFrom(0).check("0").is_ok() && OptionKind::FloatFrom(0).check("0.25").is_ok());
+        assert_eq!(OptionKind::FloatFrom(0).check("-1.5").unwrap_err(), "at least 0 expected, got -1.5");
+        assert_eq!(OptionKind::FloatFrom(0).check("nan").unwrap_err(), "a number expected, got \"nan\"");
+        assert_eq!((OptionKind::IntIn(1, 8).name(), OptionKind::FloatFrom(0).name()), ("int", "float"));
+        assert_eq!((OptionKind::IntIn(1, 8).least(), OptionKind::IntIn(1, 8).most(), OptionKind::IntFrom(1).most()), (Some(1), Some(8), None));
         assert!(OptionKind::OnOff.check("on").is_ok() && OptionKind::OnOff.check("true").is_err());
         assert_eq!(OptionKind::Choice(&["a", "b"]).check("c").unwrap_err(), "one of a, b expected, got \"c\"");
         assert!(OptionKind::Text.check("").is_err() && OptionKind::Text.check("x").is_ok());
@@ -955,6 +993,7 @@ mod option_tests {
             (ServeOption { name: "Threads", ..ok }, "cannot be written"),
             (ServeOption { name: "max-context", ..ok }, "a flag every worker reads"),
             (ServeOption { kind: OptionKind::Choice(&[]), ..ok }, "offers no choice"),
+            (ServeOption { kind: OptionKind::IntIn(8, 1), ..ok }, "takes nothing"),
             (ServeOption { about: "", ..ok }, "needs words"),
         ] {
             assert!(check_declaration(&[bad]).unwrap_err().contains(said), "{bad:?}");

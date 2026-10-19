@@ -160,11 +160,12 @@ fn runtime_cmd(args: &[String]) {
                 [flag] if flag == "--json" => true,
                 _ => usage(),
             };
-            let runtime = catalog.require(id).unwrap_or_else(|e| fail(e));
+            // Answered before an install too: the options are what one reads to make the runtime run here.
+            let options = superfluid_daemon::runtime_options::declared_by(&catalog, id).unwrap_or_else(|e| fail(e));
             if json {
-                println!("{}", serde_json::to_string_pretty(&superfluid_daemon::runtime_options::json(&runtime)).expect("json"));
+                println!("{}", serde_json::to_string_pretty(&superfluid_daemon::runtime_options::json(id, &options)).expect("json"));
             } else {
-                print!("{}", superfluid_daemon::runtime_options::text(&runtime));
+                print!("{}", superfluid_daemon::runtime_options::text(id, &options));
             }
         }
         "update" => {

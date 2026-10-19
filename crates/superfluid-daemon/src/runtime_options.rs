@@ -5,10 +5,10 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
-use superfluid_adapter_kit::{check_value, placeholder, WorkerArgs};
+use superfluid_adapter_kit::{check_value, placeholder, OptionDecl, WorkerArgs};
 
 use crate::runtime_pick::RuntimeId;
-use crate::runtimes::{Catalog, Runtime};
+use crate::runtimes::{Catalog, Runtime, Source, Worker};
 
 /// One `--<runtime>-<name> <value>` as given, resolved to the runtime it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,11 +19,16 @@ pub struct Given {
     pub value: String,
 }
 
-/// Whether `flag` is shaped as a runtime option, `--<x>-<y>`; only then does `serve` keep it for [`resolve`].
+/// Whether `flag` is shaped as a runtime option, `--<id>-<name>`, spelled as a runtime id and an option name can be
+/// (an id may hold '.' and '_', a name never does); only then does `serve` keep it for [`resolve`].
 pub fn looks_like(flag: &str) -> bool {
     let Some(body) = flag.strip_prefix("--") else { return false };
-    let shaped = body.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_'));
-    shaped && body.split_once('-').is_some_and(|(id, name)| !id.is_empty() && !name.is_empty())
+    let id_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_');
+    let name_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    body.match_indices('-').any(|(i, _)| {
+        let (id, name) = (&body[..i], &body[i + 1..]);
+        !id.is_empty() && id.chars().all(id_char) && !name.is_empty() && name.chars().all(name_char)
+    })
 }
 
 /// The runtime among `ids` that `flag` names, the longest id winning (`--mlx-x-y` is mlx's `x-y`
@@ -40,6 +45,17 @@ pub fn resolve(flag: &str, value: &str, ids: &[RuntimeId]) -> Option<Given> {
     best.map(|(runtime, name)| Given { flag: flag.to_string(), runtime, name: name.to_string(), value: value.to_string() })
 }
 
+/// Refuses an option given twice: the worker reads the last value and this process the first (`daemon_environment`),
+/// so a repeat would split one knob between two values; serve refuses it as a usage error before anything starts.
+pub fn refuse_repeats(given: &[Given]) -> Result<(), String> {
+    for (i, g) in given.iter().enumerate() {
+        if let Some(first) = given[..i].iter().find(|p| p.runtime == g.runtime && p.name == g.name) {
+            return Err(format!("{}: given twice ({:?}, then {:?}); give it once", g.flag, first.value, g.value));
+        }
+    }
+    Ok(())
+}
+
 /// The options among `given` for `runtime`, checked against its declarations, as the pairs its worker takes.
 pub fn check(given: &[Given], runtime: &Runtime) -> Result<Vec<(String, String)>, String> {
     let id = runtime.id.base();
@@ -53,7 +69,7 @@ pub fn check(given: &[Given], runtime: &Runtime) -> Result<Vec<(String, String)>
                 format!("{}: the {} runtime takes no such option (it takes: {})", g.flag, id.name(), takes.join(", "))
             });
         };
-        check_value(&decl.kind, &decl.choices, decl.least, &g.value).map_err(|e| format!("{}: {e}", g.flag))?;
+        check_value(&decl.kind, &decl.choices, decl.least, decl.most, &g.value).map_err(|e| format!("{}: {e}", g.flag))?;
         out.push((format!("--{}", g.name), g.value.clone()));
     }
     Ok(out)
@@ -173,14 +189,32 @@ pub fn for_runtime(id: RuntimeId) -> Vec<(String, String)> {
     SET.get().and_then(|all| all.iter().find(|(r, _)| *r == id.base()).map(|(_, o)| o.clone())).unwrap_or_default()
 }
 
+/// What `superfluid runtime options <id>` lists: a usable runtime's declaration, else the one its adapter makes before
+/// an install, asked as `runtime versions` asks it (the worker named for it, the linked adapter, the worker that would
+/// install it): the options, `--llamacpp-lib` among them, are what one reads before the runtime runs here.
+pub fn declared_by(catalog: &Catalog, id: RuntimeId) -> Result<Vec<OptionDecl>, String> {
+    let id = id.base();
+    let not_usable = match catalog.require(id) {
+        Ok(runtime) => return Ok(runtime.options),
+        Err(why) => why,
+    };
+    let named = std::env::var_os(crate::runtimes::worker_env(id)).is_some();
+    if let Some(rt) = crate::linked::get(id).filter(|_| !named) {
+        return Ok(superfluid_adapter_kit::declared(rt));
+    }
+    // A worker's report declares its options whether or not the runtime runs here.
+    let bin = crate::installs::installer(catalog, id).map_err(|_| not_usable.clone())?;
+    let report = crate::runtimes::run_check_model(&Worker { bin, prefix: Vec::new(), source: Source::Shipped }, None).map_err(|_| not_usable)?;
+    Ok(superfluid_worker::check::options_from(&report["options"]))
+}
+
 /// `superfluid runtime options <id>`, for a person.
-pub fn text(runtime: &Runtime) -> String {
-    let id = runtime.id.base().name();
-    if runtime.options.is_empty() {
+pub fn text(id: RuntimeId, options: &[OptionDecl]) -> String {
+    let id = id.base().name();
+    if options.is_empty() {
         return format!("the {id} runtime takes no option of its own; `superfluid serve --help` lists the flags every runtime takes\n");
     }
-    let rows: Vec<(String, String, String)> = runtime
-        .options
+    let rows: Vec<(String, String, String)> = options
         .iter()
         .map(|o| {
             let default = if o.default.is_empty() { "-".to_string() } else { o.default.clone() };
@@ -197,15 +231,14 @@ pub fn text(runtime: &Runtime) -> String {
 }
 
 /// `superfluid runtime options <id> --json`.
-pub fn json(runtime: &Runtime) -> Value {
-    json!({"runtime": runtime.id.base().name(), "options": runtime.options.iter().map(|o| o.to_json()).collect::<Vec<_>>()})
+pub fn json(id: RuntimeId, options: &[OptionDecl]) -> Value {
+    json!({"runtime": id.base().name(), "options": options.iter().map(|o| o.to_json()).collect::<Vec<_>>()})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtimes::{Info, Source, Worker};
-    use superfluid_worker::check::OptionDecl;
+    use crate::runtimes::Info;
 
     fn runtime(id: &str, options: Vec<OptionDecl>) -> Runtime {
         Runtime {
@@ -228,6 +261,7 @@ mod tests {
             kind: kind.into(),
             choices: choices.iter().map(|c| c.to_string()).collect(),
             least: None,
+            most: None,
             default: default.into(),
             about: format!("about {name}"),
         }
@@ -246,6 +280,18 @@ mod tests {
         assert_eq!(pairs[0], (ids[0], vec![("--lib".to_string(), "/custom/lib".to_string()), ("--n-gpu-layers".to_string(), "20".to_string())]));
         assert_eq!(pairs[1], (ids[1], vec![("--venv".to_string(), "/custom/env".to_string())]));
         assert!(given_pairs(&[]).is_empty());
+    }
+
+    #[test]
+    fn an_option_given_twice_is_refused() {
+        let ids = [RuntimeId::new("llamacpp"), RuntimeId::new("mlx")];
+        let given = |flags: &[(&str, &str)]| flags.iter().map(|(f, v)| resolve(f, v, &ids).unwrap()).collect::<Vec<_>>();
+        let twice = given(&[("--llamacpp-lib", "/a"), ("--mlx-venv", "/e"), ("--llamacpp-lib", "/b")]);
+        assert_eq!(refuse_repeats(&twice).unwrap_err(), "--llamacpp-lib: given twice (\"/a\", then \"/b\"); give it once");
+        let same = given(&[("--llamacpp-threads", "8"), ("--llamacpp-threads", "8")]);
+        assert!(refuse_repeats(&same).is_err(), "the same value twice is still a repeat");
+        assert!(refuse_repeats(&given(&[("--llamacpp-lib", "/a"), ("--mlx-venv", "/a"), ("--llamacpp-threads", "8")])).is_ok());
+        assert!(refuse_repeats(&[]).is_ok());
     }
 
     #[test]
@@ -279,6 +325,9 @@ mod tests {
         assert!(!looks_like("--port"), "no '-' after the runtime");
         assert!(!looks_like("--llamacpp-"), "an empty name");
         assert!(!looks_like("-ngl") && !looks_like("--Llamacpp-x") && !looks_like("--llamacpp-x=1"));
+        assert!(!looks_like("--llamacpp-cache_type_k") && !looks_like("--llamacpp-rope.freq"), "no option name holds '_' or '.'");
+        assert!(looks_like("--my_rt.2-threads"), "a runtime id may");
+        assert!(!looks_like("--my_rt.2-"));
     }
 
     #[test]
@@ -306,6 +355,16 @@ mod tests {
         floored.options[0].least = Some(1);
         let zero = [resolve("--llamacpp-batch-size", "0", &[floored.id]).unwrap()];
         assert_eq!(check(&zero, &floored).unwrap_err(), "--llamacpp-batch-size: at least 1 expected, got 0");
+        let mut bounded = runtime("llamacpp", vec![decl("threads", "int", &[], "0"), decl("rope-freq-base", "float", &[], "model's")]);
+        (bounded.options[0].least, bounded.options[0].most, bounded.options[1].least) = (Some(0), Some(512), Some(0));
+        let ids = [bounded.id];
+        let many = [resolve("--llamacpp-threads", "2147483647", &ids).unwrap()];
+        assert_eq!(check(&many, &bounded).unwrap_err(), "--llamacpp-threads: 0 to 512 expected, got 2147483647");
+        let below = [resolve("--llamacpp-rope-freq-base", "-1", &ids).unwrap()];
+        assert_eq!(check(&below, &bounded).unwrap_err(), "--llamacpp-rope-freq-base: at least 0 expected, got -1");
+        let fine = [resolve("--llamacpp-threads", "512", &ids).unwrap(), resolve("--llamacpp-rope-freq-base", "0", &ids).unwrap()];
+        assert_eq!(check(&fine, &bounded).unwrap().len(), 2);
+        let ids = [rt.id];
         let unknown = [resolve("--llamacpp-ngl", "20", &ids).unwrap()];
         assert_eq!(
             check(&unknown, &rt).unwrap_err(),
@@ -318,13 +377,38 @@ mod tests {
     }
 
     #[test]
+    fn the_options_are_listed_before_the_runtime_runs_here() {
+        let root = std::env::temp_dir().join(format!("superfluid-runtime-options-declared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (beside, libexec) = (root.join("bin"), root.join("libexec").join("superfluid"));
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::create_dir_all(&libexec).unwrap();
+        // A shipped adapter whose library is not here: not usable, and still declaring what it takes.
+        let report = r#"{"runtime":{"id":"toyopt","version":"v1"},"available":"no libtoy here","options":[{"name":"lib","kind":"text","default":"the install's","about":"a library of your own"}]}"#;
+        crate::runtimes::tests::fake_worker(&libexec, "superfluid-worker-toyopt", report, 1);
+        let cat = Catalog::new(root.join("home"), Some(beside.clone()), beside.join("superfluid-workerd"));
+        let id = RuntimeId::new("toyopt");
+        assert!(cat.require(id).is_err(), "the runtime does not run here");
+        let options = declared_by(&cat, id).unwrap();
+        assert_eq!(options.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["lib"]);
+        assert!(text(id, &options).contains("--toyopt-lib <value>"));
+        let nowhere = RuntimeId::new("nort");
+        assert_eq!(declared_by(&cat, nowhere).unwrap_err(), cat.require(nowhere).unwrap_err(), "nothing declares it: the runtime's own error");
+        for id in crate::linked::ids().into_iter().filter(|id| std::env::var_os(crate::runtimes::worker_env(*id)).is_none()) {
+            let linked = superfluid_adapter_kit::declared(crate::linked::get(id).unwrap());
+            assert_eq!(declared_by(&cat, id).unwrap(), linked, "{}: a linked adapter answers in process", id.name());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn the_listing_shows_each_option_with_its_value_shape_and_default() {
         let rt = runtime("llamacpp", vec![decl("n-gpu-layers", "int", &[], "-1"), decl("flash-attn", "choice", &["auto", "on", "off"], ""), decl("lib", "text", &[], "the install's")]);
-        let t = text(&rt);
+        let t = text(rt.id, &rt.options);
         assert!(t.contains("--llamacpp-n-gpu-layers <N>"), "{t}");
         assert!(t.contains("--llamacpp-flash-attn <auto|on|off>"), "{t}");
         assert!(t.contains("--llamacpp-lib <value>") && t.contains("the install's") && t.contains("about lib"), "{t}");
-        assert!(text(&runtime("basert", Vec::new())).starts_with("the basert runtime takes no option of its own"));
-        assert_eq!(json(&rt)["options"][1]["choices"], json!(["auto", "on", "off"]));
+        assert!(text(RuntimeId::new("basert"), &[]).starts_with("the basert runtime takes no option of its own"));
+        assert_eq!(json(rt.id, &rt.options)["options"][1]["choices"], json!(["auto", "on", "off"]));
     }
 }

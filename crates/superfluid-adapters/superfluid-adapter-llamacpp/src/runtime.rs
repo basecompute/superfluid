@@ -538,6 +538,10 @@ fn kv_cell_bytes(model: *const sys::llama_model, path: &std::path::Path, type_k:
 
 /// What the saved state is keyed by: the weights, and the settings that change what a cached key means (RoPE, YaRN) or
 /// how it is stored (the cache types); with none set, the weights alone, as before.
+///
+/// The settings count as in effect, not as given: a value that is llama.cpp's own default (an f16 cache) or its "the
+/// model's" (0 for a RoPE frequency or the YaRN context, a negative YaRN factor) runs as a plain run does, so it keeps
+/// the state a plain run saved.
 fn state_identity(weights: [u8; 32], cfg: &LlamaConfig) -> [u8; 32] {
     let mut settings: Vec<u8> = Vec::new();
     let mut put = |tag: u8, v: Option<i64>| {
@@ -547,16 +551,19 @@ fn state_identity(weights: [u8; 32], cfg: &LlamaConfig) -> [u8; 32] {
         }
     };
     let bits = |f: Option<f32>| f.map(|f| i64::from(f.to_bits()));
+    let unless_zero = |f: Option<f32>| f.filter(|f| *f != 0.0);
+    let unless_negative = |f: Option<f32>| f.filter(|f| *f >= 0.0);
+    let unless_f16 = |t: Option<sys::ggml_type>| t.filter(|t| *t != sys::GGML_TYPE_F16).map(i64::from);
     put(1, cfg.rope_scaling.map(i64::from));
-    put(2, bits(cfg.rope_freq_base));
-    put(3, bits(cfg.rope_freq_scale));
-    put(4, bits(cfg.yarn_ext_factor));
-    put(5, bits(cfg.yarn_attn_factor));
-    put(6, bits(cfg.yarn_beta_fast));
-    put(7, bits(cfg.yarn_beta_slow));
-    put(8, cfg.yarn_orig_ctx.map(i64::from));
-    put(9, cfg.type_k.map(i64::from));
-    put(10, cfg.type_v.map(i64::from));
+    put(2, bits(unless_zero(cfg.rope_freq_base)));
+    put(3, bits(unless_zero(cfg.rope_freq_scale)));
+    put(4, bits(unless_negative(cfg.yarn_ext_factor)));
+    put(5, bits(unless_negative(cfg.yarn_attn_factor)));
+    put(6, bits(unless_negative(cfg.yarn_beta_fast)));
+    put(7, bits(unless_negative(cfg.yarn_beta_slow)));
+    put(8, cfg.yarn_orig_ctx.filter(|n| *n != 0).map(i64::from));
+    put(9, unless_f16(cfg.type_k));
+    put(10, unless_f16(cfg.type_v));
     if settings.is_empty() {
         return weights;
     }
@@ -1779,6 +1786,23 @@ mod kv_shape_tests {
         assert_eq!(state_identity(weights, &plain), weights, "no setting: the weights alone, as before");
         let same_meaning = LlamaConfig { n_gpu_layers: 0, flash_attn: Some(sys::LLAMA_FLASH_ATTN_TYPE_ENABLED), ..LlamaConfig::default() };
         assert_eq!(state_identity(weights, &same_meaning), weights, "settings that do not change what a cached key means");
+        let as_plain = LlamaConfig {
+            type_k: Some(sys::GGML_TYPE_F16),
+            type_v: Some(sys::GGML_TYPE_F16),
+            rope_freq_base: Some(0.0),
+            rope_freq_scale: Some(-0.0),
+            yarn_ext_factor: Some(-1.0),
+            yarn_attn_factor: Some(-1.0),
+            yarn_beta_fast: Some(-0.5),
+            yarn_beta_slow: Some(-1.0),
+            yarn_orig_ctx: Some(0),
+            ..LlamaConfig::default()
+        };
+        assert_eq!(state_identity(weights, &as_plain), weights, "llama.cpp's defaults and its \"the model's\", given: a plain run's state");
+        let bf16 = LlamaConfig { type_k: Some(sys::GGML_TYPE_BF16), ..LlamaConfig::default() };
+        assert_ne!(state_identity(weights, &bf16), weights, "a cache stored otherwise");
+        let no_ext = LlamaConfig { yarn_ext_factor: Some(0.0), ..LlamaConfig::default() };
+        assert_ne!(state_identity(weights, &no_ext), weights, "0 is a YaRN factor of its own, not the model's");
         let base = LlamaConfig { rope_freq_base: Some(1_000_000.0), ..LlamaConfig::default() };
         let other_base = LlamaConfig { rope_freq_base: Some(500_000.0), ..LlamaConfig::default() };
         let scaled = LlamaConfig { rope_freq_scale: Some(0.25), ..LlamaConfig::default() };
