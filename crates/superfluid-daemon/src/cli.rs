@@ -482,6 +482,7 @@ Usage: superfluid compat [--json]
   A release carries the same data beside its tarball, as compat.json, so a host can choose a
   release before downloading it. `superfluid runtime versions <id>` lists one runtime's versions
   with which install on this machine.
+  Exits 1, after printing the rest, when a shipped adapter fails to answer for its runtime.
 
 Options:
   --json    Print JSON

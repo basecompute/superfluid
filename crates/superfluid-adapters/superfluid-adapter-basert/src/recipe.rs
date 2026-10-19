@@ -39,6 +39,13 @@ pub fn pinned() -> Vec<Pin> {
         .unwrap_or_default()
 }
 
+/// The pins this build drives, the ones that install without `--untested`: `compat` names these and no others, as a
+/// pin of another line stays in the recipe for `--untested` and `superfluid runtime versions` to say why it does not.
+pub fn driven(pins: &[Pin]) -> Vec<&Pin> {
+    use superfluid_engine_ffi::libbasert::{abi_built_for, compatible};
+    pins.iter().filter(|p| compatible(p.abi, abi_built_for(), &p.version).is_ok()).collect()
+}
+
 /// The ABI number a release states beside its bundles, as `basert-engine-abi-<N>.txt`.
 fn abi_marked(release: &Value) -> Option<u32> {
     release["assets"].as_array()?.iter().find_map(|a| a["name"].as_str()?.strip_prefix("basert-engine-abi-")?.strip_suffix(".txt")?.parse().ok())
@@ -306,6 +313,8 @@ mod tests {
             assert_eq!(e.contains("this build drives ABI"), !driven, "{e}");
         }
         assert!(versions(&mac()).iter().any(|c| c.here.is_ok()), "the recipe pins an engine this build drives");
+        let driven: Vec<&str> = driven(&pins).iter().map(|p| p.version.as_str()).collect();
+        assert_eq!(driven, ["0.4.5", "0.3.9"], "the pins that install without --untested, in the recipe's order");
     }
 
     #[test]

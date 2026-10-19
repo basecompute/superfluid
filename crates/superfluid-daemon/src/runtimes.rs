@@ -2,16 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Mutex;
-use std::time::Duration;
-
 use superfluid_engine::artifact::{Device, Format, TokenizerSource};
 use serde_json::Value;
 
 use crate::runtime_pick::RuntimeId;
-
-const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -569,34 +565,11 @@ pub fn run_check_model(w: &Worker, model: Option<&Path>) -> Result<Value, String
     if let Some(m) = model {
         cmd.arg("--model").arg(m);
     }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let child = crate::exec::when_not_busy(|| cmd.spawn()).map_err(|e| format!("{} could not start: {e}", w.bin.display()))?;
-    let pid = child.id() as i32;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    let out = match rx.recv_timeout(CHECK_TIMEOUT) {
-        Ok(out) => out.map_err(|e| format!("{} check: {e}", w.bin.display()))?,
-        Err(_) => {
-            kill_hard(pid);
-            return Err(format!("{} check did not answer within {}s", w.bin.display(), CHECK_TIMEOUT.as_secs()));
-        }
-    };
-    serde_json::from_slice::<Value>(&out.stdout).map_err(|_| {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let tail: Vec<&str> = stderr.lines().rev().take(3).collect();
-        format!(
-            "{} check failed ({}){}",
-            w.bin.display(),
-            out.status,
-            if tail.is_empty() {
-                String::new()
-            } else {
-                format!(": {}", tail.into_iter().rev().collect::<Vec<_>>().join(" / "))
-            }
-        )
-    })
+    let out = crate::exec::output_within(&mut cmd, crate::exec::ANSWER_WITHIN)
+        .map_err(|e| format!("{} could not start: {e}", w.bin.display()))?
+        .ok_or_else(|| format!("{} check did not answer within {}s", w.bin.display(), crate::exec::ANSWER_WITHIN.as_secs()))?;
+    serde_json::from_slice::<Value>(&out.stdout)
+        .map_err(|_| format!("{} check failed ({}){}", w.bin.display(), out.status, crate::exec::stderr_tail(&out.stderr)))
 }
 
 pub fn sizing_of(rt: &Runtime, model: &Path) -> Result<superfluid_adapter_kit::Sizing, String> {
@@ -669,16 +642,6 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
         options: superfluid_worker::check::options_from(&report["options"]),
         worker,
     })
-}
-
-fn kill_hard(pid: i32) {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: plain POSIX kill on a child this process spawned.
-    unsafe {
-        kill(pid, 9);
-    }
 }
 
 #[cfg(test)]

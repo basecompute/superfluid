@@ -498,10 +498,17 @@ fn main() {
     }
     if command == Some("compat") {
         let catalog = superfluid_daemon::runtimes::Catalog::from_env();
+        let c = superfluid_daemon::compat::json(&catalog);
         if args[1..].iter().any(|a| a == "--json") {
-            println!("{}", serde_json::to_string_pretty(&superfluid_daemon::compat::json(&catalog)).expect("compat is JSON"));
+            println!("{}", serde_json::to_string_pretty(&c).expect("compat is JSON"));
         } else {
-            print!("{}", superfluid_daemon::compat::text(&catalog));
+            print!("{}", superfluid_daemon::compat::text(&c));
+        }
+        // Printed whole first, so the error is there to read; the exit status stops a release that would publish it.
+        let unanswered = superfluid_daemon::compat::unanswered(&c);
+        if !unanswered.is_empty() {
+            eprintln!("superfluid: the adapter for {} did not answer, so this is not all this build supports", unanswered.join(", "));
+            std::process::exit(1);
         }
         return;
     }
