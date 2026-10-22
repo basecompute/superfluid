@@ -97,12 +97,16 @@ impl Runtime for Basert {
             PullOption { name: "target", value: true, about: "the quant scheme a model fetched from its source is converted to (base-q4, base-q8, ...)" },
             PullOption { name: "profile", value: true, about: "a quant profile JSON, instead of the auto-selected one" },
             PullOption { name: "revision", value: true, about: "the Hugging Face revision, branch or tag" },
+            PullOption { name: "file", value: true, about: "the .base file to take from a repo that holds several (e.g. Foo-Medium.base)" },
             PullOption { name: "force", value: false, about: "fetch and convert again, even if installed" },
         ])
     }
 
     fn pull(&self, pull: &Pull, _args: &WorkerArgs) -> Result<std::path::PathBuf, String> {
         let (id, variant) = pull.split()?;
+        // a file taken by name is served from the variant it was installed under
+        let from_file = pull.option("file").flatten().map(file_variant);
+        let variant = variant.or(from_file.as_deref());
         let tool = basert_tool()?;
         if !pull.offline {
             let mut cmd = std::process::Command::new(&tool);
@@ -132,6 +136,15 @@ impl Runtime for Basert {
         // The pins alone, offline: `plan` would consult the release listing when a pin fails.
         recipe::versions(host)
     }
+}
+
+/// The variant `basert pull --file` installs a file under: `default-` and the last
+/// `-`/`_` segment of its name, lowercased (`Foo-Medium.base` -> `default-medium`).
+/// Mirrors baseRT's `base_variant`.
+fn file_variant(file: &str) -> String {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    let stem = name.strip_suffix(".base").unwrap_or(name);
+    format!("default-{}", stem.rsplit(['-', '_']).next().unwrap_or(stem).to_ascii_lowercase())
 }
 
 /// The `.base` file `basert list --json` holds for `id`: the variant named with the id,
@@ -299,7 +312,17 @@ mod tests {
 
 #[cfg(test)]
 mod pull_tests {
-    use super::installed_path;
+    use super::{file_variant, installed_path};
+
+    #[test]
+    fn a_file_names_the_variant_basert_installs_it_under() {
+        assert_eq!(file_variant("Qwen3.8-27B-BaseQuant-V1-Medium.base"), "default-medium");
+        assert_eq!(file_variant("sub/m-Q8.base"), "default-q8");
+        assert_eq!(file_variant("m_Small"), "default-small");
+        let l = list(&[("org/a", "default-q4", true), ("org/a", "default-medium", true)]);
+        let medium = file_variant("a-Medium.base");
+        assert_eq!(installed_path(&l, "org/a", Some(&medium)).unwrap().to_str().unwrap(), "/m/org/a/default-medium/model.base");
+    }
 
     fn list(entries: &[(&str, &str, bool)]) -> String {
         let items: Vec<String> = entries
