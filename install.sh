@@ -6,11 +6,13 @@
 # Environment:
 #   SUPERFLUID_VERSION  a release tag (v0.1.0); default: the latest release
 #   SUPERFLUID_NO_BASERT  set to skip installing the baseRT engine
-#   SUPERFLUID_PREFIX   where to install; default: ~/.local (bin/ and libexec/superfluid/ under it)
+#   SUPERFLUID_PREFIX   where the `superfluid` command goes; default: ~/.local (its bin/)
+#   SUPERFLUID_HOME     where releases are kept, side by side; default: ~/.superfluid (versions/)
 #
-# Nothing runs as root and nothing outside the prefix is touched. The baseRT
-# engine is installed where it runs (Apple silicon, Linux arm64 with CUDA);
-# llama.cpp and MLX install themselves the first time a model needs them.
+# Nothing runs as root. The release goes under $SUPERFLUID_HOME/versions, linked
+# from $SUPERFLUID_PREFIX/bin, so `superfluid self update` can install the next
+# one beside it. The baseRT engine is installed where it runs; llama.cpp and
+# MLX install themselves the first time a model needs them.
 set -eu
 
 REPO="basecompute/superfluid"
@@ -19,6 +21,8 @@ VERSION="${SUPERFLUID_VERSION:-latest}"
 
 say() { printf 'superfluid: %s\n' "$*"; }
 fail() { printf 'superfluid: %s\n' "$*" >&2; exit 1; }
+# The prefix as a person reads it, ~ for $HOME; spelled out, as bash's ${PREFIX/#$HOME/~} stops dash.
+shown() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) target=aarch64-apple-darwin ;;
@@ -58,12 +62,34 @@ have="$(sha256 "$tmp/$name.tar.gz")"
 [ "$want" = "$have" ] || fail "checksum mismatch: expected $want, got $have"
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
-mkdir -p "$PREFIX/bin" "$PREFIX/libexec/superfluid"
-cp "$tmp/$name"/bin/* "$PREFIX/bin/"
-cp "$tmp/$name"/libexec/superfluid/* "$PREFIX/libexec/superfluid/"
-chmod +x "$PREFIX"/bin/superfluid* "$PREFIX"/libexec/superfluid/superfluid-worker-*
+chmod +x "$tmp/$name"/bin/superfluid* "$tmp/$name"/libexec/superfluid/superfluid-worker-*
+# A release from before `self install` has no `self` command and exits 2 with
+# its usage; only that release is placed by the installed superfluid when there
+# is one, else copied in place, never through a link. Any other failure (a copy
+# that does not start, a lock not taken) stops here: copying that release in
+# place would install exactly what was refused.
+status=0
+"$tmp/$name/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin" || status=$?
+if [ "$status" -eq 0 ]; then
+  :
+elif [ "$status" -ne 2 ]; then
+  fail "the release was not installed (see above)"
+elif [ -L "$PREFIX/bin/superfluid" ]; then
+  "$PREFIX/bin/superfluid" self install --from "$tmp/$name" --prefix "$PREFIX/bin" \
+    || fail "the installed superfluid did not place the release (see above)"
+  say "placed by the installed superfluid, since this release cannot place itself"
+else
+  say "this release places itself the old way: copied into $(shown "$PREFIX")/bin"
+  mkdir -p "$PREFIX/bin" "$PREFIX/libexec/superfluid"
+  for f in "$tmp/$name"/bin/*; do
+    [ -L "$PREFIX/bin/$(basename "$f")" ] && rm -f "$PREFIX/bin/$(basename "$f")"
+    cp "$f" "$PREFIX/bin/"
+  done
+  cp "$tmp/$name"/libexec/superfluid/* "$PREFIX/libexec/superfluid/"
+  chmod +x "$PREFIX"/bin/superfluid* "$PREFIX"/libexec/superfluid/superfluid-worker-*
+fi
 
-say "installed $("$PREFIX/bin/superfluid" --version) to ${PREFIX/#$HOME/~}/bin"
+say "installed $("$PREFIX/bin/superfluid" --version) to $(shown "$PREFIX")/bin"
 
 # The baseRT engine ships for Apple silicon and Linux arm64 (CUDA); install it
 # where it runs so .base bundles serve without a first-use wait. llama.cpp and
