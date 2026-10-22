@@ -819,6 +819,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#superfluid-compat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        superfluid compat
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#superfluid-self" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        superfluid self
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#superfluid-session" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -906,6 +928,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../updating/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Updating superfluid
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../multiple_models/" class="md-nav__link">
         
   
@@ -942,6 +992,34 @@
     
   
     Distributed serving
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosting superfluid in another product
   
 
     
@@ -2295,6 +2373,28 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#superfluid-compat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        superfluid compat
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#superfluid-self" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        superfluid self
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#superfluid-session" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2397,6 +2497,14 @@
 <td>install, update, repair, remove or pin a runtime</td>
 </tr>
 <tr>
+<td><code>superfluid compat</code></td>
+<td>what this build was built for: the runtime contracts it checks at load</td>
+</tr>
+<tr>
+<td><code>superfluid self &lt;subcommand&gt;</code></td>
+<td>update superfluid itself, or switch between the versions installed here</td>
+</tr>
+<tr>
 <td><code>superfluid session &lt;subcommand&gt;</code></td>
 <td>inspect or export a session from a running server</td>
 </tr>
@@ -2431,7 +2539,7 @@
 </tr>
 <tr>
 <td>1</td>
-<td>run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull</td>
+<td>run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull, a shipped adapter that did not answer <code>compat</code></td>
 </tr>
 <tr>
 <td>2</td>
@@ -2440,6 +2548,10 @@
 <tr>
 <td>3</td>
 <td>(<code>superfluid-workerd</code>, <code>superfluid-noded</code>) the model did not load</td>
+</tr>
+<tr>
+<td>4</td>
+<td>(<code>serve</code>) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts superfluid can tell this from a flag it got wrong (2), and from an install superfluid tried that failed (1)</td>
 </tr>
 </tbody>
 </table>
@@ -2486,6 +2598,11 @@
 <td><code>--pull-&lt;name&gt; [value]</code></td>
 <td></td>
 <td>Pass <code>--&lt;name&gt;</code> to the runtime's pull tool (for example <code>--pull-file model.gguf</code>). See <a href="../../models/supported_models/#pulling-models-by-id">Supported models</a>.</td>
+</tr>
+<tr>
+<td><code>--&lt;runtime&gt;-&lt;name&gt; &lt;value&gt;</code></td>
+<td>the runtime's</td>
+<td>A knob of one runtime, for example <code>--llamacpp-n-gpu-layers 20</code> or <code>--mlx-prefill-chunk 512</code>; <code>superfluid runtime options &lt;id&gt;</code> lists them, and <a href="../../models/runtimes/#per-runtime-options">Runtimes</a> describes them. The value is checked against the runtime's declaration before anything loads, and an option given twice is refused (exit 2); a flag every runtime takes (<code>--max-context</code>, <code>--max-batch</code>, <code>--kv-bits</code>) is never spelled this way.</td>
 </tr>
 <tr>
 <td><code>--model-dir &lt;dir&gt;</code></td>
@@ -3051,27 +3168,42 @@
 <h2 id="superfluid-runtimes"><code>superfluid runtimes</code><a class="headerlink" href="#superfluid-runtimes" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>superfluid<span class="w"> </span>runtimes<span class="w"> </span><span class="o">[</span>&lt;model&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--json<span class="o">]</span>
 </code></pre></div>
-<p>Without a model: one row per runtime and install, with state (<code>ready</code>, <code>not installed</code>, <code>broken</code>, <code>missing</code>), version, formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.</p>
+<p>Without a model: one row per runtime and install, with state (<code>ready</code>, <code>not installed</code>, <code>broken</code>, <code>missing</code>), version, the newest version its adapter installs on its own here (<code>INSTALLABLE</code>, marked <code>(installed)</code> when an install of it exists; <code>superfluid runtime versions &lt;id&gt;</code> lists them all), formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.</p>
+<p>With <code>--json</code>, a runtime's row carries <code>installable</code>, the versions its adapter installs on its own here, newest first; a ready runtime's row carries <code>abi</code> when the runtime states a contract number (baseRT's engine ABI) and <code>options</code> when the runtime takes knobs of its own on <code>serve</code> (each with <code>name</code>, <code>kind</code>, <code>choices</code>, <code>least</code> and <code>most</code> when the value is bounded, <code>default</code> and <code>about</code>), and the <code>basert</code> row carries <code>requires</code>, what this build was built for, whether or not an engine was found. See <a href="../hosts/">Hosting superfluid in another product</a>.</p>
 <h2 id="superfluid-runtime"><code>superfluid runtime</code><a class="headerlink" href="#superfluid-runtime" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--version<span class="w"> </span>V<span class="o">]</span><span class="w"> </span><span class="o">[</span>--backend<span class="w"> </span>B<span class="o">]</span><span class="w"> </span><span class="o">[</span>--from<span class="w"> </span>&lt;url<span class="p">|</span>path&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--sha256<span class="w"> </span>H<span class="o">]</span><span class="w"> </span><span class="o">[</span>--untested<span class="o">]</span><span class="w"> </span><span class="o">[</span>--dry-run<span class="o">]</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>update<span class="w"> </span>&lt;id&gt;
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>repair<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>&lt;install&gt;<span class="o">]</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>remove<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>&lt;install&gt;<span class="o">]</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>use<span class="w"> </span>&lt;id&gt;<span class="w"> </span>&lt;install&gt;<span class="w"> </span><span class="p">|</span><span class="w"> </span>--auto
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>versions<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--json<span class="o">]</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--version<span class="w"> </span>V<span class="o">]</span><span class="w"> </span><span class="o">[</span>--backend<span class="w"> </span>B<span class="o">]</span><span class="w"> </span><span class="o">[</span>--from<span class="w"> </span>&lt;url<span class="p">|</span>path&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--sha256<span class="w"> </span>H<span class="o">]</span><span class="w"> </span><span class="o">[</span>--untested<span class="o">]</span><span class="w"> </span><span class="o">[</span>--dry-run<span class="o">]</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>update<span class="w"> </span>&lt;id&gt;
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>repair<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>&lt;install&gt;<span class="o">]</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>remove<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>&lt;install&gt;<span class="o">]</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>use<span class="w"> </span>&lt;id&gt;<span class="w"> </span>&lt;install&gt;<span class="w"> </span><span class="p">|</span><span class="w"> </span>--auto
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>options<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--json<span class="o">]</span>
 </code></pre></div>
-<p>See <a href="../../models/runtimes/#managing-installs">Runtimes</a>.</p>
+<p>See <a href="../../models/runtimes/#managing-installs">Runtimes</a>. <code>options</code> lists the knobs the runtime takes on <code>serve</code> as <code>--&lt;id&gt;-&lt;name&gt; &lt;value&gt;</code>, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so <code>--llamacpp-lib</code> can be found when the runtime needs it; see <a href="../../models/runtimes/#per-runtime-options">per-runtime options</a>.</p>
+<h2 id="superfluid-compat"><code>superfluid compat</code><a class="headerlink" href="#superfluid-compat" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>superfluid<span class="w"> </span>compat<span class="w"> </span><span class="o">[</span>--json<span class="o">]</span>
+</code></pre></div>
+<p>What this build was built and tested for, per runtime: for <code>basert</code>, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for <code>llamacpp</code> and <code>mlx</code>, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers <code>superfluid-worker-&lt;id&gt; compat --json</code> for its part; one that fails or does not answer within a minute is reported under its runtime as <code>error</code>, with the last lines it wrote to stderr, and <code>superfluid compat</code> then exits 1 after printing the rest. A release carries the same JSON beside its tarball as <code>compat.json</code>. See <a href="../hosts/">Hosting superfluid in another product</a>. For one runtime on this machine, <code>superfluid runtime versions &lt;id&gt;</code> says which of those versions install here.</p>
+<h2 id="superfluid-self"><code>superfluid self</code><a class="headerlink" href="#superfluid-self" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>superfluid<span class="w"> </span>self<span class="w"> </span>update<span class="w"> </span><span class="o">[</span>--version<span class="w"> </span>&lt;v&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--dry-run<span class="o">]</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>superfluid<span class="w"> </span>self<span class="w"> </span>check
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>superfluid<span class="w"> </span>self<span class="w"> </span>list
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>superfluid<span class="w"> </span>self<span class="w"> </span>use<span class="w"> </span>&lt;v&gt;
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>superfluid<span class="w"> </span>self<span class="w"> </span>install<span class="w"> </span>--from<span class="w"> </span>&lt;dir&gt;<span class="w"> </span><span class="o">[</span>--prefix<span class="w"> </span>&lt;dir&gt;<span class="o">]</span>
+</code></pre></div>
+<p><code>update</code> installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for <code>use</code>. <code>check</code> asks whether a newer release is out. <code>install</code> places an unpacked release, which is what the install script runs. See <a href="../updating/">Updating superfluid</a>.</p>
 <h2 id="superfluid-session"><code>superfluid session</code><a class="headerlink" href="#superfluid-session" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>superfluid<span class="w"> </span>session<span class="w"> </span>inspect<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--json<span class="o">]</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>superfluid<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w"> </span>--format<span class="w"> </span>jsonl<span class="p">|</span>otlp-jsonl<span class="w"> </span><span class="o">[</span>--out<span class="w"> </span>&lt;dir&gt;<span class="o">]</span><span class="w"> </span><span class="se">\</span>
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">    </span><span class="o">[</span>--include-content<span class="o">]</span><span class="w"> </span><span class="o">[</span>--model<span class="w"> </span>&lt;name&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--endpoint<span class="w"> </span>&lt;otlp-http-url&gt;<span class="w"> </span><span class="o">[</span>--allow-content-egress<span class="o">]]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>superfluid<span class="w"> </span>session<span class="w"> </span>inspect<span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--json<span class="o">]</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>superfluid<span class="w"> </span>session<span class="w"> </span><span class="nb">export</span><span class="w"> </span>&lt;id&gt;<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w"> </span>--format<span class="w"> </span>jsonl<span class="p">|</span>otlp-jsonl<span class="w"> </span><span class="o">[</span>--out<span class="w"> </span>&lt;dir&gt;<span class="o">]</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">    </span><span class="o">[</span>--include-content<span class="o">]</span><span class="w"> </span><span class="o">[</span>--model<span class="w"> </span>&lt;name&gt;<span class="o">]</span><span class="w"> </span><span class="o">[</span>--endpoint<span class="w"> </span>&lt;otlp-http-url&gt;<span class="w"> </span><span class="o">[</span>--allow-content-egress<span class="o">]]</span>
 </code></pre></div>
 <p><code>inspect</code> prints a session's summary and events. <code>export</code> writes its events as JSONL or OTLP trace lines, or pushes them to a collector. Content is omitted unless <code>--include-content</code>, and leaves the host only with <code>--allow-content-egress</code>. <code>--socket</code> defaults to <code>$SUPERFLUID_HOME/superfluid.sock</code>. See <a href="../../features/sessions/#command-line-tools">Sessions</a>.</p>
 <h2 id="superfluid-media"><code>superfluid media</code><a class="headerlink" href="#superfluid-media" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>superfluid<span class="w"> </span>media<span class="w"> </span>put<span class="w"> </span>&lt;file&gt;<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w">    </span><span class="c1"># store a file, print its hash</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>superfluid<span class="w"> </span>media<span class="w"> </span>gc<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w">            </span><span class="c1"># sweep blobs no session references</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>superfluid<span class="w"> </span>media<span class="w"> </span>put<span class="w"> </span>&lt;file&gt;<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w">    </span><span class="c1"># store a file, print its hash</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>superfluid<span class="w"> </span>media<span class="w"> </span>gc<span class="w"> </span><span class="o">[</span>--socket<span class="w"> </span>&lt;path&gt;<span class="o">]</span><span class="w">            </span><span class="c1"># sweep blobs no session references</span>
 </code></pre></div>
 <h2 id="superfluid-top"><code>superfluid top</code><a class="headerlink" href="#superfluid-top" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>superfluid<span class="w"> </span>top<span class="w"> </span><span class="o">[</span>--api-key<span class="w"> </span>&lt;key&gt;<span class="o">]</span><span class="w"> </span>&lt;host:port&gt;<span class="w"> </span><span class="o">[</span>&lt;host:port&gt;<span class="w"> </span>...<span class="o">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>superfluid<span class="w"> </span>top<span class="w"> </span><span class="o">[</span>--api-key<span class="w"> </span>&lt;key&gt;<span class="o">]</span><span class="w"> </span>&lt;host:port&gt;<span class="w"> </span><span class="o">[</span>&lt;host:port&gt;<span class="w"> </span>...<span class="o">]</span>
 </code></pre></div>
 <p>Live per-node view over each server's <code>/metrics</code>. A keyed node needs <code>--api-key</code>, else it shows as <code>401</code>. <code>q</code> or <code>Esc</code> quits.</p>
 <h2 id="superfluid-workerd-and-superfluid-noded"><code>superfluid-workerd</code> and <code>superfluid-noded</code><a class="headerlink" href="#superfluid-workerd-and-superfluid-noded" title="Permanent link">&para;</a></h2>
