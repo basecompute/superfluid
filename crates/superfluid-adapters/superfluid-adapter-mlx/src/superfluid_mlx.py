@@ -95,7 +95,7 @@ _mlx_lm_without_tokenizers()
 import mlx.core as mx
 import mlx_lm
 import numpy as np
-from mlx.utils import tree_flatten, tree_unflatten
+from mlx.utils import tree_flatten, tree_map, tree_unflatten
 from mlx_lm.models import cache as _cache
 
 MAGIC = b"BRTMLX1\x00"
@@ -244,10 +244,76 @@ def _is_rotating(c):
     """A sliding-window cache: keeps a window, not the whole sequence."""
     return isinstance(c, getattr(_cache, "RotatingKVCache", ())) or hasattr(c, "max_size")
 
+def _has_meta(c):
+    """mlx-lm up to 0.31 keeps a cache's offset and settings in `meta_state`,
+    its `state` covers the live tokens only, and `from_state` takes both.
+    From 0.32 `state` carries everything, buffers included, and `from_state`
+    takes it alone. `c` may be a class or an instance."""
+    return hasattr(c, "meta_state")
+
+def _is_array(v):
+    return isinstance(v, mx.array)
+
+def _classes(*names):
+    """The cache classes of these names this mlx-lm has (a match by class
+    takes in a model's own subclasses of them, as a match by name would not)."""
+    return tuple(getattr(_cache, n) for n in names if hasattr(_cache, n))
+
+# The caches whose buffers grow in steps past the live tokens and hold them
+# from slot 0, so the live tokens are a plain cut of them. A class this
+# mlx-lm lacks is left out.
+_GROWN = _classes("KVCache", "QuantizedKVCache")
+_CHUNKED = _classes("ChunkedKVCache")
+_RING = _classes("RotatingKVCache")
+
+def _live_slots(c):
+    """How many slots at the head of a stepped cache's buffers hold its live
+    tokens, or None when every slot does (or the cache is not stepped)."""
+    if isinstance(c, _RING):
+        # A ring buffer allocates a step (256 slots, at most its window) at
+        # its first token, and 0.31 cut it to the offset until it filled: taken
+        # whole, a token was priced as 256 on 0.32, and a model with sliding
+        # window layers (Gemma 2 and 3, gpt-oss) was granted a sliver of its
+        # pool. Once it has wrapped, every slot is live.
+        return c.offset if c.offset < c.keys.shape[2] else None
+    if isinstance(c, _CHUNKED):
+        # Slot 0 holds the token at `start_position`: what the chunk has not
+        # dropped from its front.
+        return c.offset - c.start_position
+    if isinstance(c, _GROWN):
+        return c.offset
+    return None
+
+def _live_state(c):
+    """The cache's state cut to its live tokens: what `state` was up to mlx-lm
+    0.31. From 0.32 a stepped cache's keys and values are sliced to its live
+    slots (lazily; nothing is copied until the copy is asked for), a cache of
+    another shape is taken as it is, and a `CacheList` member by member."""
+    if _has_meta(c):
+        return c.state
+    st = c.state
+    caches = getattr(c, "caches", None)
+    if isinstance(caches, (tuple, list)):
+        return [(_live_state(m), type(m).__name__) for m in caches]
+    if not isinstance(st, (tuple, list)) or len(st) < 3 or st[0] is None:
+        return st
+    live = _live_slots(c)
+    if live is None:
+        return st
+    cut = lambda a: a[..., :live, :] if _is_array(a) else a
+    return (tree_map(cut, st[0]), tree_map(cut, st[1])) + tuple(st[2:])
+
+def _from_state(cls, state, meta):
+    """A cache of `cls` from a state and, for the mlx-lm that keeps one, a meta state."""
+    if _has_meta(cls):
+        return cls.from_state(state, meta)
+    return cls.from_state(state)
+
 def _clone(c):
-    """An independent copy of one layer cache with fresh arrays."""
-    state = tree_unflatten([(k, mx.contiguous(v)) for k, v in tree_flatten(c.state)])
-    return type(c).from_state(state, c.meta_state)
+    """An independent copy of one layer cache with fresh arrays, holding its
+    live tokens and no room past them."""
+    state = tree_unflatten([(k, mx.contiguous(v) if _is_array(v) else v) for k, v in tree_flatten(_live_state(c))])
+    return _from_state(type(c), state, c.meta_state if _has_meta(c) else None)
 
 def _held_bytes(c):
     """Bytes of buffer one layer cache keeps: its live state and any room
@@ -262,8 +328,8 @@ def _held_bytes(c):
         return _live_bytes(c)
 
 def _live_bytes(c):
-    """Bytes of one layer cache's live state (`state` covers only it)."""
-    return sum(int(a.nbytes) for _, a in tree_flatten(c.state) if hasattr(a, "nbytes"))
+    """Bytes of one layer cache's live state (see `_live_state`)."""
+    return sum(int(a.nbytes) for _, a in tree_flatten(_live_state(c)) if _is_array(a))
 
 def _compact(caches):
     """`caches` re-materialized at their current length: a layer's `state`
@@ -301,19 +367,13 @@ class Runtime:
 
     def _measure_kv_bytes(self, kv_only=False):
         """Bytes of cache state one token leaves behind, over every layer, or
-        over the layers whose cache holds keys and values (`kv_only`)."""
+        over the layers whose cache holds keys and values (`kv_only`). Read
+        from the live state: from mlx-lm 0.32 a grown cache's `state` holds
+        the growth step its buffer was made with (256 tokens), not the one
+        token fed."""
         caches = _cache.make_prompt_cache(self.model)
         mx.eval(self.model(mx.array([[0]], dtype=mx.int32), cache=caches))
-        total = 0
-        for c in caches:
-            if kv_only and not _holds_kv(c):
-                continue
-            state = c.state
-            arrays = state if isinstance(state, (list, tuple)) else [state]
-            for a in arrays:
-                if a is not None and hasattr(a, "nbytes"):
-                    total += int(a.nbytes)
-        return total
+        return sum(_live_bytes(c) for c in caches if not kv_only or _holds_kv(c))
 
     def describe(self):
         return {
@@ -592,14 +652,21 @@ class Runtime:
         caches = s if n == cur else self._cut([_clone(c) for c in s], cur, n)
         layers, blobs = [], []
         for c in caches:
-            layer = {"cls": type(c).__name__, "meta": _meta_out(c.meta_state), "arrays": None}
+            layer = {"cls": type(c).__name__, "meta": _meta_out(c.meta_state) if _has_meta(c) else None, "arrays": None}
             if n > 0 and not c.empty():
-                arrs = []
-                for k, v in tree_flatten(c.state):
-                    name, shape, raw = _arr_bytes(v)
-                    arrs.append({"k": k, "dt": name, "shape": shape, "len": len(raw)})
-                    blobs.append(raw)
+                # The arrays travel as blobs; the plain values a state carries from
+                # mlx-lm 0.32 on (offsets, settings, a CacheList's member names) in the header.
+                arrs, plain = [], []
+                for k, v in tree_flatten(_live_state(c)):
+                    if _is_array(v):
+                        name, shape, raw = _arr_bytes(v)
+                        arrs.append({"k": k, "dt": name, "shape": shape, "len": len(raw)})
+                        blobs.append(raw)
+                    else:
+                        plain.append([k, v])
                 layer["arrays"] = arrs
+                if plain:
+                    layer["plain"] = plain
             layers.append(layer)
         header = json.dumps({"len": int(n), "layers": layers}).encode()
         return MAGIC + len(header).to_bytes(4, "little") + header + b"".join(blobs)
@@ -632,7 +699,9 @@ class Runtime:
                 raw = payload[off : off + a["len"]]
                 off += a["len"]
                 flat.append((a["k"], _arr_from(a["dt"], a["shape"], raw)))
-            caches.append(cls.from_state(tree_unflatten(flat), _meta_in(layer["meta"])))
+            for k, v in layer.get("plain", []):
+                flat.append((k, v))
+            caches.append(_from_state(cls, tree_unflatten(flat), _meta_in(layer["meta"]) if layer.get("meta") is not None else None))
         self.seqs[sid] = caches
         self.lens[sid] = n
         return n

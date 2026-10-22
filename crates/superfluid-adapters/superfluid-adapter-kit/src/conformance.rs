@@ -33,6 +33,14 @@ pub fn runtime(rt: &dyn Runtime) {
         );
         assert!(!rt.pull_options().unwrap_or_default()[..i].iter().any(|p| p.name == o.name), "{id}: the pull option {} is declared twice", o.name);
     }
+    if let Err(e) = crate::check_declaration(rt.options()) {
+        panic!("{id}: {e}");
+    }
+    for o in rt.options() {
+        if !o.default.is_empty() && !o.default.contains(' ') && !o.default.ends_with("'s") {
+            assert!(o.kind.check(o.default).is_ok(), "{id}: the option {} shows a default it would not take: {:?}", o.name, o.default);
+        }
+    }
     for (i, f) in info.formats.iter().enumerate() {
         assert!(!f.id.is_empty() && !f.describe.is_empty(), "{id}: a format needs an id and words for it");
         assert!(!info.formats[..i].iter().any(|g| g.id == f.id), "{id}: the format {} is declared twice", f.id);

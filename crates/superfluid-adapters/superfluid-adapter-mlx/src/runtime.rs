@@ -33,6 +33,8 @@ pub struct MlxConfig {
     pub max_batch: u32,
     pub cells_total: u32,
     pub prefill_chunk: u32,
+    /// MLX's buffer cache limit (`mx.set_cache_limit`).
+    pub cache_limit_bytes: u64,
     pub venv: Option<PathBuf>,
     pub python_site: Vec<PathBuf>,
 }
@@ -45,6 +47,7 @@ impl Default for MlxConfig {
             max_batch: 8,
             cells_total: 0,
             prefill_chunk: 2048,
+            cache_limit_bytes: 1 << 30,
             venv: None,
             python_site: Vec::new(),
         }
@@ -253,6 +256,7 @@ impl MlxRuntime {
                 cfg.max_batch,
                 cfg.max_seq_len,
                 cfg.prefill_chunk,
+                cfg.cache_limit_bytes,
             ))?;
             let d = rt.call_method0("describe")?;
             let d = d.cast::<PyDict>()?;
@@ -419,7 +423,7 @@ pub fn probe(venv: Option<&Path>) -> Result<Probe, String> {
                 memory: get("max_recommended_working_set_size").and_then(|v| v.extract::<u64>().ok()).unwrap_or(0),
             });
         }
-        Ok(Probe { version, devices })
+        Ok(Probe { version, devices, abi: None })
     })
     .map_err(|e| py_message(&e))
 }
@@ -1165,8 +1169,15 @@ rt.seqs[1], rt.lens[1] = [C.CacheList(C.KVCache(), C.RotatingKVCache(max_size=64
 imported = rt.seq_import(1, payload)
 back = rt.seqs[1][0]
 kinds = int([type(c).__name__ for c in back.caches] == ['KVCache', 'RotatingKVCache'])
-same_meta = int(back.meta_state == both.meta_state)
-same_state = int(all(bool(mx.array_equal(a, b)) for (_, a), (_, b) in zip(shim.tree_flatten(back.state), shim.tree_flatten(both.state))))
+# What a cache carries besides its arrays: its meta state up to mlx-lm 0.31,
+# the plain values of its state (offsets, window, member names) from 0.32.
+def settings(c):
+    if shim._has_meta(c):
+        return c.meta_state
+    return [v for _, v in shim.tree_flatten(c.state) if not isinstance(v, mx.array)]
+same_meta = int(bool(settings(both)) and settings(back) == settings(both))
+arrays = lambda c: [a for _, a in shim.tree_flatten(shim._live_state(c)) if isinstance(a, mx.array)]
+same_state = int(len(arrays(back)) == len(arrays(both)) and all(bool(mx.array_equal(a, b)) for a, b in zip(arrays(back), arrays(both))))
 flat = int(shim._meta_in({'kind': 'tuple', 'v': ['4', '64', '12', '12']}) == ('4', '64', '12', '12'))
 ",
             &["imported", "kinds", "same_meta", "same_state", "flat"],
@@ -1174,6 +1185,71 @@ flat = int(shim._meta_in({'kind': 'tuple', 'v': ['4', '64', '12', '12']}) == ('4
             return;
         };
         assert_eq!(v, vec![12, 1, 1, 1, 1], "tokens imported, member classes, meta state, arrays, the flat form");
+    }
+
+    #[test]
+    fn a_sliding_window_or_chunked_layer_is_priced_and_copied_by_the_tokens_it_holds() {
+        let Some(v) = probe(
+            c"import mlx.nn as nn
+from types import SimpleNamespace
+
+# A grown, a sliding-window and a chunked layer, one KV head of four halves
+# each: a token leaves 16 bytes of keys and values in every one. From mlx-lm
+# 0.32 the window and the chunk hand out their whole stepped buffer as state
+# (256 slots at the first token).
+class Tiny(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.args = SimpleNamespace(num_attention_heads=1, num_key_value_heads=1, head_dim=4, hidden_size=4, vocab_size=V)
+        self.embed = mx.ones((V, 4), dtype=mx.float16)
+        self.layers = [nn.Identity()] * 3
+    def make_cache(self):
+        return [C.KVCache(), C.RotatingKVCache(max_size=1024), C.ChunkedKVCache(chunk_size=512)]
+    def __call__(self, x, cache=None):
+        B, T = x.shape
+        out = mx.zeros((B, T, V), dtype=mx.float32)
+        for i, c in enumerate(cache):
+            k = mx.full((B, 1, T, 4), float(i + 1), dtype=mx.float16)
+            ks, vs = c.update_and_fetch(k, k)
+            out = out + (ks[:, 0, -1:, :1] * 0).astype(mx.float32)
+        return out
+
+shim._load_model = lambda path: Tiny()
+rt = shim.Runtime('tiny', 1, 1 << 20)
+priced, price = rt.kv_bytes_priced, rt.kv_bytes_per_token
+
+# Ten tokens, one at a time, leave each layer a buffer of a step; a copy and
+# an export hold the ten.
+src, dst, back = rt.seq_create(), rt.seq_create(), rt.seq_create()
+for _ in range(10):
+    rt.step([(src, [1], False)])
+rt.seq_copy(src, dst, 10)
+copied = max(c.keys.shape[2] for c in rt.seqs[dst])
+payload = rt.seq_export(src, 10)
+header = shim.json.loads(payload[12 : 12 + int.from_bytes(payload[8:12], 'little')])
+exported = max(a['shape'][2] for layer in header['layers'] for a in layer['arrays'])
+imported = rt.seq_import(back, payload)
+rt.step([(src, [1], False), (back, [1], False)])
+keys = lambda s: [shim._live_state(c)[0] for c in rt.seqs[s]]
+same = int(all(a.shape == b.shape and bool(mx.array_equal(a, b)) for a, b in zip(keys(src), keys(back))))
+
+# A window that has wrapped is live in every slot, and travels whole.
+ring = C.RotatingKVCache(max_size=16)
+for i in range(40):
+    z = mx.full((1, 1, 1, 4), float(i), dtype=mx.float16)
+    ring.update_and_fetch(z, z)
+wrapped = int(shim._live_bytes(ring) == shim._held_bytes(ring) == 16 * 16)
+",
+            &["priced", "price", "copied", "exported", "imported", "same", "wrapped"],
+        ) else {
+            return;
+        };
+        let (priced, price) = (v[0], v[1]);
+        assert_eq!(priced, 48, "three layers of one KV head of four halves, keys and values");
+        assert_eq!(price, priced, "a window's or a chunk's token is priced by the token, not the step its buffer holds");
+        assert_eq!((v[2], v[3]), (10, 10), "a copy and an export hold the ten tokens, not the buffer's slack");
+        assert_eq!((v[4], v[5]), (10, 1), "the import holds the ten and decodes as the sequence it came from");
+        assert_eq!(v[6], 1, "a wrapped window is live in every slot");
     }
 
     #[test]
@@ -1204,5 +1280,45 @@ bound = (128 + 256) * rt.kv_bytes_per_token
         };
         let (held, bound) = (v[0], v[1]);
         assert!(held <= bound, "many small cuts leave under a growth step of slack: {held} > {bound} bytes");
+    }
+
+    #[test]
+    fn a_runtime_built_as_usual_prices_a_token_by_its_live_state() {
+        let Some(v) = probe(
+            c"import mlx.nn as nn
+from types import SimpleNamespace
+
+# One attention layer with one KV head of four halves: a token leaves 16 bytes of keys and values.
+class Tiny(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.args = SimpleNamespace(num_attention_heads=1, num_key_value_heads=1, head_dim=4, hidden_size=4, vocab_size=V)
+        self.embed = mx.ones((V, 4), dtype=mx.float16)
+        self.layers = [nn.Identity()]
+    def __call__(self, x, cache=None):
+        B, T = x.shape
+        k = mx.ones((B, 1, T, 4), dtype=mx.float16)
+        ks, vs = cache[0].update_and_fetch(k, k)
+        return mx.zeros((B, T, V), dtype=mx.float32) + (ks[:, 0, -1:, :1] * 0).astype(mx.float32)
+
+shim._load_model = lambda path: Tiny()
+rt = shim.Runtime('tiny', 1, 1 << 20)
+priced, price = rt.kv_bytes_priced, rt.kv_bytes_per_token
+kv = C.KVCache()
+z = mx.ones((1, 1, 8192, 4), dtype=mx.float16)
+kv.update_and_fetch(z, z)
+mx.eval(kv.keys, kv.values)
+rt.seqs[0], rt.lens[0] = [kv], 8192
+rt.seq_truncate(0, 128)
+slots = rt.seqs[0][0].keys.shape[2]
+",
+            &["priced", "price", "slots"],
+        ) else {
+            return;
+        };
+        let (priced, price, slots) = (v[0], v[1], v[2]);
+        assert_eq!(priced, 16, "one KV head of four halves, keys and values");
+        assert_eq!(price, priced, "the price measured at construction is one token's, not the growth step its buffer holds");
+        assert!(slots <= 128 + 256, "a cut from 8192 to 128 tokens compacts the buffer, which the price decides: {slots} slots kept");
     }
 }

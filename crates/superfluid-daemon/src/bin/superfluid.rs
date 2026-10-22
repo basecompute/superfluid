@@ -52,7 +52,7 @@ fn runtimes_cmd(args: &[String]) {
     }
     let found = superfluid_daemon::runtimes_report::with_installs(&catalog);
     if json {
-        let rows = superfluid_daemon::runtimes_report::table_json(&found);
+        let rows = superfluid_daemon::runtimes_report::table_json_of(&found, Some(&catalog));
         println!("{}", serde_json::to_string_pretty(&rows).expect("json"));
         return;
     }
@@ -104,6 +104,17 @@ fn runtime_cmd(args: &[String]) {
         done
     };
     match sub.as_str() {
+        "versions" => {
+            if rest.iter().any(|a| a != "--json") {
+                usage();
+            }
+            let listing = superfluid_daemon::versions::of(&catalog, id).unwrap_or_else(|e| fail(e));
+            if rest.iter().any(|a| a == "--json") {
+                println!("{}", serde_json::to_string_pretty(&listing.json()).expect("json"));
+            } else {
+                print!("{}", listing.text());
+            }
+        }
         "install" => {
             let mut req = Request::default();
             let mut dry_run = false;
@@ -142,6 +153,20 @@ fn runtime_cmd(args: &[String]) {
                 return;
             }
             carry_out(&installer, &plans);
+        }
+        "options" => {
+            let json = match rest {
+                [] => false,
+                [flag] if flag == "--json" => true,
+                _ => usage(),
+            };
+            // Answered before an install too: the options are what one reads to make the runtime run here.
+            let options = superfluid_daemon::runtime_options::declared_by(&catalog, id).unwrap_or_else(|e| fail(e));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&superfluid_daemon::runtime_options::json(id, &options)).expect("json"));
+            } else {
+                print!("{}", superfluid_daemon::runtime_options::text(id, &options));
+            }
         }
         "update" => {
             if !rest.is_empty() {
@@ -472,6 +497,22 @@ fn main() {
         session_cmd(&args[1..]);
         return;
     }
+    if command == Some("compat") {
+        let catalog = superfluid_daemon::runtimes::Catalog::from_env();
+        let c = superfluid_daemon::compat::json(&catalog);
+        if args[1..].iter().any(|a| a == "--json") {
+            println!("{}", serde_json::to_string_pretty(&c).expect("compat is JSON"));
+        } else {
+            print!("{}", superfluid_daemon::compat::text(&c));
+        }
+        // Printed whole first, so the error is there to read; the exit status stops a release that would publish it.
+        let unanswered = superfluid_daemon::compat::unanswered(&c);
+        if !unanswered.is_empty() {
+            eprintln!("superfluid: the adapter for {} did not answer, so this is not all this build supports", unanswered.join(", "));
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(feature = "tui")]
     if command == Some("top") {
         top_cmd(&args[1..]);
@@ -484,6 +525,9 @@ fn main() {
     if command == Some("runtimes") {
         runtimes_cmd(&args[1..]);
         return;
+    }
+    if command == Some("self") {
+        std::process::exit(superfluid_daemon::selfupdate::run(&args[1..]));
     }
     if command == Some("runtime") {
         runtime_cmd(&args[1..]);

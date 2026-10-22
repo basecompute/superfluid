@@ -235,7 +235,7 @@ pub fn load_node(
     let catalog = Catalog::from_env();
     let runtime = runtime.map(|r| if r == "native" { "basert" } else { r });
     let (path, model_name, id) = resolve_model(&catalog, model, runtime, offline)?;
-    let runtime = catalog.require(id).or_else(|_| crate::pulls::ensure_installed(&catalog, id, offline))?;
+    let runtime = catalog.require(id).or_else(|_| crate::pulls::ensure_installed(&catalog, id, offline).map_err(String::from))?;
     let (ctx, sized) = match max_context {
         Some(n) => (n, format!("--max-context {n}")),
         None => match device_window(&runtime, &path, lanes) {
@@ -253,12 +253,7 @@ pub fn load_node(
     } else {
         let rt = crate::linked::engine(runtime.id.name())
             .ok_or_else(|| format!("the {} runtime has no worker here", runtime.id.name()))?;
-        let args = superfluid_adapter_kit::WorkerArgs {
-            model: Some(path.clone()),
-            max_context: ctx,
-            max_batch: lanes,
-            ..Default::default()
-        };
+        let args = crate::runtime_options::worker_args(runtime.id, &path, ctx, lanes, 0).map_err(|e| format!("model load failed: {e}"))?;
         EngineHost::try_spawn_loaded(move || rt.open(&args))
     }
     .map_err(|e| format!("model load failed: {e}"))?;

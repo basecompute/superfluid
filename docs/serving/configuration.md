@@ -8,13 +8,15 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 
 | variable | default | meaning |
 |---|---|---|
-| `SUPERFLUID_HOME` | `~/.superfluid` | Home directory: runtime installs, pull locks, and the default sessions directory and socket. |
+| `SUPERFLUID_HOME` | `~/.superfluid` | Home directory: the installed superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
+| `SUPERFLUID_NO_UPDATE_CHECK` | unset | Set to anything but `0` to stop `serve` from checking once a day whether a newer superfluid is out. See [Updating superfluid](updating.md). |
+| `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |
 | `SUPERFLUID_WORKER_<ID>` | unset | Explicit worker executable for runtime `<ID>` (upper-cased, `-` and `.` as `_`, e.g. `SUPERFLUID_WORKER_LLAMACPP`). Also the installer `runtime install` uses. A runtime named this way is never auto-installed. |
 | `BASERT_LIB` | search | libbaseRT file or directory. Set by `--basert-lib`. When set, nothing else is searched. |
 | `BASERT_CLI` | search | The `basert` tool that pulls `.base` models; else the one beside libbaseRT, else `PATH`. |
 | `BASERT_MODELS_DIR` | platform cache | Where `--speculate auto` looks for drafters (default `~/Library/Caches/baseRT/models` on macOS, `$XDG_CACHE_HOME/baseRT/models` or `~/.cache/baseRT/models` elsewhere). |
-| `SUPERFLUID_LLAMA_LIB` | search | Your own llama.cpp build: the `libllama` file or its directory. When set, nothing else is searched. |
-| `SUPERFLUID_MLX_VENV` | the install's `env/` | Python environment with `mlx` and `mlx-lm`, when the worker is not running from an install. |
+| `SUPERFLUID_LLAMA_LIB` | search | Your own llama.cpp build: the `libllama` file or its directory. When set, nothing else is searched. `--llamacpp-lib` on `serve` is the same. |
+| `SUPERFLUID_MLX_VENV` | the install's `env/` | Python environment with `mlx` and `mlx-lm`, when the worker is not running from an install. `--mlx-venv` on `serve` is the same. |
 
 ### Serving
 

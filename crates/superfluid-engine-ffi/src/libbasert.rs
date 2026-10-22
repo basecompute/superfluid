@@ -6,6 +6,16 @@ use std::sync::{Mutex, OnceLock};
 
 pub const BUILT_FOR: &str = env!("SUPERFLUID_BASERT_HEADER_VERSION");
 
+/// The engine ABI number the header superfluid was built against states (`BASERT_ABI_VERSION`, since baseRT 0.4.0); `None` for an older header.
+pub fn abi_built_for() -> Option<u32> {
+    env!("SUPERFLUID_BASERT_ABI").parse().ok()
+}
+
+/// The line that carries an ABI without stating its number: 0.3.x carries ABI 1, from before the number existed.
+pub fn unnumbered_minor_for(abi: u32) -> Option<&'static str> {
+    (abi == 1).then_some("0.3")
+}
+
 macro_rules! library_api {
     ($table:ident, $field:ident; $( fn $name:ident ( $($arg:ident : $ty:ty),* $(,)? ) $(-> $ret:ty)? ; )* ) => {
         #[allow(non_snake_case)]
@@ -164,6 +174,8 @@ pub(crate) struct Loaded {
     _lib: libloading::Library,
     pub(crate) sys: sys::SysApi,
     pub(crate) tick: tick::TickApi,
+    /// `baseRT_get_config_into`, which a library of 0.4.0 or later exports.
+    get_config_into: Option<unsafe extern "C" fn(sys::baseRT_model_t, *mut std::ffi::c_void, usize) -> usize>,
     info: Library,
 }
 
@@ -171,6 +183,8 @@ pub(crate) struct Loaded {
 pub struct Library {
     pub path: PathBuf,
     pub version: String,
+    /// The library's engine ABI number (`baseRT_abi_version()`); a library before 0.4.0 states none.
+    pub abi: Option<u32>,
 }
 
 static LOADED: OnceLock<Result<Loaded, String>> = OnceLock::new();
@@ -294,15 +308,95 @@ fn open_at(path: &Path) -> Result<Loaded, String> {
             CStr::from_ptr(p).to_string_lossy().into_owned()
         }
     };
-    if !same_minor(&version, BUILT_FOR) {
-        return Err(format!(
-            "libbaseRT at {} is {version}; this superfluid was built for {BUILT_FOR} (a different minor version may change the ABI)",
-            path.display()
-        ));
+    // SAFETY: a query with no arguments, on a library that exports it
+    // (0.4.0 and later); an older library has no such symbol.
+    let abi: Option<u32> = unsafe { lib.get::<unsafe extern "C" fn() -> std::os::raw::c_uint>(b"baseRT_abi_version\0") }
+        .ok()
+        .map(|f| unsafe { f() });
+    if let Err(why) = compatible(abi, abi_built_for(), &version) {
+        return Err(format!("libbaseRT at {} {why}", path.display()));
     }
+    // SAFETY: resolving a symbol of the header's signature; a library before
+    // 0.4.0 has no such symbol and is read by value instead.
+    let get_config_into = unsafe {
+        lib.get::<unsafe extern "C" fn(sys::baseRT_model_t, *mut std::ffi::c_void, usize) -> usize>(b"baseRT_get_config_into\0")
+    }
+    .ok()
+    .map(|f| *f);
+    // By value, the layout must match; by size, any layout that only appends does.
     // SAFETY: a query with no arguments.
-    same_config_layout(unsafe { (sys.baseRT_model_config_sizeof)() }, &version, path)?;
-    Ok(Loaded { _lib: lib, sys, tick, info: Library { path: path.to_path_buf(), version } })
+    let theirs = unsafe { (sys.baseRT_model_config_sizeof)() };
+    match get_config_into {
+        None => same_config_layout(theirs, &version, path)?,
+        Some(_) => config_by_size_holds(theirs, &version, path)?,
+    }
+    Ok(Loaded { _lib: lib, sys, tick, get_config_into, info: Library { path: path.to_path_buf(), version, abi } })
+}
+
+/// The model's configuration: by size from a library that exports `baseRT_get_config_into`, zeros past what it has; by value from an older one, whose layout the load checked.
+///
+/// # Safety
+/// `model` is a live handle; libbaseRT is loaded (see [`load`]).
+pub unsafe fn config_of(model: sys::baseRT_model_t) -> sys::BaseRTModelConfig {
+    let l = loaded();
+    match l.get_config_into {
+        // SAFETY: an all-zero BaseRTModelConfig is a valid value (numbers and
+        // byte arrays), and the library writes at most the size given.
+        Some(read) => unsafe {
+            let mut out: sys::BaseRTModelConfig = std::mem::zeroed();
+            let theirs = read(model, (&mut out as *mut sys::BaseRTModelConfig).cast(), std::mem::size_of::<sys::BaseRTModelConfig>());
+            // A shorter struct than ours leaves zeros past its end, which the header has every
+            // field read as "not applicable"; the load refused one shorter than 0.4.0's, and
+            // the library answers the size it answered then.
+            debug_assert!(theirs >= CONFIG_BY_SIZE_FLOOR, "libbaseRT's configuration shrank to {theirs} bytes after the load checked it");
+            out
+        },
+        // SAFETY: per this function's contract.
+        None => unsafe { (l.sys.baseRT_get_config)(model) },
+    }
+}
+
+/// Whether a library can be driven through these bindings: numbers on both sides decide, whatever the versions say; a library that
+/// states none serves if it is of the line that carried this ABI before it was numbered; a build against a header without the
+/// macro judges by major.minor, as before.
+pub fn compatible(have: Option<u32>, want: Option<u32>, version: &str) -> Result<(), String> {
+    match (have, want) {
+        (Some(h), Some(w)) if h == w => Ok(()),
+        (Some(h), Some(w)) => Err(format!(
+            "({version}) has engine ABI {h}; this superfluid was built for ABI {w} (baseRT {BUILT_FOR})"
+        )),
+        (None, Some(w)) => match unnumbered_minor_for(w) {
+            Some(minor) if same_minor(version, &format!("{minor}.0")) => Ok(()),
+            Some(minor) => Err(format!(
+                "is {version} and states no engine ABI; this superfluid was built for ABI {w} (baseRT {BUILT_FOR}), \
+                 which only a {minor}.x library carries without stating it"
+            )),
+            None => Err(format!(
+                "is {version} and states no engine ABI; this superfluid was built for ABI {w} (baseRT {BUILT_FOR}), \
+                 which every library states"
+            )),
+        },
+        (_, None) if same_minor(version, BUILT_FOR) => Ok(()),
+        (_, None) => Err(format!(
+            "is {version}; this superfluid was built for {BUILT_FOR} (a different minor version may change the ABI)"
+        )),
+    }
+}
+
+/// `BaseRTModelConfig` as 0.4.0 lays it out, the first release read by size. Within one ABI
+/// the struct only grows from it, so a library that reads by size and has less is not of the
+/// ABI it states, and the zeros it would leave would stand for fields it should have.
+const CONFIG_BY_SIZE_FLOOR: usize = 1792;
+
+fn config_by_size_holds(theirs: usize, version: &str, path: &Path) -> Result<(), String> {
+    if theirs >= CONFIG_BY_SIZE_FLOOR {
+        return Ok(());
+    }
+    Err(format!(
+        "libbaseRT at {} ({version}) lays out a model's configuration in {theirs} bytes, fewer than the {CONFIG_BY_SIZE_FLOOR} \
+         of 0.4.0, the first to share it by size: it is not the library superfluid was built for ({BUILT_FOR})",
+        path.display()
+    ))
 }
 
 fn same_config_layout(theirs: usize, version: &str, path: &Path) -> Result<(), String> {
@@ -348,6 +442,17 @@ mod tests {
     }
 
     #[test]
+    fn a_library_read_by_size_has_at_least_the_first_such_configuration() {
+        let at = Path::new("/opt/x/libbaseRT.dylib");
+        let ours = std::mem::size_of::<sys::BaseRTModelConfig>();
+        assert!(ours >= CONFIG_BY_SIZE_FLOOR, "the header only appends to 0.4.0's struct");
+        assert_eq!(config_by_size_holds(CONFIG_BY_SIZE_FLOOR, "0.4.0", at), Ok(()));
+        assert_eq!(config_by_size_holds(ours + 64, "0.4.9", at), Ok(()), "a newer library appended fields");
+        let e = config_by_size_holds(CONFIG_BY_SIZE_FLOOR - 4, "0.4.0", at).unwrap_err();
+        assert!(e.starts_with("libbaseRT at /opt/x/libbaseRT.dylib (0.4.0) lays out a model's configuration in"), "{e}");
+    }
+
+    #[test]
     fn a_named_directory_is_searched_under_each_name_and_nowhere_else() {
         let dir = std::env::temp_dir().join(format!("superfluid-libbasert-named-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -371,6 +476,35 @@ mod tests {
         assert_eq!(chosen.unwrap(), versioned, "the versioned name, where it is the one there");
         assert!(is_file, "a file is the library itself");
         assert_eq!(pick(&file, is_file).unwrap(), &missing, "opened as named, missing or not");
+    }
+
+    #[test]
+    fn the_abi_number_decides_when_both_sides_have_one() {
+        assert_eq!(compatible(Some(1), Some(1), "99.0.0"), Ok(()), "the number outranks the version");
+        let e = compatible(Some(2), Some(1), "0.3.4").unwrap_err();
+        assert!(e.starts_with("(0.3.4) has engine ABI 2; this superfluid was built for ABI 1 (baseRT "), "{e}");
+    }
+
+    #[test]
+    fn a_library_that_states_no_number_is_the_unnumbered_line_of_abi_1_or_nothing() {
+        assert_eq!(unnumbered_minor_for(1), Some("0.3"));
+        assert_eq!(unnumbered_minor_for(2), None);
+        assert_eq!(compatible(None, Some(1), "0.3.0"), Ok(()), "0.3.x carried ABI 1 before the number existed");
+        assert_eq!(compatible(None, Some(1), "0.3.9"), Ok(()));
+        let e = compatible(None, Some(1), "0.2.6").unwrap_err();
+        assert!(e.starts_with("is 0.2.6 and states no engine ABI;") && e.ends_with("only a 0.3.x library carries without stating it"), "{e}");
+        let e = compatible(None, Some(1), "0.4.0").unwrap_err();
+        assert!(e.contains("states no engine ABI"), "{e}");
+        let e = compatible(None, Some(2), "0.3.0").unwrap_err();
+        assert!(e.ends_with("which every library states"), "{e}");
+    }
+
+    #[test]
+    fn a_superfluid_built_without_the_macro_judges_by_minor_as_before() {
+        assert_eq!(compatible(Some(1), None, BUILT_FOR), Ok(()));
+        assert_eq!(compatible(None, None, BUILT_FOR), Ok(()));
+        let e = compatible(None, None, "99.0.0").unwrap_err();
+        assert!(e.ends_with("(a different minor version may change the ABI)"), "{e}");
     }
 
     #[test]

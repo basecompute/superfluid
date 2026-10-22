@@ -68,9 +68,19 @@ pub fn suggest_max_context(
     ))
 }
 
+/// The report a worker process of `id` would print, its runtime's options counting from the first probe as they do
+/// in a worker's prefix (`Catalog::locate`): the library they name, the cache types a model is sized with.
 pub fn check(id: RuntimeId, model: Option<&Path>) -> Option<Report> {
-    let args = WorkerArgs { model: model.map(Path::to_path_buf), ..Default::default() };
-    get(id).map(|r| superfluid_adapter_kit::check(r, &args))
+    check_with(id, model, &crate::runtime_options::for_runtime(id))
+}
+
+fn check_with(id: RuntimeId, model: Option<&Path>, options: &[(String, String)]) -> Option<Report> {
+    let runtime = get(id)?;
+    let argv: Vec<String> = options.iter().flat_map(|(f, v)| [f.clone(), v.clone()]).collect();
+    // Flag and value pairs always parse; what an option's value means is the adapter's to judge.
+    let mut args = WorkerArgs::parse(&argv).unwrap_or_default();
+    args.model = model.map(Path::to_path_buf);
+    Some(superfluid_adapter_kit::check(runtime, &args))
 }
 
 pub fn report(id: RuntimeId, model: Option<&Path>) -> Option<serde_json::Value> {
@@ -83,7 +93,10 @@ pub fn tokenizer(id: RuntimeId, model: &Path) -> Option<Result<Arc<dyn superflui
 
 pub fn spawn(id: RuntimeId, model: PathBuf, ctx: i32, max_batch: u32, kv_bits: i32) -> Option<Result<crate::EngineHost, String>> {
     let runtime = get(id)?;
-    let args = WorkerArgs { model: Some(model), max_context: ctx, max_batch, kv_bits, ..Default::default() };
+    let args = match crate::runtime_options::worker_args(id, &model, ctx, max_batch, kv_bits) {
+        Ok(args) => args,
+        Err(e) => return Some(Err(e)),
+    };
     Some(crate::EngineHost::try_spawn_loaded(move || runtime.open(&args)).map_err(|e| e.to_string()))
 }
 
@@ -107,6 +120,21 @@ mod tests {
         assert!(get(RuntimeId::new("vllm")).is_none());
         assert!(check(RuntimeId::new("vllm"), None).is_none());
         assert!(engine("vllm").is_none());
+    }
+
+    #[test]
+    fn a_linked_check_reads_the_runtime_options() {
+        let named = |id: &str, options: &[(&str, &str)]| {
+            let options: Vec<(String, String)> = options.iter().map(|(f, v)| (f.to_string(), v.to_string())).collect();
+            check_with(RuntimeId::new(id), None, &options).and_then(|r| r.named)
+        };
+        if get(RuntimeId::new("llamacpp")).is_some() {
+            assert_eq!(named("llamacpp", &[("--lib", "/custom/lib")]).as_deref(), Some("--llamacpp-lib"), "the option names the library");
+        }
+        if get(RuntimeId::new("basert")).is_some() {
+            assert_eq!(named("basert", &[("--basert-lib", "/custom/lib")]).as_deref(), Some("--basert-lib"));
+        }
+        assert!(check_with(RuntimeId::new("vllm"), None, &[]).is_none());
     }
 
     #[test]
