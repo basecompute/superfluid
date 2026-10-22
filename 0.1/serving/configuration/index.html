@@ -16,7 +16,7 @@
         <link rel="prev" href="../cli/">
       
       
-        <link rel="next" href="../multiple_models/">
+        <link rel="next" href="../updating/">
       
       
         
@@ -774,6 +774,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../updating/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Updating superfluid
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../multiple_models/" class="md-nav__link">
         
   
@@ -810,6 +838,34 @@
     
   
     Distributed serving
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../hosts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Hosting superfluid in another product
   
 
     
@@ -2110,7 +2166,17 @@
 <tr>
 <td><code>SUPERFLUID_HOME</code></td>
 <td><code>~/.superfluid</code></td>
-<td>Home directory: runtime installs, pull locks, and the default sessions directory and socket.</td>
+<td>Home directory: the installed superfluid versions, runtime installs, pull locks, and the default sessions directory and socket.</td>
+</tr>
+<tr>
+<td><code>SUPERFLUID_NO_UPDATE_CHECK</code></td>
+<td>unset</td>
+<td>Set to anything but <code>0</code> to stop <code>serve</code> from checking once a day whether a newer superfluid is out. See <a href="../updating/">Updating superfluid</a>.</td>
+</tr>
+<tr>
+<td><code>SUPERFLUID_RELEASES</code></td>
+<td>GitHub's listing</td>
+<td>Another release listing for <code>self update</code> and the daily check: a URL or a file in GitHub's releases JSON shape.</td>
 </tr>
 <tr>
 <td><code>SUPERFLUID_WORKER_&lt;ID&gt;</code></td>
@@ -2135,12 +2201,12 @@
 <tr>
 <td><code>SUPERFLUID_LLAMA_LIB</code></td>
 <td>search</td>
-<td>Your own llama.cpp build: the <code>libllama</code> file or its directory. When set, nothing else is searched.</td>
+<td>Your own llama.cpp build: the <code>libllama</code> file or its directory. When set, nothing else is searched. <code>--llamacpp-lib</code> on <code>serve</code> is the same.</td>
 </tr>
 <tr>
 <td><code>SUPERFLUID_MLX_VENV</code></td>
 <td>the install's <code>env/</code></td>
-<td>Python environment with <code>mlx</code> and <code>mlx-lm</code>, when the worker is not running from an install.</td>
+<td>Python environment with <code>mlx</code> and <code>mlx-lm</code>, when the worker is not running from an install. <code>--mlx-venv</code> on <code>serve</code> is the same.</td>
 </tr>
 </tbody>
 </table>
@@ -2438,13 +2504,13 @@
         
         
           
-          <a href="../multiple_models/" class="md-footer__link md-footer__link--next" aria-label="Next: Serving multiple models">
+          <a href="../updating/" class="md-footer__link md-footer__link--next" aria-label="Next: Updating superfluid">
             <div class="md-footer__title">
               <span class="md-footer__direction">
                 Next
               </span>
               <div class="md-ellipsis">
-                Serving multiple models
+                Updating superfluid
               </div>
             </div>
             <div class="md-footer__button md-icon">
