@@ -84,6 +84,19 @@ pub fn version_of(name: &str) -> Option<String> {
 
 pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
     let pins = pinned();
+    // With no version named the newest release is wanted, which only the listing knows; offline the pins answer.
+    if req.version.is_none() && req.from.is_none() {
+        return match fetch_json(recipe()["releases"].as_str().unwrap_or_default()) {
+            Ok(releases) => plan_with(req, host, &pins, &releases),
+            Err(listing) => {
+                let mut plans = plan_with(req, host, &pins, &Value::Null).map_err(|why| format!("{why} ({listing})"))?;
+                for p in &mut plans {
+                    p.why = format!("{} (the newest pinned: {listing})", p.why);
+                }
+                Ok(plans)
+            }
+        };
+    }
     plan_with(req, host, &pins, &Value::Null).or_else(|why| {
         if req.from.is_some() {
             return Err(why);
@@ -185,6 +198,13 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             extra: Value::Null,
         }]);
     }
+    let prerelease: Vec<String> = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["prerelease"].as_bool().unwrap_or(false))
+        .filter_map(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
+        .collect();
     let mut published: Vec<(String, Option<u32>, Asset)> = releases
         .as_array()
         .map(|rs| {
@@ -194,7 +214,9 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
                     let version = r["tag_name"].as_str()?.trim_start_matches('v').to_string();
                     let want = engine(&version);
                     let a = r["assets"].as_array()?.iter().find(|a| a["name"] == want.as_str())?;
-                    let asset = Asset { name: want, url: a["browser_download_url"].as_str()?.to_string(), sha256: None, size: a["size"].as_u64() };
+                    // GitHub's own digest of the file as uploaded, the one the release's `.sha256` states too.
+                    let sha256 = a["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).map(str::to_string);
+                    let asset = Asset { name: want, url: a["browser_download_url"].as_str()?.to_string(), sha256, size: a["size"].as_u64() };
                     Some((version, abi_marked(r), asset))
                 })
                 .collect()
@@ -207,11 +229,11 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             let sha256 = req.sha256.clone().or(pinned.sha256.clone());
             return Ok((version, Asset { sha256, ..pinned }));
         }
-        match &req.sha256 {
-            Some(sha) => Ok((version, Asset { sha256: Some(sha.clone()), ..asset })),
+        match req.sha256.clone().or(asset.sha256.clone()) {
+            Some(sha) => Ok((version, Asset { sha256: Some(sha), ..asset })),
             None => Err(format!(
-                "basert {version} has no SHA-256 pinned in this superfluid, so it is not installed on what the release page alone \
-                 says: check the engine's SHA-256 (baseRT publishes it as {}.sha256) and pass it with --version {version} --sha256 <digest>",
+                "basert {version} has no SHA-256 pinned in this superfluid, and GitHub lists none for its engine: check the engine's \
+                 SHA-256 (baseRT publishes it as {}.sha256) and pass it with --version {version} --sha256 <digest>",
                 asset.name
             )),
         }
@@ -229,7 +251,12 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             (version, found.1, asset)
         }
         None => {
-            let found = pinned_here.into_iter().find(|(v, abi, _)| drives(v, *abi)).or_else(|| published.into_iter().find(|(v, abi, _)| drives(v, *abi)));
+            // The newest this build drives, pinned or not; a pin stays ahead of the listed copy of its own version, and a
+            // pre-release is installed only when named.
+            let listed = published.into_iter().filter(|(v, _, _)| !prerelease.contains(v));
+            let mut known: Vec<(String, Option<u32>, Asset)> = pinned_here.into_iter().chain(listed).collect();
+            known.sort_by_key(|(v, _, _)| std::cmp::Reverse(version_key(v)));
+            let found = known.into_iter().find(|(v, abi, _)| drives(v, *abi));
             let found = found.ok_or_else(|| {
                 format!(
                     "baseRT publishes no engine this superfluid drives ({}) for {part} yet (the newest is {newest}; this superfluid was built \
@@ -334,18 +361,61 @@ mod tests {
     }
 
     #[test]
-    fn a_release_with_no_pinned_digest_needs_one_named() {
+    fn the_newest_release_this_superfluid_drives_is_installed_pinned_or_not() {
+        let (same, other) = (abi(), abi() + 1);
+        let pins = [pin("0.3.9", None, "cd"), pin("0.4.5", Some(same), "ef")];
+        let mut releases = json!([release("0.3.9", None), release("0.4.5", Some(same)), release("0.4.6", Some(same)), release("0.5.0", Some(other))]);
+        let p = &plan_with(&Request::default(), &mac(), &pins, &releases).unwrap()[0];
+        assert_eq!((p.version.as_str(), p.tested, p.assets[0].sha256.as_deref()), ("0.4.6", true, Some("ab")), "the digest GitHub lists");
+        assert!(p.assets[0].url.starts_with("https://github.com/basecompute/baseRT/releases/download/v0.4.6/"));
+        assert_eq!(plan_with(&Request::default(), &mac(), &pins, &Value::Null).unwrap()[0].version, "0.4.5", "offline, the newest pin");
+        releases.as_array_mut().unwrap().remove(2);
+        let p = &plan_with(&Request::default(), &mac(), &pins, &releases).unwrap()[0];
+        assert_eq!((p.version.as_str(), p.assets[0].sha256.as_deref()), ("0.4.5", Some("ef")), "a listed release that is pinned keeps its pin");
+        assert_eq!(p.assets[0].url, "https://pinned/basert-engine-macos-arm64-0.4.5.tar.gz");
+        let mut pre = release("0.4.8", Some(same));
+        pre["prerelease"] = json!(true);
+        let p = &plan_with(&Request::default(), &mac(), &pins, &json!([pre, release("0.4.7", Some(same))])).unwrap()[0];
+        assert_eq!(p.version, "0.4.7", "a pre-release is never the newest");
+    }
+
+    #[test]
+    fn a_pre_release_is_installed_when_named_and_never_as_the_newest() {
+        let same = abi();
+        let mut pre = release("0.4.8", Some(same));
+        pre["prerelease"] = json!(true);
+        let releases = json!([pre, release("0.4.7", Some(same))]);
+        assert_eq!(plan_with(&Request::default(), &mac(), &[], &releases).unwrap()[0].version, "0.4.7");
+        let named = Request { version: Some("0.4.8".into()), ..Request::default() };
+        let p = &plan_with(&named, &mac(), &[], &releases).unwrap()[0];
+        assert_eq!((p.version.as_str(), p.tested, p.assets[0].sha256.as_deref()), ("0.4.8", true, Some("ab")));
+        // One of another ABI, as before: with --untested and a digest of one's own.
+        let mut other = release("0.5.1", Some(same + 1));
+        other["prerelease"] = json!(true);
+        let req = Request { version: Some("0.5.1".into()), untested: true, sha256: Some("12".into()), ..Request::default() };
+        let p = &plan_with(&req, &mac(), &[], &json!([other])).unwrap()[0];
+        assert_eq!((p.version.as_str(), p.tested, p.assets[0].sha256.as_deref()), ("0.5.1", false, Some("12")));
+    }
+
+    #[test]
+    fn a_release_with_no_digest_pinned_or_listed_needs_one_named() {
         let same = "0.4.9".to_string();
-        let releases = json!([release(&same, Some(abi()))]);
+        let p = &plan_with(&Request::default(), &mac(), &[], &json!([release(&same, Some(abi()))])).unwrap()[0];
+        assert_eq!((p.version.as_str(), p.assets[0].sha256.as_deref()), (same.as_str(), Some("ab")));
+        let mut unlisted = release(&same, Some(abi()));
+        unlisted["assets"][0].as_object_mut().unwrap().remove("digest");
+        let releases = json!([unlisted]);
         let e = plan_with(&Request::default(), &mac(), &[], &releases).unwrap_err();
-        assert!(e.contains(&format!("basert {same} has no SHA-256 pinned")) && e.contains("--sha256"), "{e}");
+        assert!(e.contains(&format!("basert {same} has no SHA-256 pinned")) && e.contains("GitHub lists none") && e.contains("--sha256"), "{e}");
         assert!(e.contains(&format!("basert-engine-macos-arm64-{same}.tar.gz.sha256")), "{e}");
         let e = plan_with(&Request { version: Some(same.clone()), untested: true, ..Request::default() }, &mac(), &[], &releases).unwrap_err();
         assert!(e.contains("has no SHA-256 pinned"), "--untested is about the version, not the digest: {e}");
         let named = Request { version: Some(same.clone()), sha256: Some("12".into()), ..Request::default() };
-        let p = &plan_with(&named, &mac(), &[], &releases).unwrap()[0];
-        assert_eq!((p.assets[0].sha256.as_deref(), p.assets[0].size), (Some("12"), Some(10)));
-        assert!(p.assets[0].url.starts_with("https://github.com/basecompute/baseRT/releases/download/"));
+        for releases in [releases, json!([release(&same, Some(abi()))])] {
+            let p = &plan_with(&named, &mac(), &[], &releases).unwrap()[0];
+            assert_eq!((p.assets[0].sha256.as_deref(), p.assets[0].size), (Some("12"), Some(10)), "the digest named wins");
+            assert!(p.assets[0].url.starts_with("https://github.com/basecompute/baseRT/releases/download/"));
+        }
     }
 
     #[test]

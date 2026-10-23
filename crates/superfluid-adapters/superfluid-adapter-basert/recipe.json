@@ -1,8 +1,24 @@
 {
-  "about": "baseRT engines this adapter installs without being told a SHA-256, as basecompute publishes them: each engine with the size and SHA-256 its release lists (the digest GitHub shows and the release's own <name>.sha256 agree). A version not here installs only with --sha256. Add a release here, newest first, after checking both digests.",
+  "about": "baseRT engines this adapter installs with no release listing, as basecompute publishes them: each engine with the size and SHA-256 its release lists (the digest GitHub shows and the release's own <name>.sha256 agree). With the listing, the newest release whose engine ABI this build drives is installed, by the digest GitHub lists for its engine; these pins answer offline and for `runtime versions`. Add a release here, newest first, after checking both digests.",
   "release": "https://github.com/basecompute/baseRT/releases/download/v{version}/{name}",
   "releases": "https://api.github.com/repos/basecompute/baseRT/releases?per_page=50",
   "pinned": [
+    {
+      "version": "0.4.0",
+      "abi": 1,
+      "assets": [
+        {
+          "name": "basert-engine-linux-arm64-cuda-0.4.0.tar.gz",
+          "size": 36349756,
+          "sha256": "8b06deb5a51e03d6327f1cd0149abf6b19f3aefa74758afceba59eb289bdb5c2"
+        },
+        {
+          "name": "basert-engine-macos-arm64-0.4.0.tar.gz",
+          "size": 20249930,
+          "sha256": "c9b49ea1906fa871c646df3f62fb8237b53a817f786356323ff04bda1e6e79f2"
+        }
+      ]
+    },
     {
       "version": "0.3.0",
       "assets": [

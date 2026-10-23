@@ -97,6 +97,7 @@ impl Runtime for Basert {
             PullOption { name: "target", value: true, about: "the quant scheme a model fetched from its source is converted to (base-q4, base-q8, ...)" },
             PullOption { name: "profile", value: true, about: "a quant profile JSON, instead of the auto-selected one" },
             PullOption { name: "revision", value: true, about: "the Hugging Face revision, branch or tag" },
+            PullOption { name: "file", value: true, about: "the .base file to take from a repo that holds several (e.g. Foo-Medium.base)" },
             PullOption { name: "force", value: false, about: "fetch and convert again, even if installed" },
         ])
     }
@@ -120,8 +121,13 @@ impl Runtime for Basert {
         if !list.status.success() {
             return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
         }
-        installed_path(&String::from_utf8_lossy(&list.stdout), id, variant)
-            .map_err(|why| if pull.offline { format!("{why} (offline: nothing was pulled)") } else { why })
+        let list = String::from_utf8_lossy(&list.stdout);
+        // a file taken by name is served from the install basert records it in
+        match (variant, pull.option("file").flatten()) {
+            (None, Some(file)) => installed_file(&list, id, file),
+            _ => installed_path(&list, id, variant),
+        }
+        .map_err(|why| if pull.offline { format!("{why} (offline: nothing was pulled)") } else { why })
     }
 
     fn plan(&self, req: &Request, host: &Host) -> Option<Result<Vec<Plan>, String>> {
@@ -132,6 +138,24 @@ impl Runtime for Basert {
         // The pins alone, offline: `plan` would consult the release listing when a pin fails.
         recipe::versions(host)
     }
+}
+
+/// The `.base` file `basert list --json` holds for `id` that was pulled from `file`, matched
+/// as `basert pull --file` matches it: by the whole path when `file` has a directory, else by
+/// its name, the `.base` extension optional either way.
+fn installed_file(list_json: &str, id: &str, file: &str) -> Result<std::path::PathBuf, String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(list_json).map_err(|e| format!("basert list --json: {e}"))?;
+    let bare = |s: &str| s.strip_suffix(".base").unwrap_or(s).to_string();
+    let names = |f: &str| match file.contains('/') {
+        true => bare(f) == bare(file),
+        false => bare(f.rsplit('/').next().unwrap_or(f)) == bare(file),
+    };
+    entries
+        .iter()
+        .find(|m| m["id"] == id && m["installed"] == true && m["file"].as_str().is_some_and(names))
+        .and_then(|m| m["path"].as_str())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| format!("basert lists no install of {id} pulled from {file} (a basert whose list reports `file` is needed)"))
 }
 
 /// The `.base` file `basert list --json` holds for `id`: the variant named with the id,
@@ -299,7 +323,21 @@ mod tests {
 
 #[cfg(test)]
 mod pull_tests {
-    use super::installed_path;
+    use super::{installed_file, installed_path};
+
+    #[test]
+    fn a_named_file_is_served_from_the_install_basert_records_it_in() {
+        let l = r#"[
+            {"id":"org/a","variant":"default-medium","installed":true,"path":"/m/medium.base","file":"a-Medium.base"},
+            {"id":"org/a","variant":"cuda-q4mix","installed":true,"path":"/m/cuda.base","file":"sub/a-cuda-q4mix.base"},
+            {"id":"org/a","variant":"default-q4","installed":true,"path":"/m/q4.base"}]"#;
+        assert_eq!(installed_file(l, "org/a", "a-Medium.base").unwrap().to_str(), Some("/m/medium.base"));
+        assert_eq!(installed_file(l, "org/a", "a-Medium").unwrap().to_str(), Some("/m/medium.base"));
+        assert_eq!(installed_file(l, "org/a", "a-cuda-q4mix.base").unwrap().to_str(), Some("/m/cuda.base"));
+        assert_eq!(installed_file(l, "org/a", "sub/a-cuda-q4mix").unwrap().to_str(), Some("/m/cuda.base"));
+        assert!(installed_file(l, "org/a", "other/a-cuda-q4mix.base").is_err());
+        assert!(installed_file(l, "org/a", "a-Small.base").unwrap_err().contains("no install of org/a pulled from a-Small.base"));
+    }
 
     fn list(entries: &[(&str, &str, bool)]) -> String {
         let items: Vec<String> = entries

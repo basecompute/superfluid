@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4
+
+- `superfluid serve` takes `--pull-file <name>` for a baseRT model: one `.base` from a repo that holds several, such as one whose files are named by size (`Foo-Medium.base`) rather than by quant. It is passed to `basert pull --file`, and the model is served from the install `basert list --json` records that file in. It needs basert 0.4.1 or later.
+- `superfluid runtime install basert`, and a `serve` that installs it first, take the newest baseRT release this build drives, as 0.1.3 said they did: it installed the newest pinned one (0.3.0), and a newer release only with `--sha256`. The engine's digest is the one GitHub lists for it; the pins, now with 0.4.0, answer offline.
+
 ## 0.1.3
 
 - A libbaseRT is judged by its engine ABI number: baseRT 0.4.0 and later state one (`baseRT_abi_version()`), and a library whose number equals the one this build was built for serves whatever its version says. A 0.3.x library states none and serves as the line that carried this ABI before it was numbered. The check at load still verifies every function; the model configuration is read by size from a library of 0.4.0 or later (`baseRT_get_config_into`), so the struct may grow without a new number, and by value with a size check from an older one.
