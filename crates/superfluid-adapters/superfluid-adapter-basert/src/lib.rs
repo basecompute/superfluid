@@ -104,9 +104,6 @@ impl Runtime for Basert {
 
     fn pull(&self, pull: &Pull, _args: &WorkerArgs) -> Result<std::path::PathBuf, String> {
         let (id, variant) = pull.split()?;
-        // a file taken by name is served from the variant it was installed under
-        let from_file = pull.option("file").flatten().map(file_variant);
-        let variant = variant.or(from_file.as_deref());
         let tool = basert_tool()?;
         if !pull.offline {
             let mut cmd = std::process::Command::new(&tool);
@@ -124,8 +121,13 @@ impl Runtime for Basert {
         if !list.status.success() {
             return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
         }
-        installed_path(&String::from_utf8_lossy(&list.stdout), id, variant)
-            .map_err(|why| if pull.offline { format!("{why} (offline: nothing was pulled)") } else { why })
+        let list = String::from_utf8_lossy(&list.stdout);
+        // a file taken by name is served from the install basert records it in
+        match (variant, pull.option("file").flatten()) {
+            (None, Some(file)) => installed_file(&list, id, file),
+            _ => installed_path(&list, id, variant),
+        }
+        .map_err(|why| if pull.offline { format!("{why} (offline: nothing was pulled)") } else { why })
     }
 
     fn plan(&self, req: &Request, host: &Host) -> Option<Result<Vec<Plan>, String>> {
@@ -138,13 +140,22 @@ impl Runtime for Basert {
     }
 }
 
-/// The variant `basert pull --file` installs a file under: `default-` and the last
-/// `-`/`_` segment of its name, lowercased (`Foo-Medium.base` -> `default-medium`).
-/// Mirrors baseRT's `base_variant`.
-fn file_variant(file: &str) -> String {
-    let name = file.rsplit('/').next().unwrap_or(file);
-    let stem = name.strip_suffix(".base").unwrap_or(name);
-    format!("default-{}", stem.rsplit(['-', '_']).next().unwrap_or(stem).to_ascii_lowercase())
+/// The `.base` file `basert list --json` holds for `id` that was pulled from `file`, matched
+/// as `basert pull --file` matches it: by the whole path when `file` has a directory, else by
+/// its name, the `.base` extension optional either way.
+fn installed_file(list_json: &str, id: &str, file: &str) -> Result<std::path::PathBuf, String> {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(list_json).map_err(|e| format!("basert list --json: {e}"))?;
+    let bare = |s: &str| s.strip_suffix(".base").unwrap_or(s).to_string();
+    let names = |f: &str| match file.contains('/') {
+        true => bare(f) == bare(file),
+        false => bare(f.rsplit('/').next().unwrap_or(f)) == bare(file),
+    };
+    entries
+        .iter()
+        .find(|m| m["id"] == id && m["installed"] == true && m["file"].as_str().is_some_and(names))
+        .and_then(|m| m["path"].as_str())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| format!("basert lists no install of {id} pulled from {file} (a basert whose list reports `file` is needed)"))
 }
 
 /// The `.base` file `basert list --json` holds for `id`: the variant named with the id,
@@ -312,16 +323,20 @@ mod tests {
 
 #[cfg(test)]
 mod pull_tests {
-    use super::{file_variant, installed_path};
+    use super::{installed_file, installed_path};
 
     #[test]
-    fn a_file_names_the_variant_basert_installs_it_under() {
-        assert_eq!(file_variant("Qwen3.8-27B-BaseQuant-V1-Medium.base"), "default-medium");
-        assert_eq!(file_variant("sub/m-Q8.base"), "default-q8");
-        assert_eq!(file_variant("m_Small"), "default-small");
-        let l = list(&[("org/a", "default-q4", true), ("org/a", "default-medium", true)]);
-        let medium = file_variant("a-Medium.base");
-        assert_eq!(installed_path(&l, "org/a", Some(&medium)).unwrap().to_str().unwrap(), "/m/org/a/default-medium/model.base");
+    fn a_named_file_is_served_from_the_install_basert_records_it_in() {
+        let l = r#"[
+            {"id":"org/a","variant":"default-medium","installed":true,"path":"/m/medium.base","file":"a-Medium.base"},
+            {"id":"org/a","variant":"cuda-q4mix","installed":true,"path":"/m/cuda.base","file":"sub/a-cuda-q4mix.base"},
+            {"id":"org/a","variant":"default-q4","installed":true,"path":"/m/q4.base"}]"#;
+        assert_eq!(installed_file(l, "org/a", "a-Medium.base").unwrap().to_str(), Some("/m/medium.base"));
+        assert_eq!(installed_file(l, "org/a", "a-Medium").unwrap().to_str(), Some("/m/medium.base"));
+        assert_eq!(installed_file(l, "org/a", "a-cuda-q4mix.base").unwrap().to_str(), Some("/m/cuda.base"));
+        assert_eq!(installed_file(l, "org/a", "sub/a-cuda-q4mix").unwrap().to_str(), Some("/m/cuda.base"));
+        assert!(installed_file(l, "org/a", "other/a-cuda-q4mix.base").is_err());
+        assert!(installed_file(l, "org/a", "a-Small.base").unwrap_err().contains("no install of org/a pulled from a-Small.base"));
     }
 
     fn list(entries: &[(&str, &str, bool)]) -> String {
