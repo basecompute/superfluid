@@ -3,6 +3,7 @@
 ## 0.1.4
 
 - `superfluid serve` takes `--pull-file <name>` for a baseRT model: one `.base` from a repo that holds several, such as one whose files are named by size (`Foo-Medium.base`) rather than by quant. It is passed to `basert pull --file`, and the model is served from the install `basert list --json` records that file in. It needs basert 0.4.1 or later.
+- `superfluid runtime install basert`, and a `serve` that installs it first, take the newest baseRT release this build drives, as 0.1.3 said they did: it installed the newest pinned one (0.3.0), and a newer release only with `--sha256`. The engine's digest is the one GitHub lists for it; the pins, now with 0.4.0, answer offline.
 
 ## 0.1.3
 
