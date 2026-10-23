@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -402,11 +403,18 @@ pub fn fetch(asset: &Asset, dir: &Path) -> Result<(PathBuf, String), String> {
 }
 
 pub fn fetch_json(url: &str) -> Result<Value, String> {
+    fetch_json_within(url, Duration::from_secs(20))
+}
+
+/// A lookup a caller falls back from must end: an answer that stalls fails once `deadline` has passed, retries included.
+pub fn fetch_json_within(url: &str, deadline: Duration) -> Result<Value, String> {
     if !url.starts_with("https://") {
         return Err(format!("{url}: only https:// URLs are fetched"));
     }
+    let secs = deadline.as_secs().max(1).to_string();
     let mut curl = Command::new("curl");
     curl.args(["-fsSL", "--proto", "=https", "--tlsv1.2", "--retry", "2", "-H", "Accept: application/json"]);
+    curl.args(["--connect-timeout", &secs, "--max-time", &secs, "--retry-max-time", &secs]);
     // GitHub's API allows sixty unauthenticated requests an hour per address, which hosted
     // runners share; a token in the environment lifts that, for the API alone.
     if url.starts_with("https://api.github.com/") {
@@ -572,6 +580,18 @@ pub fn own_install() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_json_lookup_that_stalls_gives_up_by_its_deadline() {
+        // A server that takes the connection and never answers, as a stalled API does.
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("https://127.0.0.1:{}/releases", server.local_addr().unwrap().port());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(fetch_json_within(&url, Duration::from_secs(2))));
+        let got = rx.recv_timeout(Duration::from_secs(15)).expect("the lookup gives up by its deadline");
+        assert!(got.is_err(), "{got:?}");
+        drop(server);
+    }
 
     #[test]
     fn the_driver_version_is_read_from_the_kernel_module_line() {
