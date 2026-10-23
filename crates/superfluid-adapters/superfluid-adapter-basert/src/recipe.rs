@@ -198,11 +198,18 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             extra: Value::Null,
         }]);
     }
+    let prerelease: Vec<String> = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|r| r["prerelease"].as_bool().unwrap_or(false))
+        .filter_map(|r| Some(r["tag_name"].as_str()?.trim_start_matches('v').to_string()))
+        .collect();
     let mut published: Vec<(String, Option<u32>, Asset)> = releases
         .as_array()
         .map(|rs| {
             rs.iter()
-                .filter(|r| !r["draft"].as_bool().unwrap_or(false) && !r["prerelease"].as_bool().unwrap_or(false))
+                .filter(|r| !r["draft"].as_bool().unwrap_or(false))
                 .filter_map(|r| {
                     let version = r["tag_name"].as_str()?.trim_start_matches('v').to_string();
                     let want = engine(&version);
@@ -244,8 +251,10 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             (version, found.1, asset)
         }
         None => {
-            // The newest this build drives, pinned or not; a pin stays ahead of the listed copy of its own version.
-            let mut known: Vec<(String, Option<u32>, Asset)> = pinned_here.into_iter().chain(published).collect();
+            // The newest this build drives, pinned or not; a pin stays ahead of the listed copy of its own version, and a
+            // pre-release is installed only when named.
+            let listed = published.into_iter().filter(|(v, _, _)| !prerelease.contains(v));
+            let mut known: Vec<(String, Option<u32>, Asset)> = pinned_here.into_iter().chain(listed).collect();
             known.sort_by_key(|(v, _, _)| std::cmp::Reverse(version_key(v)));
             let found = known.into_iter().find(|(v, abi, _)| drives(v, *abi));
             let found = found.ok_or_else(|| {
@@ -368,6 +377,24 @@ mod tests {
         pre["prerelease"] = json!(true);
         let p = &plan_with(&Request::default(), &mac(), &pins, &json!([pre, release("0.4.7", Some(same))])).unwrap()[0];
         assert_eq!(p.version, "0.4.7", "a pre-release is never the newest");
+    }
+
+    #[test]
+    fn a_pre_release_is_installed_when_named_and_never_as_the_newest() {
+        let same = abi();
+        let mut pre = release("0.4.8", Some(same));
+        pre["prerelease"] = json!(true);
+        let releases = json!([pre, release("0.4.7", Some(same))]);
+        assert_eq!(plan_with(&Request::default(), &mac(), &[], &releases).unwrap()[0].version, "0.4.7");
+        let named = Request { version: Some("0.4.8".into()), ..Request::default() };
+        let p = &plan_with(&named, &mac(), &[], &releases).unwrap()[0];
+        assert_eq!((p.version.as_str(), p.tested, p.assets[0].sha256.as_deref()), ("0.4.8", true, Some("ab")));
+        // One of another ABI, as before: with --untested and a digest of one's own.
+        let mut other = release("0.5.1", Some(same + 1));
+        other["prerelease"] = json!(true);
+        let req = Request { version: Some("0.5.1".into()), untested: true, sha256: Some("12".into()), ..Request::default() };
+        let p = &plan_with(&req, &mac(), &[], &json!([other])).unwrap()[0];
+        assert_eq!((p.version.as_str(), p.tested, p.assets[0].sha256.as_deref()), ("0.5.1", false, Some("12")));
     }
 
     #[test]
