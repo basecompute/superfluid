@@ -15,7 +15,7 @@
  "tested": [
   {
    "version": "0.32.4",
-   "mlx_lm": "0.32.0",
+   "mlx_lm": "0.32.2",
    "wheels": [
     {
      "name": "annotated-doc",
@@ -40,10 +40,10 @@
     },
     {
      "name": "filelock",
-     "version": "4.2.0",
-     "file": "filelock-4.2.0-py3-none-any.whl",
-     "size": 135032,
-     "sha256": "2ff5690882e8cdb00ef31fb3d01a3094c29f30985426c59495afb1733f3b7238"
+     "version": "4.2.4",
+     "file": "filelock-4.2.4-py3-none-any.whl",
+     "size": 162475,
+     "sha256": "301241438c57936ef93f4243a94f2559022268bfcf9b375a9a72eb0f8db8358e"
     },
     {
      "name": "fsspec",
@@ -68,24 +68,24 @@
     },
     {
      "name": "httpcore2",
-     "version": "2.13.1",
-     "file": "httpcore2-2.13.1-py3-none-any.whl",
-     "size": 83423,
-     "sha256": "e1e05d4f25f7d7d496bfb96748f6f4b67657b03da069b3a68c36069f3db73d0a"
+     "version": "2.16.0",
+     "file": "httpcore2-2.16.0-py3-none-any.whl",
+     "size": 85070,
+     "sha256": "5c4358319f2602d984ad93182c9fee5160f22e9da7babdda870a5e7c4e2dc34f"
     },
     {
      "name": "httpx2",
-     "version": "2.13.1",
-     "file": "httpx2-2.13.1-py3-none-any.whl",
-     "size": 95597,
-     "sha256": "6dff50fabc270ee5fd25d845d0b078ed20564579744d6d962850975996d2f9a4"
+     "version": "2.16.0",
+     "file": "httpx2-2.16.0-py3-none-any.whl",
+     "size": 97880,
+     "sha256": "fd2c5d7909e8d86fe92d53020c310ca0e4e431b838c207c5754b9bbf0308d49a"
     },
     {
      "name": "huggingface_hub",
-     "version": "2.2.0",
-     "file": "huggingface_hub-2.2.0-py3-none-any.whl",
-     "size": 839884,
-     "sha256": "1667f145dc56dc210d60966069397df9ecfca9607a5d43db88b308c89dae56b3"
+     "version": "2.3.0",
+     "file": "huggingface_hub-2.3.0-py3-none-any.whl",
+     "size": 855161,
+     "sha256": "5da369600233568a126eb5578754935b2add9446b42d9e2fc0927d56840ac1a5"
     },
     {
      "name": "idna",
@@ -131,10 +131,10 @@
     },
     {
      "name": "mlx-lm",
-     "version": "0.32.0",
-     "file": "mlx_lm-0.32.0-py3-none-any.whl",
-     "size": 513667,
-     "sha256": "9a0f3843135fd88d36ad791f0d82210cdc4130c5c1cb5416f5f0c4b56a135778"
+     "version": "0.32.2",
+     "file": "mlx_lm-0.32.2-py3-none-any.whl",
+     "size": 546040,
+     "sha256": "5c0991248cfff5872503d74f466d2532dd8cb7fb3670cb9be7a06d7305dadc04"
     },
     {
      "name": "mlx-metal",
@@ -229,10 +229,10 @@
     },
     {
      "name": "transformers",
-     "version": "5.19.0",
-     "file": "transformers-5.19.0-py3-none-any.whl",
-     "size": 12599123,
-     "sha256": "afcd2dd5f603ed28c1e1fcb00a338ccbb4ef5f878ed289635df8b58187afb518"
+     "version": "5.20.2",
+     "file": "transformers-5.20.2-py3-none-any.whl",
+     "size": 12844921,
+     "sha256": "7ae75dbc1fb3922aff1b6c97b9e5479d6cf26fd86a8866bfb71324190479f807"
     },
     {
      "name": "truststore",
