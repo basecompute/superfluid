@@ -1,0 +1,309 @@
+name: Publish packages
+
+# Puts each superfluid release on PyPI (superfluid-cli), npm
+# (@basecompute/superfluid) and Homebrew (a formula PR on
+# basecompute/homebrew-tap) by repackaging the tarballs release.yml attached
+# to it; nothing here compiles superfluid. The scripts are in packaging/, and
+# packaging/README.md has the registry setup. crates.io is release.yml's.
+#
+# It runs when a release is published (release.yml only drafts one) and by
+# hand for a tag. Every run builds every package and installs each on macOS
+# and on Linux x86-64 and arm64. A run uploads only when all of these hold,
+# and is otherwise a dry run:
+#   - the repository variable PUBLISH_ENABLED is "true" and dry_run is not ticked;
+#   - the release is published: not a draft, not a pre-release;
+#   - this run's commit is the one the tag names, so the packages were built by
+#     the scripts that release carries (a manual run from a branch dry-runs).
+# Each upload job first asks its registry what it has, so a rerun finishes
+# what an interrupted run left and repeats nothing.
+#
+# Actions are pinned to commits and tools to exact versions: the upload jobs
+# hold publishing rights.
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package (vX.Y.Z)
+        required: true
+      dry_run:
+        description: Build and test everything, upload nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  PYTHON_VERSION: "3.12.15"
+  NODE_VERSION: "24.21.0"
+  TAP_REPO: basecompute/homebrew-tap
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      upload: ${{ steps.plan.outputs.upload }}
+      pypi: ${{ steps.registries.outputs.pypi }}
+      npm: ${{ steps.registries.outputs.npm }}
+    steps:
+      - name: Upload or dry run
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_ENABLED: ${{ vars.PUBLISH_ENABLED }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::$TAG is not a release tag (vX.Y.Z)"; exit 1 ;;
+          esac
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
+            --jq 'if .isDraft then "a draft" elif .isPrerelease then "a pre-release" else "published" end')
+          # The commit the tag names: the peeled line for an annotated tag, else the tag's own.
+          tagged=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG" "refs/tags/$TAG^{}" \
+            | sort -k2 | tail -n 1 | cut -f1)
+          why=""
+          if [ "${PUBLISH_ENABLED:-}" != true ]; then why="PUBLISH_ENABLED is ${PUBLISH_ENABLED:-unset}"
+          elif [ "${DRY_RUN:-}" = true ]; then why="dry_run is ticked"
+          elif [ "$state" != published ]; then why="$TAG is $state"
+          elif [ "$tagged" != "$GITHUB_SHA" ]; then why="this run is at $GITHUB_SHA, and $TAG names ${tagged:-no commit}"
+          fi
+          if [ -z "$why" ]; then
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+            echo "Uploading superfluid ${TAG#v} where it is missing."
+          else
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Dry run ($why): every package is built and tested, none uploaded."
+          fi
+
+      - name: What each registry has
+        id: registries
+        if: steps.plan.outputs.upload == 'true'
+        env:
+          V: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          agent="superfluid-publish (github.com/$GITHUB_REPOSITORY)"
+          # Every platform's wheel, not just the version: a run that uploaded
+          # one wheel and then failed leaves the version on PyPI.
+          pypi=false
+          files=$(curl -sf -A "$agent" "https://pypi.org/pypi/superfluid-cli/$V/json" | jq -r '.urls[].filename') || files=""
+          for want in "superfluid_cli-$V-py3-none-macosx_*_arm64.whl" "superfluid_cli-$V-py3-none-manylinux_*_x86_64.whl" \
+                      "superfluid_cli-$V-py3-none-manylinux_*_aarch64.whl"; do
+            found=no
+            for f in $files; do case "$f" in $want) found=yes ;; esac; done
+            [ "$found" = yes ] || pypi=true
+          done
+          npm=false
+          for pkg in superfluid-darwin-arm64 superfluid-linux-x64 superfluid-linux-arm64 superfluid; do
+            curl -sfo /dev/null -A "$agent" "https://registry.npmjs.org/@basecompute%2F$pkg/$V" || npm=true
+          done
+          echo "pypi=$pypi" >> "$GITHUB_OUTPUT"
+          echo "npm=$npm" >> "$GITHUB_OUTPUT"
+          echo "PyPI needs $V: $pypi; npm needs $V: $npm; the tap is checked when its PR is made."
+
+  build:
+    name: Build packages
+    needs: plan
+    runs-on: ubuntu-24.04
+    env:
+      V: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern 'superfluid-*.tar.gz' --pattern 'superfluid-*.tar.gz.sha256'
+          (cd assets && sha256sum -c ./*.sha256)
+
+      - name: Build the packages
+        run: python3 packaging/build.py assets out --version "$V"
+
+      - name: Check the wheels as PyPI will
+        run: |
+          python3 -m pip install --quiet twine==7.0.0
+          python3 -m twine check --strict out/pypi/*.whl
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packages
+          path: out/
+          if-no-files-found: error
+
+  test:
+    name: Install (${{ matrix.os }})
+    needs: [plan, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            kinds: pip npm brew
+          # The runner image has Homebrew, off PATH.
+          - os: ubuntu-24.04
+            kinds: pip npm brew
+          - os: ubuntu-24.04-arm
+            kinds: pip npm
+    runs-on: ${{ matrix.os }}
+    env:
+      V: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: out
+
+      # brew installs the formula from the release's own URLs, so this needs
+      # the release published; pip and npm install the files just built.
+      - name: Install and run each package
+        run: |
+          set -eu
+          for kind in ${{ matrix.kinds }}; do
+            if [ "$kind" = brew ] && [ "$RUNNER_OS" = Linux ]; then
+              eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+            fi
+            packaging/try-install.sh "$kind" out "$V"
+          done
+
+  # --- uploads: only when the plan says so -----------------------------------
+
+  pypi:
+    name: Publish to PyPI
+    needs: [plan, test]
+    if: needs.plan.outputs.upload == 'true' && needs.plan.outputs.pypi == 'true'
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/superfluid-cli/${{ needs.plan.outputs.version }}/
+    permissions:
+      id-token: write # trusted publishing, and the attestations
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: out
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: out/pypi/
+          # PyPI never takes a file twice; a rerun after a partial upload steps over what is there.
+          skip-existing: true
+
+  npm:
+    name: Publish to npm
+    needs: [plan, test]
+    if: needs.plan.outputs.upload == 'true' && needs.plan.outputs.npm == 'true'
+    runs-on: ubuntu-24.04
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@basecompute/superfluid/v/${{ needs.plan.outputs.version }}
+    permissions:
+      id-token: write # provenance
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: out
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://registry.npmjs.org
+      - name: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          V: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The platform packages first, so the main package's optional
+          # dependencies exist when it appears; any a previous run published are skipped.
+          for pkg in superfluid-darwin-arm64 superfluid-linux-x64 superfluid-linux-arm64 superfluid; do
+            if npm view "@basecompute/$pkg@$V" version > /dev/null 2>&1; then
+              echo "@basecompute/$pkg@$V is on npm already"
+            else
+              npm publish "out/npm/basecompute-$pkg-$V.tgz" --access public --provenance
+            fi
+          done
+
+  homebrew:
+    name: Open the Homebrew formula PR
+    needs: [plan, test]
+    if: needs.plan.outputs.upload == 'true'
+    runs-on: ubuntu-24.04
+    environment: homebrew
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packages
+          path: out
+      # The formula reaches `brew install` users when this PR is merged on the
+      # tap, so a person sees every Homebrew release. Each step is safe to
+      # repeat: a rerun finishes a branch pushed without a PR, a PR closed
+      # unmerged, or a PR whose checksums went stale because release.yml
+      # uploaded the tarballs again (--clobber).
+      - name: Open a pull request on the tap
+        env:
+          # A token for the tap alone, with Contents and Pull requests write;
+          # this repository's own token cannot write there.
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          V: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          branch="formula/superfluid-$V"
+          gh auth setup-git
+          gh repo clone "$TAP_REPO" tap -- --depth 1
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if cmp -s ../out/homebrew/superfluid.rb Formula/superfluid.rb; then
+            echo "The tap's default branch has superfluid $V already."
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            git fetch --depth 1 origin "$branch:$branch"
+            git switch "$branch"
+          else
+            git switch -c "$branch"
+          fi
+          mkdir -p Formula
+          cp ../out/homebrew/superfluid.rb Formula/superfluid.rb
+          git add Formula/superfluid.rb
+          git diff --cached --quiet || git commit -m "superfluid $V"
+          git push origin "$branch"
+          open=$(gh pr list --repo "$TAP_REPO" --head "$branch" --state open --json url --jq '.[0].url')
+          if [ -n "$open" ]; then
+            echo "The PR is open already: $open"
+          else
+            gh pr create --repo "$TAP_REPO" --head "$branch" --title "superfluid $V" \
+              --body "The formula for superfluid $V: the release's version and checksums, from basecompute/superfluid's publish workflow, which installed and tested it on macOS and Linux. Merging it makes $V what \`brew install\` and \`brew upgrade\` give."
+          fi

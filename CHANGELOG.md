@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Each release is also published to PyPI (`superfluid-cli`), npm (`@basecompute/superfluid`, with one package per platform) and Homebrew (`basecompute/tap/superfluid`), repackaged from the release tarballs by `.github/workflows/publish.yml` and `packaging/`. A package carries an `installed-by` file at the release's root; `superfluid self update` leaves such a copy to its package manager and names the command that updates it, as the line `serve` prints for a newer release does. Before, a package's layout read as the install script's in-place copy, which `self update` would move under `~/.superfluid/versions`.
+- release.yml builds every crate from its packaged form in a `crates-verify` job before the crates.io upload, which runs no build script, and the jobs that publish are pinned to action commits and Rust 1.99.1.
+
 ## 0.1.4
 
 - `superfluid serve` takes `--pull-file <name>` for a baseRT model: one `.base` from a repo that holds several, such as one whose files are named by size (`Foo-Medium.base`) rather than by quant. It is passed to `basert pull --file`, and the model is served from the install `basert list --json` records that file in. It needs basert 0.4.1 or later.

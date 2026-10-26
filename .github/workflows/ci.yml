@@ -93,3 +93,13 @@ jobs:
         # The cache action expands ~ itself; an env value would reach the
         # script as a literal ~ and the build would look for Python under it.
         run: SUPERFLUID_ADAPTER_CACHE="$HOME/.cache/superfluid-ci/adapter-python" bash scripts/build_runtime_adapters.sh "${RUNNER_TEMP}/adapters"
+
+  packaging:
+    name: packaging scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # The PyPI, npm and Homebrew builders and launchers, on made-up releases;
+      # publish.yml builds and installs the real ones.
+      - run: python3 -m unittest discover -s tests/scripts -v
