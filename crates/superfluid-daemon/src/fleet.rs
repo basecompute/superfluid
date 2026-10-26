@@ -60,7 +60,11 @@ pub struct FleetHead {
     placements: BTreeMap<u64, Placement>,
     addr: String,
     auth: Vec<u8>,
+    on_status: Option<StatusHook>,
 }
+
+/// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
+pub type StatusHook = std::sync::Arc<dyn Fn(&superfluid_proto::handshake::CapacitySummary) + Send + Sync>;
 
 /// Epochs and command ids are numbered across every connection this head makes: a node keeps
 /// a session's across connections, and refuses an epoch or command it has already seen.
@@ -154,7 +158,14 @@ impl FleetHead {
             placements: BTreeMap::new(),
             addr,
             auth,
+            on_status: None,
         }
+    }
+
+    /// Tells `hook` every status the node sends from now on, over this connection and the ones
+    /// that replace it.
+    pub fn on_status(&mut self, hook: StatusHook) {
+        self.on_status = Some(hook);
     }
 
     fn reconnect_self(&mut self) -> Result<(), DaemonError> {
@@ -173,6 +184,9 @@ impl FleetHead {
             if frame.msg_type == msg_type::NODE_STATUS {
                 if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload) {
                     self.node.capacity = m.capacity;
+                            if let Some(hook) = &self.on_status {
+                                hook(&self.node.capacity);
+                            }
                     if !m.loadable_models.is_empty() {
                         self.node.loadable_models = m.loadable_models;
                     }
@@ -494,6 +508,9 @@ impl FleetHead {
                         if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload)
                         {
                             self.node.capacity = m.capacity;
+                            if let Some(hook) = &self.on_status {
+                                hook(&self.node.capacity);
+                            }
                             if !m.loadable_models.is_empty() {
                                 self.node.loadable_models = m.loadable_models;
                             }
@@ -666,6 +683,9 @@ impl FleetHead {
                         if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload)
                         {
                             self.node.capacity = m.capacity;
+                            if let Some(hook) = &self.on_status {
+                                hook(&self.node.capacity);
+                            }
                             if !m.loadable_models.is_empty() {
                                 self.node.loadable_models = m.loadable_models;
                             }

@@ -1,4 +1,5 @@
-//! `superfluid top` — a multi-node fleet monitor.
+//! `superfluid top` — a multi-node fleet monitor. A fleet head's address stands for every node
+//! joined to it: the head's `/metrics` lists them, and the rows follow as nodes come and go.
 
 #![cfg(feature = "tui")]
 
@@ -32,8 +33,6 @@ struct NodeStat {
     pool_total: u64,
     queue: u64,
     tps: u64,
-    prev_decode: u64,
-    prev_t: Option<Instant>,
 }
 
 pub fn run(addrs: Vec<String>, api_key: Option<String>) -> io::Result<()> {
@@ -52,41 +51,11 @@ pub fn run(addrs: Vec<String>, api_key: Option<String>) -> io::Result<()> {
         let nodes = Arc::clone(&nodes);
         let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
+            let mut prev: HashMap<String, (u64, Instant)> = HashMap::new();
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let addrs: Vec<String> = nodes.lock().unwrap().iter().map(|n| n.addr.clone()).collect();
-                for (i, addr) in addrs.iter().enumerate() {
-                    let scraped = scrape(addr, api_key.as_deref());
-                    let mut ns = nodes.lock().unwrap();
-                    let n = &mut ns[i];
-                    n.unauthorized = matches!(scraped, Err(Scrape::Unauthorized));
-                    match scraped {
-                        Ok(m) => {
-                            let now = Instant::now();
-                            let decode = get(&m, "superfluid_decode_tokens_total");
-                            if let Some(pt) = n.prev_t {
-                                let dt = (now - pt).as_secs_f64().max(1e-3);
-                                n.tps = ((decode.saturating_sub(n.prev_decode)) as f64 / dt) as u64;
-                            }
-                            n.prev_decode = decode;
-                            n.prev_t = Some(now);
-                            n.reachable = true;
-                            if let Some(h) = host_of(&m) {
-                                n.host = h;
-                            }
-                            n.lanes = get(&m, "superfluid_lanes_active");
-                            n.pool_used = get(&m, "superfluid_pool_blocks_used");
-                            n.pool_total = get(&m, "superfluid_pool_blocks_total");
-                            n.queue = ["interactive_chat", "inline_completion", "foreground_agent", "background_agent"]
-                                .iter()
-                                .map(|c| get(&m, &format!("superfluid_queue_depth{{class=\"{c}\"}}")))
-                                .sum();
-                        }
-                        Err(_) => {
-                            n.reachable = false;
-                            n.tps = 0;
-                        }
-                    }
-                }
+                let rows: Vec<NodeStat> =
+                    addrs.iter().flat_map(|addr| poll(addr, api_key.as_deref(), &mut prev)).collect();
+                *nodes.lock().unwrap() = rows;
                 std::thread::sleep(Duration::from_millis(1000));
             }
         })
@@ -176,7 +145,12 @@ fn draw(f: &mut Frame, nodes: &[NodeStat], hist: &VecDeque<u64>, total_tps: u64,
                 let bar = format!("{}{}", "█".repeat(filled), "░".repeat(14 - filled));
                 Cell::from(Line::from(vec![
                     Span::styled(bar, Style::new().fg(util_color(r))),
-                    Span::raw(format!(" {}%", (r * 100.0) as u64)),
+                    // A pool sized for a long window is barely touched by short requests: in use
+                    // is not empty.
+                    Span::raw(match (r * 100.0) as u64 {
+                        0 if n.pool_used > 0 => " <1%".to_string(),
+                        pct => format!(" {pct}%"),
+                    }),
                 ]))
             } else {
                 Cell::from(Span::styled("— n/a", Style::new().dim()))
@@ -249,6 +223,86 @@ fn bordered(title: &str) -> Block<'static> {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(Color::Rgb(70, 70, 80)))
         .title(Span::styled(format!(" {title} "), Style::new().fg(ACCENT).bold()))
+}
+
+/// The rows one address stands for: a server's own, or every node of a fleet head.
+fn poll(addr: &str, api_key: Option<&str>, prev: &mut HashMap<String, (u64, Instant)>) -> Vec<NodeStat> {
+    let m = match scrape(addr, api_key) {
+        Ok(m) => m,
+        Err(e) => {
+            return vec![NodeStat {
+                addr: addr.to_string(),
+                unauthorized: matches!(e, Scrape::Unauthorized),
+                ..Default::default()
+            }]
+        }
+    };
+    let now = Instant::now();
+    let fleet = fleet_nodes(&m);
+    if !fleet.is_empty() || m.keys().any(|k| k.starts_with("superfluid_fleet_head_info{")) {
+        return fleet
+            .into_iter()
+            .map(|(labels, name, node_addr)| {
+                let at = |series: &str| get(&m, &format!("{series}{labels}"));
+                NodeStat {
+                    tps: rate(prev, format!("{addr} {labels}"), at("superfluid_fleet_node_decode_tokens_total"), now),
+                    addr: node_addr,
+                    host: name,
+                    reachable: at("superfluid_fleet_node_up") == 1,
+                    unauthorized: false,
+                    lanes: at("superfluid_fleet_node_lanes_active"),
+                    pool_used: at("superfluid_fleet_node_pool_blocks_used"),
+                    pool_total: at("superfluid_fleet_node_pool_blocks_total"),
+                    queue: at("superfluid_fleet_node_queue_depth"),
+                }
+            })
+            .collect();
+    }
+    vec![NodeStat {
+        tps: rate(prev, addr.to_string(), get(&m, "superfluid_decode_tokens_total"), now),
+        addr: addr.to_string(),
+        host: host_of(&m).unwrap_or_default(),
+        reachable: true,
+        unauthorized: false,
+        lanes: get(&m, "superfluid_lanes_active"),
+        pool_used: get(&m, "superfluid_pool_blocks_used"),
+        pool_total: get(&m, "superfluid_pool_blocks_total"),
+        queue: ["interactive_chat", "inline_completion", "foreground_agent", "background_agent"]
+            .iter()
+            .map(|c| get(&m, &format!("superfluid_queue_depth{{class=\"{c}\"}}")))
+            .sum(),
+    }]
+}
+
+/// Tokens per second since the last poll of the same row; 0 on its first.
+fn rate(prev: &mut HashMap<String, (u64, Instant)>, key: String, total: u64, now: Instant) -> u64 {
+    match prev.insert(key, (total, now)) {
+        Some((was, t)) => (total.saturating_sub(was) as f64 / (now - t).as_secs_f64().max(1e-3)) as u64,
+        None => 0,
+    }
+}
+
+/// A fleet head's nodes, in the order it lists them: the label set each series carries for the
+/// node, its name and its address.
+fn fleet_nodes(m: &HashMap<String, f64>) -> Vec<(String, String, String)> {
+    let mut nodes: Vec<(String, String, String)> = m
+        .keys()
+        .filter_map(|k| k.strip_prefix("superfluid_fleet_node_up"))
+        .filter(|labels| labels.starts_with('{'))
+        .map(|labels| (labels.to_string(), label(labels, "node"), label(labels, "addr")))
+        .collect();
+    nodes.sort_by(|a, b| a.1.cmp(&b.1));
+    nodes
+}
+
+/// A label's value in a `{k="v",...}` set; escapes are left as they are.
+fn label(labels: &str, key: &str) -> String {
+    labels
+        .split(&format!("{key}=\""))
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default()
+        .to_string()
 }
 
 enum Scrape {
@@ -337,6 +391,70 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// Serves what `body` holds now on every request, as a fleet head's `/metrics`.
+    fn head_metrics_server(body: Arc<Mutex<String>>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(mut sock) = sock else { break };
+                let _ = sock.read(&mut [0u8; 4096]);
+                let body = body.lock().unwrap().clone();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+        addr
+    }
+
+    fn node(name: &str, addr: &str, up: bool, decode_tokens: u64) -> crate::fleet_manager::NodeStatus {
+        crate::fleet_manager::NodeStatus {
+            name: name.to_string(),
+            addr: addr.to_string(),
+            up,
+            lanes: 8,
+            lanes_active: 2,
+            queue_depth: 1,
+            kv_blocks_used: 25,
+            kv_blocks_total: 100,
+            decode_tokens,
+        }
+    }
+
+    #[test]
+    fn a_fleet_heads_address_stands_for_each_of_its_nodes() {
+        let render = |nodes: &[crate::fleet_manager::NodeStatus]| {
+            crate::fleet_openai::fleet_metrics(nodes, "head", "qwen")
+        };
+        let body = Arc::new(Mutex::new(render(&[node("m3-ultra", "10.0.0.57", true, 100)])));
+        let head = head_metrics_server(Arc::clone(&body));
+        let mut prev = HashMap::new();
+
+        let rows = poll(&head, None, &mut prev);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert_eq!((r.host.as_str(), r.addr.as_str(), r.reachable), ("m3-ultra", "10.0.0.57", true));
+        assert_eq!((r.lanes, r.queue, r.pool_used, r.pool_total, r.tps), (2, 1, 25, 100, 0));
+
+        // A node joins and the first one generates: the rows follow without a restart.
+        std::thread::sleep(Duration::from_millis(50));
+        *body.lock().unwrap() =
+            render(&[node("m3-ultra", "10.0.0.57", true, 200), node("spark-gb10", "10.0.0.22", false, 0)]);
+        let rows = poll(&head, None, &mut prev);
+        let names: Vec<_> = rows.iter().map(|r| (r.host.as_str(), r.reachable)).collect();
+        assert_eq!(names, [("m3-ultra", true), ("spark-gb10", false)]);
+        assert!(rows[0].tps > 0, "100 tokens since the last poll");
+    }
+
+    #[test]
+    fn a_head_with_no_nodes_yet_shows_no_rows_not_itself() {
+        let head = head_metrics_server(Arc::new(Mutex::new(crate::fleet_openai::fleet_metrics(&[], "head", "qwen"))));
+        assert!(poll(&head, None, &mut HashMap::new()).is_empty());
     }
 
     #[test]

@@ -23,7 +23,7 @@ On each node:
 superfluid node join --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --token <the token>
 ```
 
-The node finds the head on the local network (`_superfluid-fleet._tcp`, or give `<host:port>` as the first argument), pulls the model as `serve` would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as `joined:<identity>` and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; `--model-name` overrides that. A head with no token takes nodes from its own machine only.
+The node finds the head on the local network (`_superfluid-fleet._tcp`, which also carries the head's HTTP port for `superfluid top`, or give `<host:port>` as the first argument), pulls the model as `serve` would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as `joined:<identity>` and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; `--model-name` overrides that. A head with no token takes nodes from its own machine only.
 
 | flag | default | meaning |
 |---|---|---|
@@ -113,8 +113,9 @@ A prompt no node can hold is refused with `context_length_exceeded`.
 
 - `POST /v1/chat/completions`, streaming or not, with tools ([OpenAI API](openai_compatible_server.md)).
 - `GET /v1/models`: the one model the fleet serves.
+- `GET /metrics`: each node as the head sees it, labelled `node` and `addr`: `superfluid_fleet_node_up`, `_lanes`, `_lanes_active`, `_queue_depth`, `_pool_blocks_used`, `_pool_blocks_total` and `_decode_tokens_total`. A streamed generation's tokens count as they arrive; a non-streamed one's when it ends, as the node sends them in one reply. The KV pool is the node's latest status, sent every 2 s. `superfluid top` pointed at the head, or run with no address on the head's network, shows every node from it.
 
-Refused with 400: non-zero `presence_penalty`/`frequency_penalty`, a `repeat_penalty` other than 1.0, `ignore_eos`, `stream_options.continuous_usage_stats`, and image or audio parts. Not read: `logprobs`, `logit_bias`, `response_format`, `tool_choice`. There is no `/health`, `/metrics`, Anthropic, Ollama, embeddings, files or batches surface on the head. A generation has a ten-minute wall-clock ceiling.
+Refused with 400: non-zero `presence_penalty`/`frequency_penalty`, a `repeat_penalty` other than 1.0, `ignore_eos`, `stream_options.continuous_usage_stats`, and image or audio parts. Not read: `logprobs`, `logit_bias`, `response_format`, `tool_choice`. There is no `/health`, Anthropic, Ollama, embeddings, files or batches surface on the head. A generation has a ten-minute wall-clock ceiling.
 
 ## Failure handling
 

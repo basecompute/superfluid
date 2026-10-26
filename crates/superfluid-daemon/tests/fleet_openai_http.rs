@@ -136,6 +136,69 @@ fn fleet_openai_non_streaming_chat_completion() {
     );
 }
 
+fn head_metrics(a: &ureq::Agent, http_addr: &str) -> String {
+    let mut resp = a.get(&format!("http://{http_addr}/metrics")).call().expect("metrics");
+    assert_eq!(resp.status().as_u16(), 200);
+    resp.body_mut().read_to_string().unwrap()
+}
+
+fn series(metrics: &str, name: &str, node_addr: &str) -> u64 {
+    let key = format!("{name}{{node=\"openai-node\",addr=\"{node_addr}\"}} ");
+    let line = metrics.lines().find(|l| l.starts_with(&key)).unwrap_or_else(|| panic!("no {key}in {metrics}"));
+    line[key.len()..].parse().unwrap()
+}
+
+#[test]
+fn fleet_head_metrics_list_each_node_and_count_its_tokens() {
+    let node_addr = spawn_node();
+    let http_addr = start_head(node_addr.clone());
+    let a = agent();
+    wait_ready(&a, &http_addr);
+    let chat = |stream: bool| {
+        let body = serde_json::json!({
+            "model": "mock",
+            "messages": [{"role": "user", "content": "hello there"}],
+            "max_tokens": 12,
+            "stream": stream
+        })
+        .to_string();
+        let mut resp = a
+            .post(&format!("http://{http_addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .send(body.as_bytes())
+            .expect("chat request");
+        assert_eq!(resp.status().as_u16(), 200);
+        resp.body_mut().read_to_string().unwrap()
+    };
+
+    let json: serde_json::Value = serde_json::from_str(&chat(false)).unwrap();
+    let completion = json["usage"]["completion_tokens"].as_u64().unwrap();
+    let m = head_metrics(&a, &http_addr);
+    assert!(m.contains("superfluid_fleet_head_info{"), "{m}");
+    assert_eq!(series(&m, "superfluid_fleet_node_up", &node_addr), 1);
+    assert_eq!(series(&m, "superfluid_fleet_node_lanes_active", &node_addr), 0);
+    assert_eq!(series(&m, "superfluid_fleet_node_decode_tokens_total", &node_addr), completion);
+
+    chat(true);
+    let m = head_metrics(&a, &http_addr);
+    assert!(series(&m, "superfluid_fleet_node_decode_tokens_total", &node_addr) > completion, "{m}");
+}
+
+#[test]
+fn a_connection_tells_its_status_hook_what_the_node_reports() {
+    let node_addr = spawn_node();
+    let mut head = superfluid_daemon::fleet::FleetHead::connect(&node_addr, Vec::new()).expect("connect");
+    let seen = Arc::new(AtomicU64::new(0));
+    let hook_seen = Arc::clone(&seen);
+    head.on_status(Arc::new(move |_| {
+        hook_seen.fetch_add(1, Ordering::Relaxed);
+    }));
+    // The node reports every 2 s; the head reads it on the next call that pumps the link.
+    std::thread::sleep(std::time::Duration::from_millis(2_500));
+    head.drain_status().expect("node still there");
+    assert!(seen.load(Ordering::Relaxed) > 0, "no status reached the hook");
+}
+
 #[test]
 fn fleet_openai_rejects_unknown_model() {
     let http_addr = start_head(spawn_node());
