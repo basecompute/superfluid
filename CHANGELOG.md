@@ -3,6 +3,7 @@
 ## 0.1.5
 
 - A baseRT model named with its variant (`org/model:<variant>`) that is installed already is served as it is, as `--offline` serves it: `serve` no longer runs `basert pull`, which takes no variant and fetched the default quant instead, and failed for a repo that has none, such as a `file-…` variant taken with `--pull-file` (`no pre-converted .base for quant "q4"`). `--pull-force` still pulls.
+- A baseRT model named with a variant that is not installed is pulled as that variant where basert takes one (0.4.2 and later): `serve` runs `basert pull org/model:<variant>`, so a catalog variant such as `default-f16`, or a `file-…` variant, is fetched as named rather than as the default quant, and `--pull-file` is no longer needed to serve one beside other models. `--pull-file`, `--pull-profile` and `--pull-target`, which basert refuses beside a variant, are left out of that pull; `--pull-revision` and `--pull-force` go with it. An older basert, or one whose `--version` names no version, is given the id alone, as before.
 
 ## 0.1.4
 
