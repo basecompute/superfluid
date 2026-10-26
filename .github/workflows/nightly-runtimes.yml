@@ -110,10 +110,14 @@ jobs:
         # macos-14 runner's virtualized GPU takes llama.cpp's fallback Metal
         # kernels, which fail the adapter's numeric tests whatever the build,
         # and its memory leaves the pool shared where the tests expect a
-        # buffer per lane.
+        # buffer per lane. So does a self-hosted Mac with too little memory:
+        # ten 8192-token buffers need some 16 GB of Metal memory free, more
+        # than a 24 GB Mac ever has, so only runners labelled ram-48g (48 GB
+        # or more) take the leg. With none online it waits, and after a day
+        # records nothing.
         include:
           - os: macos
-            runner: [self-hosted, macOS, ARM64]
+            runner: [self-hosted, macOS, ARM64, ram-48g]
           - os: ubuntu-24.04
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
