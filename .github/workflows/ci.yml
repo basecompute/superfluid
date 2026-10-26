@@ -27,11 +27,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build
       - name: cargo test
@@ -42,11 +42,11 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: basert adapter, daemon without it
         run: |
@@ -71,7 +71,7 @@ jobs:
             echo "$plan"
             echo "PLAN_EOF"
           } >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/superfluid-ci/llamacpp
           key: llamacpp-${{ runner.os }}-${{ runner.arch }}-${{ steps.llama.outputs.name }}
@@ -85,7 +85,7 @@ jobs:
           export SUPERFLUID_LLAMA_LIB="$dir/lib"
           cargo test -p superfluid-adapter-llamacpp -- --nocapture 2>&1 | python3 scripts/skip_report.py "llama.cpp adapter"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/superfluid-ci/adapter-python
           key: adapter-python-${{ hashFiles('crates/superfluid-adapters/superfluid-adapter-mlx/recipe.json') }}
