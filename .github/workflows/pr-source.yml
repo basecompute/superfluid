@@ -1,0 +1,36 @@
+name: PR source
+
+# main only takes release candidates: a PR into it must come from an rc-*
+# branch of this repository. This runs main's copy of the file
+# (pull_request_target), so a PR cannot edit the check it is judged by. It
+# never checks out or runs PR code, and needs no token permissions.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+
+permissions: {}
+
+jobs:
+  rc-only:
+    name: rc branch only
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require an rc-* branch of this repository
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "::error::PRs into main must come from a branch of $BASE_REPO, not a fork (${HEAD_REPO:-deleted}). Target the current rc-* branch instead."
+            exit 1
+          fi
+          case "$HEAD_REF" in
+            rc-*) echo "$HEAD_REF is a release candidate branch." ;;
+            *)
+              echo "::error::PRs into main must come from an rc-* branch, not '$HEAD_REF'. Target the current rc-* branch instead."
+              exit 1
+              ;;
+          esac
