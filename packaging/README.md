@@ -10,7 +10,7 @@ superfluid ships as GitHub release tarballs (`.github/workflows/release.yml`, `s
 
 `superfluid` is another project's name on both PyPI and npm, hence `superfluid-cli` and the `@basecompute` scope.
 
-Every package carries the release tree unchanged, so superfluid finds its runtime workers in `libexec/superfluid` beside its own `bin/` as it does in a tarball install, plus one file at the root, `installed-by` (`<manager>: <command>`). From the release after 0.1.4, `superfluid self update` reads it, leaves the copy to its package manager and names the command, and so does the line `serve` prints when a newer release is out. Without it, a package's layout looks like the install script's in-place copy, and `self update` would move it under `~/.superfluid/versions`.
+Every package carries the release tree unchanged, so superfluid finds its runtime workers in `libexec/superfluid` beside its own `bin/` as it does in a tarball install, plus one file at the root, `installed-by` (`<manager>: <command>`). From 0.1.5 on, `superfluid self update` reads it, leaves the copy to its package manager and names the command, and so does the line `serve` prints when a newer release is out. Without it, a package's layout looks like the install script's in-place copy, and `self update` would move it under `~/.superfluid/versions`.
 
 ## The scripts
 
@@ -37,7 +37,7 @@ The tests (`python3 -m unittest discover -s tests/scripts`) build every kind fro
 
 ## The workflow
 
-`publish.yml` runs when a release is published (release.yml leaves a draft, a person publishes it) and by hand for a tag. Every run downloads the tarballs, builds every package, checks the wheels with `twine check --strict`, and installs each kind on macOS 15, Ubuntu x86-64 and Ubuntu arm64 (brew on the first two). It uploads only when the repository variable `PUBLISH_ENABLED` is `true`, `dry_run` is not ticked, the release is published (not a draft or pre-release), and the run's commit is the one the tag names, so a manual run from a branch is always a dry run. The first release it can upload is therefore the first one tagged after this workflow landed. Each upload job checks what its registry has first, so a rerun only finishes what is missing:
+`publish.yml` runs when a release is published (release.yml leaves a draft, a person publishes it) and by hand for a tag. Every run downloads the tarballs, builds every package, checks the wheels with `twine check --strict`, and installs each kind on macOS 15, Ubuntu x86-64 and Ubuntu arm64 (brew on the first two). It uploads only when the repository variable `PUBLISH_ENABLED` is `true`, `dry_run` is not ticked, the release is published (not a draft or pre-release), and the run's commit is the one the tag names, so a manual run from a branch is always a dry run. The first release it can upload is therefore the first one tagged with this workflow in it, 0.1.5. Each upload job checks what its registry has first, so a rerun only finishes what is missing:
 
 - **PyPI**: trusted publishing, with attestations (the repository is public).
 - **npm**: platform packages first, then the main one, each with `--provenance`, skipping versions already there.
@@ -47,7 +47,7 @@ The tests (`python3 -m unittest discover -s tests/scripts`) build every kind fro
 
 1. **PyPI**: add a pending trusted publisher for the project `superfluid-cli` (PyPI, Publishing): owner `basecompute`, repository `superfluid`, workflow `publish.yml`, environment `pypi`.
 2. **npm**: create the `basecompute` organization on npmjs.com (baseRT's packages plan to use it too), and a granular access token that can publish to `@basecompute`. Store it as the secret `NPM_TOKEN` of the `npm` environment. Once the four packages exist, trusted publishing can replace the token.
-3. **Homebrew**: make `basecompute/homebrew-tap` public, or `brew tap basecompute/tap` fails for everyone outside the organization. Create a fine-grained token (or an app) with Contents and Pull requests write on the tap only, stored as the secret `HOMEBREW_TAP_TOKEN` of the `homebrew` environment.
+3. **Homebrew**: the tap is public, so `brew install basecompute/tap/superfluid` works for anyone. Create a fine-grained token (or an app) with Contents and Pull requests write on the tap only, stored as the secret `HOMEBREW_TAP_TOKEN` of the `homebrew` environment.
 4. **Environments**: create `pypi`, `npm` and `homebrew` under Settings, Environments, each limited to tags `v*`; add required reviewers to any you want a person to approve.
 5. Set the repository variable `PUBLISH_ENABLED` to `true`.
 

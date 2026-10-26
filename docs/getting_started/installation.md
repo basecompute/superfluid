@@ -39,7 +39,7 @@ npm install --global @basecompute/superfluid
 Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on PyPI and npm, hence `superfluid-cli` and `@basecompute/superfluid`. Update with the package manager (`brew upgrade superfluid`, `pip install --upgrade superfluid-cli`, `npm install --global @basecompute/superfluid@latest`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way superfluid came.
 
 > [!NOTE]
-> These packages are published from the first release after 0.1.4.
+> These packages are published from 0.1.5 on.
 
 ## cargo install
 

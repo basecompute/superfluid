@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.5
 
 - Each release is also published to PyPI (`superfluid-cli`), npm (`@basecompute/superfluid`, with one package per platform) and Homebrew (`basecompute/tap/superfluid`), repackaged from the release tarballs by `.github/workflows/publish.yml` and `packaging/`. A package carries an `installed-by` file at the release's root; `superfluid self update` leaves such a copy to its package manager and names the command that updates it, as the line `serve` prints for a newer release does. Before, a package's layout read as the install script's in-place copy, which `self update` would move under `~/.superfluid/versions`.
 - release.yml builds every crate from its packaged form in a `crates-verify` job before the crates.io upload, which runs no build script, and the jobs that publish are pinned to action commits and Rust 1.99.1.
