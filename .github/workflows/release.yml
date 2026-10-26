@@ -125,6 +125,9 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    # CARGO_REGISTRY_TOKEN lives in this environment, not the repository: only
+    # a v* tag or main can deploy to it, and a main-maintainer approves each run.
+    environment: crates-io
     steps:
       - uses: actions/checkout@v4
         with:
