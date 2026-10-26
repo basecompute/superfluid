@@ -6,10 +6,18 @@ name: Nightly runtimes
 # `workflow_dispatch` tests a named release. A schedule fires only from the
 # default branch, and a release the recipe already lists is a no-op.
 #
-# Two things this file cannot do for itself. A PR opened with the job's
-# GITHUB_TOKEN starts no workflow, so CI does not run on the nightly's PRs
-# until someone pushes to them; if required checks gate merging, the record
-# jobs need a GitHub App token or a PAT instead. And the macOS leg's runner is
+# The PRs go to the release being cut: the newest rc-X.Y.Z branch, or, with
+# none open, main, as drafts. The adapter is tested, and the recipe read and
+# changed, as that branch has them, whichever branch this file ran from; an
+# open PR follows when the branch changes.
+#
+# Two things this file cannot do for itself. The record jobs push, open PRs and
+# write issues with a token of a GitHub App installed on this repository, with
+# read and write on contents, pull requests and issues: its ID is the variable
+# NIGHTLY_APP_ID and its private key the secret NIGHTLY_APP_PRIVATE_KEY. The
+# job's GITHUB_TOKEN would not do: this repository does not let Actions open
+# PRs, and a PR or push made with it starts no workflow, so the checks main
+# requires would never run on the nightly's PRs. And the macOS leg's runner is
 # self-hosted on a public repository, where a fork's PR can edit a workflow to
 # run on it: require approval to run workflows from outside contributors
 # (Settings > Actions > General), and limit the runner's group to this
@@ -31,7 +39,7 @@ on:
 
 # Read-only by default: the test jobs build and run upstream code nobody has
 # tested yet, so they get no token that writes. The record jobs, which run only
-# this repository's code, get the write scopes they need.
+# this repository's code, write with the App's token.
 permissions:
   contents: read
 
@@ -52,12 +60,25 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      base: ${{ steps.base.outputs.base }}
       llamacpp: ${{ steps.llamacpp.outputs.version }}
       mlx: ${{ steps.mlx.outputs.version }}
       mlx_lm: ${{ steps.mlx.outputs.mlx_lm }}
     steps:
+      # The newest rc-X.Y.Z by version (rc-0.1.10 after rc-0.1.9), else main. A failed
+      # listing stops the run rather than reading as no release being cut.
+      - name: The branch the PRs go to
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/heads/rc-" --jq '.[].ref | ltrimstr("refs/heads/")')
+          rc=$(printf '%s\n' "$refs" | grep -E '^rc-[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          echo "base=${rc:-main}" | tee -a "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
+          ref: ${{ steps.base.outputs.base }}
           persist-credentials: false
       # pipefail: without it tee's success hides a pick that failed, and an empty
       # version reads as nothing new.
@@ -105,6 +126,7 @@ jobs:
       # rust-cache below); tracked files are still checked out as the commit has them.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.pick.outputs.base }}
           persist-credentials: false
           clean: ${{ runner.environment == 'github-hosted' }}
       # A self-hosted runner keeps the toolchain it has, where rustup puts it;
@@ -184,10 +206,9 @@ jobs:
     if: always() && needs.pick.outputs.llamacpp != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Writes go through the App's token; the job's own only reads the build's digests.
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
+      contents: read
     # Runs overlap, not their records: a run waits only to write a runtime's PR or
     # issue, so a macOS leg queued for a day (its runner offline) holds up no other
     # run, nor the MLX record.
@@ -197,29 +218,42 @@ jobs:
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
       RESULT: ${{ needs.llamacpp.result }}
-      GH_TOKEN: ${{ github.token }}
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      BASE: ${{ github.ref_name }}
+      BASE: ${{ needs.pick.outputs.base }}
     steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.NIGHTLY_APP_ID }}
+          private-key: ${{ secrets.NIGHTLY_APP_PRIVATE_KEY }}
+      # Left in .git/config, so the push to the PR's branch is the App's and CI runs on it.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.pick.outputs.base }}
+          token: ${{ steps.app.outputs.token }}
 
       - name: Passed, so add it to the recipe in a PR
         if: needs.llamacpp.result == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # One branch and one open PR per runtime: llama.cpp tags several builds a day and
           # each PR edits the same lines, so a newer build that passes replaces the one the
-          # open PR proposes. The title is the one `pick` looks for among closed PRs.
+          # open PR proposes, and a new release branch takes it over from the old one. The
+          # title is the one `pick` looks for among closed PRs.
           branch=nightly/llamacpp
           title="llamacpp: tested with $BUILD"
-          open=$(gh pr list --head "$branch" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          open=$(gh pr list --head "$branch" --state open --json number,baseRefName,title --jq '.[0] // empty | "\(.number) \(.baseRefName) \(.title)"') || { echo "::error::cannot list this repository's pull requests (is the nightly's App installed on it, with read and write on pull requests?)"; exit 1; }
           number=${open%% *}
-          if [ -n "$open" ] && [ "${open#* }" = "$title" ]; then
-            echo "PR #$number already proposes $BUILD"
+          on=${open#* }
+          if [ -n "$open" ] && [ "$on" = "$BASE $title" ]; then
+            echo "PR #$number already proposes $BUILD to $BASE"
             exit 0
           fi
           git switch -C "$branch"
-          GITHUB_TOKEN="$GH_TOKEN" python3 scripts/nightly_runtimes.py llamacpp append "$BUILD"
+          python3 scripts/nightly_runtimes.py llamacpp append "$BUILD"
           if git diff --quiet; then
             echo "the recipe on $BASE already lists $BUILD"
             exit 0
@@ -227,14 +261,23 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "$title"
           git push -f origin "$branch"
-          p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it on Apple silicon (Metal) and ubuntu-24.04 (CPU): $RUN"
+          p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it, as $BASE has them, on Apple silicon (Metal) and ubuntu-24.04 (CPU): $RUN"
           p2="This adds the build to the adapter's recipe as a tested build, with the size and SHA-256 GitHub lists for each of its assets, so the next release installs it on its own. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
           body="$p1"$'\n\n'"$p2"
+          draft=
+          if [ "$BASE" = main ]; then
+            draft=--draft
+            body="$body"$'\n\n'"No rc-X.Y.Z branch is open, so this is a draft against main; the first nightly to pass once one is cut moves it there."
+          fi
           if [ -n "$open" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" --silent
-            echo "PR #$number now proposes $BUILD"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" -f base="$BASE" --silent
+            # A PR that changes branch is a draft against main and ready against a release.
+            if [ "${on%% *}" != "$BASE" ]; then
+              if [ -n "$draft" ]; then gh pr ready "$number" --undo; else gh pr ready "$number"; fi
+            fi
+            echo "PR #$number now proposes $BUILD to $BASE"
           else
-            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body"
+            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body" $draft
           fi
 
       # Only a failure says the build breaks the adapter. A cancelled run, or the macOS
@@ -246,13 +289,15 @@ jobs:
 
       - name: Failed, so open an issue
         if: needs.llamacpp.result == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
           title="llama.cpp $BUILD breaks the adapter"
           # One open issue per runtime: a later build that fails too is a comment on it, since
           # the newest build is tested every night and the adapter may take days to catch up.
           # With none open, `.[0]` is null and would print "null null": `// empty` prints nothing.
-          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may the nightly's App write them?)"; exit 1; }
           if [ -n "$existing" ]; then
             number=${existing%% *}
             case "$existing" in *"$title"*) echo "an issue for $BUILD is already open: #$number"; exit 0;; esac
@@ -280,6 +325,7 @@ jobs:
       # The tests run an untested MLX from PyPI: the job's token is not left in .git/config for it.
       - uses: actions/checkout@v4
         with:
+          ref: ${{ needs.pick.outputs.base }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -349,10 +395,9 @@ jobs:
     if: always() && needs.pick.outputs.mlx != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # Writes go through the App's token, as for llama.cpp.
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
+      contents: read
     concurrency:
       group: nightly-record-mlx
       cancel-in-progress: false
@@ -360,10 +405,18 @@ jobs:
       VERSION: ${{ needs.pick.outputs.mlx }}
       MLX_LM: ${{ needs.pick.outputs.mlx_lm }}
       RESULT: ${{ needs.mlx.result }}
-      GH_TOKEN: ${{ github.token }}
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      BASE: ${{ needs.pick.outputs.base }}
     steps:
+      - uses: actions/create-github-app-token@v2
+        id: app
+        with:
+          app-id: ${{ vars.NIGHTLY_APP_ID }}
+          private-key: ${{ secrets.NIGHTLY_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.pick.outputs.base }}
+          token: ${{ steps.app.outputs.token }}
       - if: needs.mlx.result == 'success'
         uses: actions/download-artifact@v4
         with:
@@ -373,19 +426,21 @@ jobs:
       - name: Passed, so add it to the recipe in a PR
         if: needs.mlx.result == 'success'
         env:
-          BASE: ${{ github.ref_name }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
           # One branch and one open PR, as for llama.cpp: a newer version that passes
-          # replaces the one the open PR proposes. The mlx-lm is the one the tests ran with.
+          # replaces the one the open PR proposes, and a new release branch takes it over.
+          # The mlx-lm is the one the tests ran with.
           report="$RUNNER_TEMP/mlx/mlx-report.json"
           mlx_lm=$(jq -r '.install[].metadata | select(.name | ascii_downcase | gsub("[-_.]+"; "-") == "mlx-lm") | .version' "$report")
           branch=nightly/mlx
           title="mlx: tested with $VERSION and mlx-lm $mlx_lm"
-          open=$(gh pr list --head "$branch" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's pull requests (may Actions open them? see Settings > Actions > General)"; exit 1; }
+          open=$(gh pr list --head "$branch" --state open --json number,baseRefName,title --jq '.[0] // empty | "\(.number) \(.baseRefName) \(.title)"') || { echo "::error::cannot list this repository's pull requests (is the nightly's App installed on it, with read and write on pull requests?)"; exit 1; }
           number=${open%% *}
-          if [ -n "$open" ] && [ "${open#* }" = "$title" ]; then
-            echo "PR #$number already proposes MLX $VERSION with mlx-lm $mlx_lm"
+          on=${open#* }
+          if [ -n "$open" ] && [ "$on" = "$BASE $title" ]; then
+            echo "PR #$number already proposes MLX $VERSION with mlx-lm $mlx_lm to $BASE"
             exit 0
           fi
           git switch -C "$branch"
@@ -397,14 +452,22 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "$title"
           git push -f origin "$branch"
-          p1="The nightly job installed MLX $VERSION with mlx-lm $mlx_lm untested on macos-14 and ran the adapter's tests on it: $RUN"
+          p1="The nightly job installed MLX $VERSION with mlx-lm $mlx_lm untested on macos-14 and ran the adapter's tests on it, as $BASE has them: $RUN"
           p2="This adds the version to the adapter's recipe as a tested one, or replaces its entry for the newer mlx-lm: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
           body="$p1"$'\n\n'"$p2"
+          draft=
+          if [ "$BASE" = main ]; then
+            draft=--draft
+            body="$body"$'\n\n'"No rc-X.Y.Z branch is open, so this is a draft against main; the first nightly to pass once one is cut moves it there."
+          fi
           if [ -n "$open" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" --silent
-            echo "PR #$number now proposes MLX $VERSION with mlx-lm $mlx_lm"
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/pulls/$number" -f title="$title" -f body="$body" -f base="$BASE" --silent
+            if [ "${on%% *}" != "$BASE" ]; then
+              if [ -n "$draft" ]; then gh pr ready "$number" --undo; else gh pr ready "$number"; fi
+            fi
+            echo "PR #$number now proposes MLX $VERSION with mlx-lm $mlx_lm to $BASE"
           else
-            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body"
+            gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body" $draft
           fi
 
       - name: Did not finish, so record nothing
@@ -415,12 +478,14 @@ jobs:
         if: needs.mlx.result == 'failure'
         # Among the failures: an MLX that needs a newer Python than the
         # adapter ships, which is a change to the worker's build, not a pin.
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
           what="MLX $VERSION${MLX_LM:+ with mlx-lm $MLX_LM}"
           title="$what breaks the adapter"
           # One open issue per runtime: a later version that fails too is a comment on it.
-          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may Actions write them?)"; exit 1; }
+          existing=$(gh issue list --search "\"breaks the adapter\" MLX in:title" --state open --json number,title --jq '.[0] // empty | "\(.number) \(.title)"') || { echo "::error::cannot list this repository's issues (are issues enabled, and may the nightly's App write them?)"; exit 1; }
           if [ -n "$existing" ]; then
             number=${existing%% *}
             case "$existing" in *"$title"*) echo "an issue for $what is already open: #$number"; exit 0;; esac
