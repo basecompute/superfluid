@@ -122,6 +122,13 @@ superfluid top --api-key "$KEY" 10.0.0.11:8453 10.0.0.12:8453
 
 Polls each node's `/metrics` once a second and shows one row per node: state (`up`, `401`, `down`), KV pool, decode tok/s, lanes and queue depth, plus a fleet throughput sparkline. `q` or `Esc` quits.
 
+Given a [fleet head](../serving/distributed_serving.md), one address shows every node joined to it, from the head's own `/metrics`; with no address at all, `top` finds the head on the local network:
+
+```sh
+superfluid top --api-key "$KEY"            # the fleet head announced on this network
+superfluid top --api-key "$KEY" 10.0.0.10:8453   # a head, by address
+```
+
 ## Health and status endpoints
 
 | endpoint | returns |

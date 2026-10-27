@@ -14,10 +14,11 @@ name: Nightly runtimes
 # Two things this file cannot do for itself. The record jobs push, open PRs and
 # write issues with a token of a GitHub App installed on this repository, with
 # read and write on contents, pull requests and issues: its ID is the variable
-# NIGHTLY_APP_ID and its private key the secret NIGHTLY_APP_PRIVATE_KEY. The
-# job's GITHUB_TOKEN would not do: this repository does not let Actions open
-# PRs, and a PR or push made with it starts no workflow, so the checks main
-# requires would never run on the nightly's PRs. And the macOS leg's runner is
+# NIGHTLY_APP_ID and its private key the secret NIGHTLY_APP_PRIVATE_KEY of the
+# nightly environment, which only main can deploy to. The job's GITHUB_TOKEN
+# would not do: this repository does not let Actions open PRs, and a PR or
+# push made with it starts no workflow, so the checks main requires would
+# never run on the nightly's PRs. And the macOS leg's runner is
 # self-hosted on a public repository, where a fork's PR can edit a workflow to
 # run on it: require approval to run workflows from outside contributors
 # (Settings > Actions > General), and limit the runner's group to this
@@ -210,6 +211,9 @@ jobs:
     if: always() && needs.pick.outputs.llamacpp != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # NIGHTLY_APP_PRIVATE_KEY lives in this environment, which only main can
+    # deploy to, so a workflow edited on another branch cannot read it.
+    environment: nightly
     # Writes go through the App's token; the job's own only reads the build's digests.
     permissions:
       contents: read
@@ -399,6 +403,7 @@ jobs:
     if: always() && needs.pick.outputs.mlx != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: nightly
     # Writes go through the App's token, as for llama.cpp.
     permissions:
       contents: read

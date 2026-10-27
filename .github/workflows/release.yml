@@ -117,19 +117,44 @@ jobs:
             dist/${{ steps.pack.outputs.name }}.compat.json
             dist/superfluid-basert-abi-*.txt
 
+  crates-verify:
+    # Packages every crate and builds each from its package, as crates.io will
+    # see it, with no token here: build scripts, ours and our dependencies',
+    # run in this job, so the upload below skips verification (--no-verify)
+    # and runs none of them. macOS, where the MLX adapter's crate builds too.
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_crates
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: 1.99.1
+      - run: cargo package --workspace --locked
+
   crates:
     # Each crate in dependency order, skipping the ones already published, so a
     # run cut short by crates.io's new-crate rate limit is finished by running it
-    # again.
+    # again. Actions are pinned to commits and the toolchain to a version: this
+    # job holds the crates.io token.
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_crates
-    needs: build
+    needs: [build, crates-verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    # CARGO_REGISTRY_TOKEN lives in this environment, not the repository: only
+    # a v* tag or main can deploy to it, and a main-maintainer approves each run.
+    environment: crates-io
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: 1.99.1
       # The crates come from the tag; the publishing script from the ref this
       # run was started on, so a fixed script can finish an older tag's publish.
       - name: Publish to crates.io
