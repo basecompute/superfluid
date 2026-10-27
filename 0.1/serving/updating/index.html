@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/logos/superfluid-logo.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2062,7 +2062,7 @@
 </code></pre></div>
 <p>A release is announced a few days after it is published, so early reports land first; <code>self update</code> installs it as soon as it is out. The check is skipped with <code>--offline</code> or <code>SUPERFLUID_NO_UPDATE_CHECK=1</code>, and it never delays serving. What it learned is in <code>$SUPERFLUID_HOME/update-check.json</code> and in <code>superfluid self list</code>.</p>
 <h2 id="other-ways-superfluid-was-installed">Other ways superfluid was installed<a class="headerlink" href="#other-ways-superfluid-was-installed" title="Permanent link">&para;</a></h2>
-<p><code>self update</code> only touches a superfluid under <code>versions/</code>. A copy the install script placed before versions existed (real files in <code>~/.local/bin</code>) is kept under <code>versions/</code> as the version it is by its first <code>self update</code>, so <code>self use</code> can go back to it, and the files in <code>~/.local/bin</code> become links; its workers in <code>~/.local/libexec/superfluid</code> stay while a server still runs from that copy. A superfluid from Homebrew, <code>cargo install</code> or a source build is updated the way it was installed, and the command says which.</p>
+<p><code>self update</code> only touches a superfluid under <code>versions/</code>. A copy the install script placed before versions existed (real files in <code>~/.local/bin</code>) is kept under <code>versions/</code> as the version it is by its first <code>self update</code>, so <code>self use</code> can go back to it, and the files in <code>~/.local/bin</code> become links; its workers in <code>~/.local/libexec/superfluid</code> stay while a server still runs from that copy. A superfluid from Homebrew or npm carries an <code>installed-by</code> file naming its package manager: <code>self update</code> leaves it to that manager and names the command (<code>brew upgrade superfluid</code>, <code>npm install --global @basecompute/superfluid@latest</code>), and the daily check's line names the same command. One from <code>cargo install</code> or a source build is updated the way it was installed, and the command says which.</p>
 <p><code>SUPERFLUID_RELEASES</code> names another release listing, a URL or a file in GitHub's releases JSON shape, for a mirror.</p>
 
 
@@ -2187,10 +2187,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "content.code.copy", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "content.code.copy", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>

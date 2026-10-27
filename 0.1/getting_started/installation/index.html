@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/logos/superfluid-logo.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -386,6 +386,17 @@
     <span class="md-ellipsis">
       
         Install a release
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#homebrew-or-npm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Homebrew or npm
       
     </span>
   </a>
@@ -2026,6 +2037,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#homebrew-or-npm" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Homebrew or npm
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#cargo-install" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2171,15 +2193,25 @@
 </tbody>
 </table>
 <p>Add <code>~/.local/bin</code> to your <code>PATH</code> if the script says it is missing.</p>
+<h2 id="homebrew-or-npm">Homebrew or npm<a class="headerlink" href="#homebrew-or-npm" title="Permanent link">&para;</a></h2>
+<p>The same prebuilt release, through a package manager:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>brew<span class="w"> </span>install<span class="w"> </span>basecompute/tap/superfluid
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>npm<span class="w"> </span>install<span class="w"> </span>--global<span class="w"> </span>@basecompute/superfluid
+</code></pre></div>
+<p>Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts <code>superfluid</code> on your <code>PATH</code>. <code>superfluid</code> is another project's name on npm, hence <code>@basecompute/superfluid</code>. Update with the package manager (<code>brew upgrade superfluid</code>, <code>npm install --global @basecompute/superfluid@latest</code>): <code>superfluid self update</code> leaves such a copy to it and says which command to run. Runtimes install under <code>~/.superfluid</code> whichever way superfluid came.</p>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>These packages are published from 0.1.5 on.</p>
+</div>
 <h2 id="cargo-install">cargo install<a class="headerlink" href="#cargo-install" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>cargo<span class="w"> </span>install<span class="w"> </span>superfluid
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>cargo<span class="w"> </span>install<span class="w"> </span>superfluid
 </code></pre></div>
 <p>Builds <code>superfluid</code>, <code>superfluid-workerd</code> and <code>superfluid-noded</code> from <a href="https://crates.io/crates/superfluid">crates.io</a> with the baseRT adapter and the terminal monitor; a C compiler is required. The llama.cpp and MLX workers are installed on first use, as with a release.</p>
 <h2 id="build-from-source">Build from source<a class="headerlink" href="#build-from-source" title="Permanent link">&para;</a></h2>
 <p>Requirements: Rust (stable) and a C compiler.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/basecompute/superfluid<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>superfluid
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>cargo<span class="w"> </span>build<span class="w"> </span>--release
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="nb">export</span><span class="w"> </span><span class="nv">PATH</span><span class="o">=</span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">/target/release:</span><span class="nv">$PATH</span><span class="s2">"</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/basecompute/superfluid<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>superfluid
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>cargo<span class="w"> </span>build<span class="w"> </span>--release
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="nb">export</span><span class="w"> </span><span class="nv">PATH</span><span class="o">=</span><span class="s2">"</span><span class="nv">$PWD</span><span class="s2">/target/release:</span><span class="nv">$PATH</span><span class="s2">"</span>
 </code></pre></div>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
@@ -2245,8 +2277,8 @@
 </tbody>
 </table>
 <p>The MLX worker links a CPython, so <code>cargo build</code> does not build it. To use MLX from a source build, stage it with the packaging script and install the runtime through it once:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>scripts/build_runtime_adapters.sh<span class="w"> </span>target/adapters
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nv">SUPERFLUID_WORKER_MLX</span><span class="o">=</span>target/adapters/superfluid-worker-mlx<span class="w"> </span>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>mlx
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>scripts/build_runtime_adapters.sh<span class="w"> </span>target/adapters
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="nv">SUPERFLUID_WORKER_MLX</span><span class="o">=</span>target/adapters/superfluid-worker-mlx<span class="w"> </span>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>mlx
 </code></pre></div>
 <div class="admonition warning">
 <p class="admonition-title">Warning</p>
@@ -2254,11 +2286,11 @@
 </div>
 <h2 id="install-a-runtime">Install a runtime<a class="headerlink" href="#install-a-runtime" title="Permanent link">&para;</a></h2>
 <p><code>superfluid serve</code> installs a runtime it has never seen (unless <code>--offline</code>). To install ahead of time:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>superfluid<span class="w"> </span>runtimes<span class="w">                              </span><span class="c1"># what is here, what is missing, and the fix</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>llamacpp<span class="w"> </span>--dry-run<span class="w">    </span><span class="c1"># print what would be fetched</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>llamacpp
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>mlx<span class="w">                   </span><span class="c1"># Apple silicon only</span>
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>basert
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>superfluid<span class="w"> </span>runtimes<span class="w">                              </span><span class="c1"># what is here, what is missing, and the fix</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>llamacpp<span class="w"> </span>--dry-run<span class="w">    </span><span class="c1"># print what would be fetched</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>llamacpp
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>mlx<span class="w">                   </span><span class="c1"># Apple silicon only</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>install<span class="w"> </span>basert
 </code></pre></div>
 <table>
 <thead>
@@ -2411,10 +2443,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "content.code.copy", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "content.code.copy", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>
