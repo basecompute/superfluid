@@ -287,7 +287,7 @@ Commands:
   self <action>        Update superfluid itself, or switch between the versions installed here
   session <action>     Inspect or export a session of a running server
   media <action>       Store or garbage-collect media on a running server
-  top <host:port>...   Monitor running servers in the terminal
+  top [<host:port>...] Monitor running servers, or a fleet, in the terminal
   help [<command>]     Show help for a command
 
 Options:
@@ -440,9 +440,11 @@ Options:
 
 pub const TOP_HELP: &str = "Monitor running servers in the terminal.
 
-Usage: superfluid top [--api-key <key>] <host:port> [<host:port> ...]
+Usage: superfluid top [--api-key <key>] [<host:port> ...]
 
-  Each address is a `superfluid serve` HTTP endpoint; q or Esc quits.
+  Each address is a `superfluid serve` HTTP endpoint; a fleet head's shows every node joined to
+  it, as they come and go. With no address, the fleet head on the local network is found and
+  shown. q or Esc quits.
 
 Options:
   --api-key <key>    Sent on every scrape, for servers behind --api-key
