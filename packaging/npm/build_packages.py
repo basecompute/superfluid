@@ -51,9 +51,11 @@ def write_json(path: Path, obj: dict) -> None:
 
 
 def pack(folder: Path, out: Path) -> Path:
-    """`npm pack` a staged folder into out; return the tarball."""
+    """`npm pack` a staged folder into out; return the tarball, under out as given."""
+    # npm runs inside the staged folder, so a relative out would name a folder
+    # under it: it gets the absolute path. publish.yml passes `out`.
     res = subprocess.run(
-        ["npm", "pack", "--json", "--ignore-scripts", "--pack-destination", str(out)],
+        ["npm", "pack", "--json", "--ignore-scripts", "--pack-destination", str(out.resolve())],
         cwd=folder, check=True, stdout=subprocess.PIPE, text=True,
     )
     name = json.loads(res.stdout)[0]["filename"]

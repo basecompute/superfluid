@@ -386,6 +386,24 @@ class BuildTest(Scratch):
         self.assertEqual(len(list((out / "npm").glob("*.tgz"))), 4)
         self.assertTrue((out / "homebrew" / "superfluid.rb").is_file())
 
+    @unittest.skipUnless(shutil.which("npm"), "needs npm")
+    def test_build_takes_relative_paths_from_the_working_directory(self):
+        # publish.yml runs `build.py assets out --version "$V"` from the checkout.
+        # npm pack ran inside the staged package, so a relative out named a
+        # folder under it and the first tarball failed with ENOENT.
+        make_all(self.tmp / "assets", "2.0.0")
+        p = subprocess.run([sys.executable, str(PACKAGING / "build.py"), "assets", "out", "--version", "2.0.0"],
+                           cwd=self.tmp, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = self.tmp / "out"
+        self.assertEqual(len(list((out / "pypi").glob("*.whl"))), 3)
+        self.assertEqual(len(list((out / "npm").glob("*.tgz"))), 4)
+        self.assertTrue((out / "homebrew" / "superfluid.rb").is_file())
+        # It prints each package under out as given, and each is there.
+        printed = p.stdout.splitlines()
+        self.assertEqual(len(printed), 8, p.stdout)
+        self.assertTrue(all(not Path(line).is_absolute() and (self.tmp / line).is_file() for line in printed), p.stdout)
+
     def test_build_stops_at_the_first_problem_with_one_line(self):
         make_release(self.tmp / "assets", "aarch64-apple-darwin", "2.0.0")
         p = subprocess.run([sys.executable, str(PACKAGING / "build.py"), str(self.tmp / "assets"), str(self.tmp / "out"), "--version", "2.0.1", "--only", "pypi"],
