@@ -59,6 +59,7 @@ Pulling happens during `superfluid serve`; there is no separate `pull` command.
 | `basert` | `basert pull`, then `basert list --json` for the path | a variant | `--pull-target <scheme>`, `--pull-profile <json>`, `--pull-revision <rev>`, `--pull-file <name.base>` (one of several in a repo; served from the install `basert list` records it in), `--pull-force` | the baseRT models cache (`BASERT_MODELS_DIR`) |
 
 - `--offline` only looks in the cache and fetches nothing.
+- A baseRT variant is named as `basert list` names it (`default-q8`, `file-…`). One that is installed is served without a pull (unless `--pull-force`); one that is not is pulled as named with basert 0.4.2 or later (`basert pull org/model:<variant>`, without `--pull-file`, `--pull-profile` or `--pull-target`, which would name it twice), and with an older basert by the id alone, which fetches the quant its options pick.
 - An undeclared `--pull-*` option, or `--pull-*` with no model given by id, is refused before anything is fetched.
 - A gated or private model needs `HF_TOKEN`.
 - One pull of an id runs at a time across daemons.
