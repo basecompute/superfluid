@@ -26,17 +26,16 @@ Prebuilt tarballs exist for macOS arm64 and Linux x86-64 and arm64 (glibc 2.28 o
 
 Add `~/.local/bin` to your `PATH` if the script says it is missing.
 
-## Homebrew, pip or npm
+## Homebrew or npm
 
 The same prebuilt release, through a package manager:
 
 ```sh
 brew install basecompute/tap/superfluid
-pipx install superfluid-cli                   # or pip install / uv tool install superfluid-cli
 npm install --global @basecompute/superfluid
 ```
 
-Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on PyPI and npm, hence `superfluid-cli` and `@basecompute/superfluid`. Update with the package manager (`brew upgrade superfluid`, `pip install --upgrade superfluid-cli`, `npm install --global @basecompute/superfluid@latest`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way superfluid came.
+Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on npm, hence `@basecompute/superfluid`. Update with the package manager (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way superfluid came.
 
 > [!NOTE]
 > These packages are published from 0.1.5 on.
