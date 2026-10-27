@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../../assets/logos/superfluid-logo.svg">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -31,10 +31,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -2110,7 +2110,7 @@
 <p>On each node:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>superfluid<span class="w"> </span>node<span class="w"> </span>join<span class="w"> </span>--model<span class="w"> </span>unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M<span class="w"> </span>--token<span class="w"> </span>&lt;the<span class="w"> </span>token&gt;
 </code></pre></div>
-<p>The node finds the head on the local network (<code>_superfluid-fleet._tcp</code>, or give <code>&lt;host:port&gt;</code> as the first argument), pulls the model as <code>serve</code> would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as <code>joined:&lt;identity&gt;</code> and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; <code>--model-name</code> overrides that. A head with no token takes nodes from its own machine only.</p>
+<p>The node finds the head on the local network (<code>_superfluid-fleet._tcp</code>, which also carries the head's HTTP port for <code>superfluid top</code>, or give <code>&lt;host:port&gt;</code> as the first argument), pulls the model as <code>serve</code> would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as <code>joined:&lt;identity&gt;</code> and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; <code>--model-name</code> overrides that. A head with no token takes nodes from its own machine only.</p>
 <table>
 <thead>
 <tr>
@@ -2324,8 +2324,9 @@
 <ul>
 <li><code>POST /v1/chat/completions</code>, streaming or not, with tools (<a href="../openai_compatible_server/">OpenAI API</a>).</li>
 <li><code>GET /v1/models</code>: the one model the fleet serves.</li>
+<li><code>GET /metrics</code>: each node as the head sees it, labelled <code>node</code> and <code>addr</code>: <code>superfluid_fleet_node_up</code>, <code>_lanes</code>, <code>_lanes_active</code>, <code>_queue_depth</code>, <code>_pool_blocks_used</code>, <code>_pool_blocks_total</code> and <code>_decode_tokens_total</code>. A streamed generation's tokens count as they arrive; a non-streamed one's when it ends, as the node sends them in one reply. The KV pool is the node's latest status, sent every 2 s. <code>superfluid top</code> pointed at the head, or run with no address on the head's network, shows every node from it.</li>
 </ul>
-<p>Refused with 400: non-zero <code>presence_penalty</code>/<code>frequency_penalty</code>, a <code>repeat_penalty</code> other than 1.0, <code>ignore_eos</code>, <code>stream_options.continuous_usage_stats</code>, and image or audio parts. Not read: <code>logprobs</code>, <code>logit_bias</code>, <code>response_format</code>, <code>tool_choice</code>. There is no <code>/health</code>, <code>/metrics</code>, Anthropic, Ollama, embeddings, files or batches surface on the head. A generation has a ten-minute wall-clock ceiling.</p>
+<p>Refused with 400: non-zero <code>presence_penalty</code>/<code>frequency_penalty</code>, a <code>repeat_penalty</code> other than 1.0, <code>ignore_eos</code>, <code>stream_options.continuous_usage_stats</code>, and image or audio parts. Not read: <code>logprobs</code>, <code>logit_bias</code>, <code>response_format</code>, <code>tool_choice</code>. There is no <code>/health</code>, Anthropic, Ollama, embeddings, files or batches surface on the head. A generation has a ten-minute wall-clock ceiling.</p>
 <h2 id="failure-handling">Failure handling<a class="headerlink" href="#failure-handling" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2490,10 +2491,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "content.code.copy", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.top", "navigation.footer", "content.code.copy", "search.highlight", "toc.follow"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>
