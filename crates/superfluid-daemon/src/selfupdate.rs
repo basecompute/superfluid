@@ -21,6 +21,9 @@ pub const NO_CHECK_ENV: &str = "SUPERFLUID_NO_UPDATE_CHECK";
 /// Where the release listing is read from, for a mirror or a test: a URL or a file.
 pub const LISTING_ENV: &str = "SUPERFLUID_RELEASES";
 const LINKED: &[&str] = &["superfluid", "superfluid-workerd", "superfluid-noded"];
+/// The file at the root of a release a package manager installed (Homebrew, pip, npm), one line `<manager>: <command>`:
+/// the copy is that manager's to update, with that command.
+pub const INSTALLED_BY: &str = "installed-by";
 /// How long a new copy's `--version` or `runtimes --json` may take: it runs under the lock, which a copy that hangs
 /// would hold for every later update. Longer than the runtime checks `runtimes --json` makes, a minute each at most.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -284,7 +287,7 @@ pub enum Installed {
     Managed { versions: PathBuf, version: String },
     /// The install script's layout before versions existed: real files in `<prefix>/bin` and `<prefix>/libexec/superfluid`.
     InPlace { prefix: PathBuf },
-    /// A package manager, `cargo install`, or a source build.
+    /// A package manager (an `installed-by` file says which), `cargo install`, or a source build.
     Other(PathBuf),
 }
 
@@ -297,6 +300,10 @@ pub fn installed_as(exe: &Path) -> Installed {
         return Installed::Managed { versions, version: parts[n - 3].to_string_lossy().to_string() };
     }
     if let Some(prefix) = exe.parent().filter(|b| b.file_name().is_some_and(|n| n == "bin")).and_then(Path::parent) {
+        // A package keeps the release's layout too, so it is told apart by its file, not by where it is.
+        if prefix.join(INSTALLED_BY).is_file() {
+            return Installed::Other(exe);
+        }
         if prefix.join("libexec").join("superfluid").is_dir() {
             return Installed::InPlace { prefix: prefix.to_path_buf() };
         }
@@ -304,8 +311,25 @@ pub fn installed_as(exe: &Path) -> Installed {
     Installed::Other(exe)
 }
 
+/// The package manager that installed `exe` and the command that updates it, from the `installed-by` file at the root
+/// of its release.
+fn package_manager(exe: &Path) -> Option<(String, String)> {
+    let line = std::fs::read_to_string(exe.parent()?.parent()?.join(INSTALLED_BY)).ok()?;
+    let (manager, command) = line.trim().split_once(": ")?;
+    Some((manager.trim().to_string(), command.trim().to_string()))
+}
+
+/// The command that updates the running superfluid, for the line `serve` prints when a newer release is out.
+fn update_command(exe: &Path) -> String {
+    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    package_manager(&exe).map(|(_, command)| command).unwrap_or_else(|| "superfluid self update".to_string())
+}
+
 fn not_ours(exe: &Path) -> String {
     let p = exe.to_string_lossy();
+    if let Some((manager, command)) = package_manager(exe) {
+        return format!("{p} was installed by {manager}; `{command}` updates it");
+    }
     let how = if p.contains("/Cellar/") || p.contains("/homebrew/") || p.contains("/linuxbrew/") {
         "Homebrew installed it: `brew upgrade superfluid`"
     } else if p.contains("/.cargo/bin/") {
@@ -1057,15 +1081,15 @@ pub fn check_now(home: &Path, catalog: &Catalog, hold_off: Option<i64>, source: 
     Ok(check)
 }
 
-/// The one line `serve` prints when a newer release is out, once per release.
-fn announce(home: &Path, mut check: Check) -> Option<String> {
+/// The one line `serve` prints when a newer release is out, once per release; `command` installs it.
+fn announce(home: &Path, mut check: Check, command: &str) -> Option<String> {
     let newer = check.newer()?.to_string();
     if check.notified.as_deref() == Some(newer.as_str()) {
         return None;
     }
     check.notified = Some(newer.clone());
     let _ = check.write(home);
-    Some(format!("superfluid {newer} is available (this is {}): `superfluid self update` installs it; {NO_CHECK_ENV}=1 silences this", running()))
+    Some(format!("superfluid {newer} is available (this is {}): `{command}` installs it; {NO_CHECK_ENV}=1 silences this", running()))
 }
 
 /// What `serve` runs once the server is up: one listing read a day at most, one line per new release.
@@ -1087,9 +1111,10 @@ pub fn check_in_background(home: PathBuf, offline: bool) {
 
 /// One round: the cache when not yet due, else the listing; the line to print for a release not yet announced.
 pub fn tick(home: &Path, catalog: &Catalog, source: &str) -> Option<String> {
+    let command = update_command(&std::env::current_exe().unwrap_or_default());
     match Check::read(home).filter(|c| !c.due()) {
-        Some(cached) => announce(home, cached),
-        None => announce(home, check_now(home, catalog, Some(HOLD_OFF_DAYS), source).ok()?),
+        Some(cached) => announce(home, cached, &command),
+        None => announce(home, check_now(home, catalog, Some(HOLD_OFF_DAYS), source).ok()?, &command),
     }
 }
 
@@ -1276,6 +1301,20 @@ mod tests {
         std::fs::write(&other, "").unwrap();
         assert!(matches!(installed_as(&other), Installed::Other(_)));
         assert!(not_ours(&other).contains("brew upgrade superfluid"));
+        // A package keeps the release's layout, and its `installed-by` file says whose it is.
+        let packaged = release_tree(&dir.join("site-packages").join("superfluid_cli").join("release"), "0.1.3").join("bin").join("superfluid");
+        assert!(matches!(installed_as(&packaged), Installed::InPlace { .. }), "without the file it looks like the install script's copy");
+        std::fs::write(dir.join("site-packages").join("superfluid_cli").join("release").join(INSTALLED_BY), "pip: pip install --upgrade superfluid-cli\n").unwrap();
+        assert!(matches!(installed_as(&packaged), Installed::Other(_)));
+        let packaged = std::fs::canonicalize(&packaged).unwrap();
+        assert_eq!(not_ours(&packaged), format!("{} was installed by pip; `pip install --upgrade superfluid-cli` updates it", packaged.display()));
+        assert_eq!(update_command(&packaged), "pip install --upgrade superfluid-cli");
+        assert_eq!(update_command(&in_place), "superfluid self update");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let refused = update(&home, &catalog, &packaged, &Options::default()).unwrap_err();
+        assert!(refused.contains("installed by pip"), "{refused}");
+        assert!(list(&home, &packaged).contains("`pip install --upgrade superfluid-cli` updates it"));
         assert!(running_from(std::env::current_exe().unwrap().parent().unwrap()) || true, "other processes may or may not run from here");
         assert!(!running_from(&dir.join("nowhere")));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1689,9 +1728,11 @@ mod tests {
         assert_eq!(c.newest.as_deref(), Some("99.0.0"), "99.1.0 is inside the hold-off");
         assert!(!c.due());
         assert_eq!(Check::read(&home), Some(c.clone()));
-        let line = announce(&home, c.clone()).unwrap();
+        let line = announce(&home, c.clone(), "superfluid self update").unwrap();
         assert!(line.starts_with("superfluid 99.0.0 is available (this is ") && line.contains("`superfluid self update`"), "{line}");
-        assert_eq!(announce(&home, Check::read(&home).unwrap()), None, "announced once");
+        assert_eq!(announce(&home, Check::read(&home).unwrap(), "superfluid self update"), None, "announced once");
+        let again = Check { notified: None, ..c.clone() };
+        assert!(announce(&home, again, "brew upgrade superfluid").unwrap().contains("`brew upgrade superfluid` installs it"));
         assert!(Check::read(&home).unwrap().describe().starts_with("newest release: 99.0.0 (published 2026-01-01;"));
         let stale = Check { checked_at: 1, ..Check::default() };
         assert!(stale.due());

@@ -120,7 +120,7 @@ pub fn render_prometheus(s: &SchedStats) -> String {
     out
 }
 
-fn label_escape(s: &str) -> String {
+pub(crate) fn label_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
 }
 

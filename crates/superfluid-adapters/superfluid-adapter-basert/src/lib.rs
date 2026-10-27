@@ -106,22 +106,16 @@ impl Runtime for Basert {
         let (id, variant) = pull.split()?;
         let tool = basert_tool()?;
         if !pull.offline {
-            let mut cmd = std::process::Command::new(&tool);
-            cmd.arg("pull").arg(id);
-            for (name, value) in &pull.options {
-                cmd.arg(format!("--{name}"));
-                cmd.args(value);
+            let installed = if variant.is_some() { installed_list(&tool).unwrap_or_default() } else { String::new() };
+            if needs_pull(&installed, id, variant, pull.option("force").is_some()) {
+                let version = if variant.is_some() { tool_version(&tool) } else { String::new() };
+                let args = pull_args(pull, id, variant, &version);
+                let mut cmd = std::process::Command::new(&tool);
+                cmd.arg("pull").args(&args);
+                superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {}", args[0]))?;
             }
-            superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {id}"))?;
         }
-        let list = std::process::Command::new(&tool)
-            .args(["list", "--json"])
-            .output()
-            .map_err(|e| format!("basert list --json: {e}"))?;
-        if !list.status.success() {
-            return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
-        }
-        let list = String::from_utf8_lossy(&list.stdout);
+        let list = installed_list(&tool)?;
         // a file taken by name is served from the install basert records it in
         match (variant, pull.option("file").flatten()) {
             (None, Some(file)) => installed_file(&list, id, file),
@@ -138,6 +132,67 @@ impl Runtime for Basert {
         // The pins alone, offline: `plan` would consult the release listing when a pin fails.
         recipe::versions(host)
     }
+}
+
+/// What `basert list --json` prints.
+fn installed_list(tool: &std::path::Path) -> Result<String, String> {
+    let list = std::process::Command::new(tool)
+        .args(["list", "--json"])
+        .output()
+        .map_err(|e| format!("basert list --json: {e}"))?;
+    if !list.status.success() {
+        return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&list.stdout).into_owned())
+}
+
+/// Whether `basert pull` has to run for `id[:variant]`. A named variant that is installed already is
+/// used as it is: a basert before 0.4.2 takes no variant, so pulling would fetch another quant, or fail
+/// where the repo has no default one (a `file-…` variant taken with `--file`), and a later one leaves
+/// it as it is. `--force` always pulls.
+fn needs_pull(list_json: &str, id: &str, variant: Option<&str>, force: bool) -> bool {
+    force || variant.is_none() || installed_path(list_json, id, variant).is_err()
+}
+
+/// What follows `basert pull` for `id[:variant]`. A basert whose `--version` printed `version`
+/// takes the variant with the id when [`takes_variant`] says so, with every option but `--file`,
+/// `--profile` and `--target`, which it refuses beside a variant as naming it twice; an older one
+/// takes the id alone, with every option.
+fn pull_args(pull: &Pull, id: &str, variant: Option<&str>, version: &str) -> Vec<String> {
+    let variant = variant.filter(|_| takes_variant(version));
+    let mut args = vec![variant.map_or_else(|| id.to_string(), |v| format!("{id}:{v}"))];
+    for (name, value) in &pull.options {
+        if variant.is_some() && ["file", "profile", "target"].contains(&name.as_str()) {
+            continue;
+        }
+        args.push(format!("--{name}"));
+        args.extend(value.clone());
+    }
+    args
+}
+
+/// Whether the basert whose `--version` printed `version` (`basert 0.4.2`) takes `pull <id>:<variant>`,
+/// as 0.4.2 and later do. A pre-release of 0.4.2 may predate it, and output naming no version is
+/// taken as an older basert's.
+fn takes_variant(version: &str) -> bool {
+    let Some(v) = version.split_whitespace().find(|w| w.starts_with(|c: char| c.is_ascii_digit())) else {
+        return false;
+    };
+    let v = v.split_once('+').map_or(v, |(v, _build)| v);
+    let (core, pre) = v.split_once('-').map_or((v, false), |(core, _)| (core, true));
+    let parts: Result<Vec<u64>, _> = core.split('.').map(str::parse).collect();
+    matches!(parts.as_deref(), Ok(&[major, minor, patch]) if (major, minor, patch, !pre) >= (0, 4, 2, true))
+}
+
+/// What `basert --version` prints, or nothing when it fails.
+fn tool_version(tool: &std::path::Path) -> String {
+    std::process::Command::new(tool)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 /// The `.base` file `basert list --json` holds for `id` that was pulled from `file`, matched
@@ -323,7 +378,8 @@ mod tests {
 
 #[cfg(test)]
 mod pull_tests {
-    use super::{installed_file, installed_path};
+    use super::{installed_file, installed_path, needs_pull, pull_args, takes_variant, Basert};
+    use superfluid_adapter_kit::{Pull, Runtime};
 
     #[test]
     fn a_named_file_is_served_from_the_install_basert_records_it_in() {
@@ -371,6 +427,47 @@ mod pull_tests {
         assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q4/model.base");
         let l = list(&[("org/a", "default-q8", true), ("org/a", "default-f16", true)]);
         assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q8/model.base");
+    }
+
+    #[test]
+    fn an_installed_named_variant_is_not_pulled_again() {
+        let l = list(&[("org/a", "file-a-medium-6583221f", true), ("org/b", "default-q4", false)]);
+        assert!(!needs_pull(&l, "org/a", Some("file-a-medium-6583221f"), false));
+        assert!(needs_pull(&l, "org/a", Some("file-a-medium-6583221f"), true), "--force pulls");
+        assert!(needs_pull(&l, "org/a", None, false), "a bare id pulls (its default quant may be newer)");
+        assert!(needs_pull(&l, "org/a", Some("default-q8"), false), "a variant not here pulls");
+        assert!(needs_pull(&l, "org/b", Some("default-q4"), false), "a variant listed but not installed pulls");
+        assert!(needs_pull("", "org/a", Some("file-a-medium-6583221f"), false), "no list: pull as before");
+    }
+
+    #[test]
+    fn basert_takes_a_variant_with_the_id_from_0_4_2() {
+        for v in ["basert 0.4.2\n", "basert 0.4.3", "basert 0.10.0\n", "basert 1.0.0", "basert 0.4.3-rc.1", "0.4.2"] {
+            assert!(takes_variant(v), "{v:?}");
+        }
+        for v in ["basert 0.4.1\n", "basert 0.3.10", "basert 0.4.2-rc.779", "", "basert", "basert unknown", "basert 0.4", "basert 0.4.x", "garbage"] {
+            assert!(!takes_variant(v), "{v:?}");
+        }
+    }
+
+    /// What follows `basert pull` for the pull `args`, given the basert that printed `version`.
+    fn argv(args: &str, version: &str) -> String {
+        let args: Vec<String> = args.split(' ').map(str::to_string).collect();
+        let pull = Pull::parse(&args, Basert.pull_options().unwrap()).unwrap();
+        let (id, variant) = pull.split().unwrap();
+        pull_args(&pull, id, variant, version).join(" ")
+    }
+
+    #[test]
+    fn a_named_variant_is_pulled_as_named_where_basert_takes_one() {
+        let every = "--target base-q8 --profile p.json --revision v1 --file a-Medium.base --force";
+        let named = format!("org/a:file-a-medium-6583221f {every}");
+        let as_named = "org/a:file-a-medium-6583221f --revision v1 --force";
+        assert_eq!(argv(&named, "basert 0.4.2\n"), as_named, "--file, --profile and --target would name the variant twice");
+        assert_eq!(argv(&named, "basert 0.10.0\n"), as_named);
+        assert_eq!(argv(&named, "basert 0.4.1\n"), format!("org/a {every}"), "an older basert takes the id alone");
+        assert_eq!(argv(&named, "garbage"), format!("org/a {every}"), "so does one that names no version");
+        assert_eq!(argv(&format!("org/a {every}"), "basert 0.4.2\n"), format!("org/a {every}"), "a bare id is pulled as before");
     }
 
     #[test]

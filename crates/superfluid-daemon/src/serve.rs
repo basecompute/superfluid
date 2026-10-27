@@ -1239,7 +1239,9 @@ pub fn run(args: &[String], embedding: &Embedding) {
             eprintln!("superfluid: fleet head takes joining nodes on {listen}");
             let (m, a, name) = (Arc::clone(&manager), auth.clone(), model_name.clone());
             std::thread::spawn(move || superfluid_daemon::fleet_join::accept_nodes(listener, m, a, name));
-            match superfluid_daemon::fleet_mdns::advertise(port, &model_name) {
+            // `superfluid top` finds the head's API by this; one on loopback is no use off this machine.
+            let http_port = addr.parse::<std::net::SocketAddr>().ok().filter(|a| !a.ip().is_loopback()).map(|a| a.port());
+            match superfluid_daemon::fleet_mdns::advertise(port, &model_name, http_port) {
                 Ok(d) => Some(d),
                 Err(e) => {
                     eprintln!("superfluid: not announced on the local network ({e}); give nodes this head's address");

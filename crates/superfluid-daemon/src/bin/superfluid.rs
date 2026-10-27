@@ -543,8 +543,9 @@ fn main() {
 fn top_cmd(args: &[String]) {
     let usage = || -> ! {
         eprintln!(
-            "usage: superfluid top [--api-key <key>] <host:port> [<host:port> ...]   \
-             (each a `serve --http` endpoint; the key opens a keyed node's /metrics)"
+            "usage: superfluid top [--api-key <key>] [<host:port> ...]   \
+             (each a `serve --http` endpoint, a fleet head standing for its nodes; none finds \
+             the fleet head on the local network; the key opens a keyed server's /metrics)"
         );
         std::process::exit(2);
     };
@@ -563,7 +564,27 @@ fn top_cmd(args: &[String]) {
         }
     }
     if nodes.is_empty() {
-        usage();
+        eprintln!("superfluid top: looking for a fleet head on the local network");
+        // The first address the head's API answers on; an announced one may be unroutable here.
+        let answers = |a: &&std::net::SocketAddr| {
+            std::net::TcpStream::connect_timeout(a, std::time::Duration::from_secs(1)).is_ok()
+        };
+        match superfluid_daemon::fleet_mdns::find_head(std::time::Duration::from_secs(5)) {
+            Ok(head) => match head.http.iter().find(answers).or(head.http.first()) {
+                Some(http) => nodes.push(http.to_string()),
+                None => {
+                    eprintln!(
+                        "superfluid top: the head at {} announces no HTTP API off loopback; give its address",
+                        head.nodes[0]
+                    );
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("superfluid top: {e}; give a server's address");
+                std::process::exit(1);
+            }
+        }
     }
     if let Err(e) = superfluid_daemon::tui_top::run(nodes, api_key) {
         eprintln!("superfluid top: {e}");

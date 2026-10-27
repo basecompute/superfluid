@@ -65,6 +65,16 @@ impl NodeLoad {
     }
 }
 
+/// Keeps `node`'s live load from each status `head` reads; weak, as the node owns the head.
+fn watch(node: &Arc<NodeConn>, head: &mut FleetHead) {
+    let node = Arc::downgrade(node);
+    head.on_status(Arc::new(move |cap| {
+        if let Some(node) = node.upgrade() {
+            *node.live.lock().expect("live") = FleetManager::load_from(cap);
+        }
+    }));
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeSpec {
     pub addr: String,
@@ -77,6 +87,11 @@ struct NodeConn {
     /// How many of `conns` are in use: the count asked for, or the node's lanes once learned.
     open: std::sync::atomic::AtomicUsize,
     cursor: std::sync::atomic::AtomicUsize,
+    /// Tokens this node has generated for the head, for `/metrics`.
+    decoded: std::sync::atomic::AtomicU64,
+    /// The last status any of its connections read, mid-generation included, for `/metrics`;
+    /// the load placement reads is synced from a connection between calls.
+    live: Mutex<NodeLoad>,
 }
 
 impl NodeMeta {
@@ -234,6 +249,24 @@ pub const RETRY_DOWN_AFTER: std::time::Duration = std::time::Duration::from_secs
 /// Under the node's idle timeout (120 s by default), so an idle head keeps its connections.
 pub const KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// One node as the head sees it now, for `/metrics`.
+#[derive(Debug, Clone)]
+pub struct NodeStatus {
+    /// The node's identity, or the address the head dials while it has not answered.
+    pub name: String,
+    /// The address it joined from or is dialed at.
+    pub addr: String,
+    pub up: bool,
+    /// Connections open to it: its lanes, once it answered.
+    pub lanes: usize,
+    /// Generations the head has in flight there.
+    pub lanes_active: u32,
+    pub queue_depth: u32,
+    pub kv_blocks_used: u64,
+    pub kv_blocks_total: u64,
+    pub decode_tokens: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeReport {
     pub addr: String,
@@ -276,6 +309,8 @@ impl FleetManager {
                         .collect(),
                     open: std::sync::atomic::AtomicUsize::new(conns_per_node.max(1)),
                     cursor: std::sync::atomic::AtomicUsize::new(0),
+                    decoded: std::sync::atomic::AtomicU64::new(0),
+                    live: Mutex::new(NodeLoad::default()),
                 })
             })
             .collect();
@@ -339,6 +374,8 @@ impl FleetManager {
                         conns: (0..lanes).map(|_| Mutex::new(None)).collect(),
                         open: std::sync::atomic::AtomicUsize::new(1),
                         cursor: std::sync::atomic::AtomicUsize::new(0),
+                        decoded: std::sync::atomic::AtomicU64::new(0),
+                        live: Mutex::new(NodeLoad::default()),
                     }));
                     // Listed as down until its connection is in place, so no request lands
                     // on an empty slot meanwhile.
@@ -354,6 +391,8 @@ impl FleetManager {
         };
         self.sync_meta(i, &head);
         let node = self.node(i);
+        let mut head = head;
+        watch(&node, &mut head);
         let mut slot = 0;
         for (s, conn) in node.conns.iter().enumerate() {
             if conn.lock().expect("node conn").is_none() {
@@ -387,6 +426,36 @@ impl FleetManager {
             }
         }
         counts
+    }
+
+    /// Every node the head knows, in the order it learned them.
+    pub fn status(&self) -> Vec<NodeStatus> {
+        let nodes: Vec<Arc<NodeConn>> = self.nodes.read().expect("nodes").clone();
+        let sh = self.shared.lock().expect("shared");
+        nodes
+            .iter()
+            .zip(&sh.meta)
+            .zip(&sh.inflight)
+            .map(|((node, meta), &inflight)| {
+                let live = *node.live.lock().expect("live");
+                let load = if live.at > meta.load.at { live } else { meta.load };
+                let addr = match (&meta.peer, node.spec.addr.strip_prefix(JOINED)) {
+                    (Some(peer), Some(_)) => peer.to_string(),
+                    _ => node.spec.addr.clone(),
+                };
+                NodeStatus {
+                    name: if meta.identity.is_empty() { addr.clone() } else { meta.identity.clone() },
+                    addr,
+                    up: meta.up() && meta.learned,
+                    lanes: node.open.load(Ordering::Relaxed),
+                    lanes_active: inflight,
+                    queue_depth: load.queue_depth,
+                    kv_blocks_used: load.kv_used,
+                    kv_blocks_total: load.kv_total,
+                    decode_tokens: node.decoded.load(Ordering::Relaxed),
+                }
+            })
+            .collect()
     }
 
     pub fn node_of(&self, session: u64) -> Option<String> {
@@ -457,7 +526,8 @@ impl FleetManager {
             return Err(e);
         }
         match FleetHead::connect(&spec.addr, spec.auth.clone()) {
-            Ok(head) => {
+            Ok(mut head) => {
+                watch(&node, &mut head);
                 self.sync_meta(i, &head);
                 *guard = Some(head);
                 Ok(())
@@ -972,6 +1042,9 @@ impl FleetManager {
         self.rebind_on(session, &mut guard)?;
         let head = guard.as_mut().expect("connected");
         let r = head.generate(session, max_new_tokens, max_wall_ms);
+        if let Ok(g) = &r {
+            node_conn.decoded.fetch_add(g.tokens.len() as u64, Ordering::Relaxed);
+        }
         if let Err(e) = &r {
             if is_fatal_node(e) {
                 *guard = None;
@@ -1104,7 +1177,7 @@ impl FleetManager {
         max_new_tokens: u64,
         max_wall_ms: u64,
         flag: &AtomicBool,
-        on_tokens: impl FnMut(&[u32]),
+        mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let _inflight = InFlight::guard(&self.shared, node, session);
         let node_conn = self.node(node);
@@ -1112,7 +1185,11 @@ impl FleetManager {
         self.ensure_connected(node, &mut guard)?;
         self.rebind_on(session, &mut guard)?;
         let head = guard.as_mut().expect("connected");
-        let r = head.generate_streaming(session, max_new_tokens, max_wall_ms, flag, on_tokens);
+        let decoded = &node_conn.decoded;
+        let r = head.generate_streaming(session, max_new_tokens, max_wall_ms, flag, |b: &[u32]| {
+            decoded.fetch_add(b.len() as u64, Ordering::Relaxed);
+            on_tokens(b);
+        });
         if let Err(e) = &r {
             if is_fatal_node(e) {
                 *guard = None;
@@ -1305,7 +1382,8 @@ impl FleetManager {
                         return;
                     }
                     match FleetHead::connect(&spec.addr, spec.auth.clone()) {
-                        Ok(head) => {
+                        Ok(mut head) => {
+                            watch(&node, &mut head);
                             self.sync_meta(i, &head);
                             self.mark_up(i);
                             if let Ok(mut slot) = node.conns[0].try_lock() {
