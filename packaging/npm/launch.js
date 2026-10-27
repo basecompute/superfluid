@@ -71,11 +71,12 @@ module.exports = function launch(command) {
   }
 
   const child = spawn(exe, process.argv.slice(2), { stdio: "inherit" });
-  // A terminal's Ctrl-C and Ctrl-\ reach the whole foreground group, child
-  // included, so this process only outlives them; a signal sent to this
-  // process alone (a supervisor's SIGTERM) is passed on.
-  for (const signal of ["SIGINT", "SIGQUIT"]) process.on(signal, () => {});
-  for (const signal of ["SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
+  // Every signal sent to this process is passed on, so one sent to it alone
+  // (`kill -INT <pid>`, a supervisor's SIGTERM) reaches superfluid as it would
+  // without this launcher. A terminal's Ctrl-C and Ctrl-\ reach the child
+  // through the foreground group as well; the copy passed on finds it ending
+  // already, or gone, which kill() reports as false.
+  for (const signal of ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
   child.on("error", (e) => fail(`could not start ${exe}: ${e.message}`));
   child.on("exit", (code, signal) => {
     if (signal) {

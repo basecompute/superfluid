@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -285,8 +286,8 @@ class LauncherTest(Scratch):
         self.assertEqual(p.returncode, 1)
         self.assertIn("pip install --force-reinstall superfluid-cli", p.stderr)
 
-    @unittest.skipUnless(shutil.which("node"), "needs node")
-    def test_the_npm_launcher_runs_this_platforms_package(self):
+    def npm_fixture(self) -> tuple[Path, Path, str]:
+        """node_modules as npm lays it out for this machine: the launcher's bin/superfluid-noded.js, the platform package, its name."""
         key = {("darwin", "arm64"), ("linux", "x86_64"), ("linux", "aarch64")}
         machine = (sys.platform if sys.platform != "linux" else "linux", os.uname().machine)
         if machine not in key:
@@ -301,12 +302,65 @@ class LauncherTest(Scratch):
         (modules / "superfluid" / "bin").mkdir()
         bin_js = modules / "superfluid" / "bin" / "superfluid-noded.js"
         bin_js.write_text('require("../lib/launch.js")("superfluid-noded");\n')
+        return bin_js, platform_pkg, f"@basecompute/superfluid-{npm_platform}"
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_npm_launcher_runs_this_platforms_package(self):
+        bin_js, platform_pkg, name = self.npm_fixture()
         p = subprocess.run(["node", str(bin_js), "a b", "--c"], capture_output=True, text=True)
         self.assertEqual((p.returncode, p.stdout), (7, "ran superfluid-noded a b --c\n"), p.stderr)
         shutil.rmtree(platform_pkg)
         p = subprocess.run(["node", str(bin_js)], capture_output=True, text=True)
         self.assertEqual(p.returncode, 1)
-        self.assertIn(f"@basecompute/superfluid-{npm_platform} is not installed", p.stderr)
+        self.assertIn(f"{name} is not installed", p.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_npm_launcher_passes_on_signals_from_a_terminal_and_from_kill(self):
+        # The stand-in records each signal it gets and exits as a shell does
+        # for it. A terminal's Ctrl-C reaches the whole foreground group; a
+        # supervisor's kill(2), or Popen.send_signal, reaches the launcher alone.
+        bin_js, platform_pkg, _ = self.npm_fixture()
+        log = self.tmp / "signals"
+        # It says "ready" once the sleep it waits on has a pid, so a signal that
+        # follows finds $pid set, and the sleep ends with it: left behind, it
+        # would outlive the test, and its output goes nowhere so it can never
+        # hold the launcher's pipes.
+        (platform_pkg / "release" / "bin" / "superfluid-noded").write_text(
+            "#!/bin/sh\n"
+            f'trap \'echo INT >> "{log}"; kill $pid; exit 130\' INT\n'
+            f'trap \'echo TERM >> "{log}"; kill $pid; exit 143\' TERM\n'
+            "sleep 30 > /dev/null 2>&1 & pid=$!\n"
+            "echo ready\n"
+            "wait $pid\n"
+        )
+
+        def launch(**kw) -> subprocess.Popen:
+            p = subprocess.Popen(["node", str(bin_js)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kw)
+            self.addCleanup(p.kill)
+            self.assertEqual(p.stdout.readline(), "ready\n")
+            return p
+
+        def ended(p: subprocess.Popen) -> tuple[int, list[str], str]:
+            _, err = p.communicate(timeout=10)
+            got = log.read_text().split() if log.is_file() else []
+            log.unlink(missing_ok=True)
+            return p.returncode, got, err
+
+        # kill(2) to the launcher's pid alone, as a supervisor or a script sends it.
+        p = launch()
+        p.send_signal(signal.SIGINT)
+        code, got, err = ended(p)
+        self.assertEqual((code, got), (130, ["INT"]), err)
+        p = launch()
+        p.send_signal(signal.SIGTERM)
+        code, got, err = ended(p)
+        self.assertEqual((code, got), (143, ["TERM"]), err)
+        # The whole process group, as a terminal delivers Ctrl-C: the child
+        # gets its own copy and the launcher's, and ends once.
+        p = launch(start_new_session=True)
+        os.killpg(p.pid, signal.SIGINT)
+        code, got, err = ended(p)
+        self.assertEqual((code, got[:1]), (130, ["INT"]), err)
 
 
 @unittest.skipUnless(shutil.which("npm"), "needs npm")
