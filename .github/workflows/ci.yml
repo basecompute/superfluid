@@ -17,6 +17,11 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_INCREMENTAL: "0"
 
+# No job here writes with the GITHUB_TOKEN, so it holds only what checkout
+# needs; without this it holds whatever the repository's default grants.
+permissions:
+  contents: read
+
 jobs:
   core:
     name: build, clippy, test (${{ matrix.os }})
