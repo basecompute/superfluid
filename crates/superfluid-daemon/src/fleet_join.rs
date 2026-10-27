@@ -146,8 +146,8 @@ impl Target {
         }
         let mut found = self.found.lock().expect("head addrs");
         if *found == tried {
-            if let Ok((addrs, _)) = crate::fleet_mdns::find_head(DISCOVER) {
-                *found = addrs;
+            if let Ok(head) = crate::fleet_mdns::find_head(DISCOVER) {
+                *found = head.nodes;
             }
         }
     }
@@ -170,9 +170,9 @@ fn discover() -> (Vec<SocketAddr>, String) {
     eprintln!("superfluid: looking for a fleet head on the local network");
     loop {
         match crate::fleet_mdns::find_head(DISCOVER) {
-            Ok((addrs, served)) => {
-                eprintln!("superfluid: found the head at {}, serving {served}", addrs[0]);
-                return (addrs, served);
+            Ok(head) => {
+                eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.model);
+                return (head.nodes, head.model);
             }
             Err(e) => eprintln!("superfluid: {e}; looking again"),
         }

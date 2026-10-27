@@ -15,7 +15,7 @@
 | `superfluid self <subcommand>` | update superfluid itself, or switch between the versions installed here |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
 | `superfluid media <subcommand>` | store media in, or sweep, a running server's media pool |
-| `superfluid top <host:port>...` | live monitor over one or more servers |
+| `superfluid top [<host:port>...]` | live monitor over one or more servers, or a fleet |
 
 ```sh
 superfluid --help                 # command overview (also: superfluid, superfluid help)
@@ -289,10 +289,10 @@ superfluid media gc [--socket <path>]            # sweep blobs no session refere
 ## `superfluid top`
 
 ```sh
-superfluid top [--api-key <key>] <host:port> [<host:port> ...]
+superfluid top [--api-key <key>] [<host:port> ...]
 ```
 
-Live per-node view over each server's `/metrics`. A keyed node needs `--api-key`, else it shows as `401`. `q` or `Esc` quits.
+Live per-node view over each server's `/metrics`. A [fleet head](distributed_serving.md)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds the fleet head on the local network. A keyed server needs `--api-key`, else it shows as `401`. `q` or `Esc` quits.
 
 ## `superfluid-workerd` and `superfluid-noded`
 

@@ -38,8 +38,12 @@ fn noded_process_serves_a_fleet_generation() {
     let max = 12u32;
     let (local_tokens, _) = local_mock().generate_tokens(prompt.clone(), params, max, 0).unwrap();
 
+    // A home of its own: a fleet token in the developer's would make the node demand one.
+    let home = empty_home("generation");
     let mut child = Command::new(env!("CARGO_BIN_EXE_superfluid-noded"))
         .args(["--listen", "127.0.0.1:0", "--engine", "mock", "--identity", "proc-node"])
+        .env("HOME", &home)
+        .env("SUPERFLUID_HOME", home.join(".superfluid"))
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn superfluid-noded");
