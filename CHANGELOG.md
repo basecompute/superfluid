@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5
+
+- A baseRT model named with its variant (`org/model:<variant>`) that is installed already is served as it is, as `--offline` serves it: `serve` no longer runs `basert pull`, which takes no variant and fetched the default quant instead, and failed for a repo that has none, such as a `file-…` variant taken with `--pull-file` (`no pre-converted .base for quant "q4"`). `--pull-force` still pulls.
+
 ## 0.1.4
 
 - `superfluid serve` takes `--pull-file <name>` for a baseRT model: one `.base` from a repo that holds several, such as one whose files are named by size (`Foo-Medium.base`) rather than by quant. It is passed to `basert pull --file`, and the model is served from the install `basert list --json` records that file in. It needs basert 0.4.1 or later.

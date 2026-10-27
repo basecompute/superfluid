@@ -106,22 +106,18 @@ impl Runtime for Basert {
         let (id, variant) = pull.split()?;
         let tool = basert_tool()?;
         if !pull.offline {
-            let mut cmd = std::process::Command::new(&tool);
-            cmd.arg("pull").arg(id);
-            for (name, value) in &pull.options {
-                cmd.arg(format!("--{name}"));
-                cmd.args(value);
+            let installed = if variant.is_some() { installed_list(&tool).unwrap_or_default() } else { String::new() };
+            if needs_pull(&installed, id, variant, pull.option("force").is_some()) {
+                let mut cmd = std::process::Command::new(&tool);
+                cmd.arg("pull").arg(id);
+                for (name, value) in &pull.options {
+                    cmd.arg(format!("--{name}"));
+                    cmd.args(value);
+                }
+                superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {id}"))?;
             }
-            superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {id}"))?;
         }
-        let list = std::process::Command::new(&tool)
-            .args(["list", "--json"])
-            .output()
-            .map_err(|e| format!("basert list --json: {e}"))?;
-        if !list.status.success() {
-            return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
-        }
-        let list = String::from_utf8_lossy(&list.stdout);
+        let list = installed_list(&tool)?;
         // a file taken by name is served from the install basert records it in
         match (variant, pull.option("file").flatten()) {
             (None, Some(file)) => installed_file(&list, id, file),
@@ -138,6 +134,26 @@ impl Runtime for Basert {
         // The pins alone, offline: `plan` would consult the release listing when a pin fails.
         recipe::versions(host)
     }
+}
+
+/// What `basert list --json` prints.
+fn installed_list(tool: &std::path::Path) -> Result<String, String> {
+    let list = std::process::Command::new(tool)
+        .args(["list", "--json"])
+        .output()
+        .map_err(|e| format!("basert list --json: {e}"))?;
+    if !list.status.success() {
+        return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&list.stdout).into_owned())
+}
+
+/// Whether `basert pull` has to run for `id[:variant]`. It takes no variant and fetches the quant its
+/// flags pick, so a named variant that is installed already is used as it is: pulling would fetch
+/// another quant, or fail where the repo has no default one (a `file-…` variant taken with `--file`).
+/// `--force` always pulls.
+fn needs_pull(list_json: &str, id: &str, variant: Option<&str>, force: bool) -> bool {
+    force || variant.is_none() || installed_path(list_json, id, variant).is_err()
 }
 
 /// The `.base` file `basert list --json` holds for `id` that was pulled from `file`, matched
@@ -323,7 +339,7 @@ mod tests {
 
 #[cfg(test)]
 mod pull_tests {
-    use super::{installed_file, installed_path};
+    use super::{installed_file, installed_path, needs_pull};
 
     #[test]
     fn a_named_file_is_served_from_the_install_basert_records_it_in() {
@@ -371,6 +387,17 @@ mod pull_tests {
         assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q4/model.base");
         let l = list(&[("org/a", "default-q8", true), ("org/a", "default-f16", true)]);
         assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q8/model.base");
+    }
+
+    #[test]
+    fn an_installed_named_variant_is_not_pulled_again() {
+        let l = list(&[("org/a", "file-a-medium-6583221f", true), ("org/b", "default-q4", false)]);
+        assert!(!needs_pull(&l, "org/a", Some("file-a-medium-6583221f"), false));
+        assert!(needs_pull(&l, "org/a", Some("file-a-medium-6583221f"), true), "--force pulls");
+        assert!(needs_pull(&l, "org/a", None, false), "a bare id pulls (its default quant may be newer)");
+        assert!(needs_pull(&l, "org/a", Some("default-q8"), false), "a variant not here pulls");
+        assert!(needs_pull(&l, "org/b", Some("default-q4"), false), "a variant listed but not installed pulls");
+        assert!(needs_pull("", "org/a", Some("file-a-medium-6583221f"), false), "no list: pull as before");
     }
 
     #[test]
