@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use superfluid_linkf::{Endpoint, HeadSession};
+use superfluid_linkf::{Endpoint, HeadSession, Liveness};
 use superfluid_proto::handshake::HelloAckF;
 use superfluid_proto::linkf::{
     self, msg_type, AppendContentMsg, GenerateCancelMsg, GenerationBudgetsMsg, Lease, TokenEventPayload,
@@ -61,6 +61,7 @@ pub struct FleetHead {
     addr: String,
     auth: Vec<u8>,
     on_status: Option<StatusHook>,
+    liveness: Liveness,
 }
 
 /// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
@@ -149,7 +150,8 @@ impl FleetHead {
         Ok(FleetHead::from_parts(endpoint, node, String::new(), auth))
     }
 
-    fn from_parts(endpoint: Endpoint, node: HelloAckF, addr: String, auth: Vec<u8>) -> FleetHead {
+    fn from_parts(mut endpoint: Endpoint, node: HelloAckF, addr: String, auth: Vec<u8>) -> FleetHead {
+        endpoint.keep_alive(Liveness::DEFAULT);
         FleetHead {
             head: fresh_session_state(),
             endpoint,
@@ -159,7 +161,44 @@ impl FleetHead {
             addr,
             auth,
             on_status: None,
+            liveness: Liveness::DEFAULT,
         }
+    }
+
+    /// How long the head waits on a peer that says nothing where its silence does not end the
+    /// wait (a version 2 node): the silence limit, or the default one when that is off.
+    fn grace(&self) -> std::time::Duration {
+        match self.liveness.silence {
+            t if t.is_zero() => Liveness::DEFAULT.silence,
+            t => t,
+        }
+    }
+
+    /// When the head stops waiting on a generation: [`Self::grace`] past its own wall-clock
+    /// budget, as the node ends it at the budget, so one that has not by then never will.
+    fn wall_deadline(&self, max_wall_ms: u64) -> Option<std::time::Instant> {
+        (max_wall_ms > 0)
+            .then(|| std::time::Instant::now() + std::time::Duration::from_millis(max_wall_ms) + self.grace())
+    }
+
+    /// The next frames the node sends, or `TimedOut` when none come `within`.
+    fn frames_within(&mut self, within: std::time::Duration) -> Result<Vec<superfluid_proto::Frame>, DaemonError> {
+        let by = std::time::Instant::now() + within;
+        loop {
+            let frames = self.endpoint.pump()?;
+            if !frames.is_empty() {
+                return Ok(frames);
+            }
+            if std::time::Instant::now() >= by {
+                return Err(superfluid_linkf::LinkFError::TimedOut.into());
+            }
+        }
+    }
+
+    /// Keeps this connection, and the ones that replace it, alive as `liveness` says.
+    pub fn keep_alive(&mut self, liveness: Liveness) {
+        self.liveness = liveness;
+        self.endpoint.keep_alive(liveness);
     }
 
     /// Tells `hook` every status the node sends from now on, over this connection and the ones
@@ -178,27 +217,40 @@ impl FleetHead {
         &self.node
     }
 
-    /// Reads what the node sent while the connection sat idle; an error means it is gone.
+    /// Reads what the node sent while the connection sat idle, which also sends it a heartbeat
+    /// when one is due; an error means it is gone.
     pub fn drain_status(&mut self) -> Result<(), DaemonError> {
         for frame in self.endpoint.pump()? {
-            if frame.msg_type == msg_type::NODE_STATUS {
-                if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload) {
-                    self.node.capacity = m.capacity;
-                            if let Some(hook) = &self.on_status {
-                                hook(&self.node.capacity);
-                            }
-                    if !m.loadable_models.is_empty() {
-                        self.node.loadable_models = m.loadable_models;
-                    }
-                }
-            }
+            self.absorb(frame)?;
         }
         Ok(())
     }
 
-    pub fn keepalive(&mut self) -> Result<(), DaemonError> {
-        self.endpoint.send(msg_type::KEEPALIVE, &())?;
-        self.drain_status()
+    /// Takes what any read of the link can carry, a status or a lease renewal, and hands back
+    /// the frames left for the caller.
+    fn absorb(&mut self, frame: superfluid_proto::Frame) -> Result<Option<superfluid_proto::Frame>, DaemonError> {
+        match frame.msg_type {
+            msg_type::NODE_STATUS => {
+                if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload) {
+                    self.node.capacity = m.capacity;
+                    if let Some(hook) = &self.on_status {
+                        hook(&self.node.capacity);
+                    }
+                    if !m.loadable_models.is_empty() {
+                        self.node.loadable_models = m.loadable_models;
+                    }
+                }
+                Ok(None)
+            }
+            msg_type::LEASE_RENEW => {
+                let m: linkf::LeaseRenewMsg = postcard::from_bytes(&frame.payload)?;
+                if let Some(grant) = self.head.on_lease_renew(&m) {
+                    self.endpoint.send(msg_type::LEASE_GRANT, &grant)?;
+                }
+                Ok(None)
+            }
+            _ => Ok(Some(frame)),
+        }
     }
 
     pub fn knows(&self, session_id: u64) -> bool {
@@ -214,7 +266,8 @@ impl FleetHead {
                 why: "dialed in on its own; waiting for it to join again".into(),
             });
         }
-        let (endpoint, node) = handshake(addr, auth)?;
+        let (mut endpoint, node) = handshake(addr, auth)?;
+        endpoint.keep_alive(self.liveness);
         self.node = node;
         self.endpoint = endpoint;
         let rec = self.head.reconcile();
@@ -224,7 +277,8 @@ impl FleetHead {
             std::collections::BTreeSet::new();
         let ack = loop {
             let mut got = None;
-            for frame in self.endpoint.wait_frames()? {
+            for frame in self.frames_within(self.grace())? {
+                let Some(frame) = self.absorb(frame)? else { continue };
                 match frame.msg_type {
                     msg_type::RECONCILE_ACK => {
                         got = Some(postcard::from_bytes::<linkf::ReconcileAckMsg>(&frame.payload)?);
@@ -261,7 +315,8 @@ impl FleetHead {
             }
         }
         while !expected.is_empty() {
-            for frame in self.endpoint.wait_frames()? {
+            for frame in self.frames_within(self.grace())? {
+                let Some(frame) = self.absorb(frame)? else { continue };
                 if frame.msg_type != msg_type::TOKEN_EVENTS {
                     continue;
                 }
@@ -467,7 +522,11 @@ impl FleetHead {
         let mut finish = 0u32;
         let mut done = false;
         let mut cancel_sent = false;
+        let deadline = self.wall_deadline(max_wall_ms);
         while !done {
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Err(superfluid_linkf::LinkFError::TimedOut.into());
+            }
             if !cancel_sent && cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 self.endpoint.send(
                     msg_type::GENERATE_CANCEL,
@@ -475,48 +534,30 @@ impl FleetHead {
                 )?;
                 cancel_sent = true;
             }
-            for frame in self.endpoint.wait_frames()? {
-                match frame.msg_type {
-                    msg_type::TOKEN_EVENTS => {
-                        let m: linkf::TokenEventsMsg = postcard::from_bytes(&frame.payload)?;
-                        for ev in &m.events {
-                            if ev.session_id == session_id && ev.generation_id == generation_id {
-                                match &ev.payload {
-                                    TokenEventPayload::Tokens(t) => {
-                                        tokens.extend_from_slice(t);
-                                        on_tokens(t);
-                                    }
-                                    TokenEventPayload::Finish { reason } => {
-                                        finish = *reason;
-                                        done = true;
-                                    }
-                                    _ => {}
-                                }
+            // One read at a time, not a wait for frames: a version 2 node is never given up for
+            // silence, so the deadline above is what ends a wait on one that went quiet.
+            for frame in self.endpoint.pump()? {
+                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKEN_EVENTS) else {
+                    continue;
+                };
+                let m: linkf::TokenEventsMsg = postcard::from_bytes(&frame.payload)?;
+                for ev in &m.events {
+                    if ev.session_id == session_id && ev.generation_id == generation_id {
+                        match &ev.payload {
+                            TokenEventPayload::Tokens(t) => {
+                                tokens.extend_from_slice(t);
+                                on_tokens(t);
                             }
-                        }
-                        for ack in self.head.on_token_events(&m) {
-                            self.endpoint.send(msg_type::WATERMARK_ACK, &ack)?;
+                            TokenEventPayload::Finish { reason } => {
+                                finish = *reason;
+                                done = true;
+                            }
+                            _ => {}
                         }
                     }
-                    msg_type::LEASE_RENEW => {
-                        let m: linkf::LeaseRenewMsg = postcard::from_bytes(&frame.payload)?;
-                        if let Some(grant) = self.head.on_lease_renew(&m) {
-                            self.endpoint.send(msg_type::LEASE_GRANT, &grant)?;
-                        }
-                    }
-                    msg_type::NODE_STATUS => {
-                        if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload)
-                        {
-                            self.node.capacity = m.capacity;
-                            if let Some(hook) = &self.on_status {
-                                hook(&self.node.capacity);
-                            }
-                            if !m.loadable_models.is_empty() {
-                                self.node.loadable_models = m.loadable_models;
-                            }
-                        }
-                    }
-                    _ => {}
+                }
+                for ack in self.head.on_token_events(&m) {
+                    self.endpoint.send(msg_type::WATERMARK_ACK, &ack)?;
                 }
             }
         }
@@ -544,6 +585,7 @@ impl FleetHead {
         self.endpoint.send(msg_type::STAGE_FORWARD_REQ, &req)?;
         loop {
             for frame in self.endpoint.wait_frames()? {
+                let Some(frame) = self.absorb(frame)? else { continue };
                 if frame.msg_type == msg_type::STAGE_FORWARD_RESP {
                     let m: linkf::StageForwardRespMsg = postcard::from_bytes(&frame.payload)?;
                     if m.request_id != request_id {
@@ -652,46 +694,32 @@ impl FleetHead {
         let mut finish = 0u32;
         let mut expired = false;
         let mut done = false;
+        let deadline = self.wall_deadline(max_wall_ms);
         while !done {
-            for frame in self.endpoint.wait_frames()? {
-                match frame.msg_type {
-                    msg_type::TOKEN_EVENTS => {
-                        let m: linkf::TokenEventsMsg = postcard::from_bytes(&frame.payload)?;
-                        for ev in &m.events {
-                            if ev.session_id == session_id && ev.generation_id == generation_id {
-                                match &ev.payload {
-                                    TokenEventPayload::Tokens(t) => tokens.extend_from_slice(t),
-                                    TokenEventPayload::Finish { reason } => {
-                                        finish = *reason;
-                                        done = true;
-                                    }
-                                    _ => {}
-                                }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Err(superfluid_linkf::LinkFError::TimedOut.into());
+            }
+            // One read at a time, not a wait for frames: a version 2 node is never given up for
+            // silence, so the deadline above is what ends a wait on one that went quiet.
+            for frame in self.endpoint.pump()? {
+                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKEN_EVENTS) else {
+                    continue;
+                };
+                let m: linkf::TokenEventsMsg = postcard::from_bytes(&frame.payload)?;
+                for ev in &m.events {
+                    if ev.session_id == session_id && ev.generation_id == generation_id {
+                        match &ev.payload {
+                            TokenEventPayload::Tokens(t) => tokens.extend_from_slice(t),
+                            TokenEventPayload::Finish { reason } => {
+                                finish = *reason;
+                                done = true;
                             }
-                        }
-                        for ack in self.head.on_token_events(&m) {
-                            self.endpoint.send(msg_type::WATERMARK_ACK, &ack)?;
+                            _ => {}
                         }
                     }
-                    msg_type::LEASE_RENEW => {
-                        let m: linkf::LeaseRenewMsg = postcard::from_bytes(&frame.payload)?;
-                        if let Some(grant) = self.head.on_lease_renew(&m) {
-                            self.endpoint.send(msg_type::LEASE_GRANT, &grant)?;
-                        }
-                    }
-                    msg_type::NODE_STATUS => {
-                        if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload)
-                        {
-                            self.node.capacity = m.capacity;
-                            if let Some(hook) = &self.on_status {
-                                hook(&self.node.capacity);
-                            }
-                            if !m.loadable_models.is_empty() {
-                                self.node.loadable_models = m.loadable_models;
-                            }
-                        }
-                    }
-                    _ => {}
+                }
+                for ack in self.head.on_token_events(&m) {
+                    self.endpoint.send(msg_type::WATERMARK_ACK, &ack)?;
                 }
             }
         }

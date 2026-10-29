@@ -64,7 +64,7 @@ superfluid-noded: node 'box-a' serving 'unsloth/Qwen3.8-27B-GGUF' on 100.64.0.2:
 | `--auth-file <path>` | `$SUPERFLUID_HOME/fleet/token` | the fleet token; with it the link is encrypted and both ends are checked |
 | `--insecure-no-auth` | off | accept any peer on a non-loopback address |
 | `--handshake-timeout-ms <N>` | 10000 | time a connecting head has to say hello |
-| `--idle-timeout-ms <N>` | 120000 | drop an idle connection |
+| `--idle-timeout-ms <N>` | 30000 | drop a connection the head has said nothing on for this long; keep it well above the head's 5 s heartbeat |
 
 Nodes can run different runtimes for the same model, such as a Mac on baseRT with the `.base` build and a Linux box on llama.cpp with a GGUF. Give each the same `--model-name`. The head sends token ids, so the builds must share the model's tokenizer, which builds of one model do; nothing checks this yet. Each node's answers follow its own build's quantization.
 
@@ -124,9 +124,10 @@ Refused with 400: non-zero `presence_penalty`/`frequency_penalty`, a `repeat_pen
 | node fails mid-stream | delivered tokens become context; the session is re-placed on the next capable node, which generates the rest. No token is delivered twice |
 | node unreachable | skipped; the head tries it again every 10 s and uses it once it answers |
 | node restarts | comes back empty; the head reconnects and new placements use it |
-| connection idle | the head sends a keepalive every 15 s, under the node's `--idle-timeout-ms`; a connection a node closed anyway is replaced before it is used |
+| connection idle or busy | each end sends a heartbeat when it has sent nothing for 5 s, during a generation too; a connection a node closed anyway is replaced before it is used |
+| node goes silent | after 30 s with nothing from it, the head gives the connection up and re-places what ran there, as for a node that failed |
 | head restarts | in-flight requests fail; placement state is lost |
-| head misses a lease renewal | the node fences the session and emits nothing more |
+| head misses a lease renewal | the node fences the session and emits nothing more; the head stops waiting 30 s past the generation's wall-clock budget |
 
 ## Limits
 

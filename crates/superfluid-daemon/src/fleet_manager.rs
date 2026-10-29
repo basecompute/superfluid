@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use superfluid_linkf::Liveness;
 use superfluid_proto::linkf::Lease;
 
 use crate::fleet::{FleetGeneration, FleetHead};
@@ -175,7 +176,7 @@ pub struct FleetManager {
     nodes: std::sync::RwLock<Vec<Arc<NodeConn>>>,
     conns_by_lanes: bool,
     retry_every: std::time::Duration,
-    last_keepalive: Mutex<std::time::Instant>,
+    liveness: Liveness,
     shared: Mutex<Shared>,
     policy: PlacementPolicy,
     lease: Lease,
@@ -246,9 +247,6 @@ const JOINED: &str = "joined:";
 /// How often the background retry tries a node that failed.
 pub const RETRY_DOWN_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Under the node's idle timeout (120 s by default), so an idle head keeps its connections.
-pub const KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
-
 /// One node as the head sees it now, for `/metrics`.
 #[derive(Debug, Clone)]
 pub struct NodeStatus {
@@ -318,7 +316,7 @@ impl FleetManager {
             nodes: std::sync::RwLock::new(nodes),
             conns_by_lanes: conns_per_node == 0,
             retry_every: RETRY_DOWN_AFTER,
-            last_keepalive: Mutex::new(std::time::Instant::now()),
+            liveness: Liveness::DEFAULT,
             shared: Mutex::new(Shared {
                 meta,
                 sessions: BTreeMap::new(),
@@ -392,6 +390,7 @@ impl FleetManager {
         self.sync_meta(i, &head);
         let node = self.node(i);
         let mut head = head;
+        head.keep_alive(self.liveness);
         watch(&node, &mut head);
         let mut slot = 0;
         for (s, conn) in node.conns.iter().enumerate() {
@@ -471,6 +470,13 @@ impl FleetManager {
         self
     }
 
+    /// How the head's connections are kept alive (default [`Liveness::DEFAULT`]); the
+    /// background tend reads each idle one every `heartbeat`.
+    pub fn with_liveness(mut self, liveness: Liveness) -> FleetManager {
+        self.liveness = liveness;
+        self
+    }
+
     fn mark_unhealthy(&self, i: usize, why: &dyn std::fmt::Display) {
         let mut sh = self.shared.lock().expect("shared");
         if sh.meta[i].down_since.is_none() {
@@ -527,6 +533,7 @@ impl FleetManager {
         }
         match FleetHead::connect(&spec.addr, spec.auth.clone()) {
             Ok(mut head) => {
+                head.keep_alive(self.liveness);
                 watch(&node, &mut head);
                 self.sync_meta(i, &head);
                 *guard = Some(head);
@@ -1341,7 +1348,9 @@ impl FleetManager {
         })
     }
 
-    /// Keeps idle connections open, drops ones a node closed, and finishes deferred session ends.
+    /// Reads every idle connection, which sends the node a heartbeat when one is due and
+    /// answers its lease renewals; drops the ones a node closed or went silent on, and finishes
+    /// deferred session ends. A connection in use is read by the call using it.
     pub fn keepalive(&self) {
         let nodes: Vec<Arc<NodeConn>> = self.nodes.read().expect("nodes").clone();
         for (i, node) in nodes.iter().enumerate() {
@@ -1349,7 +1358,7 @@ impl FleetManager {
                 let Ok(mut guard) = conn.try_lock() else { continue };
                 let Some(head) = guard.as_mut() else { continue };
                 self.flush_forgets(i, slot, head);
-                match head.keepalive() {
+                match head.drain_status() {
                     Ok(()) => self.sync_meta(i, head),
                     Err(_) => *guard = None,
                 }
@@ -1383,6 +1392,7 @@ impl FleetManager {
                     }
                     match FleetHead::connect(&spec.addr, spec.auth.clone()) {
                         Ok(mut head) => {
+                            head.keep_alive(self.liveness);
                             watch(&node, &mut head);
                             self.sync_meta(i, &head);
                             self.mark_up(i);
@@ -1406,18 +1416,13 @@ impl FleetManager {
 
     pub fn spawn_keepalive(self: &Arc<Self>) {
         let mgr = Arc::downgrade(self);
-        let tick = self.retry_every.min(KEEPALIVE_EVERY);
+        let tick = self.retry_every.min(self.liveness.heartbeat);
         std::thread::Builder::new()
             .name("fleet-keepalive".into())
             .spawn(move || loop {
                 std::thread::sleep(tick);
                 let Some(mgr) = mgr.upgrade() else { return };
-                mgr.retry_down();
-                let due = mgr.last_keepalive.lock().expect("keepalive clock").elapsed() >= KEEPALIVE_EVERY;
-                if due {
-                    mgr.keepalive();
-                    *mgr.last_keepalive.lock().expect("keepalive clock") = std::time::Instant::now();
-                }
+                mgr.tend();
             })
             .expect("spawn the fleet keepalive");
     }
