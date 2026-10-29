@@ -2356,6 +2356,8 @@
 <a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>use<span class="w"> </span>llamacpp<span class="w"> </span>--auto<span class="w">           </span><span class="c1"># unpin</span>
 <a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>repair<span class="w"> </span>llamacpp
 <a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>remove<span class="w"> </span>llamacpp<span class="w"> </span>b11284-vulkan
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>remove<span class="w"> </span>llamacpp@b11284-vulkan<span class="w"> </span><span class="c1"># the same, as `superfluid runtimes` lists the install</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>superfluid<span class="w"> </span>runtime<span class="w"> </span>remove<span class="w"> </span>llamacpp<span class="w"> </span>--all<span class="w">         </span><span class="c1"># every install</span>
 </code></pre></div>
 <table>
 <thead>
@@ -2367,7 +2369,7 @@
 <tbody>
 <tr>
 <td><code>versions &lt;id&gt;</code></td>
-<td>list the versions the adapter installs on its own (the ones it was tested with), newest first: which install on this machine and as what, with the size, and which are installed; an install of another version (<code>--untested</code>, or an archive of your own) is listed as not one the adapter lists. <code>--json</code> for scripts. Answered from the adapter's recipe, with no network</td>
+<td>list the versions the adapter installs on its own (the ones it was tested with), newest first: which install on this machine and as what, with the size, and which are installed; an install of another version (<code>--untested</code>, or an archive of your own) is listed as not one the adapter lists. basert installs a release it does not pin without <code>--untested</code> when the release states this build's engine ABI, and with no version the newest such release: an install of one newer than the pins is listed as installable when a build for the same engine ABI installed it, and the line below the list says so. <code>--json</code> for scripts. Answered from the adapter's recipe and the installs, with no network</td>
 </tr>
 <tr>
 <td><code>install &lt;id&gt;</code></td>
@@ -2382,8 +2384,8 @@
 <td>reinstall the same version and backend; what a daemon updated with <code>superfluid self update</code> asks for when an install's worker is too old</td>
 </tr>
 <tr>
-<td><code>remove &lt;id&gt; [&lt;install&gt;]</code></td>
-<td>remove one install, or all of them</td>
+<td><code>remove &lt;id&gt; [&lt;install&gt;]</code> / <code>--all</code></td>
+<td>remove one install, or every one with <code>--all</code>; the id alone removes the only install and refuses a runtime that has more</td>
 </tr>
 <tr>
 <td><code>use &lt;id&gt; &lt;install&gt;</code> / <code>--auto</code></td>
@@ -2391,6 +2393,7 @@
 </tr>
 </tbody>
 </table>
+<p><code>repair</code>, <code>remove</code> and <code>use</code> take the install as <code>&lt;id&gt;@&lt;install&gt;</code> too, as the RUNTIME column of <code>superfluid runtimes</code> shows one that is not the default.</p>
 <p><code>serve</code> installs a runtime on first use; <code>--offline</code> prevents it. A runtime's worker starts without credential-named variables (<code>*_TOKEN</code>, <code>*_API_KEY</code>, <code>*PASSWORD</code>, <code>*SECRET</code>, ...) in its environment; a pull keeps them, since it fetches with your Hugging Face token.</p>
 <p>An install fetches over <code>https://</code> only, checks each asset against a SHA-256 known before the fetch (the adapter's pinned one, or <code>--sha256</code>), stages it, and runs the staged worker's <code>check</code>. An archive from elsewhere with no SHA-256 to check is refused; a local file without one installs with a warning. An archive member that would land outside the install (an absolute path, <code>..</code>, a symlink out) fails the install. If the runtime finds no device of the planned backend, the next plan is tried (CUDA, then Vulkan, then CPU). One install of a runtime runs at a time across processes; a failed install leaves the existing ones as they were.</p>
 <h3 id="where-installs-live">Where installs live<a class="headerlink" href="#where-installs-live" title="Permanent link">&para;</a></h3>

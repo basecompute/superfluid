@@ -2236,8 +2236,8 @@
 </tr>
 <tr>
 <td><code>--idle-timeout-ms &lt;N&gt;</code></td>
-<td>120000</td>
-<td>drop an idle connection</td>
+<td>30000</td>
+<td>drop a connection the head has said nothing on for this long; keep it well above the head's 5 s heartbeat</td>
 </tr>
 </tbody>
 </table>
@@ -2349,8 +2349,12 @@
 <td>comes back empty; the head reconnects and new placements use it</td>
 </tr>
 <tr>
-<td>connection idle</td>
-<td>the head sends a keepalive every 15 s, under the node's <code>--idle-timeout-ms</code>; a connection a node closed anyway is replaced before it is used</td>
+<td>connection idle or busy</td>
+<td>each end sends a heartbeat when it has sent nothing for 5 s, during a generation too; a connection a node closed anyway is replaced before it is used</td>
+</tr>
+<tr>
+<td>node goes silent</td>
+<td>after 30 s with nothing from it, the head gives the connection up and re-places what ran there, as for a node that failed</td>
 </tr>
 <tr>
 <td>head restarts</td>
@@ -2358,7 +2362,7 @@
 </tr>
 <tr>
 <td>head misses a lease renewal</td>
-<td>the node fences the session and emits nothing more</td>
+<td>the node fences the session and emits nothing more; the head stops waiting 30 s past the generation's wall-clock budget</td>
 </tr>
 </tbody>
 </table>
