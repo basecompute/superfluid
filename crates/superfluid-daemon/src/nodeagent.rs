@@ -87,6 +87,8 @@ pub struct NodeAgent {
     opts: HashMap<(u64, u64), linkf::GenerateOptsMsg>,
     /// Blobs the head is sending: the SHA-256 each should have, and the bytes so far.
     incoming: HashMap<u64, ([u8; 32], Vec<u8>)>,
+    /// The model's tokenizer digest, told to the head (0: not known).
+    tokenizer: u64,
 }
 
 /// The largest blob a node takes from its head.
@@ -118,6 +120,7 @@ impl NodeAgent {
             asked: HashMap::new(),
             opts: HashMap::new(),
             incoming: HashMap::new(),
+            tokenizer: 0,
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -159,6 +162,7 @@ impl NodeAgent {
             asked: HashMap::new(),
             opts: HashMap::new(),
             incoming: HashMap::new(),
+            tokenizer: self.tokenizer,
         }
     }
 
@@ -167,6 +171,13 @@ impl NodeAgent {
     pub fn with_timeouts(mut self, handshake: Duration, idle: Duration) -> NodeAgent {
         self.handshake_timeout = handshake;
         self.idle_timeout = idle;
+        self
+    }
+
+    /// Tells each head the model's tokenizer by `digest` ([`crate::fleet::tokenizer_digest`]),
+    /// so one whose tokenizer differs places nothing here.
+    pub fn with_tokenizer(mut self, digest: u64) -> NodeAgent {
+        self.tokenizer = digest;
         self
     }
 
@@ -297,6 +308,9 @@ impl NodeAgent {
             t => Liveness::DEFAULT.heartbeat.min(t / 3),
         };
         endpoint.keep_alive(Liveness { heartbeat, silence: self.idle_timeout });
+        if endpoint.version() >= 3 {
+            endpoint.send(msg_type::TOKENIZER, &linkf::TokenizerMsg { digest: self.tokenizer })?;
+        }
         // Dropped on the way out, which stops a generation still running.
         let mut work = Work::default();
         self.serve_link(&mut endpoint, &mut work)

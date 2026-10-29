@@ -52,6 +52,22 @@ struct Placement {
     tokens: Vec<u32>,
 }
 
+/// What a tokenizer turns tokens into, as a digest: two tokenizers with one digest give every
+/// token id the same bytes.
+pub fn tokenizer_digest(tok: &dyn superfluid_engine::Tokenizer) -> u64 {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    let n = tok.vocab_size();
+    h.update(n.to_le_bytes());
+    for t in 0..n {
+        let bytes = tok.token_bytes(t);
+        h.update((bytes.len() as u32).to_le_bytes());
+        h.update(&bytes);
+    }
+    let d = h.finalize();
+    u64::from_le_bytes(d[..8].try_into().expect("8 bytes")).max(1)
+}
+
 /// A file a request names, sent to the node by its SHA-256 (in hex) before the request.
 #[derive(Debug, Clone)]
 pub struct Blob {
@@ -80,6 +96,8 @@ pub struct FleetHead {
     liveness: Liveness,
     /// The blobs this connection has sent, which the node keeps.
     blobs_sent: std::collections::HashSet<String>,
+    /// The node's tokenizer digest (0: not known, as from a node on version 2).
+    tokenizer: u64,
 }
 
 /// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
@@ -153,7 +171,9 @@ fn is_transient(e: &DaemonError) -> bool {
 impl FleetHead {
     pub fn connect(addr: &str, auth: Vec<u8>) -> Result<FleetHead, DaemonError> {
         let (endpoint, node) = handshake(addr, auth.clone())?;
-        Ok(FleetHead::from_parts(endpoint, node, addr.to_string(), auth))
+        let mut head = FleetHead::from_parts(endpoint, node, addr.to_string(), auth);
+        head.read_tokenizer()?;
+        Ok(head)
     }
 
     /// A node that dialed in; the head still opens the handshake, encrypted when it has a token.
@@ -165,7 +185,9 @@ impl FleetHead {
             Endpoint::from_tcp_secure(sock, &auth, superfluid_linkf::Role::Initiator, HANDSHAKE_TIMEOUT)
         };
         let (endpoint, node) = hello(opened, &peer, auth.clone(), "its token differs from this head's")?;
-        Ok(FleetHead::from_parts(endpoint, node, String::new(), auth))
+        let mut head = FleetHead::from_parts(endpoint, node, String::new(), auth);
+        head.read_tokenizer()?;
+        Ok(head)
     }
 
     fn from_parts(mut endpoint: Endpoint, node: HelloAckF, addr: String, auth: Vec<u8>) -> FleetHead {
@@ -181,6 +203,32 @@ impl FleetHead {
             on_status: None,
             liveness: Liveness::DEFAULT,
             blobs_sent: std::collections::HashSet::new(),
+            tokenizer: 0,
+        }
+    }
+
+    /// The node's tokenizer digest, 0 when it did not say.
+    pub fn tokenizer(&self) -> u64 {
+        self.tokenizer
+    }
+
+    /// Reads the tokenizer digest a node on version 3 sends just after the handshake.
+    fn read_tokenizer(&mut self) -> Result<(), DaemonError> {
+        if self.endpoint.version() < 3 {
+            return Ok(());
+        }
+        let by = std::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        loop {
+            for frame in self.endpoint.pump()? {
+                if frame.msg_type == msg_type::TOKENIZER {
+                    self.tokenizer = postcard::from_bytes::<linkf::TokenizerMsg>(&frame.payload)?.digest;
+                    return Ok(());
+                }
+                self.absorb(frame)?;
+            }
+            if std::time::Instant::now() >= by {
+                return Err(superfluid_linkf::LinkFError::TimedOut.into());
+            }
         }
     }
 
@@ -317,6 +365,7 @@ impl FleetHead {
         self.node = node;
         self.endpoint = endpoint;
         self.blobs_sent.clear();
+        self.read_tokenizer()?;
         let rec = self.head.reconcile();
         self.endpoint.send(msg_type::RECONCILE, &rec)?;
 

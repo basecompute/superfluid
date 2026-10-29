@@ -83,7 +83,13 @@ At start the head connects to every node and reports each one, or why it cannot 
 ```text
 superfluid: fleet node 'box-a' at 100.64.0.2:8454: qwen, context window 32768 tokens, 8 lanes
 superfluid: fleet node 100.64.0.3:8454: closed the connection at the handshake; check that --fleet-auth holds the key in the node's --auth-file; retrying it every 10 s
-superfluid: context window 32768 tokens (the largest node's)
+superfluid: qwen: context window 32768 tokens (the largest node's)
+```
+
+Give `--model` once per model the fleet serves; a request's `model` picks the nodes serving it, and `/v1/models` lists each. The head opens each model for its tokenizer and chat template only and never loads its weights, so a model given by id is still pulled there; a path to the same build is enough. Each node tells the head its tokenizer, and a node whose tokenizer differs from the head's for that model gets none of its requests (the head says so in its log). A node that joins names its model after one the head serves when its own id is one of them, or after the head's only model; with several and none its own, give it `--model-name`.
+
+```sh
+superfluid serve /models/qwen.base /models/gemma.base --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
 ```
 
 | flag | default | meaning |
@@ -138,6 +144,5 @@ Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has
 
 ## Limits
 
-- One model per fleet.
 - No KV transfer between nodes: a failover re-prefills.
 - No QoS class crosses the wire.

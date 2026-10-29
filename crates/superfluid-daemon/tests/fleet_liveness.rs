@@ -427,6 +427,9 @@ fn a_node_that_goes_silent_mid_generation_is_given_up_on() {
             std::thread::spawn(move || {
                 let mut ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
                 if ep.answer_hello_as_agent(&ack, b"").is_ok() {
+                    // As a node on version 3 does just after the handshake, then nothing more.
+                    let told = superfluid_proto::linkf::TokenizerMsg { digest: 0 };
+                    let _ = ep.send(superfluid_proto::linkf::msg_type::TOKENIZER, &told);
                     while ep.pump().is_ok() {}
                 }
             });

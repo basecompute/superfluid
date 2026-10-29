@@ -140,6 +140,7 @@ fn main() {
         eprintln!("superfluid-noded: the link is encrypted and both ends are checked against the token");
     }
     let node = NodeAgent::new(Arc::new(loaded.daemon), identity, model_name)
+        .with_tokenizer(loaded.tokenizer)
         .with_max_lanes(lanes)
         .with_timeouts(handshake_timeout, idle_timeout)
         .with_auth(auth.clone());

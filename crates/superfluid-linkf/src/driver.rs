@@ -94,6 +94,8 @@ pub struct Endpoint {
     liveness: Option<Liveness>,
     last_sent: Instant,
     last_heard: Instant,
+    /// Frames read with the hello's answer, handed out by the next `pump`.
+    held: Vec<Frame>,
 }
 
 impl Endpoint {
@@ -163,6 +165,7 @@ impl Endpoint {
             liveness: None,
             last_sent: now,
             last_heard: now,
+            held: Vec::new(),
         })
     }
 
@@ -205,6 +208,9 @@ impl Endpoint {
     }
 
     pub fn pump(&mut self) -> Result<Vec<Frame>, LinkFError> {
+        if !self.held.is_empty() {
+            return Ok(std::mem::take(&mut self.held));
+        }
         let mut out = Vec::new();
         let mut buf = [0u8; 64 * 1024];
         match self.stream.read(&mut buf) {
@@ -259,12 +265,15 @@ impl Endpoint {
             },
         )?;
         loop {
-            let frames = self.pump()?;
+            let mut frames = self.pump()?;
             if !frames.is_empty() {
-                let ack = frames
+                let at = frames
                     .iter()
-                    .find(|f| f.msg_type == msg_type::HELLO_ACK_F)
+                    .position(|f| f.msg_type == msg_type::HELLO_ACK_F)
                     .ok_or(LinkFError::Protocol("expected HelloAckF"))?;
+                let ack = frames.remove(at);
+                // What the node sent right after its answer is for the next read.
+                self.held = frames.split_off(at);
                 let ack: HelloAckF = postcard::from_bytes(&ack.payload)?;
                 self.version = ack.chosen_version;
                 return Ok(ack);

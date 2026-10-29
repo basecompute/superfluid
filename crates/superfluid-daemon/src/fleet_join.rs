@@ -110,8 +110,9 @@ fn join(args: &[String]) {
     let loaded = load_node(&model, runtime.as_deref(), max_context, max_batch, offline, &node_wal(&home, &identity))
         .unwrap_or_else(|e| fail(e));
     eprintln!("superfluid: {}", loaded.summary);
-    let model_name = model_name.or(announced.filter(|m| !m.is_empty())).unwrap_or(loaded.model_name);
+    let model_name = model_name.unwrap_or_else(|| name_among(announced.as_deref().unwrap_or_default(), loaded.model_name));
     let node = NodeAgent::new(Arc::new(loaded.daemon), identity.clone(), model_name.clone())
+        .with_tokenizer(loaded.tokenizer)
         .with_max_lanes(max_batch)
         .with_auth(token.clone());
     eprintln!("superfluid: node '{identity}' serves {model_name}; dialing the head at {target} once per lane ({max_batch})");
@@ -171,15 +172,33 @@ impl std::fmt::Display for Target {
 }
 
 /// The head on the local network, however long it takes to appear.
-fn discover() -> (Vec<SocketAddr>, String) {
+fn discover() -> (Vec<SocketAddr>, Vec<String>) {
     eprintln!("superfluid: looking for a fleet head on the local network");
     loop {
         match crate::fleet_mdns::find_head(DISCOVER) {
             Ok(head) => {
-                eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.model);
-                return (head.nodes, head.model);
+                eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.models.join(", "));
+                return (head.nodes, head.models);
             }
             Err(e) => eprintln!("superfluid: {e}; looking again"),
+        }
+    }
+}
+
+/// The name a node serves its model under: its own when the head serves a model by that name,
+/// the head's one model when it serves one (the same model under another id or path), and its
+/// own, said, when the head serves several and none is it.
+fn name_among(served: &[String], own: String) -> String {
+    match served {
+        _ if served.contains(&own) => own,
+        [only] => only.clone(),
+        [] => own,
+        _ => {
+            eprintln!(
+                "superfluid: the head serves {}, and none is '{own}'; give this node --model-name <one of them>",
+                served.join(", ")
+            );
+            own
         }
     }
 }
@@ -229,6 +248,8 @@ pub struct LoadedNode {
     pub model_name: String,
     /// The runtime, model, window and lanes, for the node's start line.
     pub summary: String,
+    /// The model's tokenizer digest, for the head to check (0: no tokenizer opens here).
+    pub tokenizer: u64,
 }
 
 /// A fleet node's model by path or id, as `superfluid serve` loads one: pulled when given by
@@ -273,7 +294,9 @@ pub fn load_node(
         runtime.id.name(),
         path.display()
     );
-    loaded(host, Box::new(NoCodec), lanes, model_name, summary, wal)
+    let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, wal)?;
+    node.tokenizer = crate::serve::tokenizer_digest(&runtime, &path).unwrap_or(0);
+    Ok(node)
 }
 
 /// A node on the test engine, which needs no model.
@@ -298,7 +321,7 @@ fn loaded(
     wal: &Path,
 ) -> Result<LoadedNode, String> {
     let store = SessionStore::open(wal).map_err(|e| format!("node store: {e}"))?;
-    Ok(LoadedNode { daemon: Daemon::new(store, host, codec, lanes as usize), model_name, summary })
+    Ok(LoadedNode { daemon: Daemon::new(store, host, codec, lanes as usize), model_name, summary, tokenizer: 0 })
 }
 
 /// The window this device holds for `lanes` lanes of the model, as `superfluid serve` sizes it.
@@ -383,7 +406,7 @@ fn resolve_model(catalog: &Catalog, model: &str, runtime: Option<&str>, offline:
 /// The head's end: every node that dials in with the token is taken into the fleet. With no
 /// token, only nodes on this machine are; `model` is what the head serves, and a node that
 /// serves something else is taken but warned about, since no session will go to it.
-pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec<u8>, model: String) {
+pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec<u8>, models: Vec<String>) {
     let in_handshake = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for sock in listener.incoming() {
         let Ok(sock) = sock else { continue };
@@ -396,7 +419,7 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
             std::thread::sleep(Duration::from_millis(20));
         }
         in_handshake.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let (manager, auth, model, in_handshake) = (Arc::clone(&manager), auth.clone(), model.clone(), Arc::clone(&in_handshake));
+        let (manager, auth, served, in_handshake) = (Arc::clone(&manager), auth.clone(), models.clone(), Arc::clone(&in_handshake));
         std::thread::spawn(move || {
             let opened = FleetHead::accept(sock, auth);
             in_handshake.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
@@ -404,12 +427,15 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
                 Ok(head) => {
                     let node = head.node();
                     let (identity, models, ctx) = (node.node_identity.clone(), node.loadable_models.join(", "), node.capacity.max_context_tokens);
-                    let serves_it = node.loadable_models.contains(&model);
+                    let serves_one = node.loadable_models.iter().any(|m| served.contains(m));
                     match manager.adopt(head, peer.ip()) {
                         Ok((_, true, _)) => {
                             eprintln!("superfluid: fleet node '{identity}' joined from {peer}: {models}, context window {ctx} tokens");
-                            if !serves_it {
-                                eprintln!("superfluid: fleet node '{identity}' serves {models}, not {model}; no session will go to it (set --model-name {model} there)");
+                            if !serves_one {
+                                eprintln!(
+                                    "superfluid: fleet node '{identity}' serves {models}, none of {}; no session will go to it (set --model-name there)",
+                                    served.join(", ")
+                                );
                             }
                         }
                         Ok((_, false, 1)) => eprintln!("superfluid: fleet node '{identity}' rejoined from {peer}"),
@@ -420,5 +446,19 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
                 Err(e) => eprintln!("superfluid: a node at {peer} did not join: {e}"),
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::name_among;
+
+    #[test]
+    fn a_node_takes_its_own_name_when_served_else_the_heads_only_one() {
+        let own = || "qwen".to_string();
+        assert_eq!(name_among(&["llama".into(), "qwen".into()], own()), "qwen");
+        assert_eq!(name_among(&["Qwen3-0.6B".into()], own()), "Qwen3-0.6B", "the same model under another id");
+        assert_eq!(name_among(&["llama".into(), "gemma".into()], own()), "qwen", "several, none it: its own");
+        assert_eq!(name_among(&[], own()), "qwen");
     }
 }

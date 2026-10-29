@@ -223,6 +223,11 @@ impl ModelRegistry {
         )
     }
 
+    /// Serves `daemon` as `name` beside the models already loaded.
+    pub fn insert_loaded(&self, name: &str, daemon: Arc<Daemon>) {
+        self.models.write().expect("registry").insert(name.to_string(), daemon);
+    }
+
     pub fn default_name(&self) -> String {
         self.default_model.read().expect("registry").clone()
     }

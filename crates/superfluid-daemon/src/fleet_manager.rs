@@ -106,6 +106,7 @@ impl NodeMeta {
             learned: false,
             max_context_tokens: 0,
             load: NodeLoad::default(),
+            tokenizer_refused: Vec::new(),
         }
     }
 
@@ -158,6 +159,8 @@ struct NodeMeta {
     learned: bool,
     max_context_tokens: u64,
     load: NodeLoad,
+    /// The models the node serves with a tokenizer other than the head's.
+    tokenizer_refused: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +192,9 @@ pub struct FleetManager {
     conns_by_lanes: bool,
     retry_every: std::time::Duration,
     liveness: Liveness,
+    /// The tokenizer digest the head serves each model with: a node whose differs is not used
+    /// for that model.
+    tokenizers: std::sync::RwLock<std::collections::HashMap<String, u64>>,
     shared: Mutex<Shared>,
     policy: PlacementPolicy,
     lease: Lease,
@@ -329,6 +335,7 @@ impl FleetManager {
             conns_by_lanes: conns_per_node == 0,
             retry_every: RETRY_DOWN_AFTER,
             liveness: Liveness::DEFAULT,
+            tokenizers: Default::default(),
             shared: Mutex::new(Shared {
                 meta,
                 sessions: BTreeMap::new(),
@@ -491,6 +498,12 @@ impl FleetManager {
         self
     }
 
+    /// Serves `model` only on nodes whose tokenizer has `digest` ([`crate::fleet::tokenizer_digest`]);
+    /// a node that does not say is taken at its word.
+    pub fn expect_tokenizer(&self, model: &str, digest: u64) {
+        self.tokenizers.write().expect("tokenizers").insert(model.to_string(), digest);
+    }
+
     /// How the head's connections are kept alive (default [`Liveness::DEFAULT`]); the
     /// background tend reads each idle one every `heartbeat`.
     pub fn with_liveness(mut self, liveness: Liveness) -> FleetManager {
@@ -637,7 +650,23 @@ impl FleetManager {
     fn sync_meta(&self, i: usize, head: &FleetHead) {
         let mut sh = self.shared.lock().expect("shared");
         let cap = &head.node().capacity;
-        sh.meta[i].models = head.node().loadable_models.clone();
+        let theirs = head.tokenizer();
+        let (models, refused): (Vec<String>, Vec<String>) = {
+            let ours = self.tokenizers.read().expect("tokenizers");
+            head.node().loadable_models.iter().cloned().partition(|m| {
+                ours.get(m).is_none_or(|&d| d == 0 || theirs == 0 || d == theirs)
+            })
+        };
+        if !refused.is_empty() && sh.meta[i].tokenizer_refused != refused {
+            tracing::warn!(
+                "fleet: node {} tokenizes {} otherwise than this head does, so nothing for it is placed there; \
+                 serve the same build of the model on both",
+                self.label(&sh, i),
+                refused.join(", ")
+            );
+        }
+        sh.meta[i].tokenizer_refused = refused;
+        sh.meta[i].models = models;
         sh.meta[i].max_context_tokens = cap.max_context_tokens;
         sh.meta[i].identity = head.node().node_identity.clone();
         sh.meta[i].learned = true;

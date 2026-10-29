@@ -378,3 +378,100 @@ fn every_route_answers_through_the_head_with_the_status_it_has_on_one_machine() 
     }
     assert!(differ.is_empty(), "{}", differ.join("\n"));
 }
+
+/// A node serving `model` under `identity`, telling the head its tokenizer by `tokenizer`.
+fn named_node(identity: &'static str, model: &'static str, tokenizer: u64) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let daemon = Arc::new(Daemon::new(store("node"), engine(), Box::new(MockCodec), 8));
+        let node = NodeAgent::new(daemon, identity, model).with_max_lanes(8).with_tokenizer(tokenizer);
+        for sock in listener.incoming() {
+            let Ok(sock) = sock else { break };
+            let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+            let mut conn = node.connection();
+            std::thread::spawn(move || {
+                let _ = conn.serve(ep);
+            });
+        }
+    });
+    addr
+}
+
+/// A head serving each of `models` over one fleet of `nodes`, with the tokenizer digests given.
+fn multi_head(nodes: Vec<String>, models: &[(&str, u64)]) -> (String, Arc<FleetManager>) {
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let specs = nodes.into_iter().map(|addr| NodeSpec { addr, auth: Vec::new() }).collect();
+    let fleet = Arc::new(FleetManager::new(specs, PlacementPolicy::LeastLoaded, lease));
+    for (model, digest) in models {
+        fleet.expect_tokenizer(model, *digest);
+    }
+    let _ = fleet.probe();
+    let mut registry: Option<Arc<ModelRegistry>> = None;
+    for (model, _) in models {
+        let d = Arc::new(
+            Daemon::over_fleet(store("head"), Box::new(MockChatCodec), Arc::clone(&fleet), model.to_string(), DaemonOptions::default()).unwrap(),
+        );
+        match &registry {
+            None => registry = Some(Arc::new(ModelRegistry::single(model.to_string(), d))),
+            Some(r) => r.insert_loaded(model, d),
+        }
+    }
+    let registry = registry.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = openai::serve_blocking_config(listener, registry, openai::ServeConfig::default());
+    });
+    (addr, fleet)
+}
+
+fn chat_to(addr: &str, model: &str) -> (u16, String) {
+    let body = serde_json::json!({"model": model, "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 6, "temperature": 0});
+    post(addr, "/v1/chat/completions", &body)
+}
+
+/// Tokens each node has generated for the head, by node name.
+fn decoded(fleet: &FleetManager) -> std::collections::HashMap<String, u64> {
+    fleet.status().into_iter().map(|n| (n.name, n.decode_tokens)).collect()
+}
+
+#[test]
+fn two_models_on_two_nodes_are_routed_by_model() {
+    let (a, b) = (named_node("alpha-node", "alpha", 7), named_node("beta-node", "beta", 7));
+    let (head, fleet) = multi_head(vec![a, b], &[("alpha", 7), ("beta", 7)]);
+
+    let mut resp = agent().get(&format!("http://{head}/v1/models")).call().unwrap();
+    let listed: Value = serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
+    let ids: Vec<&str> = listed["data"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
+    assert!(ids.contains(&"alpha") && ids.contains(&"beta"), "{listed}");
+
+    for _ in 0..3 {
+        let (status, body) = chat_to(&head, "alpha");
+        assert_eq!(status, 200, "{body}");
+    }
+    let after_alpha = decoded(&fleet);
+    assert!(after_alpha["alpha-node"] > 0 && after_alpha["beta-node"] == 0, "{after_alpha:?}");
+    let (status, body) = chat_to(&head, "beta");
+    assert_eq!(status, 200, "{body}");
+    let after_beta = decoded(&fleet);
+    assert_eq!(after_beta["alpha-node"], after_alpha["alpha-node"], "beta went to the alpha node: {after_beta:?}");
+    assert!(after_beta["beta-node"] > 0, "{after_beta:?}");
+}
+
+#[test]
+fn a_node_whose_tokenizer_differs_is_not_used_for_the_model() {
+    let (same, other, unknown) = (named_node("same", "alpha", 7), named_node("other", "alpha", 8), named_node("silent", "beta", 0));
+    let (head, fleet) = multi_head(vec![other.clone(), same], &[("alpha", 7), ("beta", 9)]);
+    for _ in 0..4 {
+        let (status, body) = chat_to(&head, "alpha");
+        assert_eq!(status, 200, "{body}");
+    }
+    let by_node = decoded(&fleet);
+    assert!(by_node["same"] > 0 && by_node["other"] == 0, "the node with another tokenizer took work: {by_node:?}");
+
+    // A node that does not say what it tokenizes with is taken at its word.
+    let (head, _) = multi_head(vec![unknown], &[("beta", 9)]);
+    let (status, body) = chat_to(&head, "beta");
+    assert_eq!(status, 200, "{body}");
+}

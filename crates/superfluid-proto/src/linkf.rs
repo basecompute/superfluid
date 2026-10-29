@@ -41,6 +41,8 @@ pub mod msg_type {
     /// A Link W state operation run on the node's engine, and its answer (version 3).
     pub const STATE_SYNC_REQ: u16 = 0x001C;
     pub const STATE_SYNC_RESP: u16 = 0x001D;
+    /// The node's tokenizer, by digest, just after the handshake (version 3).
+    pub const TOKENIZER: u16 = 0x001E;
 
     pub const TELEMETRY: u16 = 0x8001;
     /// An idle head's sign of life; droppable, so a node that predates it skips it.
@@ -76,6 +78,7 @@ pub mod msg_type {
         GENERATE_OPTS,
         STATE_SYNC_REQ,
         STATE_SYNC_RESP,
+        TOKENIZER,
         TELEMETRY,
         KEEPALIVE,
     ];
@@ -311,6 +314,13 @@ pub struct GenerateOptsMsg {
     /// The images and audio in the context: where each starts, the blob it is (sent before, by
     /// its SHA-256 in hex), and the tokens it takes.
     pub media: Vec<(u64, String, u32)>,
+}
+
+/// What a node's model tokenizes with, by digest (0: not known), so a head refuses a node whose
+/// tokens would mean other text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizerMsg {
+    pub digest: u64,
 }
 
 /// A media path the head sent as a blob: the node reads it from its own media pool.

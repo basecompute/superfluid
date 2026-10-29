@@ -1151,6 +1151,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
         eprintln!("superfluid: {e}");
         std::process::exit(2);
     });
+    let first_tokenizer = fleet_mode.then(|| superfluid_daemon::fleet::tokenizer_digest(&*tokenizer));
     let codec: Box<dyn superfluid_daemon::TextCodec + Send + Sync> = match codec_for_dialect(&dialect, tokenizer) {
         Ok((c, kind)) => {
             if dialect == "auto" {
@@ -1220,6 +1221,29 @@ pub fn run(args: &[String], embedding: &Embedding) {
             fleet_pool_high,
             fleet_conns,
         ));
+        // Every model the head serves: the first as resolved above, and each further --model,
+        // opened for its tokenizer and chat template only.
+        let mut served: Vec<(String, Box<dyn superfluid_daemon::TextCodec + Send + Sync>)> = vec![(model_name.clone(), codec)];
+        manager.expect_tokenizer(&model_name, first_tokenizer.unwrap_or(0));
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::from([model_name.clone()]);
+        for extra in models.iter().skip(1) {
+            let name = pulled_names.get(extra).cloned().unwrap_or_else(|| (embedding.model_name)(extra, &taken));
+            if !taken.insert(name.clone()) {
+                eprintln!("superfluid: model '{name}' given twice, skipping");
+                continue;
+            }
+            let rt = runtime_pick.resolve(extra, &catalog).and_then(|id| catalog.require(id)).unwrap_or_else(|e| {
+                eprintln!("superfluid: {}: {e}", extra.display());
+                std::process::exit(2);
+            });
+            let extra_codec = build_codec_for(&dialect, &rt, extra).unwrap_or_else(|e| {
+                eprintln!("superfluid: {}: {e}", extra.display());
+                std::process::exit(2);
+            });
+            manager.expect_tokenizer(&name, tokenizer_digest(&rt, extra).unwrap_or(0));
+            served.push((name, extra_codec));
+        }
+        let names: Vec<String> = served.iter().map(|(n, _)| n.clone()).collect();
         let mut reached = 0;
         for node in manager.probe() {
             match node {
@@ -1233,12 +1257,13 @@ pub fn run(args: &[String], embedding: &Embedding) {
                         n.max_context_tokens,
                         n.max_lanes
                     );
-                    if !n.models.contains(&model_name) {
+                    if !n.models.iter().any(|m| names.contains(m)) {
                         eprintln!(
-                            "superfluid: fleet node '{}' serves {}, not {model_name}, so nothing is placed \
-                             there; start it with --model-name {model_name}",
+                            "superfluid: fleet node '{}' serves {}, none of {}, so nothing is placed \
+                             there; start it with --model-name <one of them>",
                             n.identity,
-                            n.models.join(", ")
+                            n.models.join(", "),
+                            names.join(", ")
                         );
                     }
                 }
@@ -1246,11 +1271,11 @@ pub fn run(args: &[String], embedding: &Embedding) {
             }
         }
         if max_context.is_none() {
-            match manager.advertised_context(&model_name) {
-                Some(n) => eprintln!("superfluid: context window {n} tokens (the largest node's)"),
-                None => eprintln!(
-                    "superfluid: context window unknown until a node serving {model_name} answers"
-                ),
+            for name in &names {
+                match manager.advertised_context(name) {
+                    Some(n) => eprintln!("superfluid: {name}: context window {n} tokens (the largest node's)"),
+                    None => eprintln!("superfluid: {name}: context window unknown until a node serving it answers"),
+                }
             }
         }
         manager.spawn_keepalive();
@@ -1261,11 +1286,11 @@ pub fn run(args: &[String], embedding: &Embedding) {
             });
             let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
             eprintln!("superfluid: fleet head takes joining nodes on {listen}");
-            let (m, a, name) = (Arc::clone(&manager), auth.clone(), model_name.clone());
-            std::thread::spawn(move || superfluid_daemon::fleet_join::accept_nodes(listener, m, a, name));
+            let (m, a, all) = (Arc::clone(&manager), auth.clone(), names.clone());
+            std::thread::spawn(move || superfluid_daemon::fleet_join::accept_nodes(listener, m, a, all));
             // `superfluid top` finds the head's API by this; one on loopback is no use off this machine.
             let http_port = addr.parse::<std::net::SocketAddr>().ok().filter(|a| !a.ip().is_loopback()).map(|a| a.port());
-            match superfluid_daemon::fleet_mdns::advertise(port, &model_name, http_port) {
+            match superfluid_daemon::fleet_mdns::advertise(port, &names, http_port) {
                 Ok(d) => Some(d),
                 Err(e) => {
                     eprintln!("superfluid: not announced on the local network ({e}); give nodes this head's address");
@@ -1315,26 +1340,43 @@ pub fn run(args: &[String], embedding: &Embedding) {
             );
         }
         let advertised = manager.advertised_context(&model_name).map(|n| n.min(u32::MAX as u64) as u32);
-        let daemon = Daemon::over_fleet(
-            open_session_store(&sessions),
-            codec,
-            Arc::clone(&manager),
-            model_name.clone(),
-            superfluid_daemon::DaemonOptions {
-                tool_lease_ms,
-                media_dir: Some(sessions.join("media")),
-                files_max_bytes,
-                files_expiry_secs: files_expiry,
-                completion_deadline_ms,
-                trace_scope: superfluid_daemon::otlp::TraceScope::model(&model_name),
-                ..Default::default()
-            },
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("superfluid: cannot serve '{model_name}' over the fleet: {e}");
-            std::process::exit(2);
-        });
-        let registry = Arc::new(superfluid_daemon::registry::ModelRegistry::single(model_name.clone(), Arc::new(daemon)));
+        let mut registry = None;
+        for (i, (name, codec)) in served.into_iter().enumerate() {
+            // The first model's sessions where a single server keeps them; each other's in a
+            // directory of its own, as a server with several models keeps them.
+            let dir = if i == 0 {
+                sessions.clone()
+            } else {
+                superfluid_daemon::registry::state_dir(&sessions.join("models"), &name).unwrap_or_else(|e| {
+                    eprintln!("superfluid: {name}: cannot keep its sessions: {e}");
+                    std::process::exit(1);
+                })
+            };
+            let daemon = Daemon::over_fleet(
+                open_session_store(&dir),
+                codec,
+                Arc::clone(&manager),
+                name.clone(),
+                superfluid_daemon::DaemonOptions {
+                    tool_lease_ms,
+                    media_dir: Some(sessions.join("media")),
+                    files_max_bytes,
+                    files_expiry_secs: files_expiry,
+                    completion_deadline_ms,
+                    trace_scope: superfluid_daemon::otlp::TraceScope::model(&name),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("superfluid: cannot serve '{name}' over the fleet: {e}");
+                std::process::exit(2);
+            });
+            match &registry {
+                None => registry = Some(Arc::new(superfluid_daemon::registry::ModelRegistry::single(name, Arc::new(daemon)))),
+                Some(r) => r.insert_loaded(&name, Arc::new(daemon)),
+            }
+        }
+        let registry = registry.expect("the first model is served");
         superfluid_daemon::openai::serve_blocking_config(
             http_listener,
             registry,
@@ -1947,6 +1989,12 @@ fn refuse_statically(
 fn describe_worker(runtime: &superfluid_daemon::runtimes::Runtime) -> String {
     let version = runtime.version.as_deref().map(|v| format!("{v}, ")).unwrap_or_default();
     format!("{version}{}: {}", runtime.worker.source.name(), runtime.worker.bin.display())
+}
+
+/// The digest of the tokenizer `model` is read with on `runtime`, as a fleet head and its nodes
+/// compare them; none when no tokenizer opens here.
+pub fn tokenizer_digest(runtime: &superfluid_daemon::runtimes::Runtime, model: &std::path::Path) -> Option<u64> {
+    open_tokenizer(runtime, model).ok().map(|t| superfluid_daemon::fleet::tokenizer_digest(&*t))
 }
 
 fn open_tokenizer(
