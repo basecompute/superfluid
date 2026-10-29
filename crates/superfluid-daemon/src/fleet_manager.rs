@@ -1284,16 +1284,7 @@ impl FleetManager {
         req: superfluid_proto::linkw::StateSyncReqMsg,
         blobs: &[crate::fleet::Blob],
     ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
-        let cand = self.candidates_claiming(model, None, RequestShape::default());
-        let mut last = None;
-        for i in cand {
-            match self.state_sync_on(i, req.clone(), blobs) {
-                Ok(ok) => return Ok(ok),
-                Err(e) if is_fatal_node(&e) => last = Some(e),
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last.unwrap_or(DaemonError::Config("no healthy node can serve the model")))
+        self.on_a_node(model, |head| head.state_sync(req.clone(), blobs))
     }
 
     /// Runs a state operation on every node up that serves `model`, as a LoRA must be on each
@@ -1317,13 +1308,19 @@ impl FleetManager {
         req: superfluid_proto::linkw::StateSyncReqMsg,
         blobs: &[crate::fleet::Blob],
     ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.on_node(i, |head| head.state_sync(req, blobs))
+    }
+
+    /// Runs `call` on an idle connection to node `i`, connecting it first if it has to; a node
+    /// whose link fails is down.
+    fn on_node<R>(&self, i: usize, call: impl FnOnce(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
         let node = self.node(i);
         let (_, mut guard) = node.checkout_idle();
         if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
             *guard = None;
         }
         self.ensure_connected(i, &mut guard)?;
-        let r = guard.as_mut().expect("connected").state_sync(req, blobs);
+        let r = call(guard.as_mut().expect("connected"));
         if let Err(e) = &r {
             if is_fatal_node(e) {
                 *guard = None;
@@ -1331,6 +1328,37 @@ impl FleetManager {
             }
         }
         r
+    }
+
+    /// Runs `call` on one node serving `model`, the next tried when a node fails.
+    fn on_a_node<R>(&self, model: &str, mut call: impl FnMut(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
+        let cand = self.candidates_claiming(model, None, RequestShape::default());
+        let mut last = None;
+        for i in cand {
+            match self.on_node(i, &mut call) {
+                Ok(r) => return Ok(r),
+                Err(e) if is_fatal_node(&e) => last = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or(DaemonError::Config("no healthy node can serve the model")))
+    }
+
+    /// The tokenizer of a node serving `model`, for a head with no copy of it; encoding asks a
+    /// node serving the model each time.
+    pub fn remote_tokenizer(self: &Arc<Self>, model: &str) -> Result<crate::fleet::RemoteTokenizer, DaemonError> {
+        let export = self.on_a_node(model, |head| head.tokenizer_export())?;
+        if export.vocab.is_empty() {
+            return Err(DaemonError::Generation(format!(
+                "no node serving {model} shares a tokenizer; give the head --model a path to the model's files"
+            )));
+        }
+        Ok(crate::fleet::RemoteTokenizer::new(Arc::clone(self), model.to_string(), export))
+    }
+
+    /// Text a node serving `model` encodes.
+    pub fn tokenize(&self, model: &str, text: &superfluid_proto::linkf::TokenizeMsg) -> Result<Option<Vec<u32>>, DaemonError> {
+        self.on_a_node(model, |head| head.tokenize(text.clone()))
     }
 
     pub fn cancel(&self, session: u64) -> Result<(), DaemonError> {

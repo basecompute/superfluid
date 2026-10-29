@@ -89,6 +89,8 @@ pub struct NodeAgent {
     incoming: HashMap<u64, ([u8; 32], Vec<u8>)>,
     /// The model's tokenizer digest, told to the head (0: not known).
     tokenizer: u64,
+    /// The model's tokenizer, for a head that has no copy of the model to export and encode with.
+    tokenizer_impl: Option<Arc<dyn superfluid_engine::Tokenizer>>,
 }
 
 /// The largest blob a node takes from its head.
@@ -121,6 +123,7 @@ impl NodeAgent {
             opts: HashMap::new(),
             incoming: HashMap::new(),
             tokenizer: 0,
+            tokenizer_impl: None,
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -163,6 +166,7 @@ impl NodeAgent {
             opts: HashMap::new(),
             incoming: HashMap::new(),
             tokenizer: self.tokenizer,
+            tokenizer_impl: self.tokenizer_impl.clone(),
         }
     }
 
@@ -178,6 +182,14 @@ impl NodeAgent {
     /// so one whose tokenizer differs places nothing here.
     pub fn with_tokenizer(mut self, digest: u64) -> NodeAgent {
         self.tokenizer = digest;
+        self
+    }
+
+    /// Serves the model's tokenizer to a head: its digest, all it says without encoding, and
+    /// the text it encodes, so a head with no copy of the model tokenizes as this node does.
+    pub fn with_tokenizer_of(mut self, tok: Arc<dyn superfluid_engine::Tokenizer>) -> NodeAgent {
+        self.tokenizer = crate::fleet::tokenizer_digest(&*tok);
+        self.tokenizer_impl = Some(tok);
         self
     }
 
@@ -491,6 +503,22 @@ impl NodeAgent {
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
+            msg_type::TOKENIZER_EXPORT_REQ => {
+                let m: linkf::TokenizerExportReqMsg = postcard::from_bytes(&frame.payload)?;
+                endpoint.send(msg_type::TOKENIZER_EXPORT, &self.export(m.request_id))?;
+            }
+            msg_type::TOKENIZE_REQ => {
+                let m: linkf::TokenizeReqMsg = postcard::from_bytes(&frame.payload)?;
+                let tokens = self.tokenizer_impl.as_ref().and_then(|t| match &m.text {
+                    linkf::TokenizeMsg::Encode(text) => Some(t.encode(text)),
+                    linkf::TokenizeMsg::Plain(text) => t.encode_plain(text),
+                    linkf::TokenizeMsg::Pieces(pieces) => {
+                        let pieces: Vec<(&str, bool)> = pieces.iter().map(|(p, s)| (p.as_str(), *s)).collect();
+                        t.encode_pieces(&pieces)
+                    }
+                });
+                endpoint.send(msg_type::TOKENIZE_RESP, &linkf::TokenizeRespMsg { request_id: m.request_id, tokens })?;
+            }
             msg_type::GENERATE_OPTS => {
                 let m: linkf::GenerateOptsMsg = postcard::from_bytes(&frame.payload)?;
                 self.opts.insert((m.session_id, m.generation_id), m);
@@ -571,6 +599,36 @@ impl NodeAgent {
             _ => {  }
         }
         Ok(())
+    }
+
+    /// The tokenizer as a head without the model takes it; no vocabulary when this node has none.
+    fn export(&self, request_id: u64) -> linkf::TokenizerExportMsg {
+        let Some(t) = &self.tokenizer_impl else {
+            return linkf::TokenizerExportMsg {
+                request_id,
+                digest: 0,
+                vocab: Vec::new(),
+                specials: Vec::new(),
+                bos: None,
+                eos: 0,
+                chat_template: String::new(),
+                named_templates: Vec::new(),
+                plain: false,
+                pieces: false,
+            };
+        };
+        linkf::TokenizerExportMsg {
+            request_id,
+            digest: self.tokenizer,
+            vocab: (0..t.vocab_size()).map(|i| t.token_bytes(i)).collect(),
+            specials: t.special_tokens(),
+            bos: t.bos_token(),
+            eos: t.eos_token(),
+            chat_template: t.chat_template_jinja(),
+            named_templates: ["tool_use"].iter().filter_map(|n| Some((n.to_string(), t.chat_template_named(n)?))).collect(),
+            plain: t.encode_plain("a").is_some(),
+            pieces: t.encode_pieces(&[("a", false)]).is_some(),
+        }
     }
 
     /// A path the head sent as a blob, where the blob sits in this node's media pool.

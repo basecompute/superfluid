@@ -495,3 +495,95 @@ fn a_request_sent_again_with_its_key_through_the_head_gets_the_first_answer() {
     assert_eq!((first_replayed, again_replayed), (false, true));
     assert_eq!(again, first);
 }
+
+/// A byte-level tokenizer with ChatML's markers, for a head to take from its node.
+struct Bytes;
+
+impl superfluid_engine::Tokenizer for Bytes {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            if let Some(r) = rest.strip_prefix("<|im_start|>") {
+                out.push(256);
+                rest = r;
+            } else if let Some(r) = rest.strip_prefix("<|im_end|>") {
+                out.push(257);
+                rest = r;
+            } else {
+                let c = rest.chars().next().unwrap();
+                out.extend(c.to_string().bytes().map(u32::from));
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        out
+    }
+    fn token_bytes(&self, token: u32) -> Vec<u8> {
+        match token {
+            0..=255 => vec![token as u8],
+            256 => b"<|im_start|>".to_vec(),
+            257 => b"<|im_end|>".to_vec(),
+            _ => Vec::new(),
+        }
+    }
+    fn vocab_size(&self) -> u32 {
+        512
+    }
+    fn special_tokens(&self) -> Vec<(String, u32)> {
+        vec![("<|im_start|>".into(), 256), ("<|im_end|>".into(), 257)]
+    }
+    fn bos_token(&self) -> Option<u32> {
+        None
+    }
+    fn eos_token(&self) -> u32 {
+        257
+    }
+    fn chat_template_jinja(&self) -> String {
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}".into()
+    }
+}
+
+#[test]
+fn a_head_with_no_copy_of_the_model_takes_its_tokenizer_from_a_node() {
+    use superfluid_engine::Tokenizer;
+    let tok: Arc<dyn Tokenizer> = Arc::new(Bytes);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let node_addr = listener.local_addr().unwrap().to_string();
+    {
+        let tok = Arc::clone(&tok);
+        std::thread::spawn(move || {
+            let daemon = Arc::new(Daemon::new(store("node"), engine(), Box::new(MockCodec), 8));
+            let node = NodeAgent::new(daemon, "sharer", "mock-model").with_max_lanes(8).with_tokenizer_of(tok);
+            for sock in listener.incoming() {
+                let Ok(sock) = sock else { break };
+                let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+                let mut conn = node.connection();
+                std::thread::spawn(move || {
+                    let _ = conn.serve(ep);
+                });
+            }
+        });
+    }
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let fleet = Arc::new(FleetManager::new(vec![NodeSpec { addr: node_addr, auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease));
+    let _ = fleet.probe();
+    let remote = fleet.remote_tokenizer("mock-model").expect("the node shares its tokenizer");
+    assert_eq!(remote.digest(), superfluid_daemon::fleet::tokenizer_digest(&*tok));
+    for text in ["hello there", "<|im_start|>user\nhi<|im_end|>", "naïve ✓"] {
+        assert_eq!(remote.encode(text), tok.encode(text), "{text}");
+    }
+    assert_eq!((remote.vocab_size(), remote.eos_token(), remote.special_tokens()), (512, 257, tok.special_tokens()));
+    assert_eq!(remote.chat_template_jinja(), tok.chat_template_jinja());
+
+    // A head built on what it took answers as one machine with the tokenizer itself does.
+    let codec = |t: Arc<dyn Tokenizer>| superfluid_daemon::codec::auto_codec_from_tokenizer(t).0;
+    let local = serve(Daemon::new(store("local"), engine(), codec(Arc::clone(&tok)), 8));
+    let head = serve(
+        Daemon::over_fleet(store("head"), codec(Arc::new(remote)), fleet, "mock-model".into(), DaemonOptions::default()).unwrap(),
+    );
+    for stream in [false, true] {
+        let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 12, "temperature": 0, "stream": stream});
+        let said = same(&local, &head, "/v1/chat/completions", &body);
+        assert!(said.to_string().contains("completion_tokens"), "{said}");
+    }
+}

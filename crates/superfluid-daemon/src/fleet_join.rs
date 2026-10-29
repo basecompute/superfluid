@@ -111,9 +111,11 @@ fn join(args: &[String]) {
         .unwrap_or_else(|e| fail(e));
     eprintln!("superfluid: {}", loaded.summary);
     let model_name = model_name.unwrap_or_else(|| name_among(announced.as_deref().unwrap_or_default(), loaded.model_name));
-    let node = NodeAgent::new(Arc::new(loaded.daemon), identity.clone(), model_name.clone())
-        .with_tokenizer(loaded.tokenizer)
-        .with_max_lanes(max_batch)
+    let mut node = NodeAgent::new(Arc::new(loaded.daemon), identity.clone(), model_name.clone()).with_max_lanes(max_batch);
+    if let Some(tok) = loaded.tokenizer {
+        node = node.with_tokenizer_of(tok);
+    }
+    let node = node
         .with_auth(token.clone());
     eprintln!("superfluid: node '{identity}' serves {model_name}; dialing the head at {target} once per lane ({max_batch})");
     // One connection per lane, each its own generation at a time on the head.
@@ -248,8 +250,8 @@ pub struct LoadedNode {
     pub model_name: String,
     /// The runtime, model, window and lanes, for the node's start line.
     pub summary: String,
-    /// The model's tokenizer digest, for the head to check (0: no tokenizer opens here).
-    pub tokenizer: u64,
+    /// The model's tokenizer, for the head to check and, with no copy of the model, to use.
+    pub tokenizer: Option<Arc<dyn superfluid_engine::Tokenizer>>,
 }
 
 /// A fleet node's model by path or id, as `superfluid serve` loads one: pulled when given by
@@ -295,7 +297,7 @@ pub fn load_node(
         path.display()
     );
     let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, wal)?;
-    node.tokenizer = crate::serve::tokenizer_digest(&runtime, &path).unwrap_or(0);
+    node.tokenizer = crate::serve::open_tokenizer(&runtime, &path).ok();
     Ok(node)
 }
 
@@ -321,7 +323,7 @@ fn loaded(
     wal: &Path,
 ) -> Result<LoadedNode, String> {
     let store = SessionStore::open(wal).map_err(|e| format!("node store: {e}"))?;
-    Ok(LoadedNode { daemon: Daemon::new(store, host, codec, lanes as usize), model_name, summary, tokenizer: 0 })
+    Ok(LoadedNode { daemon: Daemon::new(store, host, codec, lanes as usize), model_name, summary, tokenizer: None })
 }
 
 /// The window this device holds for `lanes` lanes of the model, as `superfluid serve` sizes it.

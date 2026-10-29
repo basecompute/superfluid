@@ -68,6 +68,79 @@ pub fn tokenizer_digest(tok: &dyn superfluid_engine::Tokenizer) -> u64 {
     u64::from_le_bytes(d[..8].try_into().expect("8 bytes")).max(1)
 }
 
+/// A tokenizer a head without the model takes from a node serving it: what it says without
+/// encoding is the node's own, kept here, and text is encoded by a node serving the model,
+/// once per request rather than once per token.
+pub struct RemoteTokenizer {
+    fleet: std::sync::Arc<crate::fleet_manager::FleetManager>,
+    model: String,
+    export: linkf::TokenizerExportMsg,
+}
+
+impl RemoteTokenizer {
+    pub fn new(fleet: std::sync::Arc<crate::fleet_manager::FleetManager>, model: String, export: linkf::TokenizerExportMsg) -> RemoteTokenizer {
+        RemoteTokenizer { fleet, model, export }
+    }
+
+    /// The node's tokenizer digest, which every node serving the model is held to.
+    pub fn digest(&self) -> u64 {
+        self.export.digest
+    }
+
+    fn encode_by(&self, text: linkf::TokenizeMsg) -> Option<Vec<u32>> {
+        match self.fleet.tokenize(&self.model, &text) {
+            Ok(tokens) => tokens,
+            Err(e) => {
+                tracing::warn!("fleet: no node serving {} could encode a request's text: {e}", self.model);
+                None
+            }
+        }
+    }
+}
+
+impl superfluid_engine::Tokenizer for RemoteTokenizer {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        self.encode_by(linkf::TokenizeMsg::Encode(text.to_string())).unwrap_or_default()
+    }
+
+    fn token_bytes(&self, token: u32) -> Vec<u8> {
+        self.export.vocab.get(token as usize).cloned().unwrap_or_default()
+    }
+
+    fn vocab_size(&self) -> u32 {
+        self.export.vocab.len() as u32
+    }
+
+    fn special_tokens(&self) -> Vec<(String, u32)> {
+        self.export.specials.clone()
+    }
+
+    fn bos_token(&self) -> Option<u32> {
+        self.export.bos
+    }
+
+    fn eos_token(&self) -> u32 {
+        self.export.eos
+    }
+
+    fn chat_template_jinja(&self) -> String {
+        self.export.chat_template.clone()
+    }
+
+    fn chat_template_named(&self, name: &str) -> Option<String> {
+        self.export.named_templates.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
+    }
+
+    fn encode_plain(&self, text: &str) -> Option<Vec<u32>> {
+        self.export.plain.then(|| self.encode_by(linkf::TokenizeMsg::Plain(text.to_string()))).flatten()
+    }
+
+    fn encode_pieces(&self, pieces: &[(&str, bool)]) -> Option<Vec<u32>> {
+        let pieces = pieces.iter().map(|(p, s)| (p.to_string(), *s)).collect();
+        self.export.pieces.then(|| self.encode_by(linkf::TokenizeMsg::Pieces(pieces))).flatten()
+    }
+}
+
 /// A file a request names, sent to the node by its SHA-256 (in hex) before the request.
 #[derive(Debug, Clone)]
 pub struct Blob {
@@ -620,6 +693,44 @@ impl FleetHead {
             None,
             format!("node {} runs an older superfluid that cannot take {what}; update it", self.node.node_identity),
         )))
+    }
+
+    /// The node's tokenizer, whole but for encoding, for a head with no copy of the model.
+    pub fn tokenizer_export(&mut self) -> Result<linkf::TokenizerExportMsg, DaemonError> {
+        self.needs_v3("sharing its tokenizer")?;
+        let request_id = self.next_generation;
+        self.next_generation += 1;
+        self.endpoint.send(msg_type::TOKENIZER_EXPORT_REQ, &linkf::TokenizerExportReqMsg { request_id })?;
+        loop {
+            for frame in self.endpoint.wait_frames()? {
+                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKENIZER_EXPORT) else {
+                    continue;
+                };
+                let m: linkf::TokenizerExportMsg = postcard::from_bytes(&frame.payload)?;
+                if m.request_id == request_id {
+                    return Ok(m);
+                }
+            }
+        }
+    }
+
+    /// Text the node's tokenizer encodes; none when it does not encode that way.
+    pub fn tokenize(&mut self, text: linkf::TokenizeMsg) -> Result<Option<Vec<u32>>, DaemonError> {
+        self.needs_v3("encoding text")?;
+        let request_id = self.next_generation;
+        self.next_generation += 1;
+        self.endpoint.send(msg_type::TOKENIZE_REQ, &linkf::TokenizeReqMsg { request_id, text })?;
+        loop {
+            for frame in self.endpoint.wait_frames()? {
+                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKENIZE_RESP) else {
+                    continue;
+                };
+                let m: linkf::TokenizeRespMsg = postcard::from_bytes(&frame.payload)?;
+                if m.request_id == request_id {
+                    return Ok(m.tokens);
+                }
+            }
+        }
     }
 
     /// Runs one Link W state operation on the node's engine.

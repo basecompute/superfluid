@@ -43,6 +43,12 @@ pub mod msg_type {
     pub const STATE_SYNC_RESP: u16 = 0x001D;
     /// The node's tokenizer, by digest, just after the handshake (version 3).
     pub const TOKENIZER: u16 = 0x001E;
+    /// The node's tokenizer whole, for a head that has no copy of the model (version 3).
+    pub const TOKENIZER_EXPORT_REQ: u16 = 0x001F;
+    pub const TOKENIZER_EXPORT: u16 = 0x0020;
+    /// Text the node's tokenizer encodes for the head (version 3).
+    pub const TOKENIZE_REQ: u16 = 0x0021;
+    pub const TOKENIZE_RESP: u16 = 0x0022;
 
     pub const TELEMETRY: u16 = 0x8001;
     /// An idle head's sign of life; droppable, so a node that predates it skips it.
@@ -79,6 +85,10 @@ pub mod msg_type {
         STATE_SYNC_REQ,
         STATE_SYNC_RESP,
         TOKENIZER,
+        TOKENIZER_EXPORT_REQ,
+        TOKENIZER_EXPORT,
+        TOKENIZE_REQ,
+        TOKENIZE_RESP,
         TELEMETRY,
         KEEPALIVE,
     ];
@@ -321,6 +331,48 @@ pub struct GenerateOptsMsg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerMsg {
     pub digest: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizerExportReqMsg {
+    pub request_id: u64,
+}
+
+/// What a tokenizer says without being asked to encode: every token's bytes, its specials and
+/// ends, and its chat templates. A head with this and a node to encode has the tokenizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizerExportMsg {
+    pub request_id: u64,
+    pub digest: u64,
+    pub vocab: Vec<Vec<u8>>,
+    pub specials: Vec<(String, u32)>,
+    pub bos: Option<u32>,
+    pub eos: u32,
+    pub chat_template: String,
+    /// The templates asked for by name (`tool_use`), each the node has.
+    pub named_templates: Vec<(String, String)>,
+    /// Whether the tokenizer encodes plainly (no specials parsed) and by pieces.
+    pub plain: bool,
+    pub pieces: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenizeMsg {
+    Encode(String),
+    Plain(String),
+    Pieces(Vec<(String, bool)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizeReqMsg {
+    pub request_id: u64,
+    pub text: TokenizeMsg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizeRespMsg {
+    pub request_id: u64,
+    pub tokens: Option<Vec<u32>>,
 }
 
 /// A media path the head sent as a blob: the node reads it from its own media pool.
