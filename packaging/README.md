@@ -10,7 +10,7 @@ superfluid ships as GitHub release tarballs (`.github/workflows/release.yml`, `s
 
 `superfluid` is another project's name on both PyPI and npm, hence `superfluid-cli` and the `@basecompute` scope.
 
-Every package carries the release tree unchanged, so superfluid finds its runtime workers in `libexec/superfluid` beside its own `bin/` as it does in a tarball install, plus one file at the root, `installed-by` (`<manager>: <command>`). From 0.1.5 on, `superfluid self update` reads it, leaves the copy to its package manager and names the command, and so does the line `serve` prints when a newer release is out. Without it, a package's layout looks like the install script's in-place copy, and `self update` would move it under `~/.superfluid/versions`.
+Every package carries the release tree unchanged, so superfluid finds its runtime workers in `libexec/superfluid` beside its own `bin/` as it does in a tarball install, plus one file at the root, `installed-by` (`<manager>: <command>`). From 0.1.5 on, `superfluid self update` reads it and names the command, and so does the line `serve` prints when a newer release is out; from 0.1.6 on it runs that manager's update itself (Homebrew, npm, pipx, uv, cargo), after asking, and still only names pip's. Without it, a package's layout looks like the install script's in-place copy, and `self update` would move it under `~/.superfluid/versions`.
 
 ## The scripts
 

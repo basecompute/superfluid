@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7
+
+- 0.1.6 reached GitHub and crates.io but not npm or the Homebrew tap: the install test that gates those uploads (`packaging/try-install.sh`, run by publish.yml on each release) still expected 0.1.5's `self update --dry-run` wording, "was installed by <manager>; `<command>` updates it", and 0.1.6 says "was installed by pip, which updates it: run `<command>` (…)" for a pip copy and "was installed by <manager>: `self update` would run …" for the managers it runs itself (#54). The test now takes both: the manager named either way, a dry run that exits 0 showing the command it would run, one that exits 1 naming it (pip; npm too in the test, whose throwaway `--prefix` has no npm of its own), and the copy unchanged after it; `packaging/README.md` says so. Nothing else changes from 0.1.6.
+
 ## 0.1.6
 
 - A fleet node's link stays up while the node generates: each end sends a keepalive after 5 s with nothing sent and gives the link up (`TimedOut`) after 30 s with nothing heard, both inside `pump`, so any loop reading the link keeps it alive mid-generation; a generation runs on a thread of its own and its tokens reach the connection's loop through a channel (coalesced as before, 16 tokens or 200 ms) while the loop reads cancels, lease grants and heartbeats and sends status every 2 s; the head bounds its wait on a node. Link version 3, offered beside 2: a peer on 2 sends no heartbeat and is never given up for silence. Before, a generation longer than the node's idle timeout (120 s) had its link dropped when it finished, one longer than its lease (60 s) hung the request, and a node that went quiet without closing its socket hung the head's request for good; the stopgap that reset the idle clock after a generation and renewed leases from the token loop is gone (#55).
