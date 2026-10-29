@@ -25,6 +25,7 @@ superfluid runtime use llamacpp --auto           # unpin
 superfluid runtime repair llamacpp
 superfluid runtime remove llamacpp b11284-vulkan
 superfluid runtime remove llamacpp@b11284-vulkan # the same, as `superfluid runtimes` lists the install
+superfluid runtime remove llamacpp --all         # every install
 ```
 
 | command | what it does |
@@ -33,7 +34,7 @@ superfluid runtime remove llamacpp@b11284-vulkan # the same, as `superfluid runt
 | `install <id>` | plan, fetch, verify and place an install. Options: `--version V`, `--backend B` (no fallback), `--from <archive>` (a URL or path to your own archive or, for MLX, package index), `--sha256 H`, `--untested`, `--dry-run` |
 | `update <id>` | install the newest tested build for the default install's backend beside it and make it the default |
 | `repair <id> [<install>]` | reinstall the same version and backend; what a daemon updated with `superfluid self update` asks for when an install's worker is too old |
-| `remove <id> [<install>]` | remove one install, or all of them |
+| `remove <id> [<install>]` / `--all` | remove one install, or every one with `--all`; the id alone removes the only install and refuses a runtime that has more |
 | `use <id> <install>` / `--auto` | pin the default install / return to ranking |
 
 `repair`, `remove` and `use` take the install as `<id>@<install>` too, as the RUNTIME column of `superfluid runtimes` shows one that is not the default.

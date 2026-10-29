@@ -68,3 +68,55 @@ fn an_install_as_runtimes_lists_it_reaches_the_runtime_actions() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("install basert --version 0.3.0 --backend metal`"));
     assert!(!home.exists(), "nothing was written");
 }
+
+#[test]
+fn removing_a_runtime_with_more_than_one_install_needs_all() {
+    let home = std::env::temp_dir().join(format!("superfluid-serve-cli-all-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let place = |install: &str| {
+        let (version, backend) = install.split_once('-').unwrap();
+        let dir = home.join("runtimes/basert").join(install);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = serde_json::json!({
+            "id": "basert", "install": install, "version": version, "backend": backend,
+            "link_w": [superfluid_agent::client::PROTO_VERSION], "platforms": [],
+            "worker": "bin/superfluid-worker-basert", "sources": [], "tested": true,
+        });
+        std::fs::write(dir.join("runtime.json"), manifest.to_string()).unwrap();
+    };
+    let installed = || {
+        let mut names: Vec<String> = std::fs::read_dir(home.join("runtimes/basert"))
+            .map(|rd| rd.flatten().filter(|e| e.path().join("runtime.json").exists()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    };
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_superfluid")).arg("runtime").args(args).env("SUPERFLUID_HOME", &home).output().expect("run superfluid")
+    };
+    place("0.3.0-metal");
+    place("0.4.2-metal");
+    let out = run(&["remove", "basert"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "superfluid: basert has 2 installs (0.4.2-metal, 0.3.0-metal): `superfluid runtime remove basert <install>` removes one, \
+         `superfluid runtime remove basert --all` every one\n"
+    );
+    assert_eq!(installed(), ["0.3.0-metal", "0.4.2-metal"], "nothing was removed");
+
+    let out = run(&["remove", "basert@0.3.0-metal"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "removed basert 0.3.0-metal\nbasert serves from 0.4.2-metal by default\n");
+    let out = run(&["remove", "basert"]);
+    assert!(out.status.success(), "the only install goes without --all: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(installed(), Vec::<String>::new());
+
+    place("0.3.0-metal");
+    place("0.4.2-metal");
+    let out = run(&["remove", "basert", "--all"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "removed basert 0.4.2-metal, 0.3.0-metal\n");
+    assert!(!home.join("runtimes/basert").exists());
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -388,17 +388,18 @@ Options:
 pub const RUNTIME_HELP: &str = "Install and manage inference runtimes.
 
 Usage:
-  superfluid runtime versions <id> [--json]     List the versions the adapter installs on its own: which install
-                                                here, as what, and which are installed
-  superfluid runtime install <id> [options]     Fetch and install a runtime for this machine
-  superfluid runtime update <id>                Install the newest tested build beside the current one
-  superfluid runtime repair <id> [<install>]    Reinstall an install in place
-  superfluid runtime remove <id> [<install>]    Remove one install, or all of them
-  superfluid runtime use <id> <install>|--auto  Pin the default install, or go back to the best-ranked
-  superfluid runtime options <id> [--json]      The knobs it takes on `serve`, as --<id>-<name> <value>
+  superfluid runtime versions <id> [--json]         List the versions the adapter installs on its own: which
+                                                    install here, as what, and which are installed
+  superfluid runtime install <id> [options]         Fetch and install a runtime for this machine
+  superfluid runtime update <id>                    Install the newest tested build beside the current one
+  superfluid runtime repair <id> [<install>]        Reinstall an install in place
+  superfluid runtime remove <id> [<install>|--all]  Remove one install, or with --all every one
+  superfluid runtime use <id> <install>|--auto      Pin the default install, or go back to the best-ranked
+  superfluid runtime options <id> [--json]          The knobs it takes on `serve`, as --<id>-<name> <value>
 
   <id> is basert, llamacpp or mlx. Installs live under $SUPERFLUID_HOME/runtimes (~/.superfluid).
   repair, remove and use also take an install as <id>@<install>, the way `superfluid runtimes` lists it.
+  remove <id> with no install removes the runtime's only install, and needs --all when it has more.
 
 Install options:
   --version <V>          A runtime version (default: the newest this adapter was tested with)
@@ -432,6 +433,9 @@ pub fn runtime_target(action: &str, name: &str, rest: &[String]) -> Result<(Runt
             [same] if same == install => Ok((base, rest.to_vec())),
             [auto] if action == "use" && auto == "--auto" => Err(format!(
                 "'{name}' pins {install} and --auto unpins: `superfluid runtime use {base} --auto` goes back to the best-ranked"
+            )),
+            [all] if action == "remove" && all == "--all" => Err(format!(
+                "'{name}' names the install {install} and --all every one: `superfluid runtime remove {base} --all` removes them all"
             )),
             [other] => Err(format!("'{name}' names the install {install} and '{other}' names another: give one")),
             // More than an install follows: the action's own usage refuses it.
@@ -636,6 +640,11 @@ mod tests {
         assert_eq!(
             target("use", "basert@0.4.2-metal", &["--auto"]),
             Err("'basert@0.4.2-metal' pins 0.4.2-metal and --auto unpins: `superfluid runtime use basert --auto` goes back to the best-ranked".into())
+        );
+        assert_eq!(target("remove", "basert", &["--all"]), basert(&["--all"]));
+        assert_eq!(
+            target("remove", "basert@0.3.0-metal", &["--all"]),
+            Err("'basert@0.3.0-metal' names the install 0.3.0-metal and --all every one: `superfluid runtime remove basert --all` removes them all".into())
         );
         assert_eq!(target("remove", "basert@a", &["a", "b"]), basert(&["a", "b"]), "left to the action's usage");
     }

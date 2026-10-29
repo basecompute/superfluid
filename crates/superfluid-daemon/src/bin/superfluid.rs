@@ -213,9 +213,23 @@ fn runtime_cmd(args: &[String]) {
         "remove" => {
             let name = match rest {
                 [] => None,
-                [name] => Some(name.as_str()),
+                [all] if all == "--all" => None,
+                [name] if !name.starts_with('-') => Some(name.as_str()),
                 _ => usage(),
             };
+            // The bare id is also how `superfluid runtimes` lists the default install, so it removes
+            // every install only when it is the only one, or with --all.
+            let installed = installs::list(&catalog, id);
+            if rest.is_empty() && installed.len() > 1 {
+                let names: Vec<&str> = installed.iter().map(|i| i.name.as_str()).collect();
+                eprintln!(
+                    "superfluid: {id} has {} installs ({}): `superfluid runtime remove {id} <install>` removes one, \
+                     `superfluid runtime remove {id} --all` every one",
+                    names.len(),
+                    names.join(", ")
+                );
+                std::process::exit(2);
+            }
             match installs::remove(&catalog, id, name) {
                 Ok(gone) => {
                     println!("removed {id} {}", gone.join(", "));

@@ -242,12 +242,14 @@ superfluid runtime versions <id> [--json]
 superfluid runtime install <id> [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested] [--dry-run]
 superfluid runtime update <id>
 superfluid runtime repair <id> [<install>]
-superfluid runtime remove <id> [<install>]
+superfluid runtime remove <id> [<install> | --all]
 superfluid runtime use <id> <install> | --auto
 superfluid runtime options <id> [--json]
 ```
 
 `repair`, `remove` and `use` also take an install as `<id>@<install>`, the way `superfluid runtimes` lists one in its RUNTIME column: `superfluid runtime remove basert@0.3.0-metal` is `superfluid runtime remove basert 0.3.0-metal`, and two installs named both ways are refused. The other actions take the id alone and say so.
+
+`remove <id>` with no install removes the runtime's only install; when it has more, it names them and removes nothing, and `--all` removes every one. The bare id is also how `superfluid runtimes` lists the default install.
 
 See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](../models/runtimes.md#per-runtime-options).
 
