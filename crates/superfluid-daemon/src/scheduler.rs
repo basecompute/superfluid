@@ -186,6 +186,7 @@ pub struct LaneCarry {
     tool_buf: String,
     produced_before: u32,
     spec_before: (u64, u64),
+    decode_before: (u64, f64),
     warm_prefix_first: Option<u64>,
 }
 
@@ -207,6 +208,9 @@ pub enum LaneEvent {
         finish: u32,
         warm_prefix: u64,
         spec: (u64, u64),
+        /// Tokens decoded after the request's first tick and the seconds they
+        /// took, tick end to tick end (see `Lane::decode`).
+        decode: (u64, f64),
     },
     Failed(String),
 }
@@ -332,12 +336,35 @@ struct Lane {
     turn_kept: bool,
     produced_before: u32,
     spec: (u64, u64),
+    /// The request's decode as delivered tick by tick: tokens after its first
+    /// tick and the seconds from that tick's end to the last one's, summed over
+    /// its spans (a preempted lane starts a new span). A tick hands over all
+    /// of its tokens at once, under one or more events, so only tick ends time
+    /// it; the first tick also ran the prefill, so it only opens the span.
+    decode: (u64, f64),
+    /// The open span: (end of its first tick, tokens by then, end of its
+    /// latest tick, tokens by then).
+    decode_ticks: Option<(std::time::Instant, u32, std::time::Instant, u32)>,
     disp_tokens: u32,
     warm_prefix_first: Option<u64>,
     admitted_at: std::time::Instant,
     ttft_observed: bool,
     ttft_frame_ms: Option<u64>,
     fault_code: Option<u32>,
+}
+
+impl Lane {
+    /// `decode` with the open span closed.
+    fn decode_measured(&self) -> (u64, f64) {
+        let mut d = self.decode;
+        if let Some((at, by, last_at, last_by)) = self.decode_ticks {
+            if last_by > by {
+                d.0 += u64::from(last_by - by);
+                d.1 += last_at.saturating_duration_since(at).as_secs_f64();
+            }
+        }
+        d
+    }
 }
 
 #[derive(Default)]
@@ -2276,6 +2303,7 @@ impl Scheduler {
                 continue;
             }
             let spec_before = job.carry.as_ref().map(|c| c.spec_before).unwrap_or_default();
+            let decode_before = job.carry.as_ref().map(|c| c.decode_before).unwrap_or_default();
             let (seg, utf8, disp_seg, disp_utf8, tool_buf, produced_before, warm_prefix_first) =
                 match job.carry.take() {
                     Some(c) => (
@@ -2339,6 +2367,8 @@ impl Scheduler {
                 produced_before,
                 disp_tokens: produced_before,
                 spec: spec_before,
+                decode: decode_before,
+                decode_ticks: None,
                 warm_prefix_first,
                 admitted_at: std::time::Instant::now(),
                 ttft_observed: false,
@@ -3166,6 +3196,7 @@ impl Scheduler {
                         finish: lane.fin,
                         warm_prefix: lane.warm_prefix,
                         spec: lane.spec,
+                        decode: lane.decode_measured(),
                     });
                     locally_retired.push(lane.session);
                     false
@@ -3629,6 +3660,7 @@ impl Scheduler {
             self.defer_admits(&deferred);
         }
         let tick_secs = tick_started.elapsed().as_secs_f64().max(1e-3);
+        let tick_done = std::time::Instant::now();
         // Prefill the engine shed (a tick that yielded between steps) is
         // planned again from where it stopped.
         for e in ev.shed.entries.iter().filter(|e| e.kind == superfluid_abi::shed_kind::PREFILL_CHUNK) {
@@ -3672,6 +3704,24 @@ impl Scheduler {
             .map(|e| e.n_tokens.saturating_sub(e.spec.accepted).max(1))
             .max()
             .unwrap_or(0);
+        // A lane whose prefill ended in this tick takes its first token from
+        // the prefill's logits, not from a decode round: a tick that only
+        // finished prompts ran no decode round to learn a decode cost from.
+        let first_from_prefill: HashSet<u64> = self
+            .lanes
+            .iter()
+            .filter(|l| l.produced == 0 && prefill_by_tag.contains_key(&l.tag))
+            .map(|l| l.tag)
+            .collect();
+        let tick_decode_rounds: Option<u32> = ev
+            .emits
+            .iter()
+            .filter(|e| e.n_tokens > 0)
+            .map(|e| {
+                let rounds = e.n_tokens.saturating_sub(e.spec.accepted).max(1);
+                rounds - u32::from(first_from_prefill.contains(&e.lane_tag))
+            })
+            .max();
         self.stats
             .prefill_tokens
             .fetch_add(prefill_tokens_ran as u64, Ordering::Relaxed);
@@ -3679,12 +3729,15 @@ impl Scheduler {
         let (prefill_secs_meas, decode_secs_meas) = if phase_split {
             (ev.timings.prefill_ns as f64 / 1e9, ev.timings.decode_ns as f64 / 1e9)
         } else {
-            let decode_est = self.decode_round_secs.unwrap_or(0.0) * tick_rounds_exec as f64;
+            let decode_est = self.decode_round_secs.unwrap_or(0.0) * tick_decode_rounds.unwrap_or(0) as f64;
             ((tick_secs - decode_est).max(1e-3), decode_est)
         };
         // A tick the daemon ended early ran fewer steps than planned: the
         // rates are of what ran.
-        let decode_rounds_ran = if tick_rounds_exec > 0 { tick_rounds_exec.min(plan_decode_rounds) } else { plan_decode_rounds };
+        let decode_rounds_ran = match tick_decode_rounds {
+            Some(rounds) => rounds.min(plan_decode_rounds),
+            None => plan_decode_rounds,
+        };
         if decode_rounds_ran > 0 && phase_split && decode_secs_meas > 0.0 {
             let sample = decode_secs_meas / decode_rounds_ran as f64;
             self.decode_round_secs = Some(match self.decode_round_secs {
@@ -3867,6 +3920,10 @@ impl Scheduler {
             lane.all_tokens.extend_from_slice(&tokens);
             lane.produced += tokens.len() as u32;
             lane.fin = fin;
+            lane.decode_ticks = Some(match lane.decode_ticks {
+                None => (tick_done, lane.produced, tick_done, lane.produced),
+                Some((at, by, _, _)) => (at, by, tick_done, lane.produced),
+            });
             let frame_fed = std::mem::take(&mut lane.frame_fed).min(tokens.len());
             if !lane.job.completion {
                 provisional_ingest(&self.codec, &self.bus, lane, &tokens[frame_fed..]);
@@ -4010,6 +4067,7 @@ impl Scheduler {
                 }
                 let lane = self.lanes.remove(i);
                 if lane.preempted && lane.fin == finish::NONE {
+                    let decode_before = lane.decode_measured();
                     let mut job = lane.job;
                     job.stream = lane.all_tokens;
                     job.max_tokens -= lane.produced;
@@ -4021,6 +4079,7 @@ impl Scheduler {
                         tool_buf: lane.tool_buf,
                         produced_before: lane.produced_before + lane.produced,
                         spec_before: lane.spec,
+                        decode_before,
                         warm_prefix_first: Some(lane.warm_prefix_first.unwrap_or(lane.warm_prefix)),
                     });
                     requeue.push(job);
@@ -4038,6 +4097,7 @@ impl Scheduler {
                             finish: lane.fin,
                             warm_prefix: lane.warm_prefix_first.unwrap_or(lane.warm_prefix),
                             spec: lane.spec,
+                            decode: lane.decode_measured(),
                         });
                     }
                 }
@@ -4147,7 +4207,7 @@ pub fn run_completion_streaming(
     }
 }
 
-pub type RunJobResult = (Vec<CommittedEvent>, u32, u32, u64, Vec<TokenLogprob>, (u64, u64));
+pub type RunJobResult = (Vec<CommittedEvent>, u32, u32, u64, Vec<TokenLogprob>, (u64, u64), (u64, f64));
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_job(
@@ -4224,10 +4284,11 @@ pub fn run_job(
                 finish,
                 warm_prefix,
                 spec,
+                decode,
             }) => {
                 return match delivery_err {
                     Some(err) => Err(err),
-                    None => Ok((events, tokens_generated, finish, warm_prefix, logprobs, spec)),
+                    None => Ok((events, tokens_generated, finish, warm_prefix, logprobs, spec, decode)),
                 };
             }
             Ok(LaneEvent::Failed(msg)) => {
