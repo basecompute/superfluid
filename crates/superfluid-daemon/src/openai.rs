@@ -40,6 +40,9 @@ pub struct ServeConfig {
     pub surface: HttpSurface,
     pub model_naming: ModelNaming,
     pub identity: ServerIdentity,
+    /// Where answers recorded under an `Idempotency-Key` are kept across restarts; in memory
+    /// alone when none.
+    pub idempotency_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ServeConfig {
@@ -57,6 +60,7 @@ impl Default for ServeConfig {
             surface: HttpSurface::default(),
             model_naming: ModelNaming::default(),
             identity: ServerIdentity::default(),
+            idempotency_dir: None,
         }
     }
 }
@@ -514,7 +518,9 @@ pub(crate) fn access_layers(
     ip_limiter: Arc<crate::ratelimit::RateLimiter>,
     listens_on_loopback: bool,
 ) -> Router {
-    app.layer(axum::middleware::from_fn_with_state(Arc::clone(&ip_limiter), rate_limit_layer))
+    let records = Arc::new(crate::idempotency::Records::new(cfg.idempotency_dir.clone()));
+    app.layer(axum::middleware::from_fn_with_state(records, crate::idempotency::layer))
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&ip_limiter), rate_limit_layer))
         .layer(axum::middleware::from_fn_with_state(
             AuthState {
                 api_key_digest: cfg.api_key.as_deref().map(crate::keypolicy::sha256),

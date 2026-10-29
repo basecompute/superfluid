@@ -475,3 +475,23 @@ fn a_node_whose_tokenizer_differs_is_not_used_for_the_model() {
     let (status, body) = chat_to(&head, "beta");
     assert_eq!(status, 200, "{body}");
 }
+
+#[test]
+fn a_request_sent_again_with_its_key_through_the_head_gets_the_first_answer() {
+    let head = head(node());
+    let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 12, "temperature": 1.0});
+    let send = || {
+        let mut resp = agent()
+            .post(&format!("http://{head}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .header("Idempotency-Key", "through-the-head")
+            .send(body.to_string().as_bytes())
+            .unwrap();
+        let replayed = resp.headers().get("idempotent-replayed").is_some();
+        (replayed, resp.body_mut().read_to_string().unwrap())
+    };
+    let (first_replayed, first) = send();
+    let (again_replayed, again) = send();
+    assert_eq!((first_replayed, again_replayed), (false, true));
+    assert_eq!(again, first);
+}

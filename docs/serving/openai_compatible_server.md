@@ -180,8 +180,22 @@ A batch runs line by line against the default model. Up to 4 batches run at once
 | `x-superfluid-batch-invariant` | request | a lane that ticks alone; needs `--http-allow-batch-invariant` |
 | `x-superfluid-warm` | response | prompt tokens served from the prefix cache |
 | `x-superfluid-keepalive: whitespace` | response | `--nonstream-keepalive` is padding the body with spaces |
+| `Idempotency-Key` | request | a POST sent again with its key gets the first one's answer; see below |
+| `Idempotent-Replayed: true` | response | this answer was recorded for an earlier request with the same key |
 
 With `--nonstream-keepalive <sec>`, a non-streaming generation commits `200 OK` at admission and writes one space every interval until the JSON body, so an idle-timing proxy does not drop a long prefill. Leading whitespace is valid JSON.
+
+### Retrying with `Idempotency-Key`
+
+Send `Idempotency-Key: <any string up to 255 characters>` with a POST, on any route and in any API format, and send the same request with the same key to retry it. The answer the first one got is replayed whole, from its start, with `Idempotent-Replayed: true`:
+
+- A connection that dropped mid-stream does not stop the generation. A retry reads the stream from its first event, then follows it to its end, so a client that keeps nothing from the dropped attempt reads one complete stream.
+- A finished answer is kept for 24 hours under `<sessions>/idempotency` and replayed after a restart.
+- A request a restart cut short runs again under its key.
+- A key belongs to the credential it came with: another API key with the same string is another request.
+- The same key with another request body, or on another route, is refused with `422` (`code: idempotency_key`).
+
+Use a new key for each new request: a retry loop that sends the same request with the same key is safe, and it runs at most once.
 
 ## Errors
 

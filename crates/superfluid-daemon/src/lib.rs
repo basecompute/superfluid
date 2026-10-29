@@ -24,6 +24,7 @@ pub mod tool_fragment;
 pub mod fleet;
 pub mod fleet_manager;
 pub(crate) mod fleet_daemon;
+pub mod idempotency;
 pub mod fleet_join;
 pub mod fleet_mdns;
 pub mod fleet_token;

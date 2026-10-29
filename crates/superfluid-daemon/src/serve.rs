@@ -1400,6 +1400,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 surface: embedding.http,
                 model_naming: embedding.model_naming,
                 identity: embedding.identity.clone(),
+                idempotency_dir: Some(sessions.join("idempotency")),
                 ..Default::default()
             },
         )
@@ -1807,6 +1808,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             surface: embedding.http,
             model_naming: embedding.model_naming,
             identity: embedding.identity.clone(),
+            idempotency_dir: Some(sessions.join("idempotency")),
         };
         http_thread = Some(std::thread::spawn(move || {
             superfluid_daemon::openai::serve_blocking_config(http_listener, reg, serve_cfg)
