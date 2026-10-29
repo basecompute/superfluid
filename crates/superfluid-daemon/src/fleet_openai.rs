@@ -59,6 +59,7 @@ pub fn serve_blocking(
             .route("/v1/chat/completions", post(chat_completions))
             .route("/v1/models", get(models))
             .route("/metrics", get(metrics))
+            .route("/health", get(health))
             .with_state(FleetState {
                 fleet,
                 codec,
@@ -114,6 +115,20 @@ async fn models(State(st): State<FleetState>) -> Json<serde_json::Value> {
     }
     .build();
     Json(serde_json::json!({"object": "list", "data": [entry]}))
+}
+
+/// 200 while some node up serves the model, 503 while none does, so a load balancer sends the
+/// head nothing it could not place.
+async fn health(State(st): State<FleetState>) -> impl IntoResponse {
+    let (up, known) = st.fleet.serving(&st.model_name);
+    let status = if up > 0 { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+    let body = serde_json::json!({
+        "status": if up > 0 { "ok" } else { "no_nodes" },
+        "model": *st.model_name,
+        "nodes_up": up,
+        "nodes_known": known,
+    });
+    (status, Json(body))
 }
 
 /// Each node as the head sees it, so `superfluid top` pointed at the head shows the whole fleet.

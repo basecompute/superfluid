@@ -457,6 +457,15 @@ impl FleetManager {
             .collect()
     }
 
+    /// The nodes up now that serve `model`, and every node the head knows.
+    pub fn serving(&self, model: &str) -> (usize, usize) {
+        let sh = self.shared.lock().expect("shared");
+        let up = (0..sh.meta.len())
+            .filter(|&i| sh.meta[i].up() && sh.meta[i].learned && Self::serves(&sh, i, model))
+            .count();
+        (up, sh.meta.len())
+    }
+
     pub fn node_of(&self, session: u64) -> Option<String> {
         let sh = self.shared.lock().expect("shared");
         let node = sh.sessions.get(&session)?.node;

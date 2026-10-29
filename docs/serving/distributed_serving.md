@@ -114,8 +114,9 @@ A prompt no node can hold is refused with `context_length_exceeded`.
 - `POST /v1/chat/completions`, streaming or not, with tools ([OpenAI API](openai_compatible_server.md)).
 - `GET /v1/models`: the one model the fleet serves.
 - `GET /metrics`: each node as the head sees it, labelled `node` and `addr`: `superfluid_fleet_node_up`, `_lanes`, `_lanes_active`, `_queue_depth`, `_pool_blocks_used`, `_pool_blocks_total` and `_decode_tokens_total`. A streamed generation's tokens count as they arrive; a non-streamed one's when it ends, as the node sends them in one reply. The KV pool is the node's latest status, sent every 2 s. `superfluid top` pointed at the head, or run with no address on the head's network, shows every node from it.
+- `GET /health`: 200 with `{"status": "ok"}` while at least one node that is up serves the model, 503 with `"no_nodes"` while none does; both carry `nodes_up` and `nodes_known`. It needs no API key.
 
-Refused with 400: non-zero `presence_penalty`/`frequency_penalty`, a `repeat_penalty` other than 1.0, `ignore_eos`, `stream_options.continuous_usage_stats`, and image or audio parts. Not read: `logprobs`, `logit_bias`, `response_format`, `tool_choice`. There is no `/health`, Anthropic, Ollama, embeddings, files or batches surface on the head. A generation has a ten-minute wall-clock ceiling.
+Refused with 400: non-zero `presence_penalty`/`frequency_penalty`, a `repeat_penalty` other than 1.0, `ignore_eos`, `stream_options.continuous_usage_stats`, and image or audio parts. Not read: `logprobs`, `logit_bias`, `response_format`, `tool_choice`. There is no Anthropic, Ollama, embeddings, files or batches surface on the head. A generation has a ten-minute wall-clock ceiling.
 
 ## Failure handling
 

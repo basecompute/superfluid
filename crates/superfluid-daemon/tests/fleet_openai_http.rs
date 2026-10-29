@@ -61,6 +61,8 @@ fn start_head_cfg(node_addr: String, max_context: u32, cfg: superfluid_daemon::o
     let specs = vec![NodeSpec { addr: node_addr, auth: Vec::new() }];
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::new(specs, PlacementPolicy::LeastLoaded, lease));
+    // As `serve` does, so the head knows what each node serves before the first request.
+    let _ = manager.probe();
     let codec: Arc<dyn TextCodec + Send + Sync> = Arc::new(MockChatCodec);
     let http = TcpListener::bind("127.0.0.1:0").unwrap();
     let http_addr = http.local_addr().unwrap().to_string();
@@ -567,4 +569,33 @@ fn fleet_head_cancels_a_disconnected_stream_and_holds_its_slot_until_then() {
         .send(second.as_bytes())
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[test]
+fn fleet_head_health_says_whether_a_node_serves_the_model() {
+    let a: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let health = |addr: &str| {
+        let mut resp = a.get(&format!("http://{addr}/health")).call().expect("health");
+        let json: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
+        (resp.status().as_u16(), json)
+    };
+
+    let http_addr = start_head(spawn_node());
+    wait_ready(&agent(), &http_addr);
+    let (status, json) = health(&http_addr);
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["nodes_up"], 1);
+
+    let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+    let http_addr = start_head(gone);
+    wait_ready(&agent(), &http_addr);
+    let (status, json) = health(&http_addr);
+    assert_eq!(status, 503, "{json}");
+    assert_eq!(json["status"], "no_nodes");
+    assert_eq!(json["nodes_known"], 1);
 }
