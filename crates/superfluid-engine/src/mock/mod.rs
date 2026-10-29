@@ -1125,6 +1125,9 @@ impl Engine for MockEngine {
         hidden_in: Option<Vec<u8>>,
     ) -> Result<StageOutput, Status> {
         let n = MOCK_PIPELINE_LAYERS;
+        if !self.cfg.tick_delay.is_zero() {
+            std::thread::sleep(self.cfg.tick_delay);
+        }
         if start_layer > end_layer || end_layer > n {
             return Err(Status::RejectBounds);
         }

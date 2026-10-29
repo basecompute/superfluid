@@ -195,7 +195,9 @@ impl Endpoint {
             FrameClass::Required
         };
         let payload = postcard::to_stdvec(msg)?;
-        let bytes = encode_frame(PROTO_VERSION, msg_type, self.seq, 0, class, &payload)?;
+        // Before the handshake settles a version, the oldest one, which every peer reads.
+        let version = if self.version == 0 { OLDEST_VERSION } else { self.version };
+        let bytes = encode_frame(version, msg_type, self.seq, 0, class, &payload)?;
         self.seq += 1;
         self.stream.write_all(&bytes)?;
         self.last_sent = Instant::now();
@@ -302,8 +304,8 @@ impl Endpoint {
         if !expected_auth.is_empty() && !ct_eq(&hello.auth, expected_auth) {
             return Err(LinkFError::Unauthorized);
         }
-        self.send(msg_type::HELLO_ACK_F, &HelloAckF { chosen_version: version, ..ack.clone() })?;
         self.version = version;
+        self.send(msg_type::HELLO_ACK_F, &HelloAckF { chosen_version: version, ..ack.clone() })?;
         Ok(())
     }
 
@@ -383,14 +385,17 @@ mod tests {
         let sent = head.wait_frames().unwrap();
         let ack: HelloAckF = postcard::from_bytes(&sent[0].payload).unwrap();
         assert_eq!(ack.chosen_version, node.version());
+        assert_eq!(sent[0].proto_version, node.version(), "the ack is framed at the version it chose");
         node.keep_alive(Liveness { heartbeat: Duration::from_secs(60), silence: Duration::from_millis(50) });
         (head, node)
     }
 
     #[test]
     fn a_head_on_version_2_is_answered_at_2_and_never_given_up_for_silence() {
-        let (_head, mut node) = answered((2, 2));
+        let (mut head, mut node) = answered((2, 2));
         assert_eq!(node.version(), 2);
+        node.send(msg_type::KEEPALIVE, &()).unwrap();
+        assert!(head.wait_frames().unwrap().iter().all(|f| f.proto_version == 2), "every frame after it at 2");
         std::thread::sleep(Duration::from_millis(120));
         assert!(node.pump().is_ok(), "a version 2 head sends no heartbeat, so its silence is no sign");
     }

@@ -451,3 +451,82 @@ fn a_node_that_goes_silent_mid_generation_is_given_up_on() {
     assert_eq!(got, reference(&prompt, 8));
     assert_eq!(mgr.node_of(1).as_deref(), Some("speaks"));
 }
+
+fn mute_ack() -> superfluid_proto::handshake::HelloAckF {
+    use superfluid_proto::handshake::{CapacitySummary, HelloAckF};
+    use superfluid_proto::linkf::LinkFLimits;
+    HelloAckF {
+        chosen_version: 2,
+        node_identity: "mute-v2".into(),
+        capacity: CapacitySummary {
+            gpu_memory_bytes: 0,
+            gpu_memory_free_bytes: 0,
+            host_memory_bytes: 0,
+            active_sessions: 0,
+            max_sessions: u32::MAX,
+            max_context_tokens: 4096,
+            kv_blocks_used: 0,
+            kv_blocks_total: 0,
+            lanes_active: 0,
+            max_lanes: 1,
+            queue_depth: 0,
+            decode_tokens_per_s: 0,
+            prefill_tokens_per_s: 0,
+            sampled_at_ms: 0,
+        },
+        loadable_models: vec!["mock".into()],
+        feature_flags: 0,
+        limits: LinkFLimits { max_frame: 1 << 20, transfer_window: 8, max_transfer: 1 << 26, transfer_budget: 1 << 28 },
+    }
+}
+
+#[test]
+fn a_version_2_node_that_goes_silent_mid_generation_is_given_up_at_its_wall_budget() {
+    use superfluid_proto::linkf::msg_type;
+    // A node from before heartbeats, so its silence ends nothing; it answers the hello at version
+    // 2 and then never speaks again.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mute = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for sock in listener.incoming() {
+            let Ok(sock) = sock else { break };
+            std::thread::spawn(move || {
+                let mut ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+                while let Ok(frames) = ep.pump() {
+                    if frames.iter().any(|f| f.msg_type == msg_type::HELLO) {
+                        ep.send(msg_type::HELLO_ACK_F, &mute_ack()).unwrap();
+                    }
+                }
+            });
+        }
+    });
+    let up = node("speaks-v3", Duration::from_secs(60));
+    let mgr = FleetManager::with_options(
+        vec![NodeSpec { addr: mute, auth: Vec::new() }, NodeSpec { addr: up.addr.clone(), auth: Vec::new() }],
+        PlacementPolicy::RoundRobin,
+        Lease { duration_ms: 60_000, renew_by_ms: 40_000 },
+        90,
+        1,
+    )
+    .with_liveness(quick(50, Duration::from_millis(300)));
+    let prompt = [1u32, 2, 3, 12];
+    mgr.place(1, GenParams::default(), 0, "mock", "mock", &prompt, 8).unwrap();
+    assert_eq!(mgr.node_of(1).as_deref(), Some("mute-v2"));
+    let started = Instant::now();
+    let mut got = Vec::new();
+    mgr.generate_streaming(1, 8, 500, |b| got.extend_from_slice(b)).expect("moved to the node that answers");
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert_eq!(got, reference(&prompt, 8));
+    assert_eq!(mgr.node_of(1).as_deref(), Some("speaks-v3"));
+}
+
+#[test]
+fn a_stage_forward_slower_than_the_silence_limit_keeps_the_link() {
+    let idle = Duration::from_millis(300);
+    let (addr, closed) = slow_node("stage", Duration::from_millis(900), idle);
+    let mut head = superfluid_daemon::fleet::FleetHead::connect(&addr, Vec::new()).unwrap();
+    head.keep_alive(quick(50, idle));
+    let out = head.forward_stage(&[1, 2, 3], 0, 24, None).expect("the slow stage answers");
+    assert!(matches!(out, superfluid_engine::StageOutput::Token(_)), "the last stage gives a token");
+    assert_eq!(closed.load(Ordering::SeqCst), 0, "the node closed none of its connections");
+}

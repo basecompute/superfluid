@@ -287,11 +287,11 @@ impl NodeAgent {
         };
         endpoint.keep_alive(Liveness { heartbeat, silence: self.idle_timeout });
         // Dropped on the way out, which stops a generation still running.
-        let mut running = None;
-        self.serve_link(&mut endpoint, &mut running)
+        let mut work = Work::default();
+        self.serve_link(&mut endpoint, &mut work)
     }
 
-    fn serve_link(&mut self, endpoint: &mut Endpoint, running: &mut Option<Running>) -> Result<(), DaemonError> {
+    fn serve_link(&mut self, endpoint: &mut Endpoint, work: &mut Work) -> Result<(), DaemonError> {
         loop {
             let now = self.start.elapsed();
             self.renew(endpoint, now)?;
@@ -299,11 +299,24 @@ impl NodeAgent {
             if now.as_millis() as u64 >= self.last_status_ms + STATUS_INTERVAL_MS {
                 self.send_status(endpoint);
             }
-            if let Some(run) = running.as_mut() {
+            let was_busy = work.busy();
+            if let Some(run) = work.generation.as_mut() {
                 if self.forward(endpoint, run, now)? {
-                    *running = None;
-                    endpoint.poll_every(POLL_IDLE)?;
+                    work.generation = None;
                 }
+            }
+            if let Some(stage) = &work.stage {
+                match stage.try_recv() {
+                    Ok(resp) => {
+                        work.stage = None;
+                        endpoint.send(msg_type::STAGE_FORWARD_RESP, &resp)?;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => work.stage = None,
+                }
+            }
+            if was_busy && !work.busy() {
+                endpoint.poll_every(POLL_IDLE)?;
             }
             let frames = match endpoint.pump() {
                 Ok(f) => f,
@@ -318,12 +331,12 @@ impl NodeAgent {
                 Err(e) => return Err(e.into()),
             };
             for frame in frames {
-                self.handle(endpoint, frame, running)?;
+                self.handle(endpoint, frame, work)?;
             }
             // A head on version 2 sends no heartbeat while it waits on a generation, so only
-            // a connection with none running is idle.
+            // a connection with nothing running is idle.
             if endpoint.version() < 3
-                && running.is_none()
+                && !work.busy()
                 && !self.idle_timeout.is_zero()
                 && endpoint.quiet_for() >= self.idle_timeout
             {
@@ -372,7 +385,7 @@ impl NodeAgent {
         &mut self,
         endpoint: &mut Endpoint,
         frame: superfluid_proto::Frame,
-        running: &mut Option<Running>,
+        work: &mut Work,
     ) -> Result<(), DaemonError> {
         let now = self.start.elapsed();
         match frame.msg_type {
@@ -418,7 +431,7 @@ impl NodeAgent {
             }
             msg_type::GENERATE_REQ => {
                 let m: linkf::GenerateReqMsg = postcard::from_bytes(&frame.payload)?;
-                let declined = running.is_some() || !self.shared.lock().expect("agent shared").agent.on_generate(&m);
+                let declined = work.generation.is_some() || !self.shared.lock().expect("agent shared").agent.on_generate(&m);
                 if declined {
                     tracing::warn!(
                         session = m.session_id,
@@ -441,13 +454,14 @@ impl NodeAgent {
                     };
                     endpoint.send(msg_type::TOKEN_EVENTS, &msg)?;
                 } else {
-                    *running = Some(self.start_generation(&m));
+                    work.generation = Some(self.start_generation(&m));
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
             msg_type::GENERATE_CANCEL => {
                 let m: linkf::GenerateCancelMsg = postcard::from_bytes(&frame.payload)?;
-                if let Some(run) = running
+                if let Some(run) = work
+                    .generation
                     .as_mut()
                     .filter(|r| r.session_id == m.session_id && r.generation_id == m.generation_id)
                 {
@@ -457,29 +471,15 @@ impl NodeAgent {
             }
             msg_type::STAGE_FORWARD_REQ => {
                 let m: linkf::StageForwardReqMsg = postcard::from_bytes(&frame.payload)?;
-                let resp = match self.daemon.forward_stage(
-                    m.tokens.clone(),
-                    m.start_layer,
-                    m.end_layer,
-                    m.hidden_in.clone(),
-                ) {
-                    Ok(crate::StageOutput::Hidden(h)) => linkf::StageForwardRespMsg {
-                        request_id: m.request_id,
-                        hidden: Some(h),
-                        token: None,
-                    },
-                    Ok(crate::StageOutput::Token(t)) => linkf::StageForwardRespMsg {
-                        request_id: m.request_id,
-                        hidden: None,
-                        token: Some(t),
-                    },
-                    Err(_) => linkf::StageForwardRespMsg {
-                        request_id: m.request_id,
-                        hidden: None,
-                        token: None,
-                    },
-                };
-                endpoint.send(msg_type::STAGE_FORWARD_RESP, &resp)?;
+                if work.stage.is_some() {
+                    // The head waits on one stage per connection; another is answered as one
+                    // the node could not run.
+                    let resp = linkf::StageForwardRespMsg { request_id: m.request_id, hidden: None, token: None };
+                    endpoint.send(msg_type::STAGE_FORWARD_RESP, &resp)?;
+                } else {
+                    work.stage = Some(self.start_stage(m));
+                    endpoint.poll_every(POLL_RUNNING)?;
+                }
             }
             msg_type::WATERMARK_ACK => {
                 let m: linkf::WatermarkAckMsg = postcard::from_bytes(&frame.payload)?;
@@ -493,6 +493,25 @@ impl NodeAgent {
             _ => {  }
         }
         Ok(())
+    }
+
+    /// Runs a stage forward on a thread of its own, as a generation runs, so a long one does not
+    /// silence the connection.
+    fn start_stage(&self, m: linkf::StageForwardReqMsg) -> mpsc::Receiver<linkf::StageForwardRespMsg> {
+        let (tx, rx) = mpsc::channel();
+        let daemon = Arc::clone(&self.daemon);
+        std::thread::Builder::new()
+            .name("node-stage".into())
+            .spawn(move || {
+                let (hidden, token) = match daemon.forward_stage(m.tokens, m.start_layer, m.end_layer, m.hidden_in) {
+                    Ok(crate::StageOutput::Hidden(h)) => (Some(h), None),
+                    Ok(crate::StageOutput::Token(t)) => (None, Some(t)),
+                    Err(_) => (None, None),
+                };
+                let _ = tx.send(linkf::StageForwardRespMsg { request_id: m.request_id, hidden, token });
+            })
+            .expect("spawn a node stage");
+        rx
     }
 
     /// Starts `req` on a thread of its own, so this connection goes on reading the head
@@ -614,6 +633,20 @@ impl NodeAgent {
             }
             None => Ok(false),
         }
+    }
+}
+
+/// What a connection has running off its own thread.
+#[derive(Default)]
+struct Work {
+    generation: Option<Running>,
+    /// A stage forward's answer, once it has one.
+    stage: Option<mpsc::Receiver<linkf::StageForwardRespMsg>>,
+}
+
+impl Work {
+    fn busy(&self) -> bool {
+        self.generation.is_some() || self.stage.is_some()
     }
 }
 
