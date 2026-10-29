@@ -52,7 +52,7 @@ pub trait Runtime: Send + Sync {
     fn tokenizer(&self, _model: &Path) -> Option<Result<Arc<dyn Tokenizer>, String>> { None }
     fn plan(&self, _req: &Request, _host: &Host) -> Option<Result<Vec<Plan>, String>> { None }
     fn versions(&self, host: &Host) -> Vec<Candidate> { /* each `tested` version of compat(), planned here */ }
-    fn unlisted(&self) -> Option<String> { None }                // which versions left out of versions() install without --untested
+    fn unlisted(&self) -> Option<Unlisted> { None }              // which versions left out of versions() install without --untested, and what that asks of one
     fn pull_options(&self) -> Option<&'static [PullOption]> { None }
     fn pull(&self, _pull: &Pull, _args: &WorkerArgs) -> Result<PathBuf, String> { /* refuses */ }
     fn install(&self, plan: &Plan, dir: &Path) -> Result<Vec<(String, String)>, String> { /* fetch into dir/lib */ }
@@ -73,7 +73,7 @@ pub trait Runtime: Send + Sync {
 | `model_facts()` | architecture and published sampling defaults, without loading |
 | `tokenizer()` | an in-process tokenizer, for a daemon that links the adapter |
 | `plan()`, `install()` | what installing fetches, and how |
-| `versions()`, `unlisted()` | the versions it installs on its own, and, when some it does not list install without `--untested` too (basert: any release that states this build's ABI), a clause saying which; `superfluid runtime versions` prints it, and counts an install newer than every listed version as one the adapter installs |
+| `versions()`, `unlisted()` | the versions it installs on its own, and, when some it does not list install without `--untested` too (basert: any release that states this build's ABI), a clause saying which, and what the rule asks of a version (basert: `engine ABI <n>`), which an install of an unlisted version keeps in its `runtime.json` as `requires`; `superfluid runtime versions` prints the clause, and counts an install newer than every listed version that installs here as one the adapter installs when its `requires` is what this build's rule asks |
 | `pull_options()`, `pull()` | `--pull-<name>` options, and fetching a model by id with the runtime's own tool |
 
 ## The worker executable

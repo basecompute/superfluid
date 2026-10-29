@@ -650,18 +650,22 @@ const OLD_PLANNING_SHARE: f64 = 0.85;
 /// The devices a worker reports, each with what its runtime plans against there. A worker from before devices stated that
 /// (superfluid 0.1.5 and older, still the worker of an install made then) gave only `memory`: for basert already its budget,
 /// for llama.cpp and MLX the GPU's own figure their sizing plans [`OLD_PLANNING_SHARE`] of. Another adapter's is not known.
+/// Each device is taken on its own: a budget a device states is the one used.
 fn devices_of(id: RuntimeId, reported: &Value) -> Vec<Device> {
-    let mut devices = superfluid_worker::check::devices_from(reported);
-    if reported.as_array().is_some_and(|a| a.iter().any(|d| d.get("budget").is_none())) {
-        for d in &mut devices {
-            d.budget = match id.base().name() {
-                "basert" => d.memory,
-                "llamacpp" | "mlx" if !d.backend.eq_ignore_ascii_case("cpu") => (OLD_PLANNING_SHARE * d.memory as f64) as u64,
-                _ => 0,
-            };
-        }
-    }
-    devices
+    let rows = reported.as_array().map(Vec::as_slice).unwrap_or_default();
+    rows.iter()
+        .filter_map(|row| {
+            let mut d = superfluid_worker::check::device_from(row)?;
+            if row.get("budget").is_none() {
+                d.budget = match id.base().name() {
+                    "basert" => d.memory,
+                    "llamacpp" | "mlx" if !d.backend.eq_ignore_ascii_case("cpu") => (OLD_PLANNING_SHARE * d.memory as f64) as u64,
+                    _ => 0,
+                };
+            }
+            Some(d)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -722,6 +726,14 @@ pub(crate) mod tests {
         for id in ["basert", "llamacpp", "vllm"] {
             assert_eq!(budgets(id, &stated), [1, 0], "{id}: a budget stated is the one used");
         }
+        // A report that states a budget for some devices and not others: each is taken on its own.
+        let mixed = serde_json::json!([
+            {"backend": "CUDA", "name": "a GPU", "memory": gpu, "budget": 20_000_000_000u64},
+            {"backend": "CUDA", "name": "another GPU", "memory": gpu},
+            {"backend": "CPU", "name": "x", "memory": 51_000_000_000u64},
+        ]);
+        assert_eq!(budgets("llamacpp", &mixed), [20_000_000_000, share, 0]);
+        assert_eq!(budgets("vllm", &mixed), [20_000_000_000, 0, 0], "an explicit budget is kept where the rest are not known");
     }
 
     #[test]

@@ -252,6 +252,26 @@ impl Candidate {
     }
 }
 
+/// An adapter's rule for the versions `versions` does not list that install without `--untested` all the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unlisted {
+    /// Which ones, as a clause of `superfluid runtime versions`'s footer.
+    pub describe: String,
+    /// What the rule asks of a version (basert: the engine ABI it drives), kept in the manifest of each install of an unlisted
+    /// version made under it: another build's rule installs that version again only when it asks the same.
+    pub requires: String,
+}
+
+impl Unlisted {
+    pub fn to_json(&self) -> Value {
+        json!({"describe": self.describe, "requires": self.requires})
+    }
+
+    pub fn from_json(v: &Value) -> Option<Unlisted> {
+        Some(Unlisted { describe: v["describe"].as_str()?.to_string(), requires: v["requires"].as_str()?.to_string() })
+    }
+}
+
 pub fn backend_rank(backend: &str) -> u32 {
     let family = backend.split(['-', '_']).next().unwrap_or(backend);
     match family {
@@ -281,6 +301,9 @@ pub struct Manifest {
     pub worker: String,
     pub sources: Vec<(String, String)>,
     pub tested: bool,
+    /// For a version the adapter that installed it did not list, what its rule for those asked of it ([`Unlisted::requires`]);
+    /// none for a listed version, one installed with `--untested`, and an install made before manifests kept it.
+    pub requires: Option<String>,
 }
 
 impl Manifest {
@@ -289,7 +312,7 @@ impl Manifest {
             "id": self.id, "install": self.install, "version": self.version, "backend": self.backend,
             "link_w": self.link_w, "platforms": self.platforms, "worker": self.worker,
             "sources": self.sources.iter().map(|(u, s)| json!({"url": u, "sha256": s})).collect::<Vec<_>>(),
-            "tested": self.tested,
+            "tested": self.tested, "requires": self.requires,
         })
     }
 
@@ -316,6 +339,7 @@ impl Manifest {
                 })
                 .unwrap_or_default(),
             tested: v["tested"].as_bool().unwrap_or(true),
+            requires: v["requires"].as_str().map(str::to_string),
         })
     }
 
@@ -644,8 +668,11 @@ mod tests {
             worker: "bin/superfluid-worker-llamacpp".into(),
             sources: vec![("https://x/a.tar.gz".into(), "ab".into())],
             tested: true,
+            requires: Some("engine ABI 1".into()),
         };
         assert_eq!(Manifest::from_json(&m.to_json()).unwrap(), m);
+        let older = Manifest { requires: None, ..m };
+        assert_eq!(Manifest::from_json(&older.to_json()).unwrap(), older, "an install from before manifests kept a rule's ask");
     }
 
     #[test]

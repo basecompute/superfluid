@@ -142,16 +142,18 @@ pub fn device_json(d: &Device) -> Value {
 }
 
 pub fn devices_from(v: &Value) -> Vec<Device> {
-    let one = |d: &Value| -> Option<Device> {
-        Some(Device {
-            backend: d["backend"].as_str()?.to_string(),
-            name: d["name"].as_str().unwrap_or_default().to_string(),
-            memory: d["memory"].as_u64().unwrap_or(0),
-            // A worker from before the budget states none.
-            budget: d["budget"].as_u64().unwrap_or(0),
-        })
-    };
-    v.as_array().map(|a| a.iter().filter_map(one).collect()).unwrap_or_default()
+    v.as_array().map(|a| a.iter().filter_map(device_from).collect()).unwrap_or_default()
+}
+
+/// One device of a report; none without a backend.
+pub fn device_from(d: &Value) -> Option<Device> {
+    Some(Device {
+        backend: d["backend"].as_str()?.to_string(),
+        name: d["name"].as_str().unwrap_or_default().to_string(),
+        memory: d["memory"].as_u64().unwrap_or(0),
+        // A worker from before the budget states none.
+        budget: d["budget"].as_u64().unwrap_or(0),
+    })
 }
 
 impl Report {

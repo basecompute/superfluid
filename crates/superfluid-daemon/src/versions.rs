@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Value};
-use superfluid_adapter_kit::install::{version_key, Candidate, Host};
+use superfluid_adapter_kit::install::{version_key, Candidate, Host, Unlisted};
 
 use crate::installs::{self, Install};
 use crate::runtime_pick::RuntimeId;
@@ -15,8 +15,8 @@ pub struct Listing {
     pub host: String,
     /// What the adapter lists, in its order (newest first).
     pub candidates: Vec<Candidate>,
-    /// Which versions it does not list install without `--untested`, in its words; none when every one needs it.
-    pub unlisted: Option<String>,
+    /// Which versions it does not list install without `--untested`; none when every one needs it.
+    pub unlisted: Option<Unlisted>,
     pub installs: Vec<Install>,
     pub default: Option<String>,
     pub pinned: Option<String>,
@@ -50,7 +50,7 @@ pub fn of_with(catalog: &Catalog, id: RuntimeId, named: Option<&Path>) -> Result
     })
 }
 
-fn asked(worker: &Path) -> Result<(String, Vec<Candidate>, Option<String>), String> {
+fn asked(worker: &Path) -> Result<(String, Vec<Candidate>, Option<Unlisted>), String> {
     let mut cmd = Command::new(worker);
     crate::exec::without_secrets(&mut cmd).arg("versions");
     let out = crate::exec::output_within(&mut cmd, crate::exec::ANSWER_WITHIN)
@@ -66,13 +66,13 @@ fn asked(worker: &Path) -> Result<(String, Vec<Candidate>, Option<String>), Stri
     let listed = v["versions"].as_array().ok_or_else(|| format!("{} versions printed no listing", worker.display()))?;
     let candidates = listed.iter().map(Candidate::from_json).collect::<Result<Vec<_>, _>>()?;
     // An adapter from before `unlisted` says nothing of the versions it leaves out: each needs --untested, as then.
-    Ok((v["describe"].as_str().unwrap_or_default().to_string(), candidates, v["unlisted"].as_str().map(str::to_string)))
+    Ok((v["describe"].as_str().unwrap_or_default().to_string(), candidates, Unlisted::from_json(&v["unlisted"])))
 }
 
 /// The versions that install here, newest first (`installable` in `superfluid runtimes --json`).
 pub fn here(listing: &Listing) -> Vec<&str> {
     let listed = listing.candidates.iter().filter(|c| c.here.is_ok()).map(|c| c.version.as_str());
-    listing.newer().into_iter().chain(listed).collect()
+    listing.newer().into_iter().map(|i| i.manifest.version.as_str()).chain(listed).collect()
 }
 
 /// The INSTALLABLE cell: the newest version that installs here, marked when an install of it exists.
@@ -89,29 +89,31 @@ pub fn cell(listing: &Result<Listing, String>) -> String {
 struct Row<'a> {
     version: &'a str,
     listed: Option<&'a Candidate>,
-    /// Not listed, but installed as the adapter's rule for the versions it leaves out installs it.
-    newer: bool,
+    /// Not listed, but installed, by this install, as the adapter's rule for the versions it leaves out installs it.
+    newer: Option<&'a Install>,
     installed: Vec<&'a Install>,
 }
 
 impl Listing {
-    /// Installed versions the adapter does not list that its rule for them installs, newest first: with a rule, those installed
-    /// without `--untested` and newer than every listed version that installs here, as `runtime install` with no version takes
-    /// the newest it finds. An older one is not counted, as it may be of a line this build no longer drives.
-    fn newer(&self) -> Vec<&str> {
-        if self.unlisted.is_none() {
+    /// Installed versions the adapter does not list that its rule for them installs, newest first, one install of each: with a
+    /// rule, those made under a rule that asked what this one asks (`tested` alone says only that the adapter that installed it
+    /// took it, which may have been a build for another engine), newer than every listed version that installs here, as `runtime
+    /// install` with no version takes the newest it finds. An older one is not counted, as it may be of a line this build no
+    /// longer drives; with no listed version that installs here, whether this host could install one cannot be told.
+    fn newer(&self) -> Vec<&Install> {
+        let Some(rule) = &self.unlisted else { return Vec::new() };
+        let Some(newest_listed) = self.candidates.iter().filter(|c| c.here.is_ok()).map(|c| version_key(&c.version)).max() else {
             return Vec::new();
-        }
-        let newest_listed = self.candidates.iter().filter(|c| c.here.is_ok()).map(|c| version_key(&c.version)).max();
-        let mut newer: Vec<&str> = self
+        };
+        let mut newer: Vec<&Install> = self
             .installs
             .iter()
-            .filter(|i| i.manifest.tested && !self.candidates.iter().any(|c| c.version == i.manifest.version))
-            .map(|i| i.manifest.version.as_str())
-            .filter(|v| newest_listed.as_ref().is_none_or(|n| version_key(v) > *n))
+            .filter(|i| i.manifest.requires.as_ref() == Some(&rule.requires))
+            .filter(|i| !self.candidates.iter().any(|c| c.version == i.manifest.version))
+            .filter(|i| version_key(&i.manifest.version) > newest_listed)
             .collect();
-        newer.sort_by_key(|v| std::cmp::Reverse(version_key(v)));
-        newer.dedup();
+        newer.sort_by_key(|i| std::cmp::Reverse(version_key(&i.manifest.version)));
+        newer.dedup_by(|a, b| a.manifest.version == b.manifest.version);
         newer
     }
 
@@ -120,16 +122,17 @@ impl Listing {
         let mut rows: Vec<Row> = self
             .candidates
             .iter()
-            .map(|c| Row { version: &c.version, listed: Some(c), newer: false, installed: of_version(&c.version) })
+            .map(|c| Row { version: &c.version, listed: Some(c), newer: None, installed: of_version(&c.version) })
             .collect();
         // Newest first: each goes ahead of the listed versions older than it (a listed one this build does not drive may be newer).
-        for v in self.newer() {
+        for i in self.newer() {
+            let v = i.manifest.version.as_str();
             let at = rows.iter().position(|r| version_key(r.version) < version_key(v)).unwrap_or(rows.len());
-            rows.insert(at, Row { version: v, listed: None, newer: true, installed: of_version(v) });
+            rows.insert(at, Row { version: v, listed: None, newer: Some(i), installed: of_version(v) });
         }
         for i in &self.installs {
             if !rows.iter().any(|r| r.version == i.manifest.version) {
-                rows.push(Row { version: &i.manifest.version, listed: None, newer: false, installed: of_version(&i.manifest.version) });
+                rows.push(Row { version: &i.manifest.version, listed: None, newer: None, installed: of_version(&i.manifest.version) });
             }
         }
         rows
@@ -153,14 +156,14 @@ impl Listing {
         } else {
             let mut table = vec![["VERSION", "INSTALLS HERE AS", "INSTALLED"].map(String::from).to_vec()];
             for r in &rows {
-                let here = match r.listed.map(|c| (c, &c.here)) {
-                    Some((c, Ok(p))) => match c.size() {
+                let here = match (r.listed.map(|c| (c, &c.here)), r.newer) {
+                    (Some((c, Ok(p))), _) => match c.size() {
                         0 => p.install.clone(),
                         size => format!("{} ({:.1} MB)", p.install, size as f64 / 1e6),
                     },
-                    Some((_, Err(why))) => format!("no: {why}"),
-                    None if r.newer => format!("{} (newer than the versions listed)", r.installed[0].manifest.install),
-                    None => "(not a version this adapter lists)".to_string(),
+                    (Some((_, Err(why))), _) => format!("no: {why}"),
+                    (None, Some(i)) => format!("{} (newer than the versions listed)", i.manifest.install),
+                    (None, None) => "(not a version this adapter lists)".to_string(),
                 };
                 let installed = match r.installed.as_slice() {
                     [] => "-".to_string(),
@@ -173,7 +176,7 @@ impl Listing {
         out.push_str(&format!(
             "`superfluid runtime install {} --version <v>` installs one; {}\n",
             self.id,
-            self.unlisted.as_deref().unwrap_or("a version not listed installs with --untested")
+            self.unlisted.as_ref().map_or("a version not listed installs with --untested", |u| u.describe.as_str())
         ));
         out
     }
@@ -188,27 +191,27 @@ impl Listing {
                     "listed": r.listed.is_some(),
                     "installed": r.installed.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
                 });
-                match r.listed.map(|c| (c, &c.here)) {
-                    Some((c, Ok(p))) => {
+                match (r.listed.map(|c| (c, &c.here)), r.newer) {
+                    (Some((c, Ok(p))), _) => {
                         v["installable"] = true.into();
                         v["install"] = json!(p.install);
                         v["backend"] = json!(p.backend);
                         v["size"] = json!(c.size());
                     }
-                    Some((_, Err(why))) => v["installable"] = json!(why),
-                    None if r.newer => {
+                    (Some((_, Err(why))), _) => v["installable"] = json!(why),
+                    (None, Some(i)) => {
                         v["installable"] = true.into();
-                        v["install"] = json!(r.installed[0].manifest.install);
-                        v["backend"] = json!(r.installed[0].manifest.backend);
+                        v["install"] = json!(i.manifest.install);
+                        v["backend"] = json!(i.manifest.backend);
                     }
-                    None => {}
+                    (None, None) => {}
                 }
                 v
             })
             .collect();
         json!({
             "id": self.id.name(), "host": self.host, "default": self.default, "pinned": self.pinned, "versions": versions,
-            "unlisted": self.unlisted,
+            "unlisted": self.unlisted.as_ref().map(|u| &u.describe),
         })
     }
 }
@@ -321,31 +324,49 @@ pub(crate) mod tests {
         let (beside, libexec, home) = (root.join("bin"), root.join("libexec").join("superfluid"), root.join("home"));
         std::fs::create_dir_all(&beside).unwrap();
         let rule = "with no version it installs the newest toy release, listed or not; another installs with --untested";
-        let listing = LISTING.replacen(r#""versions":["#, &format!(r#""unlisted":"{rule}","versions":["#), 1);
-        fake_worker_listing(&libexec, "superfluid-worker-rulert", "{}", &listing);
-        // t1.5 as `runtime install` with no version leaves a release newer than the pins; t0 is older than them, and t9 went
-        // in with --untested: neither is one the rule installs.
-        for (name, version, backend, tested) in [("t1.5-metal", "t1.5", "metal", true), ("t0-metal", "t0", "metal", true), ("t9-cpu", "t9", "cpu", false)] {
-            manifest(&home, "rulert", name, version, backend, tested);
+        let unlisted = format!(r#""unlisted":{{"describe":"{rule}","requires":"toy ABI 1"}},"versions":["#);
+        fake_worker_listing(&libexec, "superfluid-worker-rulert", "{}", &LISTING.replacen(r#""versions":["#, &unlisted, 1));
+        // t1.5 as `runtime install` with no version leaves a release newer than the pins, under a rule that asked what this one
+        // asks. t1.8 went in under a build for another toy ABI, and t1.6 before manifests kept what the rule asked: `tested` only
+        // says the adapter of the time took them. t0 is older than the pins, and t9 went in with --untested.
+        for (name, version, backend, tested, requires) in [
+            ("t1.5-metal", "t1.5", "metal", true, Some("toy ABI 1")),
+            ("t1.8-metal", "t1.8", "metal", true, Some("toy ABI 2")),
+            ("t1.6-metal", "t1.6", "metal", true, None),
+            ("t0-metal", "t0", "metal", true, Some("toy ABI 1")),
+            ("t9-cpu", "t9", "cpu", false, None),
+        ] {
+            let path = manifest(&home, "rulert", name, version, backend, tested).join("runtime.json");
+            let mut m: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            m["requires"] = json!(requires);
+            std::fs::write(&path, m.to_string()).unwrap();
         }
         let cat = Catalog::new(home.clone(), Some(beside.clone()), beside.join("superfluid-workerd"));
         let l = of(&cat, RuntimeId::new("rulert")).unwrap();
-        assert_eq!((l.unlisted.as_deref(), l.default.as_deref()), (Some(rule), Some("t1.5-metal")));
+        assert_eq!(l.unlisted, Some(Unlisted { describe: rule.into(), requires: "toy ABI 1".into() }));
         let text = l.text();
         let squeezed: Vec<String> = text.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
         assert_eq!(squeezed[2], "t2 no: toyrt t2 publishes no build for macos-arm64 -", "{text}");
-        assert_eq!(squeezed[3], "t1.5 t1.5-metal (newer than the versions listed) t1.5-metal (default)", "newest first: {text}");
+        assert_eq!(squeezed[3], "t1.5 t1.5-metal (newer than the versions listed) t1.5-metal", "newest first: {text}");
         assert_eq!(squeezed[4], "t1 t1-metal (3.0 MB) -", "{text}");
-        assert_eq!(squeezed[5], "t0 (not a version this adapter lists) t0-metal", "{text}");
-        assert_eq!(squeezed[6], "t9 (not a version this adapter lists) t9-cpu", "{text}");
-        assert_eq!(squeezed[7], format!("`superfluid runtime install rulert --version <v>` installs one; {rule}"), "{text}");
+        for (line, install) in squeezed[5..9].iter().zip(["t1.8-metal", "t1.6-metal", "t0-metal", "t9-cpu"]) {
+            let version = install.split('-').next().unwrap();
+            assert!(line.starts_with(&format!("{version} (not a version this adapter lists) {install}")), "{text}");
+        }
+        assert_eq!(squeezed[9], format!("`superfluid runtime install rulert --version <v>` installs one; {rule}"), "{text}");
         let j = l.json();
         assert_eq!(j["unlisted"], rule);
         assert_eq!(j["versions"][1], json!({"version": "t1.5", "listed": false, "installable": true, "install": "t1.5-metal", "backend": "metal", "installed": ["t1.5-metal"]}));
-        assert!(j["versions"][3]["installable"].is_null() && j["versions"][4]["installable"].is_null(), "{j}");
+        assert!((3..7).all(|n| j["versions"][n]["installable"].is_null()), "{j}");
         assert_eq!(here(&l), ["t1.5", "t1"]);
         assert_eq!(cell(&Ok(l)), "t1.5 (installed)");
 
+        // With no listed version that installs here, whether this host could install one cannot be told.
+        let l = of(&cat, RuntimeId::new("rulert")).unwrap();
+        let candidates = l.candidates.iter().filter(|c| c.here.is_err()).cloned().collect();
+        let l = Listing { candidates, ..l };
+        assert!(here(&l).is_empty());
+        assert_eq!(cell(&Ok(l)), "none here");
         // Without a rule an unlisted version needs --untested, whatever its install says.
         let l = Listing { unlisted: None, ..of(&cat, RuntimeId::new("rulert")).unwrap() };
         assert_eq!(here(&l), ["t1"]);
