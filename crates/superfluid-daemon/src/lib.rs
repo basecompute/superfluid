@@ -438,6 +438,7 @@ impl Serving {
         model: String,
         opts: DaemonOptions,
     ) -> Serving {
+        let capabilities = std::sync::Arc::new(std::sync::RwLock::new(fleet_daemon::capability_record()));
         let sched = fleet_daemon::spawn(fleet_daemon::Dispatch {
             fleet,
             model,
@@ -448,9 +449,10 @@ impl Serving {
             stats: std::sync::Arc::clone(ground.stats),
             tool_lease_ms: opts.tool_lease_ms,
             handles: Default::default(),
+            capabilities: std::sync::Arc::clone(&capabilities),
         });
         Serving {
-            capabilities: std::sync::Arc::new(std::sync::RwLock::new(fleet_daemon::capability_record())),
+            capabilities,
             retired: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_sampling: std::sync::OnceLock::new(),
             codec,
@@ -1328,7 +1330,7 @@ impl Daemon {
         extras: scheduler::GenExtras,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
     ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
-        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, extras, on_tokens, |_| {})
+        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, extras, Vec::new(), on_tokens, |_| {})
     }
 
     /// As [`Self::generate_tokens_streaming`], telling `on_logprobs` the log-probabilities the
@@ -1341,6 +1343,7 @@ impl Daemon {
         max_tokens: u32,
         deadline_ms: u64,
         extras: scheduler::GenExtras,
+        media: Vec<(u64, std::path::PathBuf, u32)>,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
         on_logprobs: impl FnMut(&[scheduler::TokenLogprob]),
     ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
@@ -1355,9 +1358,20 @@ impl Daemon {
             max_tokens,
             deadline,
             extras,
+            media,
             on_tokens,
             on_logprobs,
         )
+    }
+
+    /// Keeps `bytes` in this daemon's media pool, by their SHA-256 in hex.
+    pub fn media_put(&self, bytes: &[u8]) -> std::io::Result<String> {
+        self.media.put(bytes)
+    }
+
+    /// Where a blob named by its SHA-256 in hex sits in this daemon's media pool.
+    pub fn media_path(&self, hash: &str) -> std::path::PathBuf {
+        self.media.path_of(hash)
     }
 
     /// Runs one Link W state operation on this daemon's engine, as a fleet node does for its head.

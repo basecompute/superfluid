@@ -1102,7 +1102,7 @@ impl FleetManager {
         session: u64,
         max_new_tokens: u64,
         max_wall_ms: u64,
-        opts: Option<&superfluid_proto::linkf::GenerateOptsMsg>,
+        opts: Option<&crate::fleet::Ask<'_>>,
         on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
@@ -1220,7 +1220,7 @@ impl FleetManager {
         max_new_tokens: u64,
         max_wall_ms: u64,
         flag: &AtomicBool,
-        opts: Option<&superfluid_proto::linkf::GenerateOptsMsg>,
+        opts: Option<&crate::fleet::Ask<'_>>,
         on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
@@ -1253,11 +1253,12 @@ impl FleetManager {
         &self,
         model: &str,
         req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[crate::fleet::Blob],
     ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
         let cand = self.candidates_claiming(model, None, RequestShape::default());
         let mut last = None;
         for i in cand {
-            match self.state_sync_on(i, req.clone()) {
+            match self.state_sync_on(i, req.clone(), blobs) {
                 Ok(ok) => return Ok(ok),
                 Err(e) if is_fatal_node(&e) => last = Some(e),
                 Err(e) => return Err(e),
@@ -1276,7 +1277,7 @@ impl FleetManager {
         let cand = self.candidates_claiming(model, None, RequestShape::default());
         let mut answer = Err(DaemonError::Config("no healthy node can serve the model"));
         for i in cand {
-            answer = Ok(self.state_sync_on(i, req.clone())?);
+            answer = Ok(self.state_sync_on(i, req.clone(), &[])?);
         }
         answer
     }
@@ -1285,6 +1286,7 @@ impl FleetManager {
         &self,
         i: usize,
         req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[crate::fleet::Blob],
     ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
         let node = self.node(i);
         let (_, mut guard) = node.checkout_idle();
@@ -1292,7 +1294,7 @@ impl FleetManager {
             *guard = None;
         }
         self.ensure_connected(i, &mut guard)?;
-        let r = guard.as_mut().expect("connected").state_sync(req);
+        let r = guard.as_mut().expect("connected").state_sync(req, blobs);
         if let Err(e) = &r {
             if is_fatal_node(e) {
                 *guard = None;

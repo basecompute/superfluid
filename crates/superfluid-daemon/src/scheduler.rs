@@ -4173,7 +4173,7 @@ pub fn run_completion_streaming(
     extras: GenExtras,
     on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
-    run_completion_streaming_lp(tx, stream, params, max_tokens, deadline_ms, extras, on_tokens, |_| {})
+    run_completion_streaming_lp(tx, stream, params, max_tokens, deadline_ms, extras, Vec::new(), on_tokens, |_| {})
 }
 
 /// As [`run_completion_streaming`], telling `on_logprobs` each token's log-probabilities when
@@ -4186,6 +4186,7 @@ pub fn run_completion_streaming_lp(
     max_tokens: u32,
     deadline_ms: u64,
     extras: GenExtras,
+    media: Vec<(u64, std::path::PathBuf, u32)>,
     mut on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
     mut on_logprobs: impl FnMut(&[TokenLogprob]),
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
@@ -4201,7 +4202,7 @@ pub fn run_completion_streaming_lp(
         batch_invariant: false,
         carry: None,
         queued_at: 0,
-        media: Vec::new(),
+        media,
         completion: true,
         deadline: (deadline_ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms)),
         grammar_handle: extras.grammar_handle,

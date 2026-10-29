@@ -285,25 +285,39 @@ fn fleet_openai_models_carries_capabilities() {
 }
 
 #[test]
-fn fleet_openai_media_refusal_matches_what_it_advertises() {
+fn the_head_advertises_what_its_node_does_and_answers_an_image_as_one_machine_would() {
     let http_addr = start_head(spawn_node());
     let a = agent();
     wait_ready(&a, &http_addr);
+    // The head takes its node's descriptor once the node answers.
+    let mut caps = serde_json::Value::Null;
+    for _ in 0..100 {
+        let mut resp = a.get(&format!("http://{http_addr}/v1/models")).call().expect("models");
+        let v: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
+        caps = v["data"][0]["capabilities"].clone();
+        if caps["architecture"] == "mock" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(caps["architecture"], "mock", "the node's descriptor: {caps}");
+    assert_eq!(caps["backend"], "fleet", "{caps}");
 
-    let mut resp = a
-        .get(&format!("http://{http_addr}/v1/models"))
-        .call()
-        .expect("models");
-    let v: serde_json::Value =
-        serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
-    let advertised = v["data"][0]["capabilities"]["modalities"]["image_encode"]
-        .as_str()
-        .expect("image_encode is a refusal reason on a text-only head")
-        .to_string();
-
-    let modalities = v["data"][0]["architecture"]["input_modalities"].clone();
-    assert_eq!(modalities, serde_json::json!(["text"]), "{modalities}");
-
+    let local = {
+        let dir = std::env::temp_dir().join(format!("superfluid-fopenai-local-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = EngineHost::spawn(|| (MockEngine::new(EngineConfig::default()), None)).unwrap();
+        let daemon = Arc::new(Daemon::new(store, host, Box::new(MockChatCodec), 8));
+        let registry = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock", daemon));
+        let http = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = http.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let _ = superfluid_daemon::openai::serve_blocking_config(http, registry, Default::default());
+        });
+        addr
+    };
+    wait_ready(&a, &local);
     let body = serde_json::json!({
         "model": "mock",
         "messages": [{"role": "user", "content": [
@@ -314,24 +328,20 @@ fn fleet_openai_media_refusal_matches_what_it_advertises() {
         "max_tokens": 4,
     })
     .to_string();
-    let body_reader = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(10)))
-        .http_status_as_error(false)
-        .build()
-        .new_agent();
-    let mut resp = body_reader
-        .post(&format!("http://{http_addr}/v1/chat/completions"))
-        .header("content-type", "application/json")
-        .send(body.as_bytes())
-        .expect("image request");
-    assert_eq!(resp.status().as_u16(), 400, "an image part must be refused");
-    let v: serde_json::Value =
-        serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
-    let actual = v["error"]["message"].as_str().unwrap();
-    assert!(
-        actual.contains(&advertised),
-        "the route refused with {actual:?} but the descriptor advertises {advertised:?}"
-    );
+    let status = |addr: &str| {
+        let reader = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
+        let resp = reader
+            .post(&format!("http://{addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .send(body.as_bytes())
+            .expect("image request");
+        resp.status().as_u16()
+    };
+    assert_eq!(status(&http_addr), status(&local), "an engine that cannot take the image refuses it alike");
 }
 
 fn spawn_narrow_node(ctx: u32) -> String {

@@ -120,7 +120,9 @@ The head runs the same HTTP server as `superfluid serve` on one machine, with th
 
 Structured output (`response_format`, tool grammars), `logit_bias`, `logprobs`, presence, frequency and repeat penalties and `ignore_eos` reach the node that runs the generation: the head keeps a grammar or bias and the node compiles it. Embeddings (`/v1/embeddings`, `/api/embed`) run on a node serving the model. A LoRA (`/v1/lora/load`, `/unload`) is loaded on every node serving the model, from a path on each node; load it again after a node joins. These need nodes on this release; an older node refuses them by name.
 
-Refused with 400 until they reach nodes: image and audio parts. Transcription and slots answer that they do not reach fleet nodes yet. A generation has a ten-minute wall-clock ceiling.
+Image and audio parts, and transcription (`/v1/audio/transcriptions`, `/translations`), reach the node too: the head sends each file once per connection, by its SHA-256, and the node keeps it in its own media pool. A streamed transcription's segments arrive when the node has transcribed the whole file. The head describes the model as the first node serving it does (`capabilities` in `/v1/models`), so a route refuses what the nodes cannot do as a single server refuses what its engine cannot.
+
+Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has a ten-minute wall-clock ceiling.
 
 ## Failure handling
 

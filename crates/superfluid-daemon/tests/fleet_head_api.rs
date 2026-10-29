@@ -240,15 +240,101 @@ fn embeddings_and_lora_reach_a_node() {
     assert_eq!(lora["loaded"], true, "{lora}");
 }
 
+/// An engine that takes images, four tokens each.
+fn media_engine() -> EngineHost {
+    EngineHost::spawn(|| {
+        let cfg = EngineConfig { vocab: 512, image_token_id: 999, media_tokens_per_image: 4, ..EngineConfig::default() };
+        (MockEngine::new(cfg), None)
+    })
+    .unwrap()
+}
+
+fn media_options(dir: &std::path::Path) -> DaemonOptions {
+    DaemonOptions { media_dir: Some(dir.join("media")), ..DaemonOptions::default() }
+}
+
+fn temp(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("superfluid-fleet-head-{tag}-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A head and a local server whose engines take images; the node's media pool is returned.
+fn media_pair() -> (String, String, std::path::PathBuf) {
+    let local_dir = temp("local-media");
+    let local = serve(Daemon::with_options(store("local"), media_engine(), Box::new(MockChatCodec), media_options(&local_dir)).unwrap());
+    let node_dir = temp("node-media");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let node_addr = listener.local_addr().unwrap().to_string();
+    let opts = media_options(&node_dir);
+    std::thread::spawn(move || {
+        let daemon = Arc::new(Daemon::with_options(store("node"), media_engine(), Box::new(MockCodec), opts).unwrap());
+        let node = NodeAgent::new(daemon, "media-node", "mock-model").with_max_lanes(8);
+        for sock in listener.incoming() {
+            let Ok(sock) = sock else { break };
+            let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+            let mut conn = node.connection();
+            std::thread::spawn(move || {
+                let _ = conn.serve(ep);
+            });
+        }
+    });
+    let head_dir = temp("head-media");
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let fleet = Arc::new(FleetManager::new(vec![NodeSpec { addr: node_addr, auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease));
+    let _ = fleet.probe();
+    let head = serve(Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), media_options(&head_dir)).unwrap());
+    (local, head, node_dir.join("media"))
+}
+
+const IMAGE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
 #[test]
-fn what_a_node_cannot_do_yet_is_refused_as_a_400() {
-    let head = head(node());
-    let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-    let body = serde_json::json!({"model": "mock-model", "max_tokens": 4, "messages": [{"role": "user", "content": [
-        {"type": "text", "text": "what is this?"},
-        {"type": "image_url", "image_url": {"url": image}},
-    ]}]});
-    let (status, text) = post(&head, "/v1/chat/completions", &body);
-    assert_eq!(status, 400, "{text}");
-    assert!(text.contains("fleet"), "{text}");
+fn an_image_reaches_the_node_and_is_answered_as_on_one_machine() {
+    let (local, head, node_media) = media_pair();
+    for stream in [false, true] {
+        let body = serde_json::json!({"model": "mock-model", "max_tokens": 8, "temperature": 0, "stream": stream, "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": IMAGE}},
+        ]}]});
+        let said = same(&local, &head, "/v1/chat/completions", &body);
+        assert!(said.to_string().contains("prompt_tokens"), "{said}");
+    }
+    let blobs: Vec<String> = std::fs::read_dir(&node_media)
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    assert!(
+        blobs.iter().any(|n| superfluid_daemon::media::MediaPool::is_valid_id(n)),
+        "the image is in the node's media pool by its hash: {blobs:?}"
+    );
+}
+
+fn post_multipart(addr: &str, path: &str, fields: &[(&str, &str)], file: &[u8]) -> (u16, String) {
+    let boundary = "FLEETBND";
+    let mut body: Vec<u8> = Vec::new();
+    for (k, v) in fields {
+        body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").as_bytes());
+    }
+    body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n").as_bytes());
+    body.extend_from_slice(file);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let mut resp = agent()
+        .post(&format!("http://{addr}{path}"))
+        .header("content-type", &format!("multipart/form-data; boundary={boundary}"))
+        .send(&body[..])
+        .unwrap();
+    (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap())
+}
+
+#[test]
+fn a_transcription_runs_on_a_node_as_on_one_machine() {
+    let (local, head) = (local(), head(node()));
+    for (format, stream) in [("json", "false"), ("verbose_json", "false"), ("json", "true")] {
+        let fields = [("model", "mock-model"), ("response_format", format), ("stream", stream)];
+        let (ls, lb) = post_multipart(&local, "/v1/audio/transcriptions", &fields, b"RIFF....WAVEfake");
+        let (hs, hb) = post_multipart(&head, "/v1/audio/transcriptions", &fields, b"RIFF....WAVEfake");
+        assert_eq!((hs, ls), (200, 200), "one machine: {lb}; the head: {hb}");
+        assert_eq!(said(&hb), said(&lb), "{format} stream={stream}");
+        assert!(lb.contains("mock transcription"), "{lb}");
+    }
 }

@@ -7,13 +7,14 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use superfluid_abi::finish;
-use superfluid_proto::linkf::{GenerateOptsMsg, GrammarSpecMsg, TokenLogprobMsg};
+use superfluid_proto::linkf::{GenerateOptsMsg, GrammarSpecMsg, TokenLogprobMsg, BLOB_PREFIX};
 use superfluid_proto::linkw::{StateSyncOkMsg, StateSyncReqMsg};
 
+use crate::fleet::{Ask, Blob};
 use crate::fleet_manager::FleetManager;
 use crate::scheduler::{GenerateJob, LaneEvent, LaneOutput, OutputSink, SchedCmd, SchedStats, SchedulerHandle};
 use crate::bus::SessionBus;
-use crate::{CancelSet, DaemonError, Refusal, SessionStore, TextCodec};
+use crate::{CancelSet, DaemonError, SessionStore, TextCodec};
 
 /// The longest a generation runs on a node when the request set no deadline.
 pub const MAX_WALL_MS: u64 = 600_000;
@@ -33,6 +34,9 @@ pub(crate) struct Dispatch {
     pub stats: Arc<SchedStats>,
     pub tool_lease_ms: u64,
     pub handles: Handles,
+    /// What the daemon says it can do: the first node serving the model's own descriptor, once
+    /// one answers.
+    pub capabilities: crate::runtime::SharedCapabilities,
 }
 
 /// The grammars and logit biases this daemon's handlers made, by the handle each was given:
@@ -78,6 +82,7 @@ pub(crate) fn spawn(dispatch: Dispatch) -> SchedulerHandle {
 
 fn serve(d: Arc<Dispatch>, rx: Receiver<SchedCmd>) {
     let bus = d.store.lock().expect("store").bus();
+    learn_capabilities(Arc::downgrade(&d));
     while let Ok(cmd) = rx.recv() {
         match cmd {
             SchedCmd::Submit(job) => {
@@ -92,14 +97,10 @@ fn serve(d: Arc<Dispatch>, rx: Receiver<SchedCmd>) {
             SchedCmd::Sync(req, reply) => sync(&d, req, reply),
             SchedCmd::SyncAs(_, inner) => match *inner {
                 SchedCmd::Sync(req, reply) => sync(&d, req, reply),
-                SchedCmd::SyncStream(_, _, reply) => {
-                    let _ = reply.send(Err(NOT_YET.to_string()));
-                }
+                SchedCmd::SyncStream(req, segments, reply) => sync_stream(&d, req, segments, reply),
                 _ => {}
             },
-            SchedCmd::SyncStream(_, _, reply) => {
-                let _ = reply.send(Err(NOT_YET.to_string()));
-            }
+            SchedCmd::SyncStream(req, segments, reply) => sync_stream(&d, req, segments, reply),
             SchedCmd::PinHeld(_, reply) => {
                 let _ = reply.send(0);
             }
@@ -110,6 +111,39 @@ fn serve(d: Arc<Dispatch>, rx: Receiver<SchedCmd>) {
 }
 
 pub(crate) const NOT_YET: &str = "this operation does not reach fleet nodes yet";
+
+/// What an error says, without the "generation failed" each daemon it passes through would add.
+pub(crate) fn message(e: DaemonError) -> String {
+    match e {
+        DaemonError::Generation(m) => m,
+        e => e.to_string(),
+    }
+}
+
+/// How often the head asks again for a node's capabilities until one answers.
+const CAPABILITIES_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Takes the first node serving the model's capability descriptor as the daemon's, so a route
+/// refuses what the nodes cannot do as a local server refuses what its engine cannot.
+fn learn_capabilities(d: std::sync::Weak<Dispatch>) {
+    let spawned = std::thread::Builder::new().name("superfluid-fleet-capabilities".into()).spawn(move || loop {
+        let Some(dispatch) = d.upgrade() else { return };
+        if let Ok(StateSyncOkMsg::Capabilities { json }) = dispatch.fleet.state_sync(&dispatch.model, StateSyncReqMsg::Capabilities, &[]) {
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("backend".into(), "fleet".into());
+                    *dispatch.capabilities.write().expect("capability record") = crate::capabilities::Capabilities::parse(&v.to_string());
+                    return;
+                }
+            }
+        }
+        drop(dispatch);
+        std::thread::sleep(CAPABILITIES_EVERY);
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("fleet: cannot learn the nodes' capabilities: {e}");
+    }
+}
 
 type Reply = std::sync::mpsc::Sender<Result<StateSyncOkMsg, String>>;
 
@@ -136,7 +170,17 @@ fn sync(d: &Arc<Dispatch>, req: StateSyncReqMsg, reply: Reply) {
             StateSyncOkMsg::FreeLogitBias
         }
         req @ (StateSyncReqMsg::Embed { .. } | StateSyncReqMsg::LoraId | StateSyncReqMsg::Capabilities) => {
-            return on_node(d, reply, move |d| d.fleet.state_sync(&d.model, req));
+            return on_node(d, reply, move |d| d.fleet.state_sync(&d.model, req, &[]));
+        }
+        req @ StateSyncReqMsg::Transcribe { .. } => {
+            return on_node(d, reply, move |d| transcribe(d, req, None));
+        }
+        StateSyncReqMsg::MediaProbe { image_path } => {
+            return on_node(d, reply, move |d| {
+                let blob = blob_of(&image_path)?;
+                let req = StateSyncReqMsg::MediaProbe { image_path: format!("{BLOB_PREFIX}{}", blob.hash) };
+                d.fleet.state_sync(&d.model, req, &[blob])
+            });
         }
         req @ (StateSyncReqMsg::LoraLoad { .. } | StateSyncReqMsg::LoraUnload) => {
             return on_node(d, reply, move |d| d.fleet.state_sync_all(&d.model, req));
@@ -149,6 +193,60 @@ fn sync(d: &Arc<Dispatch>, req: StateSyncReqMsg, reply: Reply) {
     let _ = reply.send(Ok(answer));
 }
 
+/// A transcription streamed to its caller: it runs whole on a node, and its segments are told
+/// on as the stream.
+fn sync_stream(
+    d: &Arc<Dispatch>,
+    req: StateSyncReqMsg,
+    segments: std::sync::mpsc::Sender<superfluid_proto::linkw::TranscribeSegmentMsg>,
+    reply: Reply,
+) {
+    if !matches!(req, StateSyncReqMsg::Transcribe { .. }) {
+        let _ = reply.send(Err(NOT_YET.to_string()));
+        return;
+    }
+    on_node(d, reply, move |d| transcribe(d, req, Some(segments)));
+}
+
+/// Runs a transcription on a node serving the model, its audio sent first.
+fn transcribe(
+    d: &Dispatch,
+    req: StateSyncReqMsg,
+    segments: Option<std::sync::mpsc::Sender<superfluid_proto::linkw::TranscribeSegmentMsg>>,
+) -> Result<StateSyncOkMsg, DaemonError> {
+    let StateSyncReqMsg::Transcribe { audio_path, language, translate, timestamps, prompt, .. } = req else {
+        return Err(DaemonError::Protocol("not a transcription"));
+    };
+    let blob = blob_of(&audio_path)?;
+    let req = StateSyncReqMsg::Transcribe {
+        audio_path: format!("{BLOB_PREFIX}{}", blob.hash),
+        language,
+        translate,
+        timestamps,
+        prompt,
+        stream: false,
+    };
+    let answer = d.fleet.state_sync(&d.model, req, &[blob])?;
+    if let (Some(segments), StateSyncOkMsg::Transcribe { segments: done, .. }) = (segments, &answer) {
+        for s in done {
+            let _ = segments.send(superfluid_proto::linkw::TranscribeSegmentMsg { start_ms: s.start_ms, end_ms: s.end_ms, text: s.text.clone() });
+        }
+    }
+    Ok(answer)
+}
+
+/// The blob a media file on the head is: the media pool names a file by its SHA-256 already;
+/// another is hashed.
+fn blob_of(path: impl AsRef<std::path::Path>) -> Result<Blob, DaemonError> {
+    let path = path.as_ref().to_path_buf();
+    let named = path.file_name().and_then(|n| n.to_str()).filter(|n| crate::media::MediaPool::is_valid_id(n)).map(str::to_string);
+    let hash = match named {
+        Some(hash) => hash,
+        None => crate::media::content_hash(&std::fs::read(&path)?),
+    };
+    Ok(Blob { hash, path })
+}
+
 fn on_node(
     d: &Arc<Dispatch>,
     reply: Reply,
@@ -158,15 +256,16 @@ fn on_node(
     let spawned = std::thread::Builder::new()
         .name("superfluid-fleet-sync".into())
         .spawn(move || {
-            let _ = reply.send(run(&d).map_err(|e| e.to_string()));
+            let _ = reply.send(run(&d).map_err(message));
         });
     if let Err(e) = spawned {
         tracing::warn!("fleet: cannot run a state operation: {e}");
     }
 }
 
-/// What a job asks beyond its sampling, for the node that runs it; none when it asks nothing.
-fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<GenerateOptsMsg>, DaemonError> {
+/// What a job asks beyond its sampling, for the node that runs it, with the blobs its media are;
+/// none when it asks nothing.
+fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<(GenerateOptsMsg, Vec<Blob>)>, DaemonError> {
     let x = &job.extras;
     let lost = |what: &str| DaemonError::Protocol(if what == "grammar" { "a grammar handle this daemon never made" } else { "a logit bias handle this daemon never made" });
     let grammar = match d.handles.get(x.grammar_handle.max(job.grammar_handle)) {
@@ -187,11 +286,19 @@ fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<GenerateOptsMsg>, D
         && !x.ignore_eos
         && !x.want_logprobs
         && grammar.is_none()
-        && logit_bias.is_none();
+        && logit_bias.is_none()
+        && job.media.is_empty();
     if plain {
         return Ok(None);
     }
-    Ok(Some(GenerateOptsMsg {
+    let mut blobs = Vec::with_capacity(job.media.len());
+    let mut media = Vec::with_capacity(job.media.len());
+    for (offset, path, n) in &job.media {
+        let blob = blob_of(path)?;
+        media.push((*offset, blob.hash.clone(), *n));
+        blobs.push(blob);
+    }
+    let opts = GenerateOptsMsg {
         session_id: 0,
         generation_id: 0,
         presence_penalty_bits: x.presence_penalty.to_bits(),
@@ -201,45 +308,30 @@ fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<GenerateOptsMsg>, D
         top_logprobs: x.want_logprobs.then_some(x.top_logprobs),
         grammar,
         logit_bias,
-    }))
+        media,
+    };
+    Ok(Some((opts, blobs)))
 }
 
 /// What a fleet-backed daemon says it can do: generation, and a reason for each thing that does
 /// not reach nodes yet, so a route refuses it as the descriptor says.
 pub(crate) fn capability_record() -> crate::capabilities::Capabilities {
-    let media = "image and audio parts do not reach fleet nodes yet";
     crate::capabilities::Capabilities::parse(
         &serde_json::json!({
             "descriptor_version": 1,
             "backend": "fleet",
             "workload": {
                 "causal_generation": true,
-                "speech_to_text": NOT_YET,
-            },
-            "modalities": {
-                "image_encode": media,
-                "gemma_audio_encode": media,
-                "whisper_transcribe": media,
-                "whisper_translate": media,
             },
         })
         .to_string(),
     )
 }
 
-/// What a job asks that a node cannot do for it yet, as a refusal.
-fn unsupported(job: &GenerateJob) -> Option<Refusal> {
-    (!job.media.is_empty())
-        .then(|| Refusal::new("unsupported_on_fleet", Some("messages"), "image and audio parts do not reach fleet nodes yet"))
-}
-
 fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
     let session = job.session;
     let events = job.events.clone();
-    let outcome = match unsupported(&job) {
-        Some(refusal) => Err(DaemonError::Unsupported(refusal)),
-        None => generate(d, bus, &job),
-    };
+    let outcome = generate(d, bus, &job);
     d.active.lock().expect("active set").remove(&session);
     let _ = events.send(match outcome {
         Ok(done) => done,
@@ -301,7 +393,8 @@ fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEve
                 .collect();
             let _ = events.send(LaneEvent::TokenLogprobs(items));
         };
-        let r = d.fleet.generate_streaming_with(fs, job.max_tokens as u64, max_wall_ms, opts.as_ref(), &mut on_logprobs, |batch| {
+        let ask = opts.as_ref().map(|(opts, blobs)| Ask { opts, blobs });
+        let r = d.fleet.generate_streaming_with(fs, job.max_tokens as u64, max_wall_ms, ask.as_ref(), &mut on_logprobs, |batch| {
             if gone || fin != finish::NONE || failure.is_some() {
                 return;
             }

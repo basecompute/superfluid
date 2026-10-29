@@ -308,7 +308,13 @@ pub struct GenerateOptsMsg {
     pub top_logprobs: Option<u8>,
     pub grammar: Option<GrammarSpecMsg>,
     pub logit_bias: Option<(Vec<i32>, Vec<u32>)>,
+    /// The images and audio in the context: where each starts, the blob it is (sent before, by
+    /// its SHA-256 in hex), and the tokens it takes.
+    pub media: Vec<(u64, String, u32)>,
 }
+
+/// A media path the head sent as a blob: the node reads it from its own media pool.
+pub const BLOB_PREFIX: &str = "fleet-blob:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateSyncReqF {

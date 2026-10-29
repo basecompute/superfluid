@@ -85,7 +85,12 @@ pub struct NodeAgent {
     asked: HashMap<u64, Duration>,
     /// What each generation the head is about to start asks beyond its sampling.
     opts: HashMap<(u64, u64), linkf::GenerateOptsMsg>,
+    /// Blobs the head is sending: the SHA-256 each should have, and the bytes so far.
+    incoming: HashMap<u64, ([u8; 32], Vec<u8>)>,
 }
+
+/// The largest blob a node takes from its head.
+const MAX_BLOB: u64 = 1 << 30;
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
@@ -112,6 +117,7 @@ impl NodeAgent {
             conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
             asked: HashMap::new(),
             opts: HashMap::new(),
+            incoming: HashMap::new(),
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -152,6 +158,7 @@ impl NodeAgent {
             conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
             asked: HashMap::new(),
             opts: HashMap::new(),
+            incoming: HashMap::new(),
         }
     }
 
@@ -474,14 +481,41 @@ impl NodeAgent {
                 let m: linkf::GenerateOptsMsg = postcard::from_bytes(&frame.payload)?;
                 self.opts.insert((m.session_id, m.generation_id), m);
             }
+            msg_type::XFER_BEGIN => {
+                let m: linkf::XferBeginMsg = postcard::from_bytes(&frame.payload)?;
+                if m.total_len > MAX_BLOB {
+                    return Err(DaemonError::Protocol("the head sent a blob larger than a node takes"));
+                }
+                self.incoming.insert(m.transfer_id, (m.content_hash, Vec::with_capacity(m.total_len as usize)));
+            }
+            msg_type::XFER_CHUNK => {
+                let m: linkf::XferChunkMsg = postcard::from_bytes(&frame.payload)?;
+                if let Some((_, bytes)) = self.incoming.get_mut(&m.transfer_id) {
+                    if m.offset != bytes.len() as u64 || bytes.len() as u64 + m.data.len() as u64 > MAX_BLOB {
+                        return Err(DaemonError::Protocol("a blob's pieces came out of order"));
+                    }
+                    bytes.extend_from_slice(&m.data);
+                }
+            }
+            msg_type::XFER_END => {
+                let m: linkf::XferEndMsg = postcard::from_bytes(&frame.payload)?;
+                if let Some((want, bytes)) = self.incoming.remove(&m.transfer_id) {
+                    let got = self.daemon.media_put(&bytes).map_err(DaemonError::Io)?;
+                    let want: String = want.iter().map(|b| format!("{b:02x}")).collect();
+                    if got != want {
+                        return Err(DaemonError::Protocol("a blob from the head is not what its hash says"));
+                    }
+                }
+            }
             msg_type::STATE_SYNC_REQ => {
-                let m: linkf::StateSyncReqF = postcard::from_bytes(&frame.payload)?;
+                let mut m: linkf::StateSyncReqF = postcard::from_bytes(&frame.payload)?;
+                self.localize(&mut m.req);
                 let (tx, rx) = mpsc::channel();
                 let daemon = Arc::clone(&self.daemon);
                 std::thread::Builder::new()
                     .name("node-state-sync".into())
                     .spawn(move || {
-                        let result = daemon.state_sync(m.req).map_err(|e| e.to_string());
+                        let result = daemon.state_sync(m.req).map_err(crate::fleet_daemon::message);
                         let _ = tx.send(linkf::StateSyncRespF { request_id: m.request_id, result });
                     })
                     .expect("spawn a node state operation");
@@ -525,6 +559,23 @@ impl NodeAgent {
         Ok(())
     }
 
+    /// A path the head sent as a blob, where the blob sits in this node's media pool.
+    fn local(&self, path: &str) -> String {
+        match path.strip_prefix(linkf::BLOB_PREFIX) {
+            Some(hash) if crate::media::MediaPool::is_valid_id(hash) => self.daemon.media_path(hash).to_string_lossy().into_owned(),
+            _ => path.to_string(),
+        }
+    }
+
+    fn localize(&self, req: &mut superfluid_proto::linkw::StateSyncReqMsg) {
+        use superfluid_proto::linkw::StateSyncReqMsg as R;
+        match req {
+            R::MediaProbe { image_path } | R::MediaEncode { image_path } => *image_path = self.local(image_path),
+            R::Transcribe { audio_path, .. } => *audio_path = self.local(audio_path),
+            _ => {}
+        }
+    }
+
     /// Runs a stage forward on a thread of its own, as a generation runs, so a long one does not
     /// silence the connection.
     fn start_stage(&self, m: linkf::StageForwardReqMsg) -> mpsc::Receiver<linkf::StageForwardRespMsg> {
@@ -558,6 +609,11 @@ impl NodeAgent {
         let max_wall_ms = req.budgets.max_wall_ms;
         let opts = self.opts.remove(&(req.session_id, req.generation_id));
         self.opts.clear();
+        let media: Vec<(u64, std::path::PathBuf, u32)> = opts
+            .iter()
+            .flat_map(|o| &o.media)
+            .map(|(offset, hash, n)| (*offset, std::path::PathBuf::from(self.local(&format!("{}{hash}", linkf::BLOB_PREFIX))), *n))
+            .collect();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, out) = mpsc::channel();
         let (daemon, shared, stop) = (Arc::clone(&self.daemon), Arc::clone(&self.shared), Arc::clone(&cancel));
@@ -574,6 +630,7 @@ impl NodeAgent {
                             max_new,
                             max_wall_ms,
                             extras.extras.clone(),
+                            media,
                             |batch| {
                                 if stop.load(Ordering::Relaxed) || tx.send(Out::Tokens(batch.to_vec())).is_err() {
                                     return std::ops::ControlFlow::Break(());

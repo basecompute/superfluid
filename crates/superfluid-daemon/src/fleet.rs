@@ -52,6 +52,22 @@ struct Placement {
     tokens: Vec<u32>,
 }
 
+/// A file a request names, sent to the node by its SHA-256 (in hex) before the request.
+#[derive(Debug, Clone)]
+pub struct Blob {
+    pub hash: String,
+    pub path: std::path::PathBuf,
+}
+
+/// What a generation asks beyond its sampling: its options, and the blobs they name.
+pub struct Ask<'a> {
+    pub opts: &'a linkf::GenerateOptsMsg,
+    pub blobs: &'a [Blob],
+}
+
+/// A blob crosses in pieces this size, under the frame limit.
+const BLOB_CHUNK: usize = 4 << 20;
+
 pub struct FleetHead {
     head: HeadSession,
     endpoint: Endpoint,
@@ -62,6 +78,8 @@ pub struct FleetHead {
     auth: Vec<u8>,
     on_status: Option<StatusHook>,
     liveness: Liveness,
+    /// The blobs this connection has sent, which the node keeps.
+    blobs_sent: std::collections::HashSet<String>,
 }
 
 /// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
@@ -162,7 +180,35 @@ impl FleetHead {
             auth,
             on_status: None,
             liveness: Liveness::DEFAULT,
+            blobs_sent: std::collections::HashSet::new(),
         }
+    }
+
+    /// Sends each of `blobs` this connection has not sent yet.
+    fn send_blobs(&mut self, blobs: &[Blob]) -> Result<(), DaemonError> {
+        for blob in blobs {
+            if self.blobs_sent.contains(&blob.hash) {
+                continue;
+            }
+            let bytes = std::fs::read(&blob.path).map_err(DaemonError::Io)?;
+            let mut content_hash = [0u8; 32];
+            for (i, b) in content_hash.iter_mut().enumerate() {
+                *b = u8::from_str_radix(blob.hash.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
+            }
+            let transfer_id = self.next_generation;
+            self.next_generation += 1;
+            self.endpoint.send(
+                msg_type::XFER_BEGIN,
+                &linkf::XferBeginMsg { transfer_id, total_len: bytes.len() as u64, checksum: 0, content_type: 0, content_hash },
+            )?;
+            for (i, chunk) in bytes.chunks(BLOB_CHUNK).enumerate() {
+                let msg = linkf::XferChunkMsg { transfer_id, offset: (i * BLOB_CHUNK) as u64, data: chunk.to_vec() };
+                self.endpoint.send(msg_type::XFER_CHUNK, &msg)?;
+            }
+            self.endpoint.send(msg_type::XFER_END, &linkf::XferEndMsg { transfer_id })?;
+            self.blobs_sent.insert(blob.hash.clone());
+        }
+        Ok(())
     }
 
     /// How long the head waits on a peer that says nothing where its silence does not end the
@@ -270,6 +316,7 @@ impl FleetHead {
         endpoint.keep_alive(self.liveness);
         self.node = node;
         self.endpoint = endpoint;
+        self.blobs_sent.clear();
         let rec = self.head.reconcile();
         self.endpoint.send(msg_type::RECONCILE, &rec)?;
 
@@ -494,7 +541,7 @@ impl FleetHead {
         max_new_tokens: u64,
         max_wall_ms: u64,
         cancel: &std::sync::atomic::AtomicBool,
-        opts: Option<&linkf::GenerateOptsMsg>,
+        opts: Option<&Ask<'_>>,
         on_logprobs: &mut dyn FnMut(&[linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
@@ -527,8 +574,13 @@ impl FleetHead {
     }
 
     /// Runs one Link W state operation on the node's engine.
-    pub fn state_sync(&mut self, req: superfluid_proto::linkw::StateSyncReqMsg) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+    pub fn state_sync(
+        &mut self,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[Blob],
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
         self.needs_v3("this operation")?;
+        self.send_blobs(blobs)?;
         let request_id = self.next_generation;
         self.next_generation += 1;
         self.endpoint.send(msg_type::STATE_SYNC_REQ, &linkf::StateSyncReqF { request_id, req })?;
@@ -554,7 +606,7 @@ impl FleetHead {
         max_new_tokens: u64,
         max_wall_ms: u64,
         cancel: &std::sync::atomic::AtomicBool,
-        opts: Option<&linkf::GenerateOptsMsg>,
+        opts: Option<&Ask<'_>>,
         on_logprobs: &mut dyn FnMut(&[linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
@@ -571,8 +623,9 @@ impl FleetHead {
                 GenerationBudgetsMsg { max_new_tokens, max_wall_ms },
             )
             .ok_or(DaemonError::Protocol("generate before assign"))?;
-        if let Some(o) = opts {
-            let o = linkf::GenerateOptsMsg { session_id, generation_id, ..o.clone() };
+        if let Some(ask) = opts {
+            self.send_blobs(ask.blobs)?;
+            let o = linkf::GenerateOptsMsg { session_id, generation_id, ..ask.opts.clone() };
             self.endpoint.send(msg_type::GENERATE_OPTS, &o)?;
         }
         self.endpoint.send(msg_type::GENERATE_REQ, &req)?;
