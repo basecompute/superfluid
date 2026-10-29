@@ -1363,13 +1363,25 @@ impl FleetManager {
     pub fn keepalive(&self) {
         let nodes: Vec<Arc<NodeConn>> = self.nodes.read().expect("nodes").clone();
         for (i, node) in nodes.iter().enumerate() {
+            let mut dropped = None;
             for (slot, conn) in node.conns.iter().enumerate() {
                 let Ok(mut guard) = conn.try_lock() else { continue };
                 let Some(head) = guard.as_mut() else { continue };
                 self.flush_forgets(i, slot, head);
                 match head.drain_status() {
                     Ok(()) => self.sync_meta(i, head),
-                    Err(_) => *guard = None,
+                    Err(e) => {
+                        *guard = None;
+                        dropped = Some(e);
+                    }
+                }
+            }
+            // With its last connection gone the node is down until the background retry reaches
+            // it again, which also learns what it serves now: a node that restarted under another
+            // model name would otherwise be passed over for the name it had.
+            if let Some(e) = dropped {
+                if node.conns.iter().all(|c| c.try_lock().is_ok_and(|g| g.is_none())) {
+                    self.mark_unhealthy(i, &e);
                 }
             }
         }

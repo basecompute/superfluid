@@ -530,3 +530,44 @@ fn a_stage_forward_slower_than_the_silence_limit_keeps_the_link() {
     assert!(matches!(out, superfluid_engine::StageOutput::Token(_)), "the last stage gives a token");
     assert_eq!(closed.load(Ordering::SeqCst), 0, "the node closed none of its connections");
 }
+
+#[test]
+fn a_node_back_under_another_model_name_is_learned_again() {
+    // Each connection is served under the name the node has when it is accepted, so the node
+    // can come back as another model, as one restarted with another --model-name does.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let name = Arc::new(std::sync::Mutex::new("old"));
+    {
+        let name = Arc::clone(&name);
+        std::thread::spawn(move || {
+            let daemon = Arc::new(mock_daemon());
+            for sock in listener.incoming() {
+                let Ok(sock) = sock else { break };
+                let model = *name.lock().unwrap();
+                let mut conn = NodeAgent::new(Arc::clone(&daemon), "renamed", model)
+                    .with_timeouts(Duration::from_secs(2), Duration::from_millis(300));
+                let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+                std::thread::spawn(move || {
+                    let _ = conn.serve(ep);
+                });
+            }
+        });
+    }
+    let retry = Duration::from_millis(100);
+    let mgr = manager(&[&addr], PlacementPolicy::LeastLoaded, 1).with_retry_every(retry);
+    mgr.probe().remove(0).expect("the node answers");
+    assert_eq!(mgr.serving("old"), (1, 1));
+
+    *name.lock().unwrap() = "new";
+    // The head said nothing for longer than the node waits, so the node closed the connection;
+    // the head's tend sees it go, and its retry reaches the node again.
+    std::thread::sleep(Duration::from_millis(900));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while mgr.serving("new") != (1, 1) && Instant::now() < deadline {
+        mgr.tend();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(mgr.serving("new"), (1, 1), "the retry learned the name it serves now");
+    assert_eq!(mgr.serving("old"), (0, 1));
+}
