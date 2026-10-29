@@ -317,7 +317,13 @@ pub fn not_an_update(current: &str, planned: &str) -> Option<String> {
         .then(|| format!("it is {current}, newer than {planned}, the newest build this adapter is tested with"))
 }
 
+/// Removes the install `name`, or the one `id` names after its '@'; every install of the runtime
+/// only when neither names one.
 pub fn remove(catalog: &Catalog, id: RuntimeId, name: Option<&str>) -> Result<Vec<String>, String> {
+    let name = match (id.install(), name) {
+        (Some(at), Some(n)) if at != n => return Err(format!("{id} names the install {at}, not {n}")),
+        (at, n) => n.or(at),
+    };
     let root = catalog.package_dir(id.base());
     let all = list(catalog, id);
     match name {
@@ -434,7 +440,12 @@ cat "$dir/runtime.json"
 
         assert_eq!(remove(&cat, id, Some("b3-vulkan")).unwrap(), ["b3-vulkan"]);
         assert_eq!(default(&cat, id).unwrap().name, "b1-vulkan");
-        assert_eq!(remove(&cat, id, None).unwrap().len(), 2);
+        assert_eq!(remove(&cat, at, Some("b1-vulkan")).unwrap_err(), "toyrt@b2-cpu names the install b2-cpu, not b1-vulkan");
+        let typo = RuntimeId::new("toyrt@b2-cpuu");
+        assert_eq!(remove(&cat, typo, None).unwrap_err(), "toyrt has no install b2-cpuu (installed: b1-vulkan, b2-cpu)");
+        assert_eq!(list(&cat, id).len(), 2, "a mistyped install removes nothing");
+        assert_eq!(remove(&cat, at, None).unwrap(), ["b2-cpu"], "an id with an install removes that one only");
+        assert_eq!(remove(&cat, id, None).unwrap(), ["b1-vulkan"]);
         assert!(!home.join("runtimes/toyrt").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
