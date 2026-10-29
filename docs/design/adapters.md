@@ -52,6 +52,7 @@ pub trait Runtime: Send + Sync {
     fn tokenizer(&self, _model: &Path) -> Option<Result<Arc<dyn Tokenizer>, String>> { None }
     fn plan(&self, _req: &Request, _host: &Host) -> Option<Result<Vec<Plan>, String>> { None }
     fn versions(&self, host: &Host) -> Vec<Candidate> { /* each `tested` version of compat(), planned here */ }
+    fn unlisted(&self) -> Option<Unlisted> { None }              // which versions left out of versions() install without --untested, and what that asks of one
     fn pull_options(&self) -> Option<&'static [PullOption]> { None }
     fn pull(&self, _pull: &Pull, _args: &WorkerArgs) -> Result<PathBuf, String> { /* refuses */ }
     fn install(&self, plan: &Plan, dir: &Path) -> Result<Vec<(String, String)>, String> { /* fetch into dir/lib */ }
@@ -61,7 +62,7 @@ pub trait Runtime: Send + Sync {
 | method | answers |
 |---|---|
 | `info()` | id, aliases, formats it reads (`Format::file` by extension or magic, `Format::directory` by contents), and the tokenizer source (`HuggingFace`, `Library(stem)` or `Engine`) |
-| `probe()` | whether it runs here: version and devices, or why not |
+| `probe()` | whether it runs here: version and devices, or why not. A `Device` carries `memory`, as the runtime reads it, and `budget`, what the adapter plans a model and its cache against there (0 where it plans nothing), which `superfluid runtimes` shows for every runtime alike |
 | `open()` | load the model: `Loaded::primitives(runtime, superfluid_adapter_kit::context(args))` or `Loaded::engine(engine, rings)` |
 | `flags()` | extra worker flags it reads (`--name`); anything else is refused |
 | `options()` | the knobs it takes on `serve` as `--<id>-<name> <value>`, each with a kind (`Int`, `IntFrom(least)`, `IntIn(least, most)`, `Float`, `FloatFrom(least)`, `OnOff`, `Choice`, `Text`; bound a number the runtime would clamp, wrap or fail on), a default for the help and a description; the daemon checks a value against the kind before the worker starts and forwards it as `--<name> <value>`, the worker refuses a bad one at start, and the adapter reads it with `superfluid_adapter_kit::option(args, name)`. A knob every runtime could take is a flag of `serve` instead |
@@ -72,6 +73,7 @@ pub trait Runtime: Send + Sync {
 | `model_facts()` | architecture and published sampling defaults, without loading |
 | `tokenizer()` | an in-process tokenizer, for a daemon that links the adapter |
 | `plan()`, `install()` | what installing fetches, and how |
+| `versions()`, `unlisted()` | the versions it installs on its own, and, when some it does not list install without `--untested` too (basert: any release that states this build's ABI), a clause saying which, and what the rule asks of a version (basert: `engine ABI <n>`), which an install of an unlisted version keeps in its `runtime.json` as `requires`; `superfluid runtime versions` prints the clause, and counts an install newer than every listed version that installs here as one the adapter installs when its `requires` is what this build's rule asks |
 | `pull_options()`, `pull()` | `--pull-<name>` options, and fetching a model by id with the runtime's own tool |
 
 ## The worker executable
@@ -93,7 +95,7 @@ superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-con
 |---|---|
 | `version`, `check` | 0 when the runtime runs here (and reads `--model`); 1 otherwise. Neither loads weights |
 | `plan`, `install`, `pull` | 0, or 1 with the reason |
-| `compat`, `versions` | 0, JSON on stdout: what the adapter was built and tested for; the versions it installs on its own, each planned for this host (`superfluid runtime versions`), answered from the recipe alone. 1 with the reason on stderr, which the daemon quotes; an adapter from before them exits 2 at the unknown command |
+| `compat`, `versions` | 0, JSON on stdout: what the adapter was built and tested for; the versions it installs on its own, each planned for this host, with `unlisted` (`superfluid runtime versions`), answered from the recipe alone. 1 with the reason on stderr, which the daemon quotes; an adapter from before them exits 2 at the unknown command |
 | serving | 0 on clean close; 2 on a bad command line; 3 when the model does not load; 1 when serving fails |
 
 `check` prints the JSON report the daemon reads: runtime id, version, aliases, Link W versions (8), `available`, formats, tokenizer, devices, static capabilities, pull options, and with `--model` whether it reads the model and its facts.

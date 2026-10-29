@@ -631,7 +631,7 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
         abi: report["runtime"]["abi"].as_u64(),
         capabilities: report.get("capabilities").filter(|c| c.as_object().is_some_and(|o| !o.is_empty())).map(Value::to_string),
         info: Info::from_report(report),
-        devices: superfluid_worker::check::devices_from(&report["devices"]),
+        devices: devices_of(id, &report["devices"]),
         tokenizer: None,
         pull: report.get("pull").map(|p| {
             p["options"]
@@ -642,6 +642,30 @@ fn runtime_from_check(id: RuntimeId, worker: Worker, report: &Value) -> Result<R
         options: superfluid_worker::check::options_from(&report["options"]),
         worker,
     })
+}
+
+/// The share of a GPU's memory the llama.cpp and MLX adapters of superfluid 0.1.5 and older plan against.
+const OLD_PLANNING_SHARE: f64 = 0.85;
+
+/// The devices a worker reports, each with what its runtime plans against there. A worker from before devices stated that
+/// (superfluid 0.1.5 and older, still the worker of an install made then) gave only `memory`: for basert already its budget,
+/// for llama.cpp and MLX the GPU's own figure their sizing plans [`OLD_PLANNING_SHARE`] of. Another adapter's is not known.
+/// Each device is taken on its own: a budget a device states is the one used.
+fn devices_of(id: RuntimeId, reported: &Value) -> Vec<Device> {
+    let rows = reported.as_array().map(Vec::as_slice).unwrap_or_default();
+    rows.iter()
+        .filter_map(|row| {
+            let mut d = superfluid_worker::check::device_from(row)?;
+            if row.get("budget").is_none() {
+                d.budget = match id.base().name() {
+                    "basert" => d.memory,
+                    "llamacpp" | "mlx" if !d.backend.eq_ignore_ascii_case("cpu") => (OLD_PLANNING_SHARE * d.memory as f64) as u64,
+                    _ => 0,
+                };
+            }
+            Some(d)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -682,11 +706,35 @@ pub(crate) mod tests {
             ),
         };
         format!(
-            r#"{{"runtime":{{"id":"{id}","version":"v1","aliases":{aliases}}},"link_w":[{link_w}],"available":{available},"formats":{formats},"tokenizer":{tokenizer},"devices":[{{"backend":"Metal","name":"Apple M5 Pro","memory":36000000000}}],"capabilities":{{"descriptor_version":1,"load":{{"kv_bits":"no such knob"}},"serving":{{"park_lossy":"no lossy encoding"}}}}}}"#
+            r#"{{"runtime":{{"id":"{id}","version":"v1","aliases":{aliases}}},"link_w":[{link_w}],"available":{available},"formats":{formats},"tokenizer":{tokenizer},"devices":[{{"backend":"Metal","name":"Apple M5 Pro","memory":40000000000,"budget":34000000000}}],"capabilities":{{"descriptor_version":1,"load":{{"kv_bits":"no such knob"}},"serving":{{"park_lossy":"no lossy encoding"}}}}}}"#
         )
     }
 
     const V: u16 = superfluid_agent::client::PROTO_VERSION;
+
+    #[test]
+    fn a_device_from_a_worker_before_budgets_gets_the_one_its_runtime_planned_against() {
+        let gpu = 40_000_000_000u64;
+        let share = (OLD_PLANNING_SHARE * gpu as f64) as u64;
+        let old = serde_json::json!([{"backend": "Metal", "name": "Apple M5 Pro", "memory": gpu}, {"backend": "CPU", "name": "Apple M5 Pro", "memory": 51_000_000_000u64}]);
+        let budgets = |id: &str, reported: &Value| devices_of(RuntimeId::new(id), reported).iter().map(|d| d.budget).collect::<Vec<_>>();
+        assert_eq!(budgets("llamacpp", &old), [share, 0], "a share of the GPU, and nothing planned on the CPU");
+        assert_eq!(budgets("mlx", &old), [share, 0]);
+        assert_eq!(budgets("basert", &serde_json::json!([old[0]])), [gpu], "basert's memory was its budget");
+        assert_eq!(budgets("vllm", &old), [0, 0], "not known");
+        let stated = serde_json::json!([{"backend": "Metal", "name": "Apple M5 Pro", "memory": gpu, "budget": 1}, {"backend": "CPU", "name": "x", "memory": 1, "budget": 0}]);
+        for id in ["basert", "llamacpp", "vllm"] {
+            assert_eq!(budgets(id, &stated), [1, 0], "{id}: a budget stated is the one used");
+        }
+        // A report that states a budget for some devices and not others: each is taken on its own.
+        let mixed = serde_json::json!([
+            {"backend": "CUDA", "name": "a GPU", "memory": gpu, "budget": 20_000_000_000u64},
+            {"backend": "CUDA", "name": "another GPU", "memory": gpu},
+            {"backend": "CPU", "name": "x", "memory": 51_000_000_000u64},
+        ]);
+        assert_eq!(budgets("llamacpp", &mixed), [20_000_000_000, share, 0]);
+        assert_eq!(budgets("vllm", &mixed), [20_000_000_000, 0, 0], "an explicit budget is kept where the rest are not known");
+    }
 
     #[test]
     fn a_worker_is_started_with_its_runtime_options_from_the_first_probe_on() {
@@ -806,7 +854,7 @@ pub(crate) mod tests {
         assert_eq!(rt.worker, Worker { bin: pinned, prefix: vec![], source: Source::Installed });
         assert_eq!(rt.version.as_deref(), Some("v1"));
         assert_eq!(rt.info.aliases, ["llama.cpp"]);
-        assert_eq!(rt.device().unwrap().summary(), "Metal: Apple M5 Pro, 36.0 GB");
+        assert_eq!(rt.device().unwrap().summary(), "Metal: Apple M5 Pro, 34.0 GB");
         assert_eq!(rt.tokenizer.as_deref().map(|p| p.canonicalize().unwrap()), Some(lib.canonicalize().unwrap()));
         assert_eq!(rt.static_capabilities().check_startup_flags(true, None, None).unwrap_err(), "--park-lossy: no lossy encoding");
         let args = rt.serve_args(Path::new("/m.gguf"), 4096, 4, 8);

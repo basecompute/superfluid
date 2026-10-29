@@ -101,14 +101,18 @@ pub struct RuntimeInfo {
 pub struct Device {
     pub backend: String,
     pub name: String,
+    /// Its memory as the runtime reads it: llama.cpp's device total, MLX's recommended working set, baseRT's own budget.
     pub memory: u64,
+    /// What the runtime plans a model and its cache against here, the same rule for every runtime: 0 when it plans nothing on it.
+    pub budget: u64,
 }
 
 impl Device {
+    /// The device and its budget, as `superfluid runtimes` prints it.
     pub fn summary(&self) -> String {
         let mut s = format!("{}: {}", self.backend, self.name);
-        if self.memory > 0 {
-            s.push_str(&format!(", {:.1} GB", self.memory as f64 / 1e9));
+        if self.budget > 0 {
+            s.push_str(&format!(", {:.1} GB", self.budget as f64 / 1e9));
         }
         s
     }
@@ -174,9 +178,9 @@ mod tests {
 
     #[test]
     fn a_device_sums_itself_up() {
-        let d = Device { backend: "Metal".into(), name: "Apple M5 Pro".into(), memory: 36_000_000_000 };
-        assert_eq!(d.summary(), "Metal: Apple M5 Pro, 36.0 GB");
-        let cpu = Device { backend: "CPU".into(), name: "Apple M5 Pro".into(), memory: 0 };
-        assert_eq!(cpu.summary(), "CPU: Apple M5 Pro");
+        let d = Device { backend: "Metal".into(), name: "Apple M5 Pro".into(), memory: 40_000_000_000, budget: 34_000_000_000 };
+        assert_eq!(d.summary(), "Metal: Apple M5 Pro, 34.0 GB", "the budget, not what the device has");
+        let cpu = Device { backend: "CPU".into(), name: "Apple M5 Pro".into(), memory: 51_000_000_000, budget: 0 };
+        assert_eq!(cpu.summary(), "CPU: Apple M5 Pro", "nothing is planned on it");
     }
 }

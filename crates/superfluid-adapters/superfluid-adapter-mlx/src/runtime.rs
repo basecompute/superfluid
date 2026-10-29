@@ -417,10 +417,13 @@ pub fn probe(venv: Option<&Path>) -> Result<Probe, String> {
                 Err(_) => metal.call_method0("device_info")?,
             };
             let get = |k: &str| info.get_item(k).ok();
+            let memory = get("max_recommended_working_set_size").and_then(|v| v.extract::<u64>().ok()).unwrap_or(0);
             devices.push(superfluid_engine::artifact::Device {
                 backend: "Metal".into(),
                 name: get("device_name").and_then(|v| v.extract::<String>().ok()).unwrap_or_else(|| "Apple GPU".into()),
-                memory: get("max_recommended_working_set_size").and_then(|v| v.extract::<u64>().ok()).unwrap_or(0),
+                memory,
+                // What `sizing` plans against, before it keeps to what is free at load.
+                budget: (superfluid_executor::sizing::PLANNING_SHARE * memory as f64) as u64,
             });
         }
         Ok(Probe { version, devices, abi: None })
@@ -1059,6 +1062,7 @@ def modelled(lengths):
         let d = &p.devices[0];
         assert_eq!(d.backend, "Metal");
         assert!(!d.name.is_empty() && d.memory > 0, "{d:?}");
+        assert_eq!(d.budget, (superfluid_executor::sizing::PLANNING_SHARE * d.memory as f64) as u64, "what sizing plans against: {d:?}");
     }
 
     #[test]

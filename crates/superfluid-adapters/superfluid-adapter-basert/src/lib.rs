@@ -5,7 +5,7 @@ pub mod recipe;
 use std::path::Path;
 use std::sync::Arc;
 
-use superfluid_adapter_kit::install::{Candidate, Host, Plan, Request};
+use superfluid_adapter_kit::install::{Candidate, Host, Plan, Request, Unlisted};
 use superfluid_adapter_kit::{Pull, PullOption};
 use superfluid_adapter_kit::{ring_specs_for, Device, Format, Loaded, Probe, Runtime, RuntimeInfo, Tokenizer, TokenizerSource, WorkerArgs};
 use superfluid_engine_ffi::{libbasert, FfiEngineConfig, NativeEngine, TokenizerHandle};
@@ -131,6 +131,10 @@ impl Runtime for Basert {
     fn versions(&self, host: &Host) -> Vec<Candidate> {
         // The pins alone, offline: `plan` would consult the release listing when a pin fails.
         recipe::versions(host)
+    }
+
+    fn unlisted(&self) -> Option<Unlisted> {
+        Some(recipe::unlisted())
     }
 }
 
@@ -268,7 +272,8 @@ pub fn devices() -> Vec<Device> {
         return Vec::new();
     };
     let backend = if cfg!(target_os = "macos") { "Metal" } else { "CUDA" };
-    vec![Device { backend: backend.into(), name: gpu_name(), memory }]
+    // baseRT states its budget alone, the share of the device it plans a model against.
+    vec![Device { backend: backend.into(), name: gpu_name(), memory, budget: memory }]
 }
 
 fn gpu_name() -> String {
