@@ -138,7 +138,7 @@ pub fn tokenizer_from(v: &Value) -> Option<TokenizerSource> {
 }
 
 pub fn device_json(d: &Device) -> Value {
-    json!({"backend": d.backend, "name": d.name, "memory": d.memory})
+    json!({"backend": d.backend, "name": d.name, "memory": d.memory, "budget": d.budget})
 }
 
 pub fn devices_from(v: &Value) -> Vec<Device> {
@@ -147,6 +147,8 @@ pub fn devices_from(v: &Value) -> Vec<Device> {
             backend: d["backend"].as_str()?.to_string(),
             name: d["name"].as_str().unwrap_or_default().to_string(),
             memory: d["memory"].as_u64().unwrap_or(0),
+            // A worker from before the budget states none.
+            budget: d["budget"].as_u64().unwrap_or(0),
         })
     };
     v.as_array().map(|a| a.iter().filter_map(one).collect()).unwrap_or_default()
@@ -220,7 +222,7 @@ mod tests {
             version: Some("llama.cpp b11284".into()),
             abi: None,
             available: Ok(()),
-            devices: vec![Device { backend: "Metal".into(), name: "Apple M5 Pro".into(), memory: 1 << 30 }],
+            devices: vec![Device { backend: "Metal".into(), name: "Apple M5 Pro".into(), memory: 1 << 30, budget: 1 << 29 }],
             capabilities: r#"{"descriptor_version":1}"#.into(),
             model: None,
             pull: None,
@@ -240,7 +242,7 @@ mod tests {
                 "available": true,
                 "formats": [{"id": "gguf", "describe": "a GGUF file", "file": {"extensions": ["gguf"], "magic": "GGUF"}}],
                 "tokenizer": {"from": "library", "name": "superfluid_tokenizer_llamacpp"},
-                "devices": [{"backend": "Metal", "name": "Apple M5 Pro", "memory": 1u64 << 30}],
+                "devices": [{"backend": "Metal", "name": "Apple M5 Pro", "memory": 1u64 << 30, "budget": 1u64 << 29}],
                 "capabilities": {"descriptor_version": 1},
             })
         );

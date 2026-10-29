@@ -1,11 +1,14 @@
 //! `superfluid runtimes [<model>] [--json]`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
 use crate::capabilities::{Cap, Capabilities};
-use crate::runtimes::{Catalog, Found, Runtime};
+use crate::runtimes::{Catalog, Found, Runtime, Source, Worker};
+
+/// The DEVICE column: the device a runtime runs on and the memory it plans a model and its cache against there.
+const DEVICE: &str = "DEVICE (MEMORY BUDGET)";
 
 fn short_version(v: Option<&str>) -> String {
     v.map(|v| v.split(" (").next().unwrap_or(v).to_string()).unwrap_or_else(|| "-".into())
@@ -15,8 +18,41 @@ fn state(f: &Found) -> &'static str {
     match (&f.usable, &f.worker) {
         (Ok(_), _) => "ready",
         (Err(_), None) => "missing",
-        (Err(_), Some(w)) if matches!(w.source, crate::runtimes::Source::Installed | crate::runtimes::Source::Env) => "broken",
+        (Err(_), Some(w)) if matches!(w.source, Source::Installed | Source::Env) => "broken",
         (Err(_), Some(_)) => "not installed",
+    }
+}
+
+/// `text` with `~` for the home directory where it names a path in it.
+fn tilde(text: &str, home: Option<&Path>) -> String {
+    match home.filter(|h| h.is_absolute() && h.parent().is_some()).and_then(Path::to_str) {
+        Some(h) if text == h => "~".into(),
+        Some(h) => text.replace(&format!("{h}/"), "~/"),
+        None => text.to_string(),
+    }
+}
+
+/// The top of the release a worker of superfluid's own came in: `bin/` beside the command, `libexec/superfluid/` for the
+/// adapters it ships; a build of the source keeps both in its target directory.
+fn release_of(w: &Worker) -> Option<PathBuf> {
+    let dir = w.bin.parent()?;
+    let top = match w.source {
+        Source::Shipped => dir.parent()?.parent()?,
+        Source::BuiltIn | Source::BesideDaemon if dir.file_name().is_some_and(|n| n == "bin") => dir.parent()?,
+        Source::BuiltIn | Source::BesideDaemon => dir,
+        Source::Installed | Source::Env => return None,
+    };
+    Some(top.to_path_buf())
+}
+
+/// Where a runtime's worker is, short: an install by its name in the runtimes directory, a worker of superfluid's own by its
+/// source alone (the footer says where the release is), a worker named in the environment by its path.
+fn worker_cell(f: &Found, home: Option<&Path>) -> String {
+    let Some(w) = &f.worker else { return "-".into() };
+    match (w.source, w.install()) {
+        (Source::Installed, Some(name)) => format!("{}: {}/{name}", w.source.name(), f.id.base()),
+        (Source::BuiltIn | Source::Shipped | Source::BesideDaemon, _) => w.source.name().to_string(),
+        _ => format!("{}: {}", w.source.name(), tilde(&w.bin.display().to_string(), home)),
     }
 }
 
@@ -69,8 +105,13 @@ pub fn table(found: &[Found], packages: &Path) -> String {
 }
 
 pub fn table_of(found: &[Found], packages: &Path, catalog: Option<&Catalog>) -> String {
-    let mut rows = vec![["RUNTIME", "STATE", "INSTALL", "VERSION", "INSTALLABLE", "READS", "DEVICE", "WORKER"].map(String::from).to_vec()];
+    table_at(found, packages, catalog, std::env::home_dir().as_deref())
+}
+
+fn table_at(found: &[Found], packages: &Path, catalog: Option<&Catalog>, home: Option<&Path>) -> String {
+    let mut rows = vec![["RUNTIME", "STATE", "INSTALL", "VERSION", "INSTALLABLE", "READS", DEVICE, "WORKER"].map(String::from).to_vec()];
     let mut problems = Vec::new();
+    let mut releases: Vec<PathBuf> = Vec::new();
     for f in found {
         let installable = match (catalog, f.id.install()) {
             (Some(c), None) => crate::versions::cell(&crate::versions::of(c, f.id)),
@@ -85,12 +126,14 @@ pub fn table_of(found: &[Found], packages: &Path, catalog: Option<&Catalog>) -> 
         let (version, device) = match &f.usable {
             Ok(rt) => (short_version(rt.version.as_deref()), rt.device().map(|d| d.summary()).unwrap_or_else(|| "-".into())),
             Err(why) => {
-                problems.push(format!("{}: {why}", f.id));
+                problems.push(format!("{}: {}", f.id, tilde(why, home)));
                 ("-".into(), "-".into())
             }
         };
-        let worker = f.worker.as_ref().map(|w| format!("{}: {}", w.source.name(), w.bin.display())).unwrap_or_else(|| "-".into());
-        rows.push(vec![f.id.to_string(), state(f).into(), install_cell(f, catalog), version, installable, reads, device, worker]);
+        if let Some(top) = f.worker.as_ref().and_then(release_of).filter(|t| !releases.contains(t)) {
+            releases.push(top);
+        }
+        rows.push(vec![f.id.to_string(), state(f).into(), install_cell(f, catalog), version, installable, reads, device, worker_cell(f, home)]);
     }
     let mut out = if found.is_empty() { "no runtime is installed here\n".to_string() } else { columns(&rows) };
     for p in problems {
@@ -100,7 +143,11 @@ pub fn table_of(found: &[Found], packages: &Path, catalog: Option<&Catalog>) -> 
     if catalog.is_some() && !found.is_empty() {
         out.push_str("`superfluid runtime versions <id>` lists every version an adapter installs on its own\n");
     }
-    out.push_str(&format!("installed runtimes: {}\n", packages.display()));
+    if !releases.is_empty() {
+        let shown: Vec<String> = releases.iter().map(|r| tilde(&r.display().to_string(), home)).collect();
+        out.push_str(&format!("superfluid release: {}\n", shown.join(", ")));
+    }
+    out.push_str(&format!("installed runtimes: {}\n", tilde(&packages.display().to_string(), home)));
     out
 }
 
@@ -258,7 +305,7 @@ pub fn model(catalog: &Catalog, model: &Path) -> (String, Value, bool) {
         model.display(),
         format.as_ref().map(|f| f.describe.clone()).unwrap_or_else(|| "no runtime here declares this format".into())
     );
-    let mut rows = vec![["RUNTIME", "READS IT", "DEVICE", "MODEL"].map(String::from).to_vec()];
+    let mut rows = vec![["RUNTIME", "READS IT", DEVICE, "MODEL"].map(String::from).to_vec()];
     for a in &answers {
         let device = a.found.usable.as_ref().ok().and_then(|r| r.device()).map(|d| d.summary()).unwrap_or_else(|| "-".into());
         let (reads, detail) = match &a.reads {
@@ -340,14 +387,17 @@ mod tests {
         let cat = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         let text = table(&cat.survey(), &home.join("runtimes"));
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[0].starts_with("RUNTIME   STATE   INSTALL             VERSION  INSTALLABLE  READS  DEVICE"), "{text}");
-        assert!(lines[1].starts_with("llamacpp  ready   v1-metal (default)  v1       -            gguf   Metal: Apple M5 Pro, 36.0 GB  installed: "), "{text}");
-        assert!(lines[2].starts_with("mlx       broken  v1-metal (default)  -        -            mlx    -"), "{text}");
+        assert_eq!(lines[0], "RUNTIME   STATE   INSTALL             VERSION  INSTALLABLE  READS  DEVICE (MEMORY BUDGET)        WORKER", "{text}");
+        assert_eq!(lines[1], "llamacpp  ready   v1-metal (default)  v1       -            gguf   Metal: Apple M5 Pro, 34.0 GB  installed: llamacpp/v1-metal", "{text}");
+        assert_eq!(lines[2], "mlx       broken  v1-metal (default)  -        -            mlx    -                             installed: mlx/v1-metal", "{text}");
         assert!(lines[3].starts_with("mlx: the mlx runtime at ") && lines[3].contains("`superfluid runtime repair mlx`"), "{text}");
+        assert_eq!(lines[4], format!("installed runtimes: {}", home.join("runtimes").display()), "no worker of superfluid's own: {text}");
         let json = table_json(&cat.survey());
         assert_eq!(json[0]["formats"][0]["id"], "gguf");
         assert_eq!(json[0]["reads"], "a GGUF file");
-        assert_eq!(json[0]["devices"][0]["backend"], "Metal");
+        assert_eq!(json[0]["devices"][0], json!({"backend": "Metal", "name": "Apple M5 Pro", "memory": 40_000_000_000u64, "budget": 34_000_000_000u64}));
+        let path = home.join("runtimes/llamacpp/v1-metal/bin/superfluid-worker-llamacpp").canonicalize().unwrap();
+        assert_eq!(json[0]["worker"], json!({"path": path, "source": "installed"}), "the whole path");
         assert_eq!(json[1]["state"], "broken");
     }
 
@@ -366,16 +416,65 @@ mod tests {
         let cat = Catalog::new(home.clone(), Some(beside.clone()), beside.join("superfluid-workerd"));
         let text = table(&cat.survey(), &home.join("runtimes"));
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[1].starts_with("llamacpp  not installed  -        -        -            gguf   -       shipped with superfluid: "), "{text}");
+        assert_eq!(lines[1], format!("llamacpp  not installed  -        -        -            gguf   {:<22}  shipped with superfluid", "-"), "{text}");
         assert_eq!(
             lines[2],
             "llamacpp: the llamacpp runtime is not installed: llama.cpp not found: install it with `superfluid runtime install llamacpp`",
             "{text}"
         );
+        let release = root.canonicalize().unwrap();
+        assert_eq!(lines[3], format!("superfluid release: {}", release.display()), "where the release is, once: {text}");
+        assert_eq!(lines[4], format!("installed runtimes: {}", home.join("runtimes").display()), "{text}");
         let json = table_json(&cat.survey());
         assert_eq!(json[0]["state"], "not installed");
         assert_eq!(json[0]["worker"]["source"], "shipped with superfluid");
+        assert_eq!(json[0]["worker"]["path"], json!(release.join("libexec/superfluid/superfluid-worker-llamacpp")), "the whole path");
         assert_eq!(json[0]["formats"][0]["id"], "gguf");
+    }
+
+    #[test]
+    fn a_worker_is_named_short_and_the_release_it_came_in_once() {
+        let home = Path::new("/Users/someone");
+        let release = home.join(".nvm/versions/node/v24.16.0/lib/node_modules/@basecompute/superfluid/node_modules/@basecompute/superfluid-darwin-arm64/release");
+        let installed = home.join(".superfluid/runtimes/mlx/0.32.4-metal/bin/superfluid-worker-mlx");
+        let found = |id: &str, bin: PathBuf, source: Source, why: String| Found {
+            id: RuntimeId::new(id),
+            worker: Some(Worker { bin, prefix: Vec::new(), source }),
+            info: None,
+            usable: Err(why),
+        };
+        let rows = [
+            found("basert", release.join("bin/superfluid-workerd"), Source::BuiltIn, "no engine".into()),
+            found("llamacpp", release.join("libexec/superfluid/superfluid-worker-llamacpp"), Source::Shipped, "no llama.cpp".into()),
+            found("mlx", installed.clone(), Source::Installed, format!("the mlx runtime at {} cannot run here", installed.display())),
+            found("toyrt", home.join("src/toyrt/superfluid-worker-toyrt"), Source::Env, "no toy".into()),
+        ];
+        let text = table_at(&rows, &home.join(".superfluid/runtimes"), None, Some(home));
+        let worker: Vec<&str> = text.lines().skip(1).take(4).map(|l| l.split("  ").last().unwrap().trim()).collect();
+        assert_eq!(worker, ["built in", "shipped with superfluid", "installed: mlx/0.32.4-metal", "environment: ~/src/toyrt/superfluid-worker-toyrt"], "{text}");
+        assert!(text.contains("\nmlx: the mlx runtime at ~/.superfluid/runtimes/mlx/0.32.4-metal/bin/superfluid-worker-mlx cannot run here\n"), "{text}");
+        assert!(
+            text.ends_with(&format!(
+                "\nsuperfluid release: ~/{}\ninstalled runtimes: ~/.superfluid/runtimes\n",
+                release.strip_prefix(home).unwrap().display()
+            )),
+            "{text}"
+        );
+        assert!(!table_at(&rows, &home.join(".superfluid/runtimes"), None, None).contains('~'), "no home, no ~");
+
+        // A build of the source keeps the workers it ships and the ones it builds beside the command.
+        let target = Path::new("/src/superfluid/target/release");
+        for (bin, source) in [
+            (target.join("superfluid-workerd"), Source::BuiltIn),
+            (target.join("superfluid-worker-mlx"), Source::BesideDaemon),
+            (target.join("libexec/superfluid/superfluid-worker-mlx"), Source::Shipped),
+        ] {
+            assert_eq!(release_of(&Worker { bin, prefix: Vec::new(), source }).as_deref(), Some(target), "{source:?}");
+        }
+        assert_eq!(release_of(&Worker { bin: installed, prefix: Vec::new(), source: Source::Installed }), None);
+        assert_eq!(tilde("/Users/someoneelse/x", Some(home)), "/Users/someoneelse/x", "another user's home is not ~");
+        assert_eq!(tilde("/Users/someone", Some(home)), "~");
+        assert_eq!(tilde("/x", Some(Path::new("/"))), "/x", "a home of / is no home");
     }
 
     #[test]
@@ -395,7 +494,7 @@ mod tests {
         let found = with_installs(&cat);
         let text = table_of(&found, &home.join("runtimes"), Some(&cat));
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines[0].starts_with("RUNTIME   STATE  INSTALL             VERSION  INSTALLABLE     READS  DEVICE"), "{text}");
+        assert!(lines[0].starts_with("RUNTIME   STATE  INSTALL             VERSION  INSTALLABLE     READS  DEVICE (MEMORY BUDGET)"), "{text}");
         assert!(lines[1].starts_with("llamacpp  ready  v1-metal (default)  v1       t1 (installed)  gguf   Metal"), "{text}");
         assert!(lines[2].starts_with("mlx       ready  v1-metal (default)  v1       -               mlx    Metal"), "{text}");
         assert!(text.contains("\n`superfluid runtime versions <id>` lists every version an adapter installs on its own\ninstalled runtimes: "), "{text}");
@@ -428,8 +527,9 @@ mod tests {
         let (text, json, ok) = model(&cat, &m);
         assert!(ok, "{text}");
         assert!(text.starts_with(&format!("{}: a GGUF file\n", m.display())), "{text}");
-        assert!(text.contains("llamacpp  yes       Metal: Apple M5 Pro, 36.0 GB  qwen3; sampling defaults: temperature 0.6"), "{text}");
-        assert!(text.contains("mlx       no        Metal: Apple M5 Pro, 36.0 GB  /m is not a directory; an MLX model is a directory"), "{text}");
+        assert!(text.contains("RUNTIME   READS IT  DEVICE (MEMORY BUDGET)        MODEL"), "{text}");
+        assert!(text.contains("llamacpp  yes       Metal: Apple M5 Pro, 34.0 GB  qwen3; sampling defaults: temperature 0.6"), "{text}");
+        assert!(text.contains("mlx       no        Metal: Apple M5 Pro, 34.0 GB  /m is not a directory; an MLX model is a directory"), "{text}");
         assert!(text.contains("llamacpp serves it"), "{text}");
         assert!(text.contains("--park-lossy    no: no lossy encoding"), "{text}");
         assert!(text.contains("--kv-bits       no: no such knob"), "{text}");

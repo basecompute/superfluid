@@ -376,11 +376,18 @@ Usage: superfluid runtimes [<model>] [--json]
 
   With no model: one row per runtime and install, its state, version, the newest version its
   adapter installs on its own here (INSTALLABLE; `superfluid runtime versions <id>` lists them
-  all), the formats it reads and its device, then what to do about any that is not ready.
+  all), the formats it reads, its device and where its worker is, then what to do about any
+  that is not ready.
   With a model: which runtime reads it and what that runtime serves and refuses (exit 1 if none).
 
+  DEVICE gives the memory budget: what the runtime plans a model and its cache against there,
+  the same rule for every runtime (a share of the device's working set, 85% on Apple silicon).
+  WORKER names an install by its name in the runtimes directory and superfluid's own workers by
+  where they came from; the footer says where the release and the installs are.
+
 Options:
-  --json    Print JSON
+  --json    Print JSON: each device's own figure as `memory` beside its `budget`, and each
+            worker's whole path
 ";
 
 pub const RUNTIME_HELP: &str = "Install and manage inference runtimes.

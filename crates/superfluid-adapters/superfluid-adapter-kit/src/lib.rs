@@ -447,6 +447,13 @@ pub trait Runtime: Send + Sync {
             .collect()
     }
 
+    /// Which versions `versions` leaves out still install without `--untested`, as a clause of `superfluid runtime versions`'s
+    /// footer; by default none, a version not listed installs with `--untested`. With a rule, an install of a version newer than
+    /// every listed one that installs here counts as one the adapter installs on its own.
+    fn unlisted(&self) -> Option<String> {
+        None
+    }
+
     fn pull_options(&self) -> Option<&'static [PullOption]> {
         None
     }
@@ -585,6 +592,7 @@ pub fn worker_main(rt: &dyn Runtime) -> ! {
             "host": host.to_json(),
             "describe": host.describe(),
             "versions": rt.versions(&host).iter().map(Candidate::to_json).collect::<Vec<_>>(),
+            "unlisted": rt.unlisted(),
         });
         println!("{v}");
         std::process::exit(0);
@@ -752,7 +760,7 @@ mod tests {
         }
         fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
             match self.runs {
-                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0 }], abi: None }),
+                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0, budget: 0 }], abi: None }),
                 false => Err("no fake device here".into()),
             }
         }
@@ -844,6 +852,7 @@ mod tests {
             assert_eq!(&Candidate::from_json(&c.to_json()).unwrap(), c);
         }
         assert!(Fake { runs: true, asked_facts: AtomicBool::new(false) }.versions(&host).is_empty(), "no compat, no versions");
+        assert_eq!(Installs.unlisted(), None, "by default a version not listed installs only with --untested");
     }
 
     #[test]

@@ -106,6 +106,17 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
     })
 }
 
+/// What installs beyond the pins without `--untested`: any release this build drives, which `plan` finds in the release listing,
+/// the newest of them when no version is named.
+pub fn unlisted() -> String {
+    use superfluid_engine_ffi::libbasert::{abi_built_for, BUILT_FOR};
+    let newest = match abi_built_for() {
+        Some(n) => format!("the newest release that states engine ABI {n}"),
+        None => format!("the newest baseRT {}.x release", minor(BUILT_FOR).iter().map(u64::to_string).collect::<Vec<_>>().join(".")),
+    };
+    format!("with no version it installs {newest}, listed or not; a release this build does not drive installs with --untested")
+}
+
 /// The pinned engines, newest first, each planned from the pins alone: the driven ones install, the others say why not.
 pub fn versions(host: &Host) -> Vec<Candidate> {
     versions_with(host, &pinned())
@@ -368,6 +379,10 @@ mod tests {
         let p = &plan_with(&Request::default(), &mac(), &pins, &releases).unwrap()[0];
         assert_eq!((p.version.as_str(), p.tested, p.assets[0].sha256.as_deref()), ("0.4.6", true, Some("ab")), "the digest GitHub lists");
         assert!(p.assets[0].url.starts_with("https://github.com/basecompute/baseRT/releases/download/v0.4.6/"));
+        // What `superfluid runtime versions` says of a version it does not list.
+        assert!(unlisted().starts_with(&format!("with no version it installs the newest release that states engine ABI {same}, listed or not")), "{}", unlisted());
+        let named = &plan_with(&Request { version: Some("0.4.6".into()), ..Request::default() }, &mac(), &pins, &releases).unwrap()[0];
+        assert!(named.tested, "a release that states this build's ABI installs by name without --untested, pinned or not");
         assert_eq!(plan_with(&Request::default(), &mac(), &pins, &Value::Null).unwrap()[0].version, "0.4.5", "offline, the newest pin");
         releases.as_array_mut().unwrap().remove(2);
         let p = &plan_with(&Request::default(), &mac(), &pins, &releases).unwrap()[0];

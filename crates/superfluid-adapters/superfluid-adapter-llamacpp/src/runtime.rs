@@ -306,10 +306,14 @@ pub fn devices() -> Vec<superfluid_engine::artifact::Device> {
             let backend = backend_name(dev);
             let (mut free, mut total) = (0usize, 0usize);
             sys::ggml_backend_dev_memory(dev, &mut free, &mut total);
-            let d = Device { backend, name: registry_text(sys::ggml_backend_dev_description(dev)), memory: total as u64 };
+            let (name, memory) = (registry_text(sys::ggml_backend_dev_description(dev)), total as u64);
             match sys::ggml_backend_dev_type(dev) {
-                sys::GGML_BACKEND_DEVICE_TYPE_GPU | sys::GGML_BACKEND_DEVICE_TYPE_IGPU => gpus.push(d),
-                sys::GGML_BACKEND_DEVICE_TYPE_CPU => cpus.push(d),
+                // `sizing` plans against the GPU's share of its total, and never against a CPU.
+                sys::GGML_BACKEND_DEVICE_TYPE_GPU | sys::GGML_BACKEND_DEVICE_TYPE_IGPU => {
+                    let budget = (superfluid_executor::sizing::PLANNING_SHARE * memory as f64) as u64;
+                    gpus.push(Device { backend, name, memory, budget })
+                }
+                sys::GGML_BACKEND_DEVICE_TYPE_CPU => cpus.push(Device { backend, name, memory, budget: 0 }),
                 _ => {}
             }
         }

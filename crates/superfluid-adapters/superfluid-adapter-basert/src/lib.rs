@@ -132,6 +132,10 @@ impl Runtime for Basert {
         // The pins alone, offline: `plan` would consult the release listing when a pin fails.
         recipe::versions(host)
     }
+
+    fn unlisted(&self) -> Option<String> {
+        Some(recipe::unlisted())
+    }
 }
 
 /// What `basert list --json` prints.
@@ -268,7 +272,8 @@ pub fn devices() -> Vec<Device> {
         return Vec::new();
     };
     let backend = if cfg!(target_os = "macos") { "Metal" } else { "CUDA" };
-    vec![Device { backend: backend.into(), name: gpu_name(), memory }]
+    // baseRT states its budget alone, the share of the device it plans a model against.
+    vec![Device { backend: backend.into(), name: gpu_name(), memory, budget: memory }]
 }
 
 fn gpu_name() -> String {
