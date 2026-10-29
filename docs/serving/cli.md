@@ -260,14 +260,14 @@ What this build was built and tested for, per runtime: for `basert`, the baseRT 
 ## `superfluid self`
 
 ```sh
-superfluid self update [--version <v>] [--dry-run]
+superfluid self update [--version <v>] [--dry-run] [--yes]
 superfluid self check
 superfluid self list
 superfluid self use <v>
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating superfluid](updating.md).
 
 ## `superfluid session`
 

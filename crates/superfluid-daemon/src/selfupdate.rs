@@ -1,7 +1,7 @@
 //! `superfluid self update|list|use|check|install`: releases side by side under `$SUPERFLUID_HOME/versions`, a
 //! `current` link the commands on PATH go through, and the daily check `serve` runs.
 
-use std::io::Write;
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,6 +24,9 @@ const LINKED: &[&str] = &["superfluid", "superfluid-workerd", "superfluid-noded"
 /// The file at the root of a release a package manager installed (Homebrew, pip, npm), one line `<manager>: <command>`:
 /// the copy is that manager's to update, with that command.
 pub const INSTALLED_BY: &str = "installed-by";
+/// The stamp basert writes at the root of the superfluid it installs for `basert serve`, before it also wrote an
+/// `installed-by` file naming itself: such a copy is basert's, not the install script's.
+const BASERT_STAMP: &str = ".release";
 /// How long a new copy's `--version` or `runtimes --json` may take: it runs under the lock, which a copy that hangs
 /// would hold for every later update. Longer than the runtime checks `runtimes --json` makes, a minute each at most.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -31,7 +34,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub const HELP: &str = "Update superfluid itself, or switch between the versions installed here.
 
 Usage:
-  superfluid self update [--version <v>] [--dry-run]   Install the newest release that fits this machine and make it current
+  superfluid self update [--version <v>] [--dry-run] [--yes]
+                                                        Install the newest release that fits this machine and make it current
   superfluid self check                                 Ask whether a newer release exists, without installing
   superfluid self list                                  The versions installed here, and which is current
   superfluid self use <v>                               Make an installed version current (the one an update replaced stays)
@@ -45,7 +49,11 @@ version it started with until it is started again.
 
 With a baseRT engine here, a release must declare the engine's ABI number; with llama.cpp or
 MLX only, the newest release fits. A superfluid installed by a package manager or cargo is
-updated the way it was installed, and this command says so.
+updated the way it was installed: for Homebrew, a global npm, pipx, uv and cargo this command
+runs that manager's update (asking first; --yes runs it without asking, and is needed without
+a terminal), and for pip in an environment or a project's npm dependency it names the command.
+The superfluid basert installs for `basert serve` is basert's: this command runs
+`basert superfluid install`, which picks the release that serves basert's engine.
 
 `superfluid serve` checks for a newer release once a day, after the server is up, and prints
 one line; SUPERFLUID_NO_UPDATE_CHECK=1 or --offline turns that off. A release is announced a
@@ -301,7 +309,7 @@ pub fn installed_as(exe: &Path) -> Installed {
     }
     if let Some(prefix) = exe.parent().filter(|b| b.file_name().is_some_and(|n| n == "bin")).and_then(Path::parent) {
         // A package keeps the release's layout too, so it is told apart by its file, not by where it is.
-        if prefix.join(INSTALLED_BY).is_file() {
+        if prefix.join(INSTALLED_BY).is_file() || prefix.join(BASERT_STAMP).is_file() {
             return Installed::Other(exe);
         }
         if prefix.join("libexec").join("superfluid").is_dir() {
@@ -322,24 +330,267 @@ fn package_manager(exe: &Path) -> Option<(String, String)> {
 /// The command that updates the running superfluid, for the line `serve` prints when a newer release is out.
 fn update_command(exe: &Path) -> String {
     let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
-    package_manager(&exe).map(|(_, command)| command).unwrap_or_else(|| "superfluid self update".to_string())
+    match installed_as(&exe) {
+        Installed::Other(p) => delegate(&p).map(|d| d.command().to_string()),
+        _ => None,
+    }
+    .unwrap_or_else(|| "superfluid self update".to_string())
 }
 
 fn not_ours(exe: &Path) -> String {
     let p = exe.to_string_lossy();
-    if let Some((manager, command)) = package_manager(exe) {
-        return format!("{p} was installed by {manager}; `{command}` updates it");
+    if let Some(d) = delegate(exe) {
+        return format!("{p} was installed by {}; `{}` updates it", d.manager(), d.command());
     }
-    let how = if p.contains("/Cellar/") || p.contains("/homebrew/") || p.contains("/linuxbrew/") {
-        "Homebrew installed it: `brew upgrade superfluid`"
-    } else if p.contains("/.cargo/bin/") {
-        "cargo installed it: `cargo install superfluid`"
-    } else if p.contains("/target/") {
-        "it is a source build: build it again"
-    } else {
-        "update it the way it was installed"
-    };
+    let how = if p.contains("/target/") { "it is a source build: build it again" } else { "update it the way it was installed" };
     format!("{p} was not installed by the install script or by `superfluid self update`; {how}")
+}
+
+/// How a copy another tool installed is updated: by that tool's own command, which `self update` runs (after asking),
+/// or which it only names, saying why. The command is built here from the manager's name, never read from the
+/// `installed-by` file, whose text is for showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delegate {
+    /// `argv` is run, its binary found from the copy's own path so that it is the installation that owns the copy;
+    /// `path_first` goes first on PATH (npm's `node`, beside it). `command` is what a user would type.
+    Run { manager: String, command: String, argv: Vec<String>, path_first: Option<PathBuf> },
+    Name { manager: String, command: String, why: String },
+}
+
+impl Delegate {
+    fn manager(&self) -> &str {
+        match self {
+            Delegate::Run { manager, .. } | Delegate::Name { manager, .. } => manager,
+        }
+    }
+
+    fn command(&self) -> &str {
+        match self {
+            Delegate::Run { command, .. } | Delegate::Name { command, .. } => command,
+        }
+    }
+}
+
+/// The delegate for the copy at the real path `exe` (`<root>/bin/superfluid`), from the manager its `installed-by`
+/// file names, or from where it is for packages published before they carried the file; `None` for a copy no package
+/// manager or basert placed.
+fn delegate(exe: &Path) -> Option<Delegate> {
+    let p = exe.to_string_lossy().into_owned();
+    let bin = exe.parent()?;
+    let root = bin.parent()?;
+    // pipx and uv keep the wheel in a venv of their own, whose file says pip.
+    if p.contains("/pipx/venvs/") {
+        return Some(on_path("pipx", &["upgrade", "superfluid-cli"]));
+    }
+    if p.contains("/uv/tools/") {
+        return Some(on_path("uv", &["tool", "upgrade", "superfluid-cli"]));
+    }
+    let named = package_manager(exe);
+    Some(match named.as_ref().map(|(m, _)| m.to_ascii_lowercase()).as_deref() {
+        Some("basert") => basert(root),
+        Some("homebrew" | "brew") => homebrew(&p),
+        Some("npm") => npm(&p),
+        Some("pip") => pip(&p),
+        Some("cargo") => cargo(bin),
+        Some(_) => {
+            let (manager, command) = named?;
+            Delegate::Name { manager, command, why: "superfluid runs only Homebrew, npm, pipx, uv, cargo and basert itself".into() }
+        }
+        None if root.join(BASERT_STAMP).is_file() => basert(root),
+        None if p.contains("/Cellar/") => homebrew(&p),
+        None if p.contains("/node_modules/") => npm(&p),
+        None if p.contains("/site-packages/") => pip(&p),
+        None if p.contains("/.cargo/bin/") => cargo(bin),
+        None => return None,
+    })
+}
+
+/// Whether this user may write `path`, as the manager would need to.
+fn writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    // SAFETY: `c` is a NUL-terminated path that outlives the call.
+    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+}
+
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// `tool args…` with `tool` from PATH, or named when PATH has none.
+fn on_path(tool: &str, args: &[&str]) -> Delegate {
+    let command = std::iter::once(tool).chain(args.iter().copied()).collect::<Vec<_>>().join(" ");
+    let found = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join(tool)).find(|p| executable(p)));
+    match found {
+        Some(bin) => Delegate::Run {
+            manager: tool.to_string(),
+            command,
+            argv: std::iter::once(bin.display().to_string()).chain(args.iter().map(|a| a.to_string())).collect(),
+            path_first: None,
+        },
+        None => Delegate::Name { manager: tool.to_string(), why: format!("no {tool} on PATH"), command },
+    }
+}
+
+/// The superfluid basert installs for `basert serve` (`<basert dir>/superfluid`, or basert's data directory): basert
+/// picks the release that serves its engine. Run by the basert beside it, else the one on PATH.
+fn basert(root: &Path) -> Delegate {
+    let beside = root.parent().map(|d| d.join("basert")).filter(|b| executable(b));
+    match beside {
+        Some(b) => Delegate::Run {
+            manager: "basert".into(),
+            command: "basert superfluid install".into(),
+            argv: vec![b.display().to_string(), "superfluid".into(), "install".into()],
+            path_first: None,
+        },
+        None => match on_path("basert", &["superfluid", "install"]) {
+            Delegate::Name { command, why, .. } => Delegate::Name { manager: "basert".into(), command, why },
+            run => run,
+        },
+    }
+}
+
+/// `brew upgrade <formula>` by the Homebrew whose Cellar holds the copy, unless the formula is pinned or that Homebrew
+/// is another user's.
+fn homebrew(p: &str) -> Delegate {
+    let manager = "Homebrew".to_string();
+    let Some(i) = p.find("/Cellar/") else {
+        let why = "the Homebrew it came from cannot be told from where it is".to_string();
+        return Delegate::Name { manager, command: "brew upgrade superfluid".into(), why };
+    };
+    let prefix = Path::new(&p[..i]);
+    let formula = p[i + "/Cellar/".len()..].split('/').next().unwrap_or("superfluid");
+    let command = format!("brew upgrade {formula}");
+    let brew = prefix.join("bin").join("brew");
+    let why = if !executable(&brew) {
+        format!("there is no {}", brew.display())
+    } else if prefix.join("var/homebrew/pinned").join(formula).exists() {
+        format!("it is pinned in Homebrew: `brew unpin {formula}` first")
+    } else if !writable(&prefix.join("Cellar")) {
+        format!("the Homebrew in {} is another user's", prefix.display())
+    } else {
+        let argv = vec![brew.display().to_string(), "upgrade".into(), formula.into()];
+        return Delegate::Run { manager, command, argv, path_first: None };
+    };
+    Delegate::Name { manager, command, why }
+}
+
+/// `npm install --global` by the npm whose global folder holds the copy; a project's dependency (or pnpm's, yarn's,
+/// bun's) is that project's to update.
+fn npm(p: &str) -> Delegate {
+    let manager = "npm".to_string();
+    let command = "npm install --global @basecompute/superfluid@latest".to_string();
+    let Some(i) = p.find("/lib/node_modules/") else {
+        let why = "it is a project's dependency (or pnpm's, yarn's or bun's): update it in that project".to_string();
+        return Delegate::Name { manager, command: "npm install @basecompute/superfluid@latest".into(), why };
+    };
+    let prefix = Path::new(&p[..i]);
+    let bin = prefix.join("bin");
+    let npm = bin.join("npm");
+    let why = if !executable(&npm) {
+        format!("there is no {}", npm.display())
+    } else if !writable(&prefix.join("lib").join("node_modules")) {
+        format!("npm's global folder in {} needs root to write: run it yourself", prefix.display())
+    } else {
+        let argv = vec![npm.display().to_string(), "install".into(), "--global".into(), "@basecompute/superfluid@latest".into()];
+        return Delegate::Run { manager, command, argv, path_first: Some(bin) };
+    };
+    Delegate::Name { manager, command, why }
+}
+
+/// pip is only named: the environment may be a project's, which a lock file (Poetry, uv, pip-tools) pins, or the
+/// system's, which refuses or needs root.
+fn pip(p: &str) -> Delegate {
+    // .../<env>/lib/python3.x/site-packages/superfluid_cli/release/bin/superfluid
+    let python = p.find("/lib/python").map(|i| Path::new(&p[..i]).join("bin").join("python")).filter(|py| executable(py));
+    let command = match python {
+        Some(py) => format!("{} -m pip install --upgrade superfluid-cli", py.display()),
+        None => "pip install --upgrade superfluid-cli".to_string(),
+    };
+    let why = "its environment may be a project's, pinned by a lock file, or the system's: run it in that environment yourself";
+    Delegate::Name { manager: "pip".into(), command, why: why.into() }
+}
+
+/// `cargo install superfluid` by the cargo beside the copy.
+fn cargo(bin: &Path) -> Delegate {
+    let cargo = bin.join("cargo");
+    if !executable(&cargo) {
+        return on_path("cargo", &["install", "superfluid"]);
+    }
+    let argv = vec![cargo.display().to_string(), "install".into(), "superfluid".into()];
+    Delegate::Run { manager: "cargo".into(), command: "cargo install superfluid".into(), argv, path_first: Some(bin.to_path_buf()) }
+}
+
+/// A yes/no question on stderr, answered on stdin; an empty answer is yes.
+fn confirm(question: &str) -> Result<bool, String> {
+    eprint!("{question}");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer).map_err(|e| format!("reading the answer: {e}"))?;
+    Ok(matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes"))
+}
+
+/// `self update` of a copy another tool installed: its manager's command, run after asking (or with `--yes`) when it
+/// is one superfluid runs, else named. Nothing runs while a server runs from the copy, which the manager replaces.
+fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
+    let mut report = Report::default();
+    let Some(plan) = delegate(exe) else { return Err(not_ours(exe)) };
+    let p = exe.display();
+    let (manager, command, argv, path_first) = match (plan, &opts.version) {
+        (Delegate::Name { manager, command, why }, _) => return Err(format!("{p} was installed by {manager}, which updates it: run `{command}` ({why})")),
+        (Delegate::Run { manager, command, .. }, Some(_)) if manager == "basert" => {
+            return Err(format!("{p} is basert's, which picks the release that serves its engine: `{command}` updates it"))
+        }
+        (Delegate::Run { manager, command, .. }, Some(_)) => {
+            return Err(format!("{p} was installed by {manager}, which chooses its version: `{command}` updates it, and a version is pinned there"))
+        }
+        (Delegate::Run { manager, command, argv, path_first }, None) => (manager, command, argv, path_first),
+    };
+    let shown = argv.join(" ");
+    if opts.dry_run {
+        report.say(format!("{p} was installed by {manager}: `self update` would run {shown}"));
+        return Ok(report);
+    }
+    // Its workers start from the copy's own directories; only superfluid's programs count (a cargo install shares
+    // ~/.cargo/bin with other tools).
+    let root = exe.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
+    let watched = if manager == "cargo" { exe.parent().unwrap_or(root) } else { root };
+    let watched = std::fs::canonicalize(watched).unwrap_or_else(|_| watched.to_path_buf());
+    let busy: Vec<String> = other_processes()
+        .into_iter()
+        .filter(|(_, e)| e.starts_with(&watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
+        .map(|(pid, _)| pid.to_string())
+        .collect();
+    if !busy.is_empty() {
+        return Err(format!("a server runs from {} (pid {}), which `{command}` replaces: stop it, then run this again", watched.display(), busy.join(", ")));
+    }
+    if !opts.yes {
+        if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+            return Err(format!("{p} was installed by {manager}: run `{command}`, or `superfluid self update --yes` to let superfluid run it"));
+        }
+        if !confirm(&format!("superfluid: {p} was installed by {manager}. Run `{shown}`? [Y/n] "))? {
+            return Err(format!("nothing was run; `{command}` updates it"));
+        }
+    }
+    if manager == "cargo" {
+        eprintln!("superfluid: cargo builds superfluid from source: this takes a few minutes");
+    }
+    eprintln!("superfluid: running {shown}");
+    let mut run = Command::new(&argv[0]);
+    run.args(&argv[1..]);
+    if let Some(first) = path_first {
+        let rest = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(first).chain(std::env::split_paths(&rest))).map_err(|e| e.to_string())?;
+        run.env("PATH", path);
+    }
+    let status = run.status().map_err(|e| format!("running {}: {e}", argv[0]))?;
+    if !status.success() {
+        return Err(format!("`{shown}` failed ({status})"));
+    }
+    report.changed = true;
+    report.say(format!("{manager} updated it"));
+    Ok(report)
 }
 
 
@@ -591,6 +842,8 @@ fn processes_from(dir: &Path) -> Vec<(i32, u64)> {
 pub struct Options {
     pub version: Option<String>,
     pub dry_run: bool,
+    /// For a copy another tool installed: run its update without asking.
+    pub yes: bool,
     /// The release listing; `listing_source()` when not set.
     pub source: Option<String>,
 }
@@ -811,7 +1064,7 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
     let (versions, migrating) = match &installed {
         Installed::Managed { versions, .. } => (Versions { dir: versions.clone() }, None),
         Installed::InPlace { prefix } => (Versions::of(home), Some(prefix.clone())),
-        Installed::Other(p) => return Err(not_ours(p)),
+        Installed::Other(p) => return update_by_manager(p, opts),
     };
     let target = target().ok_or_else(|| format!("no release is published for {} {}", std::env::consts::OS, std::env::consts::ARCH))?;
     // Taken before anything is read or decided, so an update queued behind another sees the layout it left.
@@ -1152,6 +1405,7 @@ pub fn run(args: &[String]) -> i32 {
                 match a.as_str() {
                     "--version" => opts.version = it.next().cloned().or_else(|| usage()),
                     "--dry-run" => opts.dry_run = true,
+                    "--yes" | "-y" => opts.yes = true,
                     _ => usage(),
                 }
             }
@@ -1326,7 +1580,7 @@ mod tests {
         let home = dir.join("home");
         let prefix = dir.join("local");
         let p = listing(&dir, &[("0.1.3", "2026-10-01", Some(1)), ("0.1.4", "2026-10-10", Some(1)), ("0.1.5", "2026-10-12", Some(1))]);
-        let from = |version: Option<&str>, dry_run: bool| Options { version: version.map(str::to_string), dry_run, source: Some(p.to_string_lossy().to_string()) };
+        let from = |version: Option<&str>, dry_run: bool| Options { version: version.map(str::to_string), dry_run, source: Some(p.to_string_lossy().to_string()), ..Options::default() };
         let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         let unpacked = release_tree(&dir.join("unpacked").join("superfluid-x"), "0.1.3");
         let r = install_from(&home, &catalog, &unpacked, Some(&prefix.join("bin"))).unwrap();
@@ -1736,6 +1990,135 @@ mod tests {
         assert!(Check::read(&home).unwrap().describe().starts_with("newest release: 99.0.0 (published 2026-01-01;"));
         let stale = Check { checked_at: 1, ..Check::default() };
         assert!(stale.due());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A script at `path` that appends its arguments and the first PATH entry to `log`.
+    fn logging_script(path: &Path, log: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\necho \"$*|${{PATH%%:*}}\" >> {}\n", log.display())).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A packaged release at `root` (`<root>/bin/superfluid`) whose `installed-by` says `named`, by its real path.
+    fn packaged(root: &Path, named: Option<&str>) -> PathBuf {
+        release_tree(root, "0.1.5");
+        if let Some(line) = named {
+            std::fs::write(root.join(INSTALLED_BY), format!("{line}\n")).unwrap();
+        }
+        std::fs::canonicalize(root.join("bin").join("superfluid")).unwrap()
+    }
+
+    #[test]
+    fn each_package_manager_is_run_from_the_installation_that_owns_the_copy_or_named() {
+        let dir = scratch("delegate");
+        // Homebrew: the brew of the Cellar, unless pinned.
+        let brew_copy = packaged(&dir.join("brew/Cellar/superfluid/0.1.5/libexec"), Some("Homebrew: brew upgrade superfluid"));
+        assert!(matches!(delegate(&brew_copy), Some(Delegate::Name { ref why, .. }) if why.starts_with("there is no ")));
+        logging_script(&dir.join("brew/bin/brew"), &dir.join("log"));
+        let brew = std::fs::canonicalize(dir.join("brew/bin/brew")).unwrap();
+        assert_eq!(
+            delegate(&brew_copy),
+            Some(Delegate::Run {
+                manager: "Homebrew".into(),
+                command: "brew upgrade superfluid".into(),
+                argv: vec![brew.display().to_string(), "upgrade".into(), "superfluid".into()],
+                path_first: None,
+            })
+        );
+        std::fs::create_dir_all(dir.join("brew/var/homebrew/pinned")).unwrap();
+        std::fs::write(dir.join("brew/var/homebrew/pinned/superfluid"), "").unwrap();
+        assert!(matches!(delegate(&brew_copy), Some(Delegate::Name { ref why, .. }) if why.contains("`brew unpin superfluid` first")));
+        // npm: a global folder's own npm, its bin first on PATH; a project's dependency is named.
+        let npm_line = Some("npm: npm install --global @basecompute/superfluid@latest");
+        let global = packaged(&dir.join("node/lib/node_modules/@basecompute/superfluid-darwin-arm64/release"), npm_line);
+        logging_script(&dir.join("node/bin/npm"), &dir.join("log"));
+        let bin = std::fs::canonicalize(dir.join("node/bin")).unwrap();
+        match delegate(&global) {
+            Some(Delegate::Run { argv, path_first, .. }) => {
+                assert_eq!(argv[1..], ["install", "--global", "@basecompute/superfluid@latest"]);
+                assert_eq!(path_first, Some(bin));
+            }
+            other => panic!("{other:?}"),
+        }
+        let project = packaged(&dir.join("app/node_modules/@basecompute/superfluid-darwin-arm64/release"), npm_line);
+        assert!(matches!(delegate(&project), Some(Delegate::Name { ref why, .. }) if why.contains("update it in that project")));
+        // pip is named, with its environment's python; pipx and uv are told apart by their venvs.
+        let pip_line = Some("pip: pip install --upgrade superfluid-cli");
+        let env = dir.join("venv");
+        let pip_copy = packaged(&env.join("lib/python3.12/site-packages/superfluid_cli/release"), pip_line);
+        logging_script(&env.join("bin/python"), &dir.join("log"));
+        let python = std::fs::canonicalize(env.join("bin/python")).unwrap();
+        assert!(matches!(delegate(&pip_copy), Some(Delegate::Name { ref command, .. })
+            if *command == format!("{} -m pip install --upgrade superfluid-cli", python.display())));
+        let pipx = packaged(&dir.join(".local/pipx/venvs/superfluid-cli/lib/python3.12/site-packages/superfluid_cli/release"), pip_line);
+        let d = delegate(&pipx).unwrap();
+        assert_eq!((d.manager(), d.command()), ("pipx", "pipx upgrade superfluid-cli"));
+        let uv = packaged(&dir.join(".local/share/uv/tools/superfluid-cli/lib/python3.12/site-packages/superfluid_cli/release"), pip_line);
+        let d = delegate(&uv).unwrap();
+        assert_eq!((d.manager(), d.command()), ("uv", "uv tool upgrade superfluid-cli"));
+        // A manager superfluid does not run is named with the file's own command.
+        let conda = packaged(&dir.join("conda/release"), Some("conda: conda update superfluid"));
+        assert!(matches!(delegate(&conda), Some(Delegate::Name { ref command, .. }) if command == "conda update superfluid"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_superfluid_basert_installed_is_left_to_basert() {
+        let dir = scratch("basert-owned");
+        // basert's layout: <dir>/basert beside <dir>/superfluid, which an older basert marked with its stamp alone.
+        let copy = packaged(&dir.join("superfluid"), None);
+        assert!(matches!(installed_as(&copy), Installed::InPlace { .. }), "without basert's marks it is the install script's");
+        std::fs::write(dir.join("superfluid").join(BASERT_STAMP), "v0.1.5\n").unwrap();
+        assert!(matches!(installed_as(&copy), Installed::Other(_)));
+        // No basert beside it: the one on PATH, when there is one.
+        let d = delegate(&copy).unwrap();
+        assert_eq!((d.manager(), d.command()), ("basert", "basert superfluid install"));
+        logging_script(&dir.join("basert"), &dir.join("log"));
+        std::fs::write(dir.join("superfluid").join(INSTALLED_BY), "basert: basert superfluid install\n").unwrap();
+        let basert = std::fs::canonicalize(dir.join("basert")).unwrap();
+        assert_eq!(
+            delegate(&copy),
+            Some(Delegate::Run {
+                manager: "basert".into(),
+                command: "basert superfluid install".into(),
+                argv: vec![basert.display().to_string(), "superfluid".into(), "install".into()],
+                path_first: None,
+            })
+        );
+        assert_eq!(update_command(&copy), "basert superfluid install");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        // A version is basert's to pick.
+        let opts = Options { version: Some("0.1.4".into()), yes: true, ..Options::default() };
+        let refused = update(&home, &catalog, &copy, &opts).unwrap_err();
+        assert!(refused.contains("is basert's, which picks the release that serves its engine"), "{refused}");
+        // With --yes, basert is run; nothing was moved under ~/.superfluid.
+        let opts = Options { yes: true, ..Options::default() };
+        update(&home, &catalog, &copy, &opts).unwrap();
+        assert!(std::fs::read_to_string(dir.join("log")).unwrap().starts_with("superfluid install|"));
+        assert!(!home.join("versions").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_package_managers_update_is_asked_for_dry_run_or_run_with_yes() {
+        let dir = scratch("by-manager");
+        let copy = packaged(&dir.join("brew/Cellar/superfluid/0.1.5/libexec"), Some("Homebrew: brew upgrade superfluid"));
+        logging_script(&dir.join("brew/bin/brew"), &dir.join("log"));
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        // Tests run without a terminal: without --yes the command is named, not run.
+        let refused = update(&home, &catalog, &copy, &Options::default()).unwrap_err();
+        assert!(refused.contains("run `brew upgrade superfluid`, or `superfluid self update --yes`"), "{refused}");
+        let dry = update(&home, &catalog, &copy, &Options { dry_run: true, yes: true, ..Options::default() }).unwrap();
+        assert!(dry.lines[0].contains("`self update` would run ") && dry.lines[0].ends_with("brew/bin/brew upgrade superfluid"), "{:?}", dry.lines);
+        let pinned = Options { version: Some("0.1.4".into()), yes: true, ..Options::default() };
+        assert!(update(&home, &catalog, &copy, &pinned).unwrap_err().contains("which chooses its version"));
+        assert!(!dir.join("log").exists());
+        let done = update(&home, &catalog, &copy, &Options { yes: true, ..Options::default() }).unwrap();
+        assert!(done.changed);
+        assert!(std::fs::read_to_string(dir.join("log")).unwrap().starts_with("upgrade superfluid|"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
