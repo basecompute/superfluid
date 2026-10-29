@@ -476,8 +476,9 @@ fn homebrew(p: &str) -> Delegate {
     Delegate::Name { manager, command, why }
 }
 
-/// `npm install --global` by the npm whose global folder holds the copy; a project's dependency (or pnpm's, yarn's,
-/// bun's) is that project's to update.
+/// `npm install --global` by the npm whose global folder holds the copy, told that folder's prefix (npm's
+/// configuration or NPM_CONFIG_PREFIX may name another); a project's dependency (or pnpm's, yarn's, bun's) is that
+/// project's to update.
 fn npm(p: &str) -> Delegate {
     let manager = "npm".to_string();
     let command = "npm install --global @basecompute/superfluid@latest".to_string();
@@ -493,7 +494,14 @@ fn npm(p: &str) -> Delegate {
     } else if !writable(&prefix.join("lib").join("node_modules")) {
         format!("npm's global folder in {} needs root to write: run it yourself", prefix.display())
     } else {
-        let argv = vec![npm.display().to_string(), "install".into(), "--global".into(), "@basecompute/superfluid@latest".into()];
+        let argv = vec![
+            npm.display().to_string(),
+            "install".into(),
+            "--global".into(),
+            "--prefix".into(),
+            prefix.display().to_string(),
+            "@basecompute/superfluid@latest".into(),
+        ];
         return Delegate::Run { manager, command, argv, path_first: Some(bin) };
     };
     Delegate::Name { manager, command, why }
@@ -533,6 +541,8 @@ fn confirm(question: &str) -> Result<bool, String> {
 
 /// `self update` of a copy another tool installed: its manager's command, run after asking (or with `--yes`) when it
 /// is one superfluid runs, else named. Nothing runs while a server runs from the copy, which the manager replaces.
+/// basert is handed off to (`Report::hand_off`) rather than run: it refuses to replace a copy that anything runs from,
+/// this process included.
 fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
     let mut report = Report::default();
     let Some(plan) = delegate(exe) else { return Err(not_ours(exe)) };
@@ -557,14 +567,18 @@ fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
     let root = exe.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
     let watched = if manager == "cargo" { exe.parent().unwrap_or(root) } else { root };
     let watched = std::fs::canonicalize(watched).unwrap_or_else(|_| watched.to_path_buf());
-    let busy: Vec<String> = other_processes()
-        .into_iter()
-        .filter(|(_, e)| e.starts_with(&watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
-        .map(|(pid, _)| pid.to_string())
-        .collect();
-    if !busy.is_empty() {
-        return Err(format!("a server runs from {} (pid {}), which `{command}` replaces: stop it, then run this again", watched.display(), busy.join(", ")));
-    }
+    let idle = || -> Result<(), String> {
+        let busy: Vec<String> = other_processes()
+            .into_iter()
+            .filter(|(_, e)| e.starts_with(&watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
+            .map(|(pid, _)| pid.to_string())
+            .collect();
+        if busy.is_empty() {
+            return Ok(());
+        }
+        Err(format!("a server runs from {} (pid {}), which `{command}` replaces: stop it, then run this again", watched.display(), busy.join(", ")))
+    };
+    idle()?;
     if !opts.yes {
         if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
             return Err(format!("{p} was installed by {manager}: run `{command}`, or `superfluid self update --yes` to let superfluid run it"));
@@ -572,6 +586,8 @@ fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
         if !confirm(&format!("superfluid: {p} was installed by {manager}. Run `{shown}`? [Y/n] "))? {
             return Err(format!("nothing was run; `{command}` updates it"));
         }
+        // The question may have waited long enough for a server to start.
+        idle()?;
     }
     if manager == "cargo" {
         eprintln!("superfluid: cargo builds superfluid from source: this takes a few minutes");
@@ -583,6 +599,10 @@ fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
         let rest = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(first).chain(std::env::split_paths(&rest))).map_err(|e| e.to_string())?;
         run.env("PATH", path);
+    }
+    if manager == "basert" {
+        report.hand_off = Some(run);
+        return Ok(report);
     }
     let status = run.status().map_err(|e| format!("running {}: {e}", argv[0]))?;
     if !status.success() {
@@ -853,6 +873,8 @@ pub struct Options {
 pub struct Report {
     pub lines: Vec<String>,
     pub changed: bool,
+    /// The command `superfluid self update` replaces itself with, its own update left to that command.
+    pub hand_off: Option<Command>,
 }
 
 impl Report {
@@ -1409,7 +1431,17 @@ pub fn run(args: &[String]) -> i32 {
                     _ => usage(),
                 }
             }
-            print(update(&home, &catalog, &exe, &opts))
+            match update(&home, &catalog, &exe, &opts) {
+                Ok(Report { hand_off: Some(mut cmd), .. }) => {
+                    use std::os::unix::process::CommandExt;
+                    let _ = std::io::stdout().flush();
+                    // Only returns when the command could not be run.
+                    let e = cmd.exec();
+                    eprintln!("superfluid: running {}: {e}", cmd.get_program().to_string_lossy());
+                    1
+                }
+                r => print(r),
+            }
         }
         Some("check") if args.len() == 1 => match check_now(&home, &catalog, Some(HOLD_OFF_DAYS), &listing_source()) {
             Ok(check) => {
@@ -2036,7 +2068,8 @@ mod tests {
         let bin = std::fs::canonicalize(dir.join("node/bin")).unwrap();
         match delegate(&global) {
             Some(Delegate::Run { argv, path_first, .. }) => {
-                assert_eq!(argv[1..], ["install", "--global", "@basecompute/superfluid@latest"]);
+                let prefix = std::fs::canonicalize(dir.join("node")).unwrap().display().to_string();
+                assert_eq!(argv[1..], ["install", "--global", "--prefix", &prefix, "@basecompute/superfluid@latest"]);
                 assert_eq!(path_first, Some(bin));
             }
             other => panic!("{other:?}"),
@@ -2093,9 +2126,12 @@ mod tests {
         let opts = Options { version: Some("0.1.4".into()), yes: true, ..Options::default() };
         let refused = update(&home, &catalog, &copy, &opts).unwrap_err();
         assert!(refused.contains("is basert's, which picks the release that serves its engine"), "{refused}");
-        // With --yes, basert is run; nothing was moved under ~/.superfluid.
+        // With --yes, basert is handed this process, not run beside it: it refuses while anything runs from the copy.
+        // Nothing was moved under ~/.superfluid.
         let opts = Options { yes: true, ..Options::default() };
-        update(&home, &catalog, &copy, &opts).unwrap();
+        let mut hand_off = update(&home, &catalog, &copy, &opts).unwrap().hand_off.expect("basert is handed off to");
+        assert!(!dir.join("log").exists());
+        assert!(hand_off.status().unwrap().success());
         assert!(std::fs::read_to_string(dir.join("log")).unwrap().starts_with("superfluid install|"));
         assert!(!home.join("versions").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -2117,7 +2153,7 @@ mod tests {
         assert!(update(&home, &catalog, &copy, &pinned).unwrap_err().contains("which chooses its version"));
         assert!(!dir.join("log").exists());
         let done = update(&home, &catalog, &copy, &Options { yes: true, ..Options::default() }).unwrap();
-        assert!(done.changed);
+        assert!(done.changed && done.hand_off.is_none());
         assert!(std::fs::read_to_string(dir.join("log")).unwrap().starts_with("upgrade superfluid|"));
         let _ = std::fs::remove_dir_all(&dir);
     }
