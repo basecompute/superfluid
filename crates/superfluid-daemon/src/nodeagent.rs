@@ -83,6 +83,8 @@ pub struct NodeAgent {
     conn: u64,
     /// When this connection last asked for each lease it has not had granted yet.
     asked: HashMap<u64, Duration>,
+    /// What each generation the head is about to start asks beyond its sampling.
+    opts: HashMap<(u64, u64), linkf::GenerateOptsMsg>,
 }
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
@@ -109,6 +111,7 @@ impl NodeAgent {
             last_status_ms: 0,
             conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
             asked: HashMap::new(),
+            opts: HashMap::new(),
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -148,6 +151,7 @@ impl NodeAgent {
             last_status_ms: 0,
             conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
             asked: HashMap::new(),
+            opts: HashMap::new(),
         }
     }
 
@@ -305,6 +309,14 @@ impl NodeAgent {
                     work.generation = None;
                 }
             }
+            work.syncs.retain(|rx| match rx.try_recv() {
+                Ok(resp) => {
+                    let _ = endpoint.send(msg_type::STATE_SYNC_RESP, &resp);
+                    false
+                }
+                Err(mpsc::TryRecvError::Empty) => true,
+                Err(mpsc::TryRecvError::Disconnected) => false,
+            });
             if let Some(stage) = &work.stage {
                 match stage.try_recv() {
                     Ok(resp) => {
@@ -458,6 +470,24 @@ impl NodeAgent {
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
+            msg_type::GENERATE_OPTS => {
+                let m: linkf::GenerateOptsMsg = postcard::from_bytes(&frame.payload)?;
+                self.opts.insert((m.session_id, m.generation_id), m);
+            }
+            msg_type::STATE_SYNC_REQ => {
+                let m: linkf::StateSyncReqF = postcard::from_bytes(&frame.payload)?;
+                let (tx, rx) = mpsc::channel();
+                let daemon = Arc::clone(&self.daemon);
+                std::thread::Builder::new()
+                    .name("node-state-sync".into())
+                    .spawn(move || {
+                        let result = daemon.state_sync(m.req).map_err(|e| e.to_string());
+                        let _ = tx.send(linkf::StateSyncRespF { request_id: m.request_id, result });
+                    })
+                    .expect("spawn a node state operation");
+                work.syncs.push(rx);
+                endpoint.poll_every(POLL_RUNNING)?;
+            }
             msg_type::GENERATE_CANCEL => {
                 let m: linkf::GenerateCancelMsg = postcard::from_bytes(&frame.payload)?;
                 if let Some(run) = work
@@ -516,7 +546,7 @@ impl NodeAgent {
 
     /// Starts `req` on a thread of its own, so this connection goes on reading the head
     /// (cancels, lease grants, heartbeats) and sending status while it runs.
-    fn start_generation(&self, req: &linkf::GenerateReqMsg) -> Running {
+    fn start_generation(&mut self, req: &linkf::GenerateReqMsg) -> Running {
         let (context, params) = {
             let sh = self.shared.lock().expect("agent shared");
             (
@@ -526,6 +556,8 @@ impl NodeAgent {
         };
         let max_new = req.budgets.max_new_tokens.min(u32::MAX as u64) as u32;
         let max_wall_ms = req.budgets.max_wall_ms;
+        let opts = self.opts.remove(&(req.session_id, req.generation_id));
+        self.opts.clear();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, out) = mpsc::channel();
         let (daemon, shared, stop) = (Arc::clone(&self.daemon), Arc::clone(&self.shared), Arc::clone(&cancel));
@@ -533,19 +565,30 @@ impl NodeAgent {
         std::thread::Builder::new()
             .name("node-generation".into())
             .spawn(move || {
-                let generated = daemon.generate_tokens_streaming(
-                    context,
-                    params,
-                    max_new,
-                    max_wall_ms,
-                    crate::scheduler::GenExtras::default(),
-                    |batch| {
-                        if stop.load(Ordering::Relaxed) || tx.send(Out::Tokens(batch.to_vec())).is_err() {
-                            return std::ops::ControlFlow::Break(());
-                        }
-                        std::ops::ControlFlow::Continue(())
-                    },
-                );
+                let generated = match Extras::of(&daemon, opts.as_ref()) {
+                    Ok(extras) => {
+                        let lp = tx.clone();
+                        let generated = daemon.generate_tokens_streaming_lp(
+                            context,
+                            params,
+                            max_new,
+                            max_wall_ms,
+                            extras.extras.clone(),
+                            |batch| {
+                                if stop.load(Ordering::Relaxed) || tx.send(Out::Tokens(batch.to_vec())).is_err() {
+                                    return std::ops::ControlFlow::Break(());
+                                }
+                                std::ops::ControlFlow::Continue(())
+                            },
+                            |items| {
+                                let _ = lp.send(Out::Logprobs(items.to_vec()));
+                            },
+                        );
+                        extras.free(&daemon);
+                        generated
+                    }
+                    Err(e) => Err(e),
+                };
                 shared.lock().expect("agent shared").busy.stop();
                 let _ = tx.send(Out::Done(generated));
             })
@@ -572,6 +615,25 @@ impl NodeAgent {
                     run.pending.extend_from_slice(&t);
                     if run.pending.len() >= EMIT_COALESCE_TOKENS && !self.flush(endpoint, run, now)? {
                         return Ok(true);
+                    }
+                }
+                Ok(Out::Logprobs(items)) => {
+                    let msgs = items
+                        .into_iter()
+                        .map(|lp| linkf::TokenLogprobMsg {
+                            token: lp.token,
+                            logprob_bits: lp.logprob.to_bits(),
+                            top: lp.top.into_iter().map(|(t, p)| (t, p.to_bits())).collect(),
+                        })
+                        .collect();
+                    let emitted = self.shared.lock().expect("agent shared").agent.emit(
+                        run.session_id,
+                        run.generation_id,
+                        TokenEventPayload::Logprobs(msgs),
+                    );
+                    match emitted {
+                        Some(batch) => endpoint.send(msg_type::TOKEN_EVENTS, &batch)?,
+                        None => return Ok(true),
                     }
                 }
                 Ok(Out::Done(r)) => {
@@ -642,11 +704,13 @@ struct Work {
     generation: Option<Running>,
     /// A stage forward's answer, once it has one.
     stage: Option<mpsc::Receiver<linkf::StageForwardRespMsg>>,
+    /// State operations' answers, once each has one.
+    syncs: Vec<mpsc::Receiver<linkf::StateSyncRespF>>,
 }
 
 impl Work {
     fn busy(&self) -> bool {
-        self.generation.is_some() || self.stage.is_some()
+        self.generation.is_some() || self.stage.is_some() || !self.syncs.is_empty()
     }
 }
 
@@ -671,7 +735,56 @@ impl Drop for Running {
 
 enum Out {
     Tokens(Vec<u32>),
+    Logprobs(Vec<crate::scheduler::TokenLogprob>),
     Done(Result<(Vec<u32>, u32, bool), DaemonError>),
+}
+
+/// A generation's extras as its options ask, with the grammar and logit bias compiled on this
+/// node's engine and freed once it ends.
+struct Extras {
+    extras: crate::scheduler::GenExtras,
+}
+
+impl Extras {
+    fn of(daemon: &Daemon, opts: Option<&linkf::GenerateOptsMsg>) -> Result<Extras, DaemonError> {
+        let mut extras = crate::scheduler::GenExtras::default();
+        let Some(o) = opts else { return Ok(Extras { extras }) };
+        extras.presence_penalty = f32::from_bits(o.presence_penalty_bits);
+        extras.frequency_penalty = f32::from_bits(o.frequency_penalty_bits);
+        extras.repeat_penalty = f32::from_bits(o.repeat_penalty_bits);
+        extras.ignore_eos = o.ignore_eos;
+        if let Some(top) = o.top_logprobs {
+            extras.want_logprobs = true;
+            extras.top_logprobs = top;
+        }
+        extras.grammar_handle = match &o.grammar {
+            Some(linkf::GrammarSpecMsg::JsonSchema(schema)) => daemon.grammar_create(schema)?,
+            Some(linkf::GrammarSpecMsg::Structural(tag)) => daemon.grammar_create_structural(tag)?,
+            None => 0,
+        };
+        if let Some((tokens, values)) = &o.logit_bias {
+            let values: Vec<f32> = values.iter().map(|b| f32::from_bits(*b)).collect();
+            match daemon.logit_bias_create(tokens, &values) {
+                Ok(h) => extras.logit_bias_handle = h,
+                Err(e) => {
+                    if extras.grammar_handle != 0 {
+                        daemon.grammar_free(extras.grammar_handle);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(Extras { extras })
+    }
+
+    fn free(&self, daemon: &Daemon) {
+        if self.extras.grammar_handle != 0 {
+            daemon.grammar_free(self.extras.grammar_handle);
+        }
+        if self.extras.logit_bias_handle != 0 {
+            daemon.logit_bias_free(self.extras.logit_bias_handle);
+        }
+    }
 }
 
 fn is_client_refusal(e: &DaemonError) -> bool {

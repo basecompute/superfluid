@@ -36,6 +36,11 @@ pub mod msg_type {
     pub const NODE_STATUS: u16 = 0x0017;
     pub const STAGE_FORWARD_REQ: u16 = 0x0019;
     pub const STAGE_FORWARD_RESP: u16 = 0x001A;
+    /// What a generation asks beyond its sampling, just before its GENERATE_REQ (version 3).
+    pub const GENERATE_OPTS: u16 = 0x001B;
+    /// A Link W state operation run on the node's engine, and its answer (version 3).
+    pub const STATE_SYNC_REQ: u16 = 0x001C;
+    pub const STATE_SYNC_RESP: u16 = 0x001D;
 
     pub const TELEMETRY: u16 = 0x8001;
     /// An idle head's sign of life; droppable, so a node that predates it skips it.
@@ -68,6 +73,9 @@ pub mod msg_type {
         GENERATE_CANCEL,
         STAGE_FORWARD_REQ,
         STAGE_FORWARD_RESP,
+        GENERATE_OPTS,
+        STATE_SYNC_REQ,
+        STATE_SYNC_RESP,
         TELEMETRY,
         KEEPALIVE,
     ];
@@ -267,6 +275,51 @@ pub enum TokenEventPayload {
     Segment { kind: SegmentKind, data: Vec<u8> },
     Usage(UsageMsg),
     Finish { reason: u32 },
+    /// The log-probabilities of tokens already sent, for a generation that asked (version 3).
+    Logprobs(Vec<TokenLogprobMsg>),
+}
+
+/// A token's log-probability and its most likely alternatives, as f32 bits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenLogprobMsg {
+    pub token: u32,
+    pub logprob_bits: u32,
+    pub top: Vec<(u32, u32)>,
+}
+
+/// A grammar a generation is held to, as the node compiles it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GrammarSpecMsg {
+    JsonSchema(String),
+    Structural(String),
+}
+
+/// What a generation asks beyond its sampling parameters. Floats are f32 bits; the defaults
+/// (no penalty, EOS ends it, no logprobs, no grammar or bias) are what a generation with no
+/// options gets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateOptsMsg {
+    pub session_id: u64,
+    pub generation_id: u64,
+    pub presence_penalty_bits: u32,
+    pub frequency_penalty_bits: u32,
+    pub repeat_penalty_bits: u32,
+    pub ignore_eos: bool,
+    pub top_logprobs: Option<u8>,
+    pub grammar: Option<GrammarSpecMsg>,
+    pub logit_bias: Option<(Vec<i32>, Vec<u32>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSyncReqF {
+    pub request_id: u64,
+    pub req: crate::linkw::StateSyncReqMsg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSyncRespF {
+    pub request_id: u64,
+    pub result: Result<crate::linkw::StateSyncOkMsg, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

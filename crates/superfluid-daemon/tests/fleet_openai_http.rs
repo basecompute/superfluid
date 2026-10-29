@@ -273,7 +273,7 @@ fn fleet_openai_models_carries_capabilities() {
     let caps = &entry["capabilities"];
     assert_eq!(caps["descriptor_version"], 1, "{caps}");
     assert_eq!(caps["workload"]["causal_generation"], true, "{caps}");
-    assert!(caps["workload"]["embedding"].is_string(), "{caps}");
+    assert!(!caps["workload"]["embedding"].is_string(), "embeddings reach a node, so they are not refused: {caps}");
     assert!(
         caps["dialect"]["reasoning_effort"].is_boolean(),
         "the head owns the template, so it answers this first-hand: {caps}"

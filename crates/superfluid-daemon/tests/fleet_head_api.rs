@@ -94,117 +94,160 @@ fn json(body: &str) -> Value {
     serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {body}"))
 }
 
-/// The `data:` payloads of an SSE body, as JSON, the end marker left out.
-fn events(body: &str) -> Vec<Value> {
-    body.lines()
-        .filter_map(|l| l.strip_prefix("data: "))
-        .filter(|d| *d != "[DONE]")
-        .map(json)
-        .collect()
+/// What differs between two servers that say the same thing: ids, times, durations, and what a
+/// server's own prompt cache held.
+const VOLATILE: &[&str] = &[
+    "id",
+    "item_id",
+    "created",
+    "created_at",
+    "completed_at",
+    "system_fingerprint",
+    "total_duration",
+    "load_duration",
+    "prompt_eval_duration",
+    "eval_duration",
+    "cached_tokens",
+    "prompt_eval_cached_count",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "previous_response_id",
+    "sequence_number",
+];
+
+fn normalize(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            m.retain(|k, _| !VOLATILE.contains(&k.as_str()));
+            m.values_mut().for_each(normalize);
+        }
+        Value::Array(a) => a.iter_mut().for_each(normalize),
+        _ => {}
+    }
 }
 
-/// What a format's answer says, without the ids and times that differ between servers.
-fn said(path: &str, stream: bool, body: &str) -> Value {
-    match (path, stream) {
-        ("/v1/chat/completions", false) => {
-            let j = json(body);
-            serde_json::json!([j["choices"][0]["message"]["content"], j["choices"][0]["finish_reason"], j["usage"]["completion_tokens"]])
+/// The fields a stream's events carry text (or logprobs) in, a piece each: where a stream cuts
+/// them is how fast tokens came, not what was said.
+const TEXT: &[&str] = &["content", "text", "response", "thinking", "reasoning_content", "delta", "partial_json", "arguments"];
+
+/// Folds a stream's events into one value: text fields joined, every other field as it last was.
+fn fold(into: &mut Value, event: &Value) {
+    let (Value::Object(into), Value::Object(event)) = (into, event) else { return };
+    for (k, v) in event {
+        let had = into.contains_key(k);
+        match (into.get_mut(k), v) {
+            (Some(Value::String(a)), Value::String(b)) if TEXT.contains(&k.as_str()) => a.push_str(b),
+            (Some(a @ Value::Object(_)), Value::Object(_)) => fold(a, v),
+            (Some(Value::Array(a)), Value::Array(b)) if TEXT.contains(&k.as_str()) => a.extend(b.iter().cloned()),
+            (Some(Value::Array(a)), Value::Array(b)) => {
+                for (i, item) in b.iter().enumerate() {
+                    match a.get_mut(i) {
+                        Some(slot @ Value::Object(_)) => fold(slot, item),
+                        Some(slot) => *slot = item.clone(),
+                        None => a.push(item.clone()),
+                    }
+                }
+            }
+            (_, Value::Null) if had => {}
+            _ => {
+                into.insert(k.clone(), v.clone());
+            }
         }
-        ("/v1/chat/completions", true) => {
-            let text: String = events(body).iter().filter_map(|e| e["choices"][0]["delta"]["content"].as_str().map(str::to_string)).collect();
-            let fin = events(body).iter().find_map(|e| e["choices"][0]["finish_reason"].as_str().map(str::to_string));
-            serde_json::json!([text, fin])
-        }
-        ("/v1/completions", false) => {
-            let j = json(body);
-            serde_json::json!([j["choices"][0]["text"], j["choices"][0]["finish_reason"]])
-        }
-        ("/v1/completions", true) => {
-            let text: String = events(body).iter().filter_map(|e| e["choices"][0]["text"].as_str().map(str::to_string)).collect();
-            serde_json::json!([text])
-        }
-        ("/v1/responses", false) => {
-            let j = json(body);
-            serde_json::json!([j["status"], j["output"].as_array().map(|o| o.iter().map(|i| i["content"].clone()).collect::<Vec<_>>())])
-        }
-        ("/v1/messages", false) => {
-            let j = json(body);
-            serde_json::json!([j["content"], j["stop_reason"], j["usage"]["output_tokens"]])
-        }
-        ("/v1/messages", true) => {
-            let text: String = body
-                .lines()
-                .filter_map(|l| l.strip_prefix("data: "))
-                .map(json)
-                .filter_map(|e| e["delta"]["text"].as_str().map(str::to_string))
-                .collect();
-            serde_json::json!([text])
-        }
-        ("/api/chat", false) => {
-            let j = json(body);
-            serde_json::json!([j["message"]["content"], j["done_reason"], j["eval_count"]])
-        }
-        ("/api/generate", false) => {
-            let j = json(body);
-            serde_json::json!([j["response"], j["done_reason"], j["eval_count"]])
-        }
-        ("/api/chat", true) | ("/api/generate", true) => {
-            let text: String = body
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(json)
-                .filter_map(|e| e["message"]["content"].as_str().or(e["response"].as_str()).map(str::to_string))
-                .collect();
-            serde_json::json!([text])
-        }
-        _ => unreachable!("{path}"),
     }
+}
+
+/// A body as JSON without what differs between servers: one value, or a stream's events folded.
+fn said(body: &str) -> Value {
+    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    let events: Vec<Value> = if lines.iter().any(|l| l.starts_with("data: ")) {
+        lines.iter().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(json).collect()
+    } else if lines.len() > 1 {
+        lines.iter().map(|l| json(l)).collect()
+    } else {
+        vec![json(body)]
+    };
+    let mut v = serde_json::json!({});
+    for e in &events {
+        fold(&mut v, e);
+    }
+    normalize(&mut v);
+    v
+}
+
+/// Posts `body` to both servers and asserts they answer alike.
+fn same(local: &str, head: &str, path: &str, body: &Value) -> Value {
+    let (ls, lb) = post(local, path, body);
+    let (hs, hb) = post(head, path, body);
+    assert_eq!(hs, ls, "{path} {body}: status on one machine {ls} ({lb}), through the head {hs} ({hb})");
+    let (l, h) = (said(&lb), said(&hb));
+    assert_eq!(h, l, "{path} {body}: the head said otherwise");
+    l
 }
 
 #[test]
 fn every_api_format_answers_through_a_fleet_head_as_it_does_on_one_machine() {
     let (local, head) = (local(), head(node()));
-    let chat = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 12, "temperature": 0});
-    let completion = serde_json::json!({"model": "mock-model", "prompt": "once upon a time", "max_tokens": 12, "temperature": 0});
-    let responses = serde_json::json!({"model": "mock-model", "input": "hello there", "max_output_tokens": 12, "temperature": 0});
-    let messages = serde_json::json!({"model": "mock-model", "max_tokens": 12, "temperature": 0, "messages": [{"role": "user", "content": "hello there"}]});
-    let ollama_chat = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "options": {"num_predict": 12, "temperature": 0}});
-    let ollama_generate = serde_json::json!({"model": "mock-model", "prompt": "once upon a time", "options": {"num_predict": 12, "temperature": 0}});
-
-    let cases: Vec<(&str, &Value)> = vec![
-        ("/v1/chat/completions", &chat),
-        ("/v1/completions", &completion),
-        ("/v1/responses", &responses),
-        ("/v1/messages", &messages),
-        ("/api/chat", &ollama_chat),
-        ("/api/generate", &ollama_generate),
+    let user = serde_json::json!([{"role": "user", "content": "hello there"}]);
+    let cases: Vec<(&str, Value)> = vec![
+        ("/v1/chat/completions", serde_json::json!({"model": "mock-model", "messages": user, "max_tokens": 12, "temperature": 0})),
+        ("/v1/completions", serde_json::json!({"model": "mock-model", "prompt": "once upon a time", "max_tokens": 12, "temperature": 0})),
+        ("/v1/responses", serde_json::json!({"model": "mock-model", "input": "hello there", "max_output_tokens": 12, "temperature": 0})),
+        ("/v1/messages", serde_json::json!({"model": "mock-model", "max_tokens": 12, "temperature": 0, "messages": user})),
+        ("/api/chat", serde_json::json!({"model": "mock-model", "messages": user, "options": {"num_predict": 12, "temperature": 0}})),
+        ("/api/generate", serde_json::json!({"model": "mock-model", "prompt": "once upon a time", "options": {"num_predict": 12, "temperature": 0}})),
     ];
     for (path, body) in cases {
         for stream in [false, true] {
-            if path == "/v1/responses" && stream {
-                continue;
-            }
             let mut body = body.clone();
             body["stream"] = Value::Bool(stream);
-            let (ls, lb) = post(&local, path, &body);
-            let (hs, hb) = post(&head, path, &body);
-            assert_eq!(ls, 200, "{path} stream={stream} on one machine: {lb}");
-            assert_eq!(hs, 200, "{path} stream={stream} through the head: {hb}");
-            let (l, h) = (said(path, stream, &lb), said(path, stream, &hb));
-            assert_eq!(h, l, "{path} stream={stream}: the head said otherwise");
-            // The mock engine's raw stream can say nothing; what both say must still agree.
-            if !stream {
-                let text = l[0].as_str().map(str::len).unwrap_or_else(|| l[0].to_string().len());
-                assert!(text > 4, "{path}: nothing said ({l})");
-            }
+            let said = same(&local, &head, path, &body);
+            assert!(said.to_string().len() > 40, "{path} stream={stream}: nothing said ({said})");
         }
     }
 }
 
 #[test]
+fn what_a_request_asks_beyond_sampling_reaches_the_node() {
+    let (local, head) = (local(), head(node()));
+    let chat = |extra: Value| {
+        let mut body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 12, "temperature": 0});
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+    for extra in [
+        serde_json::json!({"presence_penalty": 0.5, "frequency_penalty": 0.25}),
+        serde_json::json!({"repeat_penalty": 1.3}),
+        serde_json::json!({"ignore_eos": true}),
+        serde_json::json!({"logprobs": true, "top_logprobs": 2}),
+        serde_json::json!({"logit_bias": {"300": 5, "301": -100}}),
+        serde_json::json!({"response_format": {"type": "json_schema", "json_schema": {"name": "a", "schema": {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}}}}),
+    ] {
+        for stream in [false, true] {
+            let mut body = chat(extra.clone());
+            body["stream"] = Value::Bool(stream);
+            same(&local, &head, "/v1/chat/completions", &body);
+        }
+    }
+}
+
+#[test]
+fn embeddings_and_lora_reach_a_node() {
+    let (local, head) = (local(), head(node()));
+    let embedded = same(&local, &head, "/v1/embeddings", &serde_json::json!({"model": "mock-model", "input": ["hello there", "general kenobi"]}));
+    same(&local, &head, "/api/embed", &serde_json::json!({"model": "mock-model", "input": "hello there"}));
+    assert!(embedded["data"][1]["embedding"].as_array().is_some_and(|e| !e.is_empty()), "{embedded}");
+    let lora = same(&local, &head, "/v1/lora/load", &serde_json::json!({"model": "mock-model", "path": "/nonexistent/adapter.gguf"}));
+    assert_eq!(lora["loaded"], true, "{lora}");
+}
+
+#[test]
 fn what_a_node_cannot_do_yet_is_refused_as_a_400() {
     let head = head(node());
-    let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4, "presence_penalty": 0.5});
+    let image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let body = serde_json::json!({"model": "mock-model", "max_tokens": 4, "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": image}},
+    ]}]});
     let (status, text) = post(&head, "/v1/chat/completions", &body);
     assert_eq!(status, 400, "{text}");
     assert!(text.contains("fleet"), "{text}");

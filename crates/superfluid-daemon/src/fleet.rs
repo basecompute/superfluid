@@ -480,10 +480,26 @@ impl FleetHead {
         max_new_tokens: u64,
         max_wall_ms: u64,
         cancel: &std::sync::atomic::AtomicBool,
+        on_tokens: impl FnMut(&[u32]),
+    ) -> Result<FleetGeneration, DaemonError> {
+        self.generate_streaming_with(session_id, max_new_tokens, max_wall_ms, cancel, None, &mut |_| {}, on_tokens)
+    }
+
+    /// As [`Self::generate_streaming`], with what the generation asks beyond its sampling, and
+    /// `on_logprobs` told the log-probabilities it asked for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_streaming_with(
+        &mut self,
+        session_id: u64,
+        max_new_tokens: u64,
+        max_wall_ms: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        opts: Option<&linkf::GenerateOptsMsg>,
+        on_logprobs: &mut dyn FnMut(&[linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let mut delivered = false;
-        let first = self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, |t| {
+        let first = self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, opts, on_logprobs, |t| {
             delivered = true;
             on_tokens(t)
         });
@@ -492,20 +508,59 @@ impl FleetHead {
             // reached the caller, so the generation can start over on a fresh one.
             Err(e) if !delivered && is_transient(&e) => {
                 self.reconnect_self()?;
-                self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, on_tokens)
+                self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, opts, on_logprobs, on_tokens)
             }
             r => r,
         }
     }
 
+    /// Refuses what a node on version 2 cannot be asked.
+    fn needs_v3(&self, what: &str) -> Result<(), DaemonError> {
+        if self.endpoint.version() >= 3 {
+            return Ok(());
+        }
+        Err(DaemonError::Unsupported(crate::Refusal::new(
+            "unsupported_on_fleet",
+            None,
+            format!("node {} runs an older superfluid that cannot take {what}; update it", self.node.node_identity),
+        )))
+    }
+
+    /// Runs one Link W state operation on the node's engine.
+    pub fn state_sync(&mut self, req: superfluid_proto::linkw::StateSyncReqMsg) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.needs_v3("this operation")?;
+        let request_id = self.next_generation;
+        self.next_generation += 1;
+        self.endpoint.send(msg_type::STATE_SYNC_REQ, &linkf::StateSyncReqF { request_id, req })?;
+        loop {
+            for frame in self.endpoint.wait_frames()? {
+                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::STATE_SYNC_RESP) else {
+                    continue;
+                };
+                let m: linkf::StateSyncRespF = postcard::from_bytes(&frame.payload)?;
+                if m.request_id == request_id {
+                    return m
+                        .result
+                        .map_err(|e| DaemonError::Generation(format!("node {}: {e}", self.node.node_identity)));
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn generate_streaming_once(
         &mut self,
         session_id: u64,
         max_new_tokens: u64,
         max_wall_ms: u64,
         cancel: &std::sync::atomic::AtomicBool,
+        opts: Option<&linkf::GenerateOptsMsg>,
+        on_logprobs: &mut dyn FnMut(&[linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
+        if opts.is_some() {
+            self.needs_v3("these generation options")?;
+        }
         let generation_id = self.next_generation;
         self.next_generation += 1;
         let req = self
@@ -516,6 +571,10 @@ impl FleetHead {
                 GenerationBudgetsMsg { max_new_tokens, max_wall_ms },
             )
             .ok_or(DaemonError::Protocol("generate before assign"))?;
+        if let Some(o) = opts {
+            let o = linkf::GenerateOptsMsg { session_id, generation_id, ..o.clone() };
+            self.endpoint.send(msg_type::GENERATE_OPTS, &o)?;
+        }
         self.endpoint.send(msg_type::GENERATE_REQ, &req)?;
 
         let mut tokens = Vec::new();
@@ -548,6 +607,7 @@ impl FleetHead {
                                 tokens.extend_from_slice(t);
                                 on_tokens(t);
                             }
+                            TokenEventPayload::Logprobs(items) => on_logprobs(items),
                             TokenEventPayload::Finish { reason } => {
                                 finish = *reason;
                                 done = true;

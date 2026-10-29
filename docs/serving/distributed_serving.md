@@ -118,7 +118,9 @@ The head runs the same HTTP server as `superfluid serve` on one machine, with th
 - `GET /metrics`: the server's own series, and each node as the head sees it, labelled `node` and `addr`: `superfluid_fleet_node_up`, `_lanes`, `_lanes_active`, `_queue_depth`, `_pool_blocks_used`, `_pool_blocks_total` and `_decode_tokens_total`. A generation's tokens count as they arrive. The KV pool is the node's latest status, sent every 2 s. `superfluid top` pointed at the head, or run with no address on the head's network, shows every node from it.
 - `GET /health`: 200 with `{"status": "ok"}` while at least one node that is up serves the model, 503 with `"no_nodes"` while none does; both carry `nodes_up` and `nodes_known`. It needs no API key.
 
-Refused with 400 until they reach nodes: structured output (`response_format`), `logit_bias`, `logprobs`, presence, frequency and repeat penalties, `ignore_eos`, and image or audio parts. Embeddings, transcription, LoRA and slots answer that they do not reach fleet nodes yet. A generation has a ten-minute wall-clock ceiling.
+Structured output (`response_format`, tool grammars), `logit_bias`, `logprobs`, presence, frequency and repeat penalties and `ignore_eos` reach the node that runs the generation: the head keeps a grammar or bias and the node compiles it. Embeddings (`/v1/embeddings`, `/api/embed`) run on a node serving the model. A LoRA (`/v1/lora/load`, `/unload`) is loaded on every node serving the model, from a path on each node; load it again after a node joins. These need nodes on this release; an older node refuses them by name.
+
+Refused with 400 until they reach nodes: image and audio parts. Transcription and slots answer that they do not reach fleet nodes yet. A generation has a ten-minute wall-clock ceiling.
 
 ## Failure handling
 

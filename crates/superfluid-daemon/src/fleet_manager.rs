@@ -121,6 +121,18 @@ impl NodeConn {
         (i, self.conns[i].lock().expect("node conn"))
     }
 
+    /// A connection no call is using, so a short operation does not wait out a generation;
+    /// the next in turn when every one is busy.
+    fn checkout_idle(&self) -> (usize, std::sync::MutexGuard<'_, Option<FleetHead>>) {
+        let open = self.open.load(std::sync::atomic::Ordering::Relaxed).clamp(1, self.conns.len());
+        for (i, slot) in self.conns[..open].iter().enumerate() {
+            if let Ok(guard) = slot.try_lock() {
+                return (i, guard);
+            }
+        }
+        self.checkout_next()
+    }
+
     fn checkout_at(&self, i: usize) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
         self.conns[i.min(self.conns.len() - 1)].lock().expect("node conn")
     }
@@ -1078,6 +1090,20 @@ impl FleetManager {
         session: u64,
         max_new_tokens: u64,
         max_wall_ms: u64,
+        on_tokens: impl FnMut(&[u32]),
+    ) -> Result<FleetGeneration, DaemonError> {
+        self.generate_streaming_with(session, max_new_tokens, max_wall_ms, None, &mut |_| {}, on_tokens)
+    }
+
+    /// As [`Self::generate_streaming`], with what the generation asks beyond its sampling, sent
+    /// to whichever node runs it, and `on_logprobs` told the log-probabilities it asked for.
+    pub fn generate_streaming_with(
+        &self,
+        session: u64,
+        max_new_tokens: u64,
+        max_wall_ms: u64,
+        opts: Option<&superfluid_proto::linkf::GenerateOptsMsg>,
+        on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let (node, flag) = {
@@ -1101,7 +1127,7 @@ impl FleetManager {
 
         let mut all_tokens: Vec<u32> = Vec::new();
 
-        match self.generate_streaming_on(node, session, max_new_tokens, max_wall_ms, &flag, |b| {
+        match self.generate_streaming_on(node, session, max_new_tokens, max_wall_ms, &flag, opts, on_logprobs, |b| {
             all_tokens.extend_from_slice(b);
             on_tokens(b);
         }) {
@@ -1169,7 +1195,7 @@ impl FleetManager {
                 self.identity(i),
                 all_tokens.len()
             );
-            match self.generate_streaming_on(i, session, remaining, max_wall_ms, &flag, |b| {
+            match self.generate_streaming_on(i, session, remaining, max_wall_ms, &flag, opts, on_logprobs, |b| {
                 all_tokens.extend_from_slice(b);
                 on_tokens(b);
             }) {
@@ -1186,6 +1212,7 @@ impl FleetManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_streaming_on(
         &self,
         node: usize,
@@ -1193,6 +1220,8 @@ impl FleetManager {
         max_new_tokens: u64,
         max_wall_ms: u64,
         flag: &AtomicBool,
+        opts: Option<&superfluid_proto::linkf::GenerateOptsMsg>,
+        on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let _inflight = InFlight::guard(&self.shared, node, session);
@@ -1202,7 +1231,7 @@ impl FleetManager {
         self.rebind_on(session, &mut guard)?;
         let head = guard.as_mut().expect("connected");
         let decoded = &node_conn.decoded;
-        let r = head.generate_streaming(session, max_new_tokens, max_wall_ms, flag, |b: &[u32]| {
+        let r = head.generate_streaming_with(session, max_new_tokens, max_wall_ms, flag, opts, on_logprobs, |b: &[u32]| {
             decoded.fetch_add(b.len() as u64, Ordering::Relaxed);
             on_tokens(b);
         });
@@ -1216,6 +1245,61 @@ impl FleetManager {
         }
         drop(guard);
         self.map_refusal(node, session, r)
+    }
+
+    /// Runs a state operation on one node serving `model`, the next one tried when a node
+    /// fails.
+    pub fn state_sync(
+        &self,
+        model: &str,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        let cand = self.candidates_claiming(model, None, RequestShape::default());
+        let mut last = None;
+        for i in cand {
+            match self.state_sync_on(i, req.clone()) {
+                Ok(ok) => return Ok(ok),
+                Err(e) if is_fatal_node(&e) => last = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or(DaemonError::Config("no healthy node can serve the model")))
+    }
+
+    /// Runs a state operation on every node up that serves `model`, as a LoRA must be on each
+    /// node a request can land on; the answer is the last node's.
+    pub fn state_sync_all(
+        &self,
+        model: &str,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        let cand = self.candidates_claiming(model, None, RequestShape::default());
+        let mut answer = Err(DaemonError::Config("no healthy node can serve the model"));
+        for i in cand {
+            answer = Ok(self.state_sync_on(i, req.clone())?);
+        }
+        answer
+    }
+
+    fn state_sync_on(
+        &self,
+        i: usize,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        let node = self.node(i);
+        let (_, mut guard) = node.checkout_idle();
+        if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
+            *guard = None;
+        }
+        self.ensure_connected(i, &mut guard)?;
+        let r = guard.as_mut().expect("connected").state_sync(req);
+        if let Err(e) = &r {
+            if is_fatal_node(e) {
+                *guard = None;
+                self.mark_unhealthy(i, e);
+            }
+        }
+        r
     }
 
     pub fn cancel(&self, session: u64) -> Result<(), DaemonError> {

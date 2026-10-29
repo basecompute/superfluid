@@ -7,6 +7,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use superfluid_abi::finish;
+use superfluid_proto::linkf::{GenerateOptsMsg, GrammarSpecMsg, TokenLogprobMsg};
+use superfluid_proto::linkw::{StateSyncOkMsg, StateSyncReqMsg};
 
 use crate::fleet_manager::FleetManager;
 use crate::scheduler::{GenerateJob, LaneEvent, LaneOutput, OutputSink, SchedCmd, SchedStats, SchedulerHandle};
@@ -30,6 +32,37 @@ pub(crate) struct Dispatch {
     pub active: Arc<Mutex<std::collections::HashSet<u64>>>,
     pub stats: Arc<SchedStats>,
     pub tool_lease_ms: u64,
+    pub handles: Handles,
+}
+
+/// The grammars and logit biases this daemon's handlers made, by the handle each was given:
+/// kept here, and compiled on whichever node runs the generation that uses one.
+#[derive(Default)]
+pub(crate) struct Handles {
+    next: std::sync::atomic::AtomicU32,
+    made: Mutex<std::collections::HashMap<u32, Made>>,
+}
+
+#[derive(Clone)]
+enum Made {
+    Grammar(GrammarSpecMsg),
+    Bias(Vec<i32>, Vec<u32>),
+}
+
+impl Handles {
+    fn make(&self, what: Made) -> u32 {
+        let h = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.made.lock().expect("handles").insert(h, what);
+        h
+    }
+
+    fn free(&self, h: u32) {
+        self.made.lock().expect("handles").remove(&h);
+    }
+
+    fn get(&self, h: u32) -> Option<Made> {
+        (h != 0).then(|| self.made.lock().expect("handles").get(&h).cloned()).flatten()
+    }
 }
 
 /// Answers the scheduler's commands for a daemon with no engine of its own: a generation is
@@ -56,13 +89,9 @@ fn serve(d: Arc<Dispatch>, rx: Receiver<SchedCmd>) {
                     tracing::warn!("fleet: cannot start a generation: {e}");
                 }
             }
-            SchedCmd::Sync(_, reply) => {
-                let _ = reply.send(Err(NOT_YET.to_string()));
-            }
+            SchedCmd::Sync(req, reply) => sync(&d, req, reply),
             SchedCmd::SyncAs(_, inner) => match *inner {
-                SchedCmd::Sync(_, reply) => {
-                    let _ = reply.send(Err(NOT_YET.to_string()));
-                }
+                SchedCmd::Sync(req, reply) => sync(&d, req, reply),
                 SchedCmd::SyncStream(_, _, reply) => {
                     let _ = reply.send(Err(NOT_YET.to_string()));
                 }
@@ -82,6 +111,99 @@ fn serve(d: Arc<Dispatch>, rx: Receiver<SchedCmd>) {
 
 pub(crate) const NOT_YET: &str = "this operation does not reach fleet nodes yet";
 
+type Reply = std::sync::mpsc::Sender<Result<StateSyncOkMsg, String>>;
+
+/// A state operation: a grammar or bias is kept on the head under a handle of its own; one the
+/// model's engine answers runs on a node serving it (a LoRA on every one), off this thread, so
+/// the commands behind it are not held up.
+fn sync(d: &Arc<Dispatch>, req: StateSyncReqMsg, reply: Reply) {
+    let answer = match req {
+        StateSyncReqMsg::CreateGrammar { json_schema } => {
+            StateSyncOkMsg::CreateGrammar { grammar_handle: d.handles.make(Made::Grammar(GrammarSpecMsg::JsonSchema(json_schema))) }
+        }
+        StateSyncReqMsg::CreateGrammarStructural { tag_json } => {
+            StateSyncOkMsg::CreateGrammar { grammar_handle: d.handles.make(Made::Grammar(GrammarSpecMsg::Structural(tag_json))) }
+        }
+        StateSyncReqMsg::FreeGrammar { grammar_handle } => {
+            d.handles.free(grammar_handle);
+            StateSyncOkMsg::FreeGrammar
+        }
+        StateSyncReqMsg::CreateLogitBias { tokens, values } => {
+            StateSyncOkMsg::CreateLogitBias { handle: d.handles.make(Made::Bias(tokens, values)) }
+        }
+        StateSyncReqMsg::FreeLogitBias { handle } => {
+            d.handles.free(handle);
+            StateSyncOkMsg::FreeLogitBias
+        }
+        req @ (StateSyncReqMsg::Embed { .. } | StateSyncReqMsg::LoraId | StateSyncReqMsg::Capabilities) => {
+            return on_node(d, reply, move |d| d.fleet.state_sync(&d.model, req));
+        }
+        req @ (StateSyncReqMsg::LoraLoad { .. } | StateSyncReqMsg::LoraUnload) => {
+            return on_node(d, reply, move |d| d.fleet.state_sync_all(&d.model, req));
+        }
+        _ => {
+            let _ = reply.send(Err(NOT_YET.to_string()));
+            return;
+        }
+    };
+    let _ = reply.send(Ok(answer));
+}
+
+fn on_node(
+    d: &Arc<Dispatch>,
+    reply: Reply,
+    run: impl FnOnce(&Dispatch) -> Result<StateSyncOkMsg, DaemonError> + Send + 'static,
+) {
+    let d = Arc::clone(d);
+    let spawned = std::thread::Builder::new()
+        .name("superfluid-fleet-sync".into())
+        .spawn(move || {
+            let _ = reply.send(run(&d).map_err(|e| e.to_string()));
+        });
+    if let Err(e) = spawned {
+        tracing::warn!("fleet: cannot run a state operation: {e}");
+    }
+}
+
+/// What a job asks beyond its sampling, for the node that runs it; none when it asks nothing.
+fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<GenerateOptsMsg>, DaemonError> {
+    let x = &job.extras;
+    let lost = |what: &str| DaemonError::Protocol(if what == "grammar" { "a grammar handle this daemon never made" } else { "a logit bias handle this daemon never made" });
+    let grammar = match d.handles.get(x.grammar_handle.max(job.grammar_handle)) {
+        Some(Made::Grammar(g)) => Some(g),
+        Some(Made::Bias(..)) => return Err(lost("grammar")),
+        None if x.grammar_handle != 0 || job.grammar_handle != 0 => return Err(lost("grammar")),
+        None => None,
+    };
+    let logit_bias = match d.handles.get(x.logit_bias_handle) {
+        Some(Made::Bias(tokens, values)) => Some((tokens, values)),
+        Some(Made::Grammar(_)) => return Err(lost("bias")),
+        None if x.logit_bias_handle != 0 => return Err(lost("bias")),
+        None => None,
+    };
+    let plain = x.presence_penalty == 0.0
+        && x.frequency_penalty == 0.0
+        && (x.repeat_penalty == 0.0 || x.repeat_penalty == 1.0)
+        && !x.ignore_eos
+        && !x.want_logprobs
+        && grammar.is_none()
+        && logit_bias.is_none();
+    if plain {
+        return Ok(None);
+    }
+    Ok(Some(GenerateOptsMsg {
+        session_id: 0,
+        generation_id: 0,
+        presence_penalty_bits: x.presence_penalty.to_bits(),
+        frequency_penalty_bits: x.frequency_penalty.to_bits(),
+        repeat_penalty_bits: x.repeat_penalty.to_bits(),
+        ignore_eos: x.ignore_eos,
+        top_logprobs: x.want_logprobs.then_some(x.top_logprobs),
+        grammar,
+        logit_bias,
+    }))
+}
+
 /// What a fleet-backed daemon says it can do: generation, and a reason for each thing that does
 /// not reach nodes yet, so a route refuses it as the descriptor says.
 pub(crate) fn capability_record() -> crate::capabilities::Capabilities {
@@ -92,7 +214,6 @@ pub(crate) fn capability_record() -> crate::capabilities::Capabilities {
             "backend": "fleet",
             "workload": {
                 "causal_generation": true,
-                "embedding": NOT_YET,
                 "speech_to_text": NOT_YET,
             },
             "modalities": {
@@ -108,25 +229,8 @@ pub(crate) fn capability_record() -> crate::capabilities::Capabilities {
 
 /// What a job asks that a node cannot do for it yet, as a refusal.
 fn unsupported(job: &GenerateJob) -> Option<Refusal> {
-    let x = &job.extras;
-    let what = if x.grammar_handle != 0 {
-        Some(("response_format", "structured output"))
-    } else if x.logit_bias_handle != 0 {
-        Some(("logit_bias", "logit bias"))
-    } else if x.want_logprobs {
-        Some(("logprobs", "logprobs"))
-    } else if x.presence_penalty != 0.0 || x.frequency_penalty != 0.0 {
-        Some(("presence_penalty", "presence and frequency penalties"))
-    } else if x.repeat_penalty != 0.0 && x.repeat_penalty != 1.0 {
-        Some(("repeat_penalty", "a repeat penalty"))
-    } else if x.ignore_eos {
-        Some(("ignore_eos", "ignore_eos"))
-    } else if !job.media.is_empty() {
-        Some(("messages", "image and audio parts"))
-    } else {
-        None
-    };
-    what.map(|(param, what)| Refusal::new("unsupported_on_fleet", Some(param), format!("{what} does not reach fleet nodes yet")))
+    (!job.media.is_empty())
+        .then(|| Refusal::new("unsupported_on_fleet", Some("messages"), "image and audio parts do not reach fleet nodes yet"))
 }
 
 fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
@@ -146,6 +250,7 @@ fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
 /// Places the job on a node, streams its tokens through a lane output, and ends the lane as
 /// the scheduler would.
 fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, DaemonError> {
+    let opts = options(d, job)?;
     let fs = NEXT_FLEET_SESSION.fetch_add(1, Ordering::Relaxed);
     d.fleet.place(fs, job.params, job.class, "raw", &d.model, &job.stream, job.max_tokens as u64)?;
     // Removes the session from the fleet however this ends.
@@ -184,7 +289,19 @@ fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEve
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         });
-        let r = d.fleet.generate_streaming(fs, job.max_tokens as u64, max_wall_ms, |batch| {
+        let events = &job.events;
+        let mut on_logprobs = |items: &[TokenLogprobMsg]| {
+            let items = items
+                .iter()
+                .map(|lp| crate::scheduler::TokenLogprob {
+                    token: lp.token,
+                    logprob: f32::from_bits(lp.logprob_bits),
+                    top: lp.top.iter().map(|&(t, p)| (t, f32::from_bits(p))).collect(),
+                })
+                .collect();
+            let _ = events.send(LaneEvent::TokenLogprobs(items));
+        };
+        let r = d.fleet.generate_streaming_with(fs, job.max_tokens as u64, max_wall_ms, opts.as_ref(), &mut on_logprobs, |batch| {
             if gone || fin != finish::NONE || failure.is_some() {
                 return;
             }

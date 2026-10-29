@@ -4171,7 +4171,23 @@ pub fn run_completion_streaming(
     max_tokens: u32,
     deadline_ms: u64,
     extras: GenExtras,
+    on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
+) -> Result<(Vec<u32>, u32, bool), DaemonError> {
+    run_completion_streaming_lp(tx, stream, params, max_tokens, deadline_ms, extras, on_tokens, |_| {})
+}
+
+/// As [`run_completion_streaming`], telling `on_logprobs` each token's log-probabilities when
+/// the extras ask for them.
+#[allow(clippy::too_many_arguments)]
+pub fn run_completion_streaming_lp(
+    tx: &Sender<SchedCmd>,
+    stream: Vec<u32>,
+    params: GenParams,
+    max_tokens: u32,
+    deadline_ms: u64,
+    extras: GenExtras,
     mut on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
+    mut on_logprobs: impl FnMut(&[TokenLogprob]),
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
     let (etx, erx) = std::sync::mpsc::channel();
     tx.send(SchedCmd::Submit(Box::new(GenerateJob {
@@ -4207,7 +4223,7 @@ pub fn run_completion_streaming(
             Ok(LaneEvent::Done { finish, .. }) => return Ok((tokens, finish, false)),
             Ok(LaneEvent::Expired) => return Ok((Vec::new(), finish::NONE, true)),
             Ok(LaneEvent::Committed(_)) => {}
-            Ok(LaneEvent::TokenLogprobs(_)) => {}
+            Ok(LaneEvent::TokenLogprobs(items)) => on_logprobs(&items),
             Ok(LaneEvent::Failed(msg)) => return Err(DaemonError::Generation(msg)),
             Ok(LaneEvent::Error(e)) => return Err(e),
             Err(_) => return Err(DaemonError::Protocol("scheduler dropped the lane")),

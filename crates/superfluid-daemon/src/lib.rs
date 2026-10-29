@@ -447,6 +447,7 @@ impl Serving {
             active: std::sync::Arc::clone(ground.active),
             stats: std::sync::Arc::clone(ground.stats),
             tool_lease_ms: opts.tool_lease_ms,
+            handles: Default::default(),
         });
         Serving {
             capabilities: std::sync::Arc::new(std::sync::RwLock::new(fleet_daemon::capability_record())),
@@ -1327,11 +1328,27 @@ impl Daemon {
         extras: scheduler::GenExtras,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
     ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
+        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, extras, on_tokens, |_| {})
+    }
+
+    /// As [`Self::generate_tokens_streaming`], telling `on_logprobs` the log-probabilities the
+    /// extras ask for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_tokens_streaming_lp(
+        &self,
+        stream: Vec<u32>,
+        params: GenParams,
+        max_tokens: u32,
+        deadline_ms: u64,
+        extras: scheduler::GenExtras,
+        on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
+        on_logprobs: impl FnMut(&[scheduler::TokenLogprob]),
+    ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
         self.ensure_serving()?;
         let _span = self.raw_generate_span(max_tokens);
         self.check_stream_fits(stream.len())?;
         let deadline = self.effective_deadline(deadline_ms);
-        scheduler::run_completion_streaming(
+        scheduler::run_completion_streaming_lp(
             &self.sched_tx(),
             stream,
             params,
@@ -1339,7 +1356,14 @@ impl Daemon {
             deadline,
             extras,
             on_tokens,
+            on_logprobs,
         )
+    }
+
+    /// Runs one Link W state operation on this daemon's engine, as a fleet node does for its head.
+    pub fn state_sync(&self, req: proto_linkw::StateSyncReqMsg) -> Result<proto_linkw::StateSyncOkMsg, DaemonError> {
+        self.ensure_serving()?;
+        self.engine_sync(req)
     }
 
     pub fn forward_stage(
