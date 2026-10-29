@@ -884,7 +884,7 @@ fn a_window_is_sized_from_the_header_without_the_weights() {
     assert_eq!(sized.weight_bytes, std::fs::metadata(&path).unwrap().len());
     assert!(sized.trained_context >= 2048, "{sized:?}");
     let device = superfluid_adapter_llamacpp::devices().into_iter().next().expect("a GPU");
-    assert!(sized.budget_bytes > 0 && sized.budget_bytes <= device.memory, "{sized:?} on {device:?}");
+    assert!(sized.budget_bytes > 0 && sized.budget_bytes <= device.budget && device.budget < device.memory, "{sized:?} on {device:?}");
     let window = superfluid_executor::sizing::window(&[sized], 4).expect("a window");
     assert!(window <= sized.trained_context && (window.is_multiple_of(1024) || window == sized.trained_context), "{window}");
     eprintln!("{}: {window} tokens at 4 lanes from {sized:?}", path.display());

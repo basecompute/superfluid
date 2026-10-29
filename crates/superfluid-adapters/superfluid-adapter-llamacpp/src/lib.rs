@@ -205,7 +205,9 @@ mod tests {
         if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
             assert_eq!(d[0].backend, "Metal", "{d:?}");
             assert!(d[0].memory > 0 && !d[0].name.is_empty(), "{d:?}");
+            assert_eq!(d[0].budget, (superfluid_executor::sizing::PLANNING_SHARE * d[0].memory as f64) as u64, "{d:?}");
         }
+        assert!(d.iter().filter(|d| d.backend == "CPU").all(|d| d.budget == 0), "nothing is planned on a CPU: {d:?}");
     }
 
     #[test]

@@ -24,16 +24,20 @@ superfluid runtime use llamacpp b11284-vulkan    # pin the default install
 superfluid runtime use llamacpp --auto           # unpin
 superfluid runtime repair llamacpp
 superfluid runtime remove llamacpp b11284-vulkan
+superfluid runtime remove llamacpp@b11284-vulkan # the same, as `superfluid runtimes` lists the install
+superfluid runtime remove llamacpp --all         # every install
 ```
 
 | command | what it does |
 |---|---|
-| `versions <id>` | list the versions the adapter installs on its own (the ones it was tested with), newest first: which install on this machine and as what, with the size, and which are installed; an install of another version (`--untested`, or an archive of your own) is listed as not one the adapter lists. `--json` for scripts. Answered from the adapter's recipe, with no network |
+| `versions <id>` | list the versions the adapter installs on its own (the ones it was tested with), newest first: which install on this machine and as what, with the size, and which are installed; an install of another version (`--untested`, or an archive of your own) is listed as not one the adapter lists. basert installs a release it does not pin without `--untested` when the release states this build's engine ABI, and with no version the newest such release: an install of one newer than the pins is listed as installable when a build for the same engine ABI installed it, and the line below the list says so. `--json` for scripts. Answered from the adapter's recipe and the installs, with no network |
 | `install <id>` | plan, fetch, verify and place an install. Options: `--version V`, `--backend B` (no fallback), `--from <archive>` (a URL or path to your own archive or, for MLX, package index), `--sha256 H`, `--untested`, `--dry-run` |
 | `update <id>` | install the newest tested build for the default install's backend beside it and make it the default |
 | `repair <id> [<install>]` | reinstall the same version and backend; what a daemon updated with `superfluid self update` asks for when an install's worker is too old |
-| `remove <id> [<install>]` | remove one install, or all of them |
+| `remove <id> [<install>]` / `--all` | remove one install, or every one with `--all`; the id alone removes the only install and refuses a runtime that has more |
 | `use <id> <install>` / `--auto` | pin the default install / return to ranking |
+
+`repair`, `remove` and `use` take the install as `<id>@<install>` too, as the RUNTIME column of `superfluid runtimes` shows one that is not the default.
 
 `serve` installs a runtime on first use; `--offline` prevents it. A runtime's worker starts without credential-named variables (`*_TOKEN`, `*_API_KEY`, `*PASSWORD`, `*SECRET`, ...) in its environment; a pull keeps them, since it fetches with your Hugging Face token.
 

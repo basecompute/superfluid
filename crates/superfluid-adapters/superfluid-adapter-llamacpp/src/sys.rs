@@ -441,14 +441,10 @@ fn open() -> Result<Loaded, String> {
             p.clone()
         }
     } else {
+        // The places looked in (beside this worker, and the default install) are the same everywhere: the fix is what is said.
         dirs.iter().find_map(|d| libllama_in(d)).ok_or_else(|| {
-            let tried: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
-            format!(
-                "llama.cpp not found (looked for {} in {}): install it with `superfluid runtime install llamacpp`, \
-                 or name a build with SUPERFLUID_LLAMA_LIB",
-                file_names("libllama")[0],
-                if tried.is_empty() { "nothing".to_string() } else { tried.join(", ") }
-            )
+            "llama.cpp not found: install it with `superfluid runtime install llamacpp`, or name a build with SUPERFLUID_LLAMA_LIB"
+                .to_string()
         })?
     };
     let dir = libllama.parent().map(Path::to_path_buf).unwrap_or_default();

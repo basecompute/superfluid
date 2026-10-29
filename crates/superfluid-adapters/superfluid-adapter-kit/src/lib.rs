@@ -19,7 +19,7 @@ pub use superfluid_worker::{ring_specs_for, WorkerArgs};
 pub mod conformance;
 pub mod install;
 
-use install::{Candidate, Host, Manifest, Plan, Request};
+use install::{Candidate, Host, Manifest, Plan, Request, Unlisted};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PullOption {
@@ -447,6 +447,13 @@ pub trait Runtime: Send + Sync {
             .collect()
     }
 
+    /// Which versions `versions` leaves out still install without `--untested`; by default none, a version not listed installs
+    /// with `--untested`. With a rule, an install of a version newer than every listed one that installs here counts as one the
+    /// adapter installs on its own, when the rule it was installed under asked what this one asks.
+    fn unlisted(&self) -> Option<Unlisted> {
+        None
+    }
+
     fn pull_options(&self) -> Option<&'static [PullOption]> {
         None
     }
@@ -585,6 +592,7 @@ pub fn worker_main(rt: &dyn Runtime) -> ! {
             "host": host.to_json(),
             "describe": host.describe(),
             "versions": rt.versions(&host).iter().map(Candidate::to_json).collect::<Vec<_>>(),
+            "unlisted": rt.unlisted().map(|u| u.to_json()),
         });
         println!("{v}");
         std::process::exit(0);
@@ -694,19 +702,28 @@ pub fn install_into(rt: &dyn Runtime, plan: &Plan, dir: &Path) -> Result<Manifes
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let sources = rt.install(plan, dir)?;
     install::copy_worker(dir, id)?;
+    let host = Host::detect();
     let manifest = Manifest {
         id: id.to_string(),
         install: plan.install.clone(),
         version: plan.version.clone(),
         backend: plan.backend.clone(),
         link_w: vec![superfluid_worker::server::PROTO_VERSION],
-        platforms: vec![Host::detect().platform()],
+        platforms: vec![host.platform()],
         worker: format!("bin/superfluid-worker-{id}"),
         sources,
         tested: plan.tested,
+        requires: rule_asked(rt, plan, &host),
     };
     manifest.write(dir)?;
     Ok(manifest)
+}
+
+/// What the adapter's rule for unlisted versions asked of `plan`'s version, when that rule is what installs it: a tested
+/// version `versions` does not list.
+fn rule_asked(rt: &dyn Runtime, plan: &Plan, host: &Host) -> Option<String> {
+    let rule = rt.unlisted().filter(|_| plan.tested)?;
+    (!rt.versions(host).iter().any(|c| c.version == plan.version)).then_some(rule.requires)
 }
 
 fn fail(name: &str, why: &str) -> ! {
@@ -752,7 +769,7 @@ mod tests {
         }
         fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
             match self.runs {
-                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0 }], abi: None }),
+                true => Ok(Probe { version: "fake 1".into(), devices: vec![Device { backend: "CPU".into(), name: "cpu".into(), memory: 0, budget: 0 }], abi: None }),
                 false => Err("no fake device here".into()),
             }
         }
@@ -844,6 +861,44 @@ mod tests {
             assert_eq!(&Candidate::from_json(&c.to_json()).unwrap(), c);
         }
         assert!(Fake { runs: true, asked_facts: AtomicBool::new(false) }.versions(&host).is_empty(), "no compat, no versions");
+        assert_eq!(Installs.unlisted(), None, "by default a version not listed installs only with --untested");
+    }
+
+    /// `Installs` with a rule for the versions it does not list.
+    struct Ruled;
+
+    impl Runtime for Ruled {
+        fn info(&self) -> RuntimeInfo {
+            Installs.info()
+        }
+        fn compat(&self) -> serde_json::Value {
+            Installs.compat()
+        }
+        fn probe(&self, args: &WorkerArgs) -> Result<Probe, String> {
+            Installs.probe(args)
+        }
+        fn open(&self, args: &WorkerArgs) -> Result<Loaded, String> {
+            Installs.open(args)
+        }
+        fn plan(&self, req: &Request, host: &Host) -> Option<Result<Vec<Plan>, String>> {
+            Installs.plan(req, host)
+        }
+        fn unlisted(&self) -> Option<Unlisted> {
+            Some(Unlisted { describe: "any 2.x".into(), requires: "2.x".into() })
+        }
+    }
+
+    #[test]
+    fn an_install_keeps_what_the_rule_it_went_in_under_asked() {
+        let host = Host { os: "macos".into(), arch: "arm64".into(), ..Host::default() };
+        let plan = |version: &str, tested: bool| {
+            let req = Request { version: Some(version.into()), ..Request::default() };
+            Plan { tested, ..Installs.plan(&req, &host).unwrap().unwrap().remove(0) }
+        };
+        assert_eq!(rule_asked(&Ruled, &plan("2.5", true), &host).as_deref(), Some("2.x"), "unlisted, installed under the rule");
+        assert_eq!(rule_asked(&Ruled, &plan("2.0", true), &host), None, "listed");
+        assert_eq!(rule_asked(&Ruled, &plan("2.5", false), &host), None, "installed with --untested");
+        assert_eq!(rule_asked(&Installs, &plan("2.5", true), &host), None, "no rule");
     }
 
     #[test]

@@ -231,9 +231,9 @@ Sends the server `launch` started SIGTERM and waits for it to drain. A server st
 superfluid runtimes [<model>] [--json]
 ```
 
-Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
+Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. `INSTALLABLE` is a version the adapter lists, or an installed one newer than all of them that the adapter installs without `--untested` all the same: for basert, a release that states this build's engine ABI, which `superfluid runtime install basert` takes with no version from the release listing (`superfluid runtimes` itself asks the network nothing). The device column gives its memory budget, what the runtime plans a model and its KV cache against there, by the same rule for every runtime: a share of the device's working set, 85% on Apple silicon. The worker column names an install by its name in the runtimes directory (`installed: mlx/0.32.4-metal`) and a worker of superfluid's own by where it came from (`built in`, `shipped with superfluid`, `beside superfluid`); the release's directory and the runtimes directory are printed once below the table, and your home directory as `~`. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
 
-With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `least` and `most` when the value is bounded, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
+With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; `worker.path`, the worker's whole path; and per device `memory`, the device's memory as the runtime reads it (llama.cpp's device total, MLX's recommended working set, baseRT's own budget), beside `budget`, the figure the table shows (0 where the runtime plans nothing, such as llama.cpp's CPU); a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `least` and `most` when the value is bounded, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
 
 ## `superfluid runtime`
 
@@ -242,10 +242,14 @@ superfluid runtime versions <id> [--json]
 superfluid runtime install <id> [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested] [--dry-run]
 superfluid runtime update <id>
 superfluid runtime repair <id> [<install>]
-superfluid runtime remove <id> [<install>]
+superfluid runtime remove <id> [<install> | --all]
 superfluid runtime use <id> <install> | --auto
 superfluid runtime options <id> [--json]
 ```
+
+`repair`, `remove` and `use` also take an install as `<id>@<install>`, the way `superfluid runtimes` lists one in its RUNTIME column: `superfluid runtime remove basert@0.3.0-metal` is `superfluid runtime remove basert 0.3.0-metal`, and two installs named both ways are refused. The other actions take the id alone and say so.
+
+`remove <id>` with no install removes the runtime's only install; when it has more, it names them and removes nothing, and `--all` removes every one. The bare id is also how `superfluid runtimes` lists the default install.
 
 See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](../models/runtimes.md#per-runtime-options).
 
@@ -260,14 +264,14 @@ What this build was built and tested for, per runtime: for `basert`, the baseRT 
 ## `superfluid self`
 
 ```sh
-superfluid self update [--version <v>] [--dry-run]
+superfluid self update [--version <v>] [--dry-run] [--yes]
 superfluid self check
 superfluid self list
 superfluid self use <v>
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating superfluid](updating.md).
 
 ## `superfluid session`
 
