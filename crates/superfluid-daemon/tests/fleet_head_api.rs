@@ -338,3 +338,43 @@ fn a_transcription_runs_on_a_node_as_on_one_machine() {
         assert!(lb.contains("mock transcription"), "{lb}");
     }
 }
+
+#[test]
+fn every_route_answers_through_the_head_with_the_status_it_has_on_one_machine() {
+    let (local, head) = (local(), head(node()));
+    let mut differ = Vec::new();
+    let get = |addr: &str, path: &str| {
+        let mut r = agent().get(&format!("http://{addr}{path}")).call().unwrap();
+        (r.status().as_u16(), r.body_mut().read_to_string().unwrap())
+    };
+    let gets = ["/health", "/metrics", "/props", "/slots", "/v1/models", "/v1/models/mock-model", "/v1/lora", "/v1/batches", "/v1/files", "/api/tags", "/api/ps", "/api/version", "/"];
+    for p in gets {
+        let (l, lb) = get(&local, p);
+        let (h, hb) = get(&head, p);
+        if l != h {
+            differ.push(format!("GET {p}: one machine {l} ({lb}), the head {h} ({hb})"));
+        }
+    }
+    let posts: Vec<(&str, Value)> = vec![
+        ("/v1/tokenize", serde_json::json!({"model": "mock-model", "content": "hello"})),
+        ("/v1/rerank", serde_json::json!({"model": "mock-model", "query": "q", "documents": ["a", "b"]})),
+        ("/api/show", serde_json::json!({"model": "mock-model"})),
+        ("/api/embeddings", serde_json::json!({"model": "mock-model", "prompt": "hi"})),
+        ("/slots/0/save", serde_json::json!({"filename": "a.bin"})),
+        ("/slots/0/restore", serde_json::json!({"filename": "a.bin"})),
+        ("/v1/lora/unload", serde_json::json!({"model": "mock-model"})),
+        ("/v1/models/load", serde_json::json!({"id": "other"})),
+        ("/v1/models/unload", serde_json::json!({"id": "mock-model"})),
+        ("/api/pull", serde_json::json!({"model": "x", "stream": false})),
+        ("/api/copy", serde_json::json!({"source": "mock-model", "destination": "y"})),
+        ("/api/delete", serde_json::json!({"model": "y"})),
+    ];
+    for (p, body) in posts {
+        let (l, lb) = post(&local, p, &body);
+        let (h, hb) = post(&head, p, &body);
+        if l != h {
+            differ.push(format!("POST {p}: one machine {l} ({lb}), the head {h} ({hb})"));
+        }
+    }
+    assert!(differ.is_empty(), "{}", differ.join("\n"));
+}
