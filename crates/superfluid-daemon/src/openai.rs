@@ -18,7 +18,7 @@ pub use crate::http_state::{HttpQosPolicy, QOS_HEADER, BATCH_INVARIANT_HEADER};
 use crate::inference::{
     advertised_generation_defaults, repeat_penalty_for, next_id, unix_now,
     ChatRequest, CompletionRequest, RequestPolicy, DEFAULT_MAX_CONTEXT,
-    Kind, Message,
+    Kind,
 };
 use crate::http_state::{
     AppState, AuthenticatedCredential, error_response, error_response_code,
@@ -1651,7 +1651,7 @@ fn models_data(st: &AppState, created: u64) -> Vec<serde_json::Value> {
                 ModelObject {
                     id: &id,
                     created,
-                    n_ctx: Some(st.limits.max_context),
+                    n_ctx: Some(st.window_of(&id)),
                     owned_by: &st.identity.name,
                     loaded,
                     capabilities,
@@ -1687,7 +1687,7 @@ async fn models_retrieve(
         let obj = ModelObject {
             id: &model,
             created: unix_now(),
-            n_ctx: Some(st.limits.max_context),
+            n_ctx: Some(st.window_of(&model)),
             owned_by: &st.identity.name,
             loaded,
             capabilities,
@@ -1766,7 +1766,7 @@ async fn models_load(
                 ModelObject {
                     id: &req.id,
                     created: unix_now(),
-                    n_ctx: Some(st.limits.max_context),
+                    n_ctx: Some(st.window_of(&req.id)),
                     owned_by: &st.identity.name,
                     loaded: true,
                     capabilities,
@@ -1788,10 +1788,23 @@ async fn models_unload(State(st): State<AppState>, body: axum::body::Bytes) -> R
     unload_response(&st, req.id).await
 }
 
-async fn health(State(st): State<AppState>) -> Json<serde_json::Value> {
+/// On a fleet head, 503 while no node that is up serves the model, so a load balancer sends the
+/// head nothing it could not place.
+async fn health(State(st): State<AppState>) -> Response {
     let loaded = st.registry.names().len();
     let known = st.registry.all_names().len();
-    Json(serde_json::json!({"status": "ok", "models_loaded": loaded, "models_known": known}))
+    let Some((up, nodes)) = st.default_daemon().fleet_serving() else {
+        return Json(serde_json::json!({"status": "ok", "models_loaded": loaded, "models_known": known})).into_response();
+    };
+    let status = if up > 0 { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+    let body = serde_json::json!({
+        "status": if up > 0 { "ok" } else { "no_nodes" },
+        "models_loaded": loaded,
+        "models_known": known,
+        "nodes_up": up,
+        "nodes_known": nodes,
+    });
+    (status, Json(body)).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -1963,10 +1976,6 @@ async fn tokenize(State(st): State<AppState>, body: axum::body::Bytes) -> Respon
     let tokens = st.default_daemon().tokenize(&text);
     let count = tokens.len();
     (StatusCode::OK, Json(serde_json::json!({"tokens": tokens, "count": count}))).into_response()
-}
-
-pub(crate) fn tool_call_delta(d: &crate::tool_fragment::ToolDelta, index: usize, id: &str) -> serde_json::Value {
-    crate::openai_output::message_json(&Message::tool(d, index, id))
 }
 
 async fn chat_completions(

@@ -80,7 +80,31 @@ fn serve(d: Arc<Dispatch>, rx: Receiver<SchedCmd>) {
     }
 }
 
-const NOT_YET: &str = "this operation does not reach fleet nodes yet";
+pub(crate) const NOT_YET: &str = "this operation does not reach fleet nodes yet";
+
+/// What a fleet-backed daemon says it can do: generation, and a reason for each thing that does
+/// not reach nodes yet, so a route refuses it as the descriptor says.
+pub(crate) fn capability_record() -> crate::capabilities::Capabilities {
+    let media = "image and audio parts do not reach fleet nodes yet";
+    crate::capabilities::Capabilities::parse(
+        &serde_json::json!({
+            "descriptor_version": 1,
+            "backend": "fleet",
+            "workload": {
+                "causal_generation": true,
+                "embedding": NOT_YET,
+                "speech_to_text": NOT_YET,
+            },
+            "modalities": {
+                "image_encode": media,
+                "gemma_audio_encode": media,
+                "whisper_transcribe": media,
+                "whisper_translate": media,
+            },
+        })
+        .to_string(),
+    )
+}
 
 /// What a job asks that a node cannot do for it yet, as a refusal.
 fn unsupported(job: &GenerateJob) -> Option<Refusal> {
@@ -109,31 +133,19 @@ fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
     let session = job.session;
     let events = job.events.clone();
     let outcome = match unsupported(&job) {
-        Some(refusal) => Err(Ended::Refused(refusal)),
+        Some(refusal) => Err(DaemonError::Unsupported(refusal)),
         None => generate(d, bus, &job),
     };
     d.active.lock().expect("active set").remove(&session);
     let _ = events.send(match outcome {
         Ok(done) => done,
-        Err(Ended::Refused(r)) => LaneEvent::Refused(r),
-        Err(Ended::Failed(e)) => LaneEvent::Failed(e.to_string()),
+        Err(e) => LaneEvent::Error(e),
     });
-}
-
-enum Ended {
-    Refused(Refusal),
-    Failed(DaemonError),
-}
-
-impl From<DaemonError> for Ended {
-    fn from(e: DaemonError) -> Ended {
-        Ended::Failed(e)
-    }
 }
 
 /// Places the job on a node, streams its tokens through a lane output, and ends the lane as
 /// the scheduler would.
-fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, Ended> {
+fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, DaemonError> {
     let fs = NEXT_FLEET_SESSION.fetch_add(1, Ordering::Relaxed);
     d.fleet.place(fs, job.params, job.class, "raw", &d.model, &job.stream, job.max_tokens as u64)?;
     // Removes the session from the fleet however this ends.
@@ -209,7 +221,7 @@ fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEve
         r
     });
     if let Some(e) = failure {
-        return Err(e.into());
+        return Err(e);
     }
     if gone {
         let _ = d.fleet.cancel(fs);

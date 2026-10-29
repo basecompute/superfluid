@@ -209,8 +209,9 @@ pub enum LaneEvent {
         decode: (u64, f64),
     },
     Failed(String),
-    /// The request asked what this daemon cannot do, said as it says a request it refuses.
-    Refused(crate::Refusal),
+    /// The generation ended with this error, passed on as it is, so a client's mistake stays
+    /// a client's error.
+    Error(DaemonError),
 }
 
 /// How a lane's tokens become text, tool calls and committed events: the channel each run is
@@ -4208,7 +4209,7 @@ pub fn run_completion_streaming(
             Ok(LaneEvent::Committed(_)) => {}
             Ok(LaneEvent::TokenLogprobs(_)) => {}
             Ok(LaneEvent::Failed(msg)) => return Err(DaemonError::Generation(msg)),
-            Ok(LaneEvent::Refused(r)) => return Err(DaemonError::Unsupported(r)),
+            Ok(LaneEvent::Error(e)) => return Err(e),
             Err(_) => return Err(DaemonError::Protocol("scheduler dropped the lane")),
         }
     }
@@ -4301,8 +4302,8 @@ pub fn run_job(
             Ok(LaneEvent::Failed(msg)) => {
                 return Err(delivery_err.unwrap_or(DaemonError::Generation(msg)));
             }
-            Ok(LaneEvent::Refused(r)) => {
-                return Err(delivery_err.unwrap_or(DaemonError::Unsupported(r)));
+            Ok(LaneEvent::Error(e)) => {
+                return Err(delivery_err.unwrap_or(e));
             }
             Ok(LaneEvent::CompletionTokens(_)) | Ok(LaneEvent::Expired) => {
                 return Err(DaemonError::Protocol("completion event on a generate lane"));

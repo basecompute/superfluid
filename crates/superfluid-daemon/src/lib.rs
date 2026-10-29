@@ -42,7 +42,7 @@ mod keepalive;
 mod responses;
 pub mod openai;
 pub mod ollama;
-pub mod fleet_openai;
+pub mod fleet_metrics;
 pub mod park;
 pub mod pins;
 pub mod runtime;
@@ -449,7 +449,7 @@ impl Serving {
             tool_lease_ms: opts.tool_lease_ms,
         });
         Serving {
-            capabilities: std::sync::Arc::new(std::sync::RwLock::new(capabilities::Capabilities::default())),
+            capabilities: std::sync::Arc::new(std::sync::RwLock::new(fleet_daemon::capability_record())),
             retired: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_sampling: std::sync::OnceLock::new(),
             codec,
@@ -560,6 +560,8 @@ pub struct Daemon {
     completion: std::sync::Arc<CompletionSatellite>,
     fim_satellite: std::sync::OnceLock<FimSatellite>,
     built_with: DaemonOptions,
+    /// The fleet and model this daemon's generations run on, when it has no engine of its own.
+    fleet: Option<(std::sync::Arc<fleet_manager::FleetManager>, String)>,
 }
 
 impl CompletionSatellite {
@@ -854,7 +856,22 @@ impl Daemon {
         model: String,
         opts: DaemonOptions,
     ) -> Result<Daemon, DaemonError> {
-        Self::assemble(store, opts, |ground, opts| Ok(Serving::over_fleet(std::sync::Arc::from(codec), ground, fleet, model, opts)))
+        let backing = (std::sync::Arc::clone(&fleet), model.clone());
+        let mut daemon =
+            Self::assemble(store, opts, |ground, opts| Ok(Serving::over_fleet(std::sync::Arc::from(codec), ground, fleet, model, opts)))?;
+        daemon.fleet = Some(backing);
+        Ok(daemon)
+    }
+
+    /// For a daemon over a fleet: the largest window a node serving its model has, once one has
+    /// answered.
+    pub fn fleet_window(&self) -> Option<u64> {
+        self.fleet.as_ref().and_then(|(fleet, model)| fleet.advertised_context(model))
+    }
+
+    /// For a daemon over a fleet: the nodes up now that serve its model, and every node known.
+    pub fn fleet_serving(&self) -> Option<(usize, usize)> {
+        self.fleet.as_ref().map(|(fleet, model)| fleet.serving(model))
     }
 
     fn assemble(
@@ -971,6 +988,7 @@ impl Daemon {
             }),
             fim_satellite: std::sync::OnceLock::new(),
             built_with,
+            fleet: None,
         })
     }
 
@@ -1045,6 +1063,9 @@ impl Daemon {
     }
 
     pub fn max_stream_tokens(&self) -> u64 {
+        if let Some((fleet, model)) = &self.fleet {
+            return fleet.advertised_context(model).unwrap_or(0);
+        }
         let serving = self.serving();
         let record = serving.capabilities.read().expect("capability record");
         runtime::stream_ceiling(serving.staged_tokens, &record)
@@ -1882,6 +1903,9 @@ impl Daemon {
 
     pub fn metrics_text(&self) -> String {
         let mut out = metrics::render_prometheus(&self.stats);
+        if let Some((fleet, model)) = &self.fleet {
+            out.push_str(&fleet_metrics::fleet_metrics(&fleet.status(), &metrics::hostname(), model));
+        }
         out.push_str(&format!(
             "# HELP superfluid_telemetry_dropped_total Telemetry records dropped by the bounded sinks (log lines and OTLP spans).\n# TYPE superfluid_telemetry_dropped_total counter\nsuperfluid_telemetry_dropped_total {}\n",
             telemetry::dropped_total()

@@ -98,6 +98,29 @@ pub(crate) fn settle_park_dir(dir: &std::path::Path, parking: bool, budget_gb: u
 
 pub const SUN_PATH_LEN: usize = if cfg!(target_os = "linux") { 108 } else { 104 };
 
+/// The session log under `sessions`, or the reason it cannot be served from, and exit.
+fn open_session_store(sessions: &std::path::Path) -> SessionStore {
+    let wal_path = sessions.join("wal.log");
+    match SessionStore::open(&wal_path) {
+        Ok(store) => store,
+        Err(e @ (superfluid_daemon::DaemonError::WalCorrupt | superfluid_daemon::DaemonError::Codec(_))) => {
+            eprintln!(
+                "superfluid: the session log {} is damaged ({e}). A record with more of the log \
+                 after it fails its checksum, or a whole record does not decode, so this was not a \
+                 crash mid-write (a torn last record is dropped on its own); this server won't guess \
+                 which history to keep. Move the file aside to start fresh, or run with \
+                 --sessions-cache if sessions don't need to survive a restart.",
+                wal_path.display()
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("superfluid: could not open the session log {}: {e}", wal_path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 fn listen_or_exit(flag: &str, addr: &str) -> std::net::TcpListener {
     std::net::TcpListener::bind(addr).unwrap_or_else(|e| {
         let hint = match e.kind() {
@@ -893,8 +916,9 @@ pub fn run(args: &[String], embedding: &Embedding) {
         eprintln!("superfluid: telemetry: {e}");
     }
     std::fs::create_dir_all(&sessions).expect("create sessions dir");
-    let _sessions_lock = if !fleet_mode { Some(lock_sessions_dir(&sessions)) } else { None };
-    if sessions_cache && !fleet_mode {
+    // A fleet head keeps its sessions too: its handlers commit them as a local server's do.
+    let _sessions_lock = lock_sessions_dir(&sessions);
+    if sessions_cache {
         rotate_session_wal(&sessions);
         if let Ok(rd) = std::fs::read_dir(sessions.join("models")) {
             for dir in rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|d| d.is_dir()) {
@@ -1290,18 +1314,36 @@ pub fn run(args: &[String], embedding: &Embedding) {
                  apply; class and max_class do not (the head has no local scheduler)"
             );
         }
-        let codec_arc: Arc<dyn superfluid_daemon::TextCodec + Send + Sync> = Arc::from(codec);
-        superfluid_daemon::fleet_openai::serve_blocking(
-            http_listener,
-            manager,
-            codec_arc,
-            "raw".to_string(),
+        let advertised = manager.advertised_context(&model_name).map(|n| n.min(u32::MAX as u64) as u32);
+        let daemon = Daemon::over_fleet(
+            open_session_store(&sessions),
+            codec,
+            Arc::clone(&manager),
             model_name.clone(),
-            max_context.map_or(0, |n| n.max(512) as u32),
+            superfluid_daemon::DaemonOptions {
+                tool_lease_ms,
+                media_dir: Some(sessions.join("media")),
+                files_max_bytes,
+                files_expiry_secs: files_expiry,
+                completion_deadline_ms,
+                trace_scope: superfluid_daemon::otlp::TraceScope::model(&model_name),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("superfluid: cannot serve '{model_name}' over the fleet: {e}");
+            std::process::exit(2);
+        });
+        let registry = Arc::new(superfluid_daemon::registry::ModelRegistry::single(model_name.clone(), Arc::new(daemon)));
+        superfluid_daemon::openai::serve_blocking_config(
+            http_listener,
+            registry,
             superfluid_daemon::openai::ServeConfig {
                 api_key: api_key.clone(),
                 rate_limit_per_minute: rate_limit,
-                keys: key_policy.clone(),
+                drain_timeout_secs: drain_timeout,
+                default_max_tokens,
+                max_context: max_context.map(|n| n.max(512) as u32).or(advertised).unwrap_or(8192),
                 sampling: superfluid_daemon::openai::SamplingOverrides {
                     temperature: op_temperature,
                     top_p: op_top_p,
@@ -1311,6 +1353,11 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     spec_max_temperature: None,
                     fallback: embedding.sampling_fallback,
                 },
+                keys: key_policy.clone(),
+                nonstream_keepalive_secs: nonstream_keepalive,
+                surface: embedding.http,
+                model_naming: embedding.model_naming,
+                identity: embedding.identity.clone(),
                 ..Default::default()
             },
         )
@@ -1318,25 +1365,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
         return;
     }
 
-    let wal_path = sessions.join("wal.log");
-    let store = match SessionStore::open(&wal_path) {
-        Ok(store) => store,
-        Err(e @ (superfluid_daemon::DaemonError::WalCorrupt | superfluid_daemon::DaemonError::Codec(_))) => {
-            eprintln!(
-                "superfluid: the session log {} is damaged ({e}). A record with more of the log \
-                 after it fails its checksum, or a whole record does not decode, so this was not a \
-                 crash mid-write (a torn last record is dropped on its own); this server won't guess \
-                 which history to keep. Move the file aside to start fresh, or run with \
-                 --sessions-cache if sessions don't need to survive a restart.",
-                wal_path.display()
-            );
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("superfluid: could not open the session log {}: {e}", wal_path.display());
-            std::process::exit(1);
-        }
-    };
+    let store = open_session_store(&sessions);
 
     let workerd_bin = catalog.workerd().to_path_buf();
     let worker_process = if !runtime.in_process_capable() {

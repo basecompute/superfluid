@@ -7,7 +7,7 @@ use std::sync::Arc;
 use superfluid_daemon::codec::MockChatCodec;
 use superfluid_daemon::fleet_manager::{FleetManager, NodeSpec, PlacementPolicy};
 use superfluid_daemon::nodeagent::NodeAgent;
-use superfluid_daemon::{Daemon, EngineHost, MockCodec, SessionStore, TextCodec};
+use superfluid_daemon::{Daemon, EngineHost, MockCodec, SessionStore};
 use superfluid_engine::{EngineConfig, MockEngine};
 use superfluid_proto::linkf::Lease;
 use superfluid_proto::linkw;
@@ -63,20 +63,16 @@ fn start_head_cfg(node_addr: String, max_context: u32, cfg: superfluid_daemon::o
     let manager = Arc::new(FleetManager::new(specs, PlacementPolicy::LeastLoaded, lease));
     // As `serve` does, so the head knows what each node serves before the first request.
     let _ = manager.probe();
-    let codec: Arc<dyn TextCodec + Send + Sync> = Arc::new(MockChatCodec);
+    let dir = std::env::temp_dir().join(format!("superfluid-fopenai-head-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+    let daemon = Daemon::over_fleet(store, Box::new(MockChatCodec), manager, "mock".into(), Default::default()).unwrap();
+    let registry = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock", Arc::new(daemon)));
     let http = TcpListener::bind("127.0.0.1:0").unwrap();
     let http_addr = http.local_addr().unwrap().to_string();
+    let cfg = superfluid_daemon::openai::ServeConfig { max_context, ..cfg };
     std::thread::spawn(move || {
-        let r = superfluid_daemon::fleet_openai::serve_blocking(
-            http,
-            manager,
-            codec,
-            "raw".to_string(),
-            "mock".to_string(),
-            max_context,
-            cfg,
-        );
-        if let Err(e) = r {
+        if let Err(e) = superfluid_daemon::openai::serve_blocking_config(http, registry, cfg) {
             eprintln!("fleet head: {e}");
         }
     });
@@ -269,7 +265,7 @@ fn fleet_openai_models_carries_capabilities() {
 
     assert_eq!(entry["id"], "mock", "{entry}");
     assert_eq!(entry["object"], "model", "{entry}");
-    assert_eq!(entry["owned_by"], "superfluid-fleet", "{entry}");
+    assert_eq!(entry["owned_by"], "superfluid", "{entry}");
 
     assert!(entry["meta"].is_object(), "{entry}");
     assert!(entry["meta"]["n_ctx"].as_u64().unwrap_or(0) > 0, "{entry}");
@@ -484,7 +480,7 @@ fn fleet_head_requires_the_api_key_when_one_is_set() {
     let mut resp = a.get(&url).header("authorization", "Bearer fleet-secret").call().unwrap();
     assert_eq!(resp.status().as_u16(), 200, "the key");
     let json: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
-    assert_eq!(json["data"][0]["owned_by"], "superfluid-fleet");
+    assert_eq!(json["data"][0]["owned_by"], "superfluid");
 
     let body = serde_json::json!({"model": "mock", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
         .to_string();
