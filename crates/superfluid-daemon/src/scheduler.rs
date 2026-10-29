@@ -961,11 +961,13 @@ impl Speculation {
             Some(("dflash", path)) => ("dflash", Some(path.to_string())),
             Some(("dspark", path)) => ("dspark", Some(path.to_string())),
             Some(("eagle3", path)) => ("eagle3", Some(path.to_string())),
+            // A sidecar MTP head (Gemma 4's "assistant"): the engine loads it against the target.
+            Some(("mtp-head", path)) => ("mtp-head", Some(path.to_string())),
             _ if strategy == "prompt-lookup" => ("prompt-lookup", None),
             _ if strategy == "mtp-head" => ("mtp-head", None),
             _ => {
                 return Err(DaemonError::Config(
-                    "unknown speculation strategy (prompt-lookup | mtp-head | dflash / dspark / eagle3 / draft-model followed by ':' and a model id or .base path)",
+                    "unknown speculation strategy (prompt-lookup | mtp-head | dflash / dspark / eagle3 / draft-model / mtp-head followed by ':' and a model id or .base path)",
                 ))
             }
         };
@@ -981,10 +983,11 @@ impl Speculation {
                 "dspark/1"
             } else if id == "eagle3" {
                 "eagle3/1"
+            } else if id == "mtp-head" {
+                // Embedded or sidecar: a sidecar's identity is in config_hash.
+                "mtp-head/1"
             } else if draft_path.is_some() {
                 "draft-model/1"
-            } else if id == "mtp-head" {
-                "mtp-head/1"
             } else {
                 "prompt-lookup/1"
             };

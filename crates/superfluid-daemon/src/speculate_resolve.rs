@@ -5,7 +5,9 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const PATH_STRATEGIES: [&str; 4] = ["dflash", "dspark", "eagle3", "draft-model"];
+// `mtp-head:<path>` is a sidecar MTP head (Gemma 4's "assistant", drafting over the
+// target's KV); the bare `mtp-head` stays the target bundle's own head.
+const PATH_STRATEGIES: [&str; 5] = ["dflash", "dspark", "eagle3", "draft-model", "mtp-head"];
 
 const AUTO_KINDS: [&str; 3] = ["dspark", "dflash", "eagle3"];
 
@@ -231,6 +233,7 @@ pub fn strategy_for_drafter_header(h: &serde_json::Value) -> &'static str {
         "dflash" => "dflash",
         "dspark" => "dspark",
         "eagle3" => "eagle3",
+        "gemma4-mtp" => "mtp-head",
         _ => "draft-model",
     }
 }
@@ -726,7 +729,27 @@ mod tests {
         assert_eq!(sizing_path("eagle3:/d/z.base", t), Some((PathBuf::from("/d/z.base"), SpecLoad::Sidecar)));
         assert_eq!(sizing_path("draft-model:/d/lm.base", t), Some((PathBuf::from("/d/lm.base"), SpecLoad::DraftModel)));
         assert_eq!(sizing_path("draft-model:/m/b.base", t), Some((PathBuf::from("/m/b.base"), SpecLoad::DraftModel)));
+        assert_eq!(sizing_path("mtp-head:/d/h.base", t), Some((PathBuf::from("/d/h.base"), SpecLoad::Sidecar)));
         assert_eq!(sizing_path("prompt-lookup", t), None);
+    }
+
+    #[test]
+    fn a_gemma4_mtp_head_file_is_the_mtp_head_strategy_with_a_path() {
+        let dir = scratch("g4-mtp");
+        let t = bundle(&dir, "gemma-4-E4B-it-Q4.base", serde_json::json!({"arch": "gemma4",
+            "config": {"hidden_size": 2560, "vocab_size": 262144, "num_hidden_layers": 42}}));
+        let head = bundle(&dir, "drafters/gemma-4-E4B-it-assistant.base", serde_json::json!({"arch": "gemma4-mtp",
+            "config": {"hidden_size": 256, "vocab_size": 262144, "num_hidden_layers": 4,
+                "backbone_hidden_size": 2560, "speculator_kind": "mtp-shared-kv"}}));
+        let hp = head.to_str().unwrap();
+        assert_eq!(resolve(&format!("mtp-head:{hp}"), &t).unwrap(), Some(format!("mtp-head:{hp}")));
+        assert_eq!(resolve(hp, &t).unwrap(), Some(format!("mtp-head:{hp}")), "a bare path goes by its header");
+        assert!(
+            resolve("mtp-head", &t).unwrap_err().contains("carries no speculator head"),
+            "the bare directive is still the target's own head"
+        );
+        assert_eq!(resolve("auto", &t).unwrap(), None, "auto never pairs a separate head");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -238,7 +238,7 @@ fn mtp_head_registers_and_is_exact() {
     }];
     assert!(
         client.register_strategy(bad).is_err(),
-        "mtp-head takes no artifact"
+        "mtp-head refuses an artifact that is not a head (a missing file)"
     );
     let grant = client.register_strategy(reg).expect("mtp-head registers");
     assert_eq!(grant.strategy_slot, 1);
@@ -317,6 +317,13 @@ fn dspark_registers_and_is_exact() {
 #[test]
 fn eagle3_registers_and_is_exact() {
     block_drafter_exact("eagle3", "BASERT_TEST_EAGLE3", 0x77);
+}
+
+// A separate MTP head drafting over the target's KV (Gemma 4's "assistant",
+// a gemma4-mtp bundle): BASERT_TEST_MODEL a Gemma 4 target, baseRT >= 0.4.3.
+#[test]
+fn mtp_head_sidecar_registers_and_is_exact() {
+    block_drafter_exact("mtp-head", "BASERT_TEST_MTP_HEAD", 0x88);
 }
 
 fn block_drafter_exact(id: &str, env: &str, hash: u8) {

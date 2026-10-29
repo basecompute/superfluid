@@ -6,6 +6,7 @@ A drafter proposes several tokens per round and the target model verifies them i
 superfluid serve ~/models/Qwen3-4B-Q4.base --speculate auto
 superfluid serve ~/models/Qwen3-4B-Q4.base --speculate dflash:~/models/drafters/Qwen3-4B-DFlash-Q4.base
 superfluid serve ~/models/GLM-5.2-Q4.base --speculate mtp-head
+superfluid serve ~/models/gemma-4-E4B-it-Q4.base --speculate mtp-head:~/models/drafters/gemma-4-E4B-it-assistant.base
 ```
 
 The startup log names the strategy it registered (`superfluid: speculation: mtp-head`).
@@ -17,6 +18,7 @@ The startup log names the strategy it registered (`superfluid: speculation: mtp-
 | `off` (default) | none | |
 | `auto` | the bundle's own MTP head, else the best installed drafter that fits, else plain decoding | |
 | `mtp-head` | the multi-token-prediction head in the target bundle | a bundle converted with the head |
+| `mtp-head:<path>` | a separate MTP head that drafts over the target's KV (Gemma 4's `google/gemma-4-*-assistant`) | the head converted to `.base` by base-convert 0.4.3 or newer, and baseRT 0.4.3 or newer |
 | `prompt-lookup` | n-gram drafting from the lane's own context | nothing; drafts only where text repeats |
 | `dflash:<path>` | a DFlash block drafter | a `.base` drafter |
 | `dspark:<path>` | a DSpark drafter | a `.base` drafter |
@@ -37,7 +39,7 @@ With several models, the directive is resolved per model.
 2. Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a `drafters/` directory beside it or one level up, and the baseRT models cache. Nothing is downloaded. A plain draft model is never picked.
 3. Among fitting drafters: one the hub catalog pairs with the target, then one whose name contains the target's, then DSpark, DFlash, EAGLE-3, then the target's quantization, then the newest.
 
-If the engine refuses the first pick, `auto` tries the next and finally decodes plainly. An explicit directive has no fallback: a refusal is a startup error.
+`auto` never picks a separate MTP head (`mtp-head:<path>`); name it. If the engine refuses the first pick, `auto` tries the next and finally decodes plainly. An explicit directive has no fallback: a refusal is a startup error.
 
 The hub catalog is fetched from `https://raw.githubusercontent.com/basecompute/baseRT/main/base-convert/crates/base-hub/catalog.json` into `$SUPERFLUID_HOME/cache/hub-catalog.json` (refreshed daily, never with `--offline`), plus the one baseRT caches at `$BASERT_MODELS_DIR/.catalog-cache.json`. A drafter it lists (a pulled `<org>/<repo>/<variant>/model.base`, or a file under a catalog file name) must match the catalog's size and sha256: `auto` skips one that does not and says so, and an explicit directive naming it is a startup error. Each file is hashed once and its digest kept in `$SUPERFLUID_HOME/cache/sha256/` until the file changes.
 

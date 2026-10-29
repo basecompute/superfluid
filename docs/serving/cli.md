@@ -147,7 +147,7 @@ See [Scheduling](../features/scheduling.md).
 
 | flag | default | description |
 |---|---|---|
-| `--speculate <directive>` | off | `auto`, `mtp-head`, `prompt-lookup`, `dflash:<path>`, `dspark:<path>`, `eagle3:<path>`, `draft-model:<path>`, a drafter `.base` path, or `off`. On `llamacpp` and `mlx`, only `prompt-lookup` (and `auto`). |
+| `--speculate <directive>` | off | `auto`, `mtp-head`, `mtp-head:<path>`, `prompt-lookup`, `dflash:<path>`, `dspark:<path>`, `eagle3:<path>`, `draft-model:<path>`, a drafter `.base` path, or `off`. On `llamacpp` and `mlx`, only `prompt-lookup` (and `auto`). |
 | `--spec-draft-tokens <N>` | per strategy | Draft depth, 1-15. |
 | `--spec-adaptive` / `--no-spec-adaptive` | on | Adapt depth per lane count. |
 | `--spec-min-yield <F>` | 0.75 | Accepted tokens per round below which a request stops drafting; 0 disables. |
