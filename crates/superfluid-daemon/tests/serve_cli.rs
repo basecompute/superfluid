@@ -104,6 +104,14 @@ fn removing_a_runtime_with_more_than_one_install_needs_all() {
          `superfluid runtime remove basert --all` every one\n"
     );
     assert_eq!(installed(), ["0.3.0-metal", "0.4.2-metal"], "nothing was removed");
+    // An install after the '@' is never read as an option.
+    for (action, name) in [("remove", "basert@--all"), ("use", "basert@--auto"), ("repair", "basert@--all")] {
+        let out = run(&[action, name]);
+        assert_eq!(out.status.code(), Some(2), "{action} {name}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.starts_with(&format!("superfluid: '{name}' names no install: an install's name does not begin with '-'")), "{err}");
+    }
+    assert_eq!(installed(), ["0.3.0-metal", "0.4.2-metal"], "nothing was removed");
 
     let out = run(&["remove", "basert@0.3.0-metal"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));

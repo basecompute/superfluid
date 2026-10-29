@@ -427,6 +427,15 @@ pub fn runtime_target(action: &str, name: &str, rest: &[String]) -> Result<(Runt
     };
     let Some(install) = id.install() else { return Ok((id, rest.to_vec())) };
     let base = id.base();
+    // No install's name begins with '-', and passed on after the id it would be read as an option.
+    if install.starts_with('-') {
+        let how = match (action, install) {
+            ("remove", "--all") => format!(": `superfluid runtime remove {base} --all` removes every install"),
+            ("use", "--auto") => format!(": `superfluid runtime use {base} --auto` goes back to the best-ranked"),
+            _ => String::new(),
+        };
+        return Err(format!("'{name}' names no install: an install's name does not begin with '-'{how}"));
+    }
     if takes_install {
         return match rest {
             [] => Ok((base, vec![install.to_string()])),
@@ -647,6 +656,29 @@ mod tests {
             Err("'basert@0.3.0-metal' names the install 0.3.0-metal and --all every one: `superfluid runtime remove basert --all` removes them all".into())
         );
         assert_eq!(target("remove", "basert@a", &["a", "b"]), basert(&["a", "b"]), "left to the action's usage");
+    }
+
+    #[test]
+    fn an_install_that_looks_like_an_option_is_refused_not_passed_on_as_one() {
+        let refused = |action: &str, name: &str| runtime_target(action, name, &[]).unwrap_err();
+        assert_eq!(
+            refused("remove", "basert@--all"),
+            "'basert@--all' names no install: an install's name does not begin with '-': \
+             `superfluid runtime remove basert --all` removes every install"
+        );
+        assert_eq!(
+            refused("use", "basert@--auto"),
+            "'basert@--auto' names no install: an install's name does not begin with '-': \
+             `superfluid runtime use basert --auto` goes back to the best-ranked"
+        );
+        for action in ["remove", "repair", "use", "install", "update", "versions", "options"] {
+            assert_eq!(
+                refused(action, "basert@-x"),
+                "'basert@-x' names no install: an install's name does not begin with '-'",
+                "{action}"
+            );
+        }
+        assert!(runtime_target("remove", "basert@--all", &strings(&["--all"])).is_err());
     }
 
     #[test]
