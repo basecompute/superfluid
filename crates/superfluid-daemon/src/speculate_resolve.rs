@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 // target's KV); the bare `mtp-head` stays the target bundle's own head.
 const PATH_STRATEGIES: [&str; 5] = ["dflash", "dspark", "eagle3", "draft-model", "mtp-head"];
 
-const AUTO_KINDS: [&str; 3] = ["dspark", "dflash", "eagle3"];
+const AUTO_KINDS: [&str; 4] = ["dspark", "dflash", "eagle3", "mtp-head"];
 
 const HUB_DEPTH: usize = 3;
 
@@ -510,7 +510,20 @@ fn fits(th: &serde_json::Value, dh: &serde_json::Value) -> bool {
     let (Some(hidden), Some(vocab)) = (num(th, "hidden_size"), num(th, "vocab_size")) else {
         return false;
     };
-    if num(dh, "hidden_size") != Some(hidden) || num(dh, "vocab_size") != Some(vocab) {
+    // A separate Gemma 4 MTP head is narrower than its target: it reads and writes the
+    // target's hidden width, which it records as backbone_hidden_size.
+    fn arch(h: &serde_json::Value) -> &str {
+        h.get("arch").and_then(|a| a.as_str()).unwrap_or("")
+    }
+    let width = if arch(dh) == "gemma4-mtp" {
+        if arch(th) != "gemma4" {
+            return false;
+        }
+        num(dh, "backbone_hidden_size")
+    } else {
+        num(dh, "hidden_size")
+    };
+    if width != Some(hidden) || num(dh, "vocab_size") != Some(vocab) {
         return false;
     }
     let layers = num(th, "num_hidden_layers");
@@ -748,7 +761,31 @@ mod tests {
             resolve("mtp-head", &t).unwrap_err().contains("carries no speculator head"),
             "the bare directive is still the target's own head"
         );
-        assert_eq!(resolve("auto", &t).unwrap(), None, "auto never pairs a separate head");
+        assert_eq!(resolve("auto", &t).unwrap(), Some(format!("mtp-head:{hp}")), "auto pairs an installed head");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn auto_pairs_a_separate_mtp_head_by_the_width_it_reads() {
+        let dir = scratch("g4-mtp-fit");
+        let head = |name: &str, backbone: u64, vocab: u64| {
+            bundle(&dir, &format!("drafters/{name}.base"), serde_json::json!({"arch": "gemma4-mtp",
+                "config": {"hidden_size": 256, "vocab_size": vocab, "num_hidden_layers": 4,
+                    "backbone_hidden_size": backbone, "speculator_kind": "mtp-shared-kv"}}))
+        };
+        let e4b = bundle(&dir, "gemma-4-E4B-it.base", serde_json::json!({"arch": "gemma4",
+            "config": {"hidden_size": 2560, "vocab_size": 262144, "num_hidden_layers": 42}}));
+        let e2b = bundle(&dir, "gemma-4-E2B-it.base", serde_json::json!({"arch": "gemma4",
+            "config": {"hidden_size": 1536, "vocab_size": 262144, "num_hidden_layers": 35}}));
+        let qwen = bundle(&dir, "qwen-2560.base", serde_json::json!({"arch": "qwen",
+            "config": {"hidden_size": 2560, "vocab_size": 262144, "num_hidden_layers": 36}}));
+        head("gemma-4-E4B-it-assistant", 2560, 262144);
+        head("odd-vocab-assistant", 2560, 151936);
+        let dirs = auto_search_dirs(&e4b);
+        let at = |t: &Path| pick(t, &dirs);
+        assert_eq!(at(&e4b).as_deref(), Some("mtp-head:gemma-4-E4B-it-assistant.base"));
+        assert_eq!(at(&e2b), None, "a head over another width does not fit");
+        assert_eq!(at(&qwen), None, "a Gemma 4 head pairs with Gemma 4 targets only");
         std::fs::remove_dir_all(&dir).ok();
     }
 
