@@ -1,0 +1,13 @@
+# The workflows pin every action to a commit SHA, with its version in a
+# comment; this keeps those pins current, one grouped PR a week. Security
+# updates for the Rust dependencies come from Dependabot security updates
+# (Settings > Code security) and need nothing here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]

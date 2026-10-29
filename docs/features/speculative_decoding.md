@@ -16,7 +16,7 @@ The startup log names the strategy it registered (`superfluid: speculation: mtp-
 |---|---|---|
 | `off` (default) | none | |
 | `auto` | the bundle's own MTP head, else the best installed drafter that fits, else plain decoding | |
-| `mtp-head` | the multi-token-prediction head in the target bundle | a bundle converted with the head |
+| `mtp-head` | the multi-token-prediction head in the target bundle (Qwen3.5/3.6/3.8's own, or Gemma 4's `-assistant` head embedded by `basert add-speculator`) | a bundle converted with the head |
 | `prompt-lookup` | n-gram drafting from the lane's own context | nothing; drafts only where text repeats |
 | `dflash:<path>` | a DFlash block drafter | a `.base` drafter |
 | `dspark:<path>` | a DSpark drafter | a `.base` drafter |
