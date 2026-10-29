@@ -179,11 +179,7 @@ pub struct GenExtras {
 }
 
 pub struct LaneCarry {
-    seg: Box<dyn Channelizer>,
-    utf8: Utf8Stream,
-    disp_seg: Box<dyn Channelizer>,
-    disp_utf8: Utf8Stream,
-    tool_buf: String,
+    out: LaneOutput,
     produced_before: u32,
     spec_before: (u64, u64),
     decode_before: (u64, f64),
@@ -215,43 +211,179 @@ pub enum LaneEvent {
     Failed(String),
 }
 
-fn provisional_ingest(
-    codec: &Arc<dyn TextCodec + Send + Sync>,
-    bus: &SessionBus,
-    lane: &mut Lane,
-    tokens: &[u32],
-) {
-    if tokens.is_empty() {
-        return;
-    }
-    lane.disp_tokens += tokens.len() as u32;
-    let produced = lane.disp_tokens;
-    for run in lane.disp_seg.split(tokens) {
-        let mut text = String::new();
-        for &t in &run.text {
-            text.push_str(&lane.disp_utf8.push(&codec.token_bytes(t)));
-        }
-        if text.is_empty() {
-            continue;
-        }
-        let channel = run.channel;
-        if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
-            bus.publish_provisional(lane.session, channel, &text);
-            let _ = lane.job.events.send(LaneEvent::Provisional { channel, text, produced });
-        }
-    }
+/// How a lane's tokens become text, tool calls and committed events: the channel each run is
+/// on, the UTF-8 not yet whole and a tool call still open, kept once for what is committed and
+/// once for the text shown as it streams. The scheduler keeps one per lane; a generation a fleet
+/// node runs keeps one on the head.
+pub struct LaneOutput {
+    seg: Box<dyn Channelizer>,
+    utf8: Utf8Stream,
+    disp_seg: Box<dyn Channelizer>,
+    disp_utf8: Utf8Stream,
+    tool_buf: String,
+    disp_tokens: u32,
 }
 
-fn provisional_flush(bus: &SessionBus, lane: &mut Lane) {
-    let text = lane.disp_utf8.flush();
-    if text.is_empty() {
-        return;
+/// Where a lane's committed output goes.
+pub struct OutputSink<'a> {
+    pub codec: &'a Arc<dyn TextCodec + Send + Sync>,
+    pub store: &'a Arc<Mutex<SessionStore>>,
+    pub bus: &'a SessionBus,
+    pub tool_lease_ms: u64,
+}
+
+impl LaneOutput {
+    /// Output that starts on `open_channel` (0: the codec's first), after `produced_before`
+    /// tokens an earlier run of the job streamed.
+    pub fn new(codec: &Arc<dyn TextCodec + Send + Sync>, open_channel: u32, produced_before: u32) -> LaneOutput {
+        let mk = || {
+            let mut seg = codec.channelizer();
+            if open_channel != 0 {
+                seg.prime(open_channel);
+            }
+            seg
+        };
+        LaneOutput {
+            seg: mk(),
+            utf8: Utf8Stream::default(),
+            disp_seg: mk(),
+            disp_utf8: Utf8Stream::default(),
+            tool_buf: String::new(),
+            disp_tokens: produced_before,
+        }
     }
-    let channel = lane.disp_seg.current_channel();
-    if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
-        bus.publish_provisional(lane.session, channel, &text);
-        let produced = lane.disp_tokens;
-        let _ = lane.job.events.send(LaneEvent::Provisional { channel, text, produced });
+
+    /// Streams `tokens` as provisional text, before they are committed.
+    pub fn provisional(
+        &mut self,
+        codec: &Arc<dyn TextCodec + Send + Sync>,
+        bus: &SessionBus,
+        session: u64,
+        events: &Sender<LaneEvent>,
+        tokens: &[u32],
+    ) {
+        if tokens.is_empty() {
+            return;
+        }
+        self.disp_tokens += tokens.len() as u32;
+        let produced = self.disp_tokens;
+        for run in self.disp_seg.split(tokens) {
+            let mut text = String::new();
+            for &t in &run.text {
+                text.push_str(&self.disp_utf8.push(&codec.token_bytes(t)));
+            }
+            if text.is_empty() {
+                continue;
+            }
+            let channel = run.channel;
+            if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
+                bus.publish_provisional(session, channel, &text);
+                let _ = events.send(LaneEvent::Provisional { channel, text, produced });
+            }
+        }
+    }
+
+    pub fn provisional_flush(&mut self, bus: &SessionBus, session: u64, events: &Sender<LaneEvent>) {
+        let text = self.disp_utf8.flush();
+        if text.is_empty() {
+            return;
+        }
+        let channel = self.disp_seg.current_channel();
+        if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
+            bus.publish_provisional(session, channel, &text);
+            let produced = self.disp_tokens;
+            let _ = events.send(LaneEvent::Provisional { channel, text, produced });
+        }
+    }
+
+    /// Ends the output with `fin`: what is left of the provisional text and the UTF-8 is
+    /// flushed, and the ending committed on the channel it is on, and sent unless `quiet`.
+    pub fn close(
+        &mut self,
+        sink: &OutputSink<'_>,
+        session: u64,
+        events: &Sender<LaneEvent>,
+        fin: u32,
+        quiet: bool,
+    ) -> Result<(), DaemonError> {
+        self.provisional_flush(sink.bus, session, events);
+        let text = self.utf8.flush();
+        let e = sink.store.lock().expect("store").commit_generated(
+            session,
+            Vec::new(),
+            text,
+            self.seg.current_channel(),
+            fin,
+        )?;
+        if !quiet {
+            let _ = events.send(LaneEvent::Committed(e));
+        }
+        Ok(())
+    }
+
+    /// Commits `tokens`, split by channel, with a tool call parsed once its block closes;
+    /// `terminal` flushes everything left. `false` when the caller has gone, and nothing more
+    /// was sent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit(
+        &mut self,
+        sink: &OutputSink<'_>,
+        session: u64,
+        events: &Sender<LaneEvent>,
+        tokens: &[u32],
+        fin: u32,
+        terminal: bool,
+        schemas: Option<&crate::codec::ToolSchemas>,
+    ) -> Result<bool, DaemonError> {
+        if terminal {
+            self.provisional_flush(sink.bus, session, events);
+        }
+        let runs = self.seg.split(tokens);
+        let n_runs = runs.len().max(1);
+        for (i, run) in runs.into_iter().enumerate() {
+            let last = i + 1 == n_runs;
+            let mut text = String::new();
+            for &t in &run.text {
+                text.push_str(&self.utf8.push(&sink.codec.token_bytes(t)));
+            }
+            if last && terminal {
+                text.push_str(&self.utf8.flush());
+            }
+            let channel = run.channel;
+            let tool_closed = run.closes && channel == crate::wal::channel::TOOL_CALL;
+            if channel == crate::wal::channel::TOOL_CALL {
+                self.tool_buf.push_str(&text);
+            }
+            let e = sink.store.lock().expect("store").commit_generated(
+                session,
+                run.span,
+                text,
+                channel,
+                if last { fin } else { finish::NONE },
+            )?;
+            let tool_event = if tool_closed {
+                let raw = std::mem::take(&mut self.tool_buf);
+                Scheduler::commit_tool_block(sink.codec, sink.store, sink.tool_lease_ms, session, raw, schemas)?
+            } else {
+                None
+            };
+            if events.send(LaneEvent::Committed(e)).is_err() {
+                return Ok(false);
+            }
+            if let Some(te) = tool_event {
+                if events.send(LaneEvent::Committed(te)).is_err() {
+                    return Ok(false);
+                }
+            }
+        }
+        if terminal && !self.tool_buf.is_empty() {
+            let raw = std::mem::take(&mut self.tool_buf);
+            let te = Scheduler::commit_tool_block(sink.codec, sink.store, sink.tool_lease_ms, session, raw, schemas)?;
+            if let Some(te) = te {
+                let _ = events.send(LaneEvent::Committed(te));
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -310,13 +442,9 @@ struct Lane {
     produced: u32,
     fin: u32,
     warm_prefix: u64,
-    utf8: Utf8Stream,
-    seg: Box<dyn Channelizer>,
-    disp_seg: Box<dyn Channelizer>,
-    disp_utf8: Utf8Stream,
+    out: LaneOutput,
     frame_fed: usize,
     emit_dead: bool,
-    tool_buf: String,
     admitted: bool,
     seed_handle: u64,
     span: linkw::TokenRefMsg,
@@ -345,7 +473,6 @@ struct Lane {
     /// The open span: (end of its first tick, tokens by then, end of its
     /// latest tick, tokens by then).
     decode_ticks: Option<(std::time::Instant, u32, std::time::Instant, u32)>,
-    disp_tokens: u32,
     warm_prefix_first: Option<u64>,
     admitted_at: std::time::Instant,
     ttft_observed: bool,
@@ -2304,36 +2431,13 @@ impl Scheduler {
             }
             let spec_before = job.carry.as_ref().map(|c| c.spec_before).unwrap_or_default();
             let decode_before = job.carry.as_ref().map(|c| c.decode_before).unwrap_or_default();
-            let (seg, utf8, disp_seg, disp_utf8, tool_buf, produced_before, warm_prefix_first) =
-                match job.carry.take() {
-                    Some(c) => (
-                        c.seg,
-                        c.utf8,
-                        c.disp_seg,
-                        c.disp_utf8,
-                        c.tool_buf,
-                        c.produced_before,
-                        c.warm_prefix_first,
-                    ),
-                    None => {
-                        let mk = || {
-                            let mut seg = self.codec.channelizer();
-                            if job.extras.open_channel != 0 {
-                                seg.prime(job.extras.open_channel);
-                            }
-                            seg
-                        };
-                        (
-                            mk(),
-                            Utf8Stream::default(),
-                            mk(),
-                            Utf8Stream::default(),
-                            String::new(),
-                            0,
-                            None,
-                        )
-                    }
-                };
+            let (out, produced_before, warm_prefix_first) = match job.carry.take() {
+                Some(mut c) => {
+                    c.out.disp_tokens = c.produced_before;
+                    (c.out, c.produced_before, c.warm_prefix_first)
+                }
+                None => (LaneOutput::new(&self.codec, job.extras.open_channel, 0), 0, None),
+            };
             let all_tokens = job.stream.clone();
             self.lanes.push(Lane {
                 tag,
@@ -2344,13 +2448,9 @@ impl Scheduler {
                 produced: 0,
                 fin: finish::NONE,
                 warm_prefix,
-                utf8,
-                seg,
-                disp_seg,
-                disp_utf8,
+                out,
                 frame_fed: 0,
                 emit_dead: false,
-                tool_buf,
                 admitted: false,
                 seed_handle,
                 span,
@@ -2365,7 +2465,6 @@ impl Scheduler {
                 checkpointed: 0,
                 turn_kept: false,
                 produced_before,
-                disp_tokens: produced_before,
                 spec: spec_before,
                 decode: decode_before,
                 decode_ticks: None,
@@ -3124,18 +3223,10 @@ impl Scheduler {
             let session = self.lanes[i].session;
             let is_active = !matches!(self.lanes[i].phase, LanePhase::Finishing);
             if is_active && self.cancels.lock().expect("cancels").remove(&session) {
+                let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
                 let lane = &mut self.lanes[i];
                 lane.fin = finish::CANCELLED;
-                provisional_flush(&self.bus, lane);
-                let text = lane.utf8.flush();
-                let e = self.store.lock().expect("store").commit_generated(
-                    session,
-                    Vec::new(),
-                    text,
-                    lane.seg.current_channel(),
-                    finish::CANCELLED,
-                )?;
-                let _ = lane.job.events.send(LaneEvent::Committed(e));
+                lane.out.close(&sink, session, &lane.job.events, finish::CANCELLED, false)?;
                 if lane.admitted {
                     lane.phase = LanePhase::Finishing;
                 } else {
@@ -3160,18 +3251,10 @@ impl Scheduler {
             let completion = self.lanes[i].job.completion;
             let session = self.lanes[i].session;
             if !completion {
-                provisional_flush(&self.bus, &mut self.lanes[i]);
-                let text = self.lanes[i].utf8.flush();
-                let channel = self.lanes[i].seg.current_channel();
-                let e = self.store.lock().expect("store").commit_generated(
-                    session,
-                    Vec::new(),
-                    text,
-                    channel,
-                    finish::LENGTH,
-                )?;
-                let _ = self.lanes[i].job.events.send(LaneEvent::Committed(e));
-                self.lanes[i].fin = finish::LENGTH;
+                let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
+                let lane = &mut self.lanes[i];
+                lane.out.close(&sink, session, &lane.job.events, finish::LENGTH, false)?;
+                lane.fin = finish::LENGTH;
             } else {
                 let _ = self.lanes[i].job.events.send(LaneEvent::Expired);
             }
@@ -3624,7 +3707,7 @@ impl Scheduler {
                         lane.emit_dead = true;
                     }
                 } else {
-                    provisional_ingest(codec, bus, lane, &em.tokens);
+                    lane.out.provisional(codec, bus, lane.session, &lane.job.events, &em.tokens);
                 }
             };
             let retry = pins.any_held().then(|| plan.clone());
@@ -3822,16 +3905,8 @@ impl Scheduler {
                 }
                 lane.fault_code = Some(f.code);
                 lane.fin = finish::ERROR;
-                provisional_flush(&self.bus, lane);
-                let text = lane.utf8.flush();
-                let e = self.store.lock().expect("store").commit_generated(
-                    lane.session,
-                    Vec::new(),
-                    text,
-                    lane.seg.current_channel(),
-                    finish::ERROR,
-                )?;
-                let _ = lane.job.events.send(LaneEvent::Committed(e));
+                let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
+                lane.out.close(&sink, lane.session, &lane.job.events, finish::ERROR, false)?;
                 lane.phase = LanePhase::Finishing;
                 tracing::warn!(session = lane.session, lane = lane.tag, code = f.code, "engine lane fault");
             }
@@ -3895,6 +3970,7 @@ impl Scheduler {
             self.stats.work_ticks.fetch_add(1, Ordering::Relaxed);
         }
         let terminators = self.codec.turn_terminators();
+        let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
         for lane in &mut self.lanes {
             lane.admitted = true;
             let Some((tokens, fin)) = emitted.remove(&lane.tag) else {
@@ -3903,16 +3979,7 @@ impl Scheduler {
             if tokens.is_empty() {
                 lane.fin = fin;
                 if !lane.job.completion {
-                    provisional_flush(&self.bus, lane);
-                    let text = lane.utf8.flush();
-                    let e = self.store.lock().expect("store").commit_generated(
-                        lane.session,
-                        Vec::new(),
-                        text,
-                        lane.seg.current_channel(),
-                        fin,
-                    )?;
-                    let _ = lane.job.events.send(LaneEvent::Committed(e));
+                    lane.out.close(&sink, lane.session, &lane.job.events, fin, false)?;
                 }
                 lane.phase = LanePhase::Finishing;
                 continue;
@@ -3926,7 +3993,7 @@ impl Scheduler {
             });
             let frame_fed = std::mem::take(&mut lane.frame_fed).min(tokens.len());
             if !lane.job.completion {
-                provisional_ingest(&self.codec, &self.bus, lane, &tokens[frame_fed..]);
+                lane.out.provisional(sink.codec, sink.bus, lane.session, &lane.job.events, &tokens[frame_fed..]);
             }
             if lane.fin == finish::NONE
                 && !lane.job.extras.ignore_eos
@@ -3973,86 +4040,22 @@ impl Scheduler {
                 }
                 continue;
             }
-            if terminal_now {
-                provisional_flush(&self.bus, lane);
-            }
-            let runs = lane.seg.split(&tokens);
-            let n_runs = runs.len().max(1);
-            let mut dead = false;
-            for (i, run) in runs.into_iter().enumerate() {
-                let last = i + 1 == n_runs;
-                let mut text = String::new();
-                for &t in &run.text {
-                    text.push_str(&lane.utf8.push(&self.codec.token_bytes(t)));
-                }
-                if last && terminal_now {
-                    text.push_str(&lane.utf8.flush());
-                }
-                let channel = run.channel;
-                let tool_closed = run.closes && channel == crate::wal::channel::TOOL_CALL;
-                if channel == crate::wal::channel::TOOL_CALL {
-                    lane.tool_buf.push_str(&text);
-                }
-                let e = self.store.lock().expect("store").commit_generated(
-                    lane.session,
-                    run.span,
-                    text,
-                    channel,
-                    if last { fin } else { finish::NONE },
-                )?;
-                let tool_event = if tool_closed {
-                    let raw = std::mem::take(&mut lane.tool_buf);
-                    Self::commit_tool_block(
-                        &self.codec,
-                        &self.store,
-                        self.tool_lease_ms,
-                        lane.session,
-                        raw,
-                        lane.job.extras.tool_schemas.as_deref(),
-                    )?
-                } else {
-                    None
-                };
-                if lane.job.events.send(LaneEvent::Committed(e)).is_err() {
-                    dead = true;
-                    break;
-                }
-                if let Some(te) = tool_event {
-                    if lane.job.events.send(LaneEvent::Committed(te)).is_err() {
-                        dead = true;
-                        break;
-                    }
-                }
-            }
-            if dead {
+            let delivered = lane.out.commit(
+                &sink,
+                lane.session,
+                &lane.job.events,
+                &tokens,
+                fin,
+                terminal_now,
+                lane.job.extras.tool_schemas.as_deref(),
+            )?;
+            if !delivered {
                 lane.fin = finish::CANCELLED;
-                provisional_flush(&self.bus, lane);
-                let text = lane.utf8.flush();
-                let _ = self.store.lock().expect("store").commit_generated(
-                    lane.session,
-                    Vec::new(),
-                    text,
-                    lane.seg.current_channel(),
-                    finish::CANCELLED,
-                )?;
+                lane.out.close(&sink, lane.session, &lane.job.events, finish::CANCELLED, true)?;
                 lane.phase = LanePhase::Finishing;
                 continue;
             }
             if terminal_now {
-                if !lane.tool_buf.is_empty() {
-                    let raw = std::mem::take(&mut lane.tool_buf);
-                    let te = Self::commit_tool_block(
-                        &self.codec,
-                        &self.store,
-                        self.tool_lease_ms,
-                        lane.session,
-                        raw,
-                        lane.job.extras.tool_schemas.as_deref(),
-                    )?;
-                    if let Some(te) = te {
-                        let _ = lane.job.events.send(LaneEvent::Committed(te));
-                    }
-                }
                 lane.phase = LanePhase::Finishing;
             }
         }
@@ -4072,11 +4075,7 @@ impl Scheduler {
                     job.stream = lane.all_tokens;
                     job.max_tokens -= lane.produced;
                     job.carry = Some(LaneCarry {
-                        seg: lane.seg,
-                        utf8: lane.utf8,
-                        disp_seg: lane.disp_seg,
-                        disp_utf8: lane.disp_utf8,
-                        tool_buf: lane.tool_buf,
+                        out: lane.out,
                         produced_before: lane.produced_before + lane.produced,
                         spec_before: lane.spec,
                         decode_before,
