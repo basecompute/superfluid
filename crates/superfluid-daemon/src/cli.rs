@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::runtime_pick::RuntimeId;
+
 pub const DEFAULT_HTTP: &str = "127.0.0.1:8453";
 
 pub struct Flag {
@@ -396,6 +398,7 @@ Usage:
   superfluid runtime options <id> [--json]      The knobs it takes on `serve`, as --<id>-<name> <value>
 
   <id> is basert, llamacpp or mlx. Installs live under $SUPERFLUID_HOME/runtimes (~/.superfluid).
+  repair, remove and use also take an install as <id>@<install>, the way `superfluid runtimes` lists it.
 
 Install options:
   --version <V>          A runtime version (default: the newest this adapter was tested with)
@@ -409,7 +412,55 @@ Examples:
   superfluid runtime versions llamacpp
   superfluid runtime install llamacpp
   superfluid runtime install llamacpp --backend vulkan --dry-run
+  superfluid runtime remove llamacpp@b11284-vulkan
 ";
+
+/// The runtime a `superfluid runtime <action>` acts on, and the arguments after it. `superfluid runtimes`
+/// lists an install other than the default as `<id>@<install>`: remove, repair and use read that as
+/// `<id> <install>`, and the actions that take only an id say how to ask for what was meant.
+pub fn runtime_target(action: &str, name: &str, rest: &[String]) -> Result<(RuntimeId, Vec<String>), String> {
+    let takes_install = matches!(action, "remove" | "repair" | "use");
+    let Some(id) = RuntimeId::parse(name) else {
+        let or_install = if takes_install { ", or <id>@<install> as `superfluid runtimes` lists it" } else { "" };
+        return Err(format!("'{name}' is not a runtime id (lowercase letters, digits, '.', '-', '_'){or_install}"));
+    };
+    let Some(install) = id.install() else { return Ok((id, rest.to_vec())) };
+    let base = id.base();
+    if takes_install {
+        return match rest {
+            [] => Ok((base, vec![install.to_string()])),
+            [same] if same == install => Ok((base, rest.to_vec())),
+            [auto] if action == "use" && auto == "--auto" => Err(format!(
+                "'{name}' pins {install} and --auto unpins: `superfluid runtime use {base} --auto` goes back to the best-ranked"
+            )),
+            [other] => Err(format!("'{name}' names the install {install} and '{other}' names another: give one")),
+            // More than an install follows: the action's own usage refuses it.
+            _ => Ok((base, rest.to_vec())),
+        };
+    }
+    let how = match action {
+        "install" => match version_and_backend(install) {
+            Some((v, b)) => format!("; `superfluid runtime install {base} --version {v} --backend {b}` installs {install}"),
+            None => "; --version and --backend pick the build".to_string(),
+        },
+        "update" => format!("; it updates the default install: `superfluid runtime update {base}`"),
+        "versions" | "options" => format!(": `superfluid runtime {action} {base}`"),
+        _ => return Ok((id, rest.to_vec())),
+    };
+    Err(format!("{action} takes a runtime id, not an install ('{name}'){how}"))
+}
+
+/// An install name, `<version>-<backend>`, split where a backend the installers rank begins:
+/// `b11284-cuda-13.4` is version `b11284` on `cuda-13.4`. None for a build of one's own.
+fn version_and_backend(install: &str) -> Option<(&str, &str)> {
+    use superfluid_adapter_kit::install::backend_rank;
+    let unranked = backend_rank("");
+    install
+        .match_indices('-')
+        .map(|(at, _)| (&install[..at], &install[at + 1..]))
+        .find(|(_, backend)| backend_rank(backend) != unranked)
+        .filter(|(version, _)| *version != "custom")
+}
 
 pub const SESSION_HELP: &str = "Inspect or export a session of a running server.
 
@@ -562,6 +613,68 @@ mod tests {
         assert_eq!(runtime_for_id("someone/Qwen3-4B-MLX-8bit:main"), "mlx");
         assert_eq!(runtime_for_id("basecompute/Qwen3-1.7B"), "basert");
         assert_eq!(runtime_for_id("Qwen/Qwen3-0.6B"), "basert");
+    }
+
+    #[test]
+    fn an_install_is_named_after_the_id_or_with_an_at_the_way_runtimes_lists_it() {
+        let target = |action: &str, name: &str, rest: &[&str]| {
+            runtime_target(action, name, &strings(rest)).map(|(id, rest)| (id.to_string(), rest))
+        };
+        let basert = |rest: &[&str]| Ok(("basert".to_string(), strings(rest)));
+        for action in ["remove", "repair", "use"] {
+            assert_eq!(target(action, "basert@0.3.0-metal", &[]), basert(&["0.3.0-metal"]), "{action}");
+            assert_eq!(target(action, "basert", &["0.3.0-metal"]), basert(&["0.3.0-metal"]), "{action}");
+            assert_eq!(target(action, "basert@0.3.0-metal", &["0.3.0-metal"]), basert(&["0.3.0-metal"]), "both forms agree");
+            assert_eq!(
+                target(action, "basert@0.3.0-metal", &["0.4.2-metal"]),
+                Err("'basert@0.3.0-metal' names the install 0.3.0-metal and '0.4.2-metal' names another: give one".into()),
+                "{action}"
+            );
+        }
+        assert_eq!(target("remove", "basert", &[]), basert(&[]), "the bare id still names every install");
+        assert_eq!(target("use", "basert", &["--auto"]), basert(&["--auto"]));
+        assert_eq!(
+            target("use", "basert@0.4.2-metal", &["--auto"]),
+            Err("'basert@0.4.2-metal' pins 0.4.2-metal and --auto unpins: `superfluid runtime use basert --auto` goes back to the best-ranked".into())
+        );
+        assert_eq!(target("remove", "basert@a", &["a", "b"]), basert(&["a", "b"]), "left to the action's usage");
+    }
+
+    #[test]
+    fn an_action_that_takes_only_an_id_says_how_to_ask_for_the_install() {
+        let refused = |action: &str, name: &str| runtime_target(action, name, &[]).unwrap_err();
+        assert_eq!(
+            refused("install", "basert@0.3.0-metal"),
+            "install takes a runtime id, not an install ('basert@0.3.0-metal'); \
+             `superfluid runtime install basert --version 0.3.0 --backend metal` installs 0.3.0-metal"
+        );
+        assert!(refused("install", "llamacpp@b11284-cuda-13.4").ends_with("--version b11284 --backend cuda-13.4` installs b11284-cuda-13.4"));
+        assert!(refused("install", "basert@0.5.0-rc1-rocm").contains("--version 0.5.0-rc1 --backend rocm`"));
+        assert!(refused("install", "llamacpp@custom-metal").ends_with("; --version and --backend pick the build"));
+        assert_eq!(
+            refused("update", "basert@0.3.0-metal"),
+            "update takes a runtime id, not an install ('basert@0.3.0-metal'); it updates the default install: `superfluid runtime update basert`"
+        );
+        for action in ["versions", "options"] {
+            assert_eq!(
+                refused(action, "mlx@0.29.1-metal"),
+                format!("{action} takes a runtime id, not an install ('mlx@0.29.1-metal'): `superfluid runtime {action} mlx`")
+            );
+        }
+        assert_eq!(runtime_target("frob", "basert@a", &[]).unwrap().0.to_string(), "basert@a", "an unknown action gets its usage");
+    }
+
+    #[test]
+    fn a_name_that_is_no_runtime_id_is_refused_with_the_forms_it_takes() {
+        let not_an_id = "'Basert' is not a runtime id (lowercase letters, digits, '.', '-', '_')";
+        assert_eq!(runtime_target("install", "Basert", &[]).unwrap_err(), not_an_id);
+        assert_eq!(
+            runtime_target("remove", "Basert", &[]).unwrap_err(),
+            format!("{not_an_id}, or <id>@<install> as `superfluid runtimes` lists it")
+        );
+        for empty in ["basert@", "@0.3.0-metal", "basert@.hidden"] {
+            assert!(runtime_target("remove", empty, &[]).is_err(), "{empty}");
+        }
     }
 
     #[test]

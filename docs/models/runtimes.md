@@ -24,6 +24,7 @@ superfluid runtime use llamacpp b11284-vulkan    # pin the default install
 superfluid runtime use llamacpp --auto           # unpin
 superfluid runtime repair llamacpp
 superfluid runtime remove llamacpp b11284-vulkan
+superfluid runtime remove llamacpp@b11284-vulkan # the same, as `superfluid runtimes` lists the install
 ```
 
 | command | what it does |
@@ -34,6 +35,8 @@ superfluid runtime remove llamacpp b11284-vulkan
 | `repair <id> [<install>]` | reinstall the same version and backend; what a daemon updated with `superfluid self update` asks for when an install's worker is too old |
 | `remove <id> [<install>]` | remove one install, or all of them |
 | `use <id> <install>` / `--auto` | pin the default install / return to ranking |
+
+`repair`, `remove` and `use` take the install as `<id>@<install>` too, as the RUNTIME column of `superfluid runtimes` shows one that is not the default.
 
 `serve` installs a runtime on first use; `--offline` prevents it. A runtime's worker starts without credential-named variables (`*_TOKEN`, `*_API_KEY`, `*PASSWORD`, `*SECRET`, ...) in its environment; a pull keeps them, since it fetches with your Hugging Face token.
 

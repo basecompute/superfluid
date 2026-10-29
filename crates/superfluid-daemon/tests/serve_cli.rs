@@ -53,3 +53,18 @@ fn help_and_version_answer_on_stdout() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--port expects a number, got \"nope\""));
 }
+
+#[test]
+fn an_install_as_runtimes_lists_it_reaches_the_runtime_actions() {
+    let home = std::env::temp_dir().join(format!("superfluid-serve-cli-at-{}", std::process::id()));
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_superfluid")).arg("runtime").args(args).env("SUPERFLUID_HOME", &home).output().expect("run superfluid")
+    };
+    let out = run(&["remove", "basert@0.3.0-metal"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "superfluid: basert has no install 0.3.0-metal (installed: none)\n");
+    let out = run(&["install", "basert@0.3.0-metal"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("install basert --version 0.3.0 --backend metal`"));
+    assert!(!home.exists(), "nothing was written");
+}

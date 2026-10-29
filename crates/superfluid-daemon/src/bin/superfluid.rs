@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 
 use superfluid_daemon::api;
-use superfluid_daemon::runtime_pick::RuntimeId;
 use superfluid_daemon::serve::SUN_PATH_LEN;
 
 fn unknown_command(c: &str) -> ! {
@@ -71,12 +70,12 @@ fn runtime_cmd(args: &[String]) {
         std::process::exit(1);
     }
     let (Some(sub), Some(name)) = (args.first(), args.get(1)) else { usage() };
-    let Some(id) = RuntimeId::parse(name).filter(|i| i.install().is_none()) else {
-        eprintln!("superfluid: '{name}' is not a runtime id (lowercase letters, digits, '.', '-', '_')");
-        std::process::exit(2);
-    };
     let rest = superfluid_daemon::cli::split_equals(&args[2..], |f| {
         Some(matches!(f, "--version" | "--backend" | "--from" | "--sha256"))
+    });
+    let (id, rest) = superfluid_daemon::cli::runtime_target(sub, name, &rest).unwrap_or_else(|e| {
+        eprintln!("superfluid: {e}");
+        std::process::exit(2);
     });
     let rest = rest.as_slice();
     let catalog = superfluid_daemon::runtimes::Catalog::from_env();
