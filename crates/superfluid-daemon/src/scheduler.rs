@@ -209,6 +209,8 @@ pub enum LaneEvent {
         decode: (u64, f64),
     },
     Failed(String),
+    /// The request asked what this daemon cannot do, said as it says a request it refuses.
+    Refused(crate::Refusal),
 }
 
 /// How a lane's tokens become text, tool calls and committed events: the channel each run is
@@ -408,6 +410,11 @@ pub struct SchedulerHandle {
 }
 
 impl SchedulerHandle {
+    /// The handle of a thread that answers `tx` as the scheduler does.
+    pub(crate) fn new(tx: Sender<SchedCmd>, join: std::thread::JoinHandle<()>) -> SchedulerHandle {
+        SchedulerHandle { tx, join: std::sync::Mutex::new(Some(join)) }
+    }
+
     pub fn signal_shutdown(&self) {
         let _ = self.tx.send(SchedCmd::Shutdown);
     }
@@ -4201,6 +4208,7 @@ pub fn run_completion_streaming(
             Ok(LaneEvent::Committed(_)) => {}
             Ok(LaneEvent::TokenLogprobs(_)) => {}
             Ok(LaneEvent::Failed(msg)) => return Err(DaemonError::Generation(msg)),
+            Ok(LaneEvent::Refused(r)) => return Err(DaemonError::Unsupported(r)),
             Err(_) => return Err(DaemonError::Protocol("scheduler dropped the lane")),
         }
     }
@@ -4292,6 +4300,9 @@ pub fn run_job(
             }
             Ok(LaneEvent::Failed(msg)) => {
                 return Err(delivery_err.unwrap_or(DaemonError::Generation(msg)));
+            }
+            Ok(LaneEvent::Refused(r)) => {
+                return Err(delivery_err.unwrap_or(DaemonError::Unsupported(r)));
             }
             Ok(LaneEvent::CompletionTokens(_)) | Ok(LaneEvent::Expired) => {
                 return Err(DaemonError::Protocol("completion event on a generate lane"));

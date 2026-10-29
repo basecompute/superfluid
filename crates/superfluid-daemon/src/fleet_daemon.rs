@@ -1,0 +1,240 @@
+//! A daemon whose generations run on fleet nodes. The head keeps every handler, the codec, the
+//! session store and what a lane's tokens become; a node runs each generation's decode loop, so
+//! no step waits on the network.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
+
+use superfluid_abi::finish;
+
+use crate::fleet_manager::FleetManager;
+use crate::scheduler::{GenerateJob, LaneEvent, LaneOutput, OutputSink, SchedCmd, SchedStats, SchedulerHandle};
+use crate::bus::SessionBus;
+use crate::{CancelSet, DaemonError, Refusal, SessionStore, TextCodec};
+
+/// The longest a generation runs on a node when the request set no deadline.
+pub const MAX_WALL_MS: u64 = 600_000;
+
+/// Sessions on the fleet are numbered across every model's daemon on the head, which share
+/// one fleet manager.
+static NEXT_FLEET_SESSION: AtomicU64 = AtomicU64::new(1);
+
+/// What a fleet-backed daemon's generations need from it.
+pub(crate) struct Dispatch {
+    pub fleet: Arc<FleetManager>,
+    pub model: String,
+    pub store: Arc<Mutex<SessionStore>>,
+    pub codec: Arc<dyn TextCodec + Send + Sync>,
+    pub cancels: Arc<CancelSet>,
+    pub active: Arc<Mutex<std::collections::HashSet<u64>>>,
+    pub stats: Arc<SchedStats>,
+    pub tool_lease_ms: u64,
+}
+
+/// Answers the scheduler's commands for a daemon with no engine of its own: a generation is
+/// placed on a node, and its tokens come back through the same lane output a local one has.
+pub(crate) fn spawn(dispatch: Dispatch) -> SchedulerHandle {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let join = std::thread::Builder::new()
+        .name("superfluid-fleet-dispatch".into())
+        .spawn(move || serve(Arc::new(dispatch), rx))
+        .expect("spawn the fleet dispatcher");
+    SchedulerHandle::new(tx, join)
+}
+
+fn serve(d: Arc<Dispatch>, rx: Receiver<SchedCmd>) {
+    let bus = d.store.lock().expect("store").bus();
+    while let Ok(cmd) = rx.recv() {
+        match cmd {
+            SchedCmd::Submit(job) => {
+                let (d, bus) = (Arc::clone(&d), Arc::clone(&bus));
+                let spawned = std::thread::Builder::new()
+                    .name("superfluid-fleet-job".into())
+                    .spawn(move || run(&d, &bus, *job));
+                if let Err(e) = spawned {
+                    tracing::warn!("fleet: cannot start a generation: {e}");
+                }
+            }
+            SchedCmd::Sync(_, reply) => {
+                let _ = reply.send(Err(NOT_YET.to_string()));
+            }
+            SchedCmd::SyncAs(_, inner) => match *inner {
+                SchedCmd::Sync(_, reply) => {
+                    let _ = reply.send(Err(NOT_YET.to_string()));
+                }
+                SchedCmd::SyncStream(_, _, reply) => {
+                    let _ = reply.send(Err(NOT_YET.to_string()));
+                }
+                _ => {}
+            },
+            SchedCmd::SyncStream(_, _, reply) => {
+                let _ = reply.send(Err(NOT_YET.to_string()));
+            }
+            SchedCmd::PinHeld(_, reply) => {
+                let _ = reply.send(0);
+            }
+            SchedCmd::Pin(_) | SchedCmd::PinUnanchor(_) => {}
+            SchedCmd::Shutdown => break,
+        }
+    }
+}
+
+const NOT_YET: &str = "this operation does not reach fleet nodes yet";
+
+/// What a job asks that a node cannot do for it yet, as a refusal.
+fn unsupported(job: &GenerateJob) -> Option<Refusal> {
+    let x = &job.extras;
+    let what = if x.grammar_handle != 0 {
+        Some(("response_format", "structured output"))
+    } else if x.logit_bias_handle != 0 {
+        Some(("logit_bias", "logit bias"))
+    } else if x.want_logprobs {
+        Some(("logprobs", "logprobs"))
+    } else if x.presence_penalty != 0.0 || x.frequency_penalty != 0.0 {
+        Some(("presence_penalty", "presence and frequency penalties"))
+    } else if x.repeat_penalty != 0.0 && x.repeat_penalty != 1.0 {
+        Some(("repeat_penalty", "a repeat penalty"))
+    } else if x.ignore_eos {
+        Some(("ignore_eos", "ignore_eos"))
+    } else if !job.media.is_empty() {
+        Some(("messages", "image and audio parts"))
+    } else {
+        None
+    };
+    what.map(|(param, what)| Refusal::new("unsupported_on_fleet", Some(param), format!("{what} does not reach fleet nodes yet")))
+}
+
+fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
+    let session = job.session;
+    let events = job.events.clone();
+    let outcome = match unsupported(&job) {
+        Some(refusal) => Err(Ended::Refused(refusal)),
+        None => generate(d, bus, &job),
+    };
+    d.active.lock().expect("active set").remove(&session);
+    let _ = events.send(match outcome {
+        Ok(done) => done,
+        Err(Ended::Refused(r)) => LaneEvent::Refused(r),
+        Err(Ended::Failed(e)) => LaneEvent::Failed(e.to_string()),
+    });
+}
+
+enum Ended {
+    Refused(Refusal),
+    Failed(DaemonError),
+}
+
+impl From<DaemonError> for Ended {
+    fn from(e: DaemonError) -> Ended {
+        Ended::Failed(e)
+    }
+}
+
+/// Places the job on a node, streams its tokens through a lane output, and ends the lane as
+/// the scheduler would.
+fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, Ended> {
+    let fs = NEXT_FLEET_SESSION.fetch_add(1, Ordering::Relaxed);
+    d.fleet.place(fs, job.params, job.class, "raw", &d.model, &job.stream, job.max_tokens as u64)?;
+    // Removes the session from the fleet however this ends.
+    struct Placed<'a>(&'a FleetManager, u64);
+    impl Drop for Placed<'_> {
+        fn drop(&mut self) {
+            self.0.finish(self.1);
+        }
+    }
+    let _placed = Placed(&d.fleet, fs);
+
+    let max_wall_ms = match job.deadline {
+        Some(at) => at.saturating_duration_since(std::time::Instant::now()).as_millis().max(1) as u64,
+        None => MAX_WALL_MS,
+    };
+    let sink = OutputSink { codec: &d.codec, store: &d.store, bus, tool_lease_ms: d.tool_lease_ms };
+    let mut out = LaneOutput::new(&d.codec, job.extras.open_channel, 0);
+    let terminators = d.codec.turn_terminators();
+    let (mut produced, mut fin) = (0u32, finish::NONE);
+    let mut failure: Option<DaemonError> = None;
+    let mut gone = false;
+    // Timed as a local lane is, batch to batch: (when the first came, tokens by then, when the
+    // latest came, tokens by then). The first batch also waited out the prefill.
+    let mut batches: Option<(std::time::Instant, u32, std::time::Instant, u32)> = None;
+
+    // A cancel lands in the daemon's cancel set; the node is told while the generation runs.
+    let stop = AtomicBool::new(false);
+    let generated = std::thread::scope(|scope| {
+        let (stop, cancels, fleet, session) = (&stop, &d.cancels, &d.fleet, job.session);
+        scope.spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if cancels.lock().expect("cancels").remove(&session) {
+                    let _ = fleet.cancel(fs);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        let r = d.fleet.generate_streaming(fs, job.max_tokens as u64, max_wall_ms, |batch| {
+            if gone || fin != finish::NONE || failure.is_some() {
+                return;
+            }
+            // The turn ends at a terminator, as it does on a local lane; what a node sent past
+            // one is not the model's answer.
+            let end = match (job.extras.ignore_eos, batch.iter().position(|t| terminators.contains(t))) {
+                (false, Some(i)) => {
+                    fin = finish::EOS;
+                    let _ = d.fleet.cancel(fs);
+                    i + 1
+                }
+                _ => batch.len(),
+            };
+            let tokens = &batch[..end];
+            produced += tokens.len() as u32;
+            let now = std::time::Instant::now();
+            batches = Some(match batches {
+                None => (now, produced, now, produced),
+                Some((at, by, _, _)) => (at, by, now, produced),
+            });
+            d.stats.decode_tokens.fetch_add(tokens.len() as u64, Ordering::Relaxed);
+            if job.completion {
+                gone = job.events.send(LaneEvent::CompletionTokens(tokens.to_vec())).is_err();
+                return;
+            }
+            out.provisional(sink.codec, sink.bus, job.session, &job.events, tokens);
+            match out.commit(&sink, job.session, &job.events, tokens, finish::NONE, false, job.extras.tool_schemas.as_deref()) {
+                Ok(true) => {}
+                Ok(false) => gone = true,
+                Err(e) => failure = Some(e),
+            }
+        });
+        stop.store(true, Ordering::Relaxed);
+        r
+    });
+    if let Some(e) = failure {
+        return Err(e.into());
+    }
+    if gone {
+        let _ = d.fleet.cancel(fs);
+        if !job.completion {
+            out.close(&sink, job.session, &job.events, finish::CANCELLED, true)?;
+        }
+        return Ok(done(produced, finish::CANCELLED, batches));
+    }
+    let g = generated?;
+    if g.expired {
+        if job.completion {
+            return Ok(LaneEvent::Expired);
+        }
+        fin = finish::LENGTH;
+    } else if fin == finish::NONE {
+        fin = g.finish;
+    }
+    if !job.completion {
+        out.commit(&sink, job.session, &job.events, &[], finish::NONE, true, job.extras.tool_schemas.as_deref())?;
+        out.close(&sink, job.session, &job.events, fin, false)?;
+    }
+    Ok(done(produced, fin, batches))
+}
+
+fn done(tokens_generated: u32, finish: u32, batches: Option<(std::time::Instant, u32, std::time::Instant, u32)>) -> LaneEvent {
+    let decode = batches.map_or((0, 0.0), |(at, by, last, n)| ((n - by) as u64, (last - at).as_secs_f64()));
+    LaneEvent::Done { tokens_generated, finish, warm_prefix: 0, spec: (0, 0), decode }
+}

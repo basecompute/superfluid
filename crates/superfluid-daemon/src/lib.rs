@@ -23,6 +23,7 @@ pub mod template_codec;
 pub mod tool_fragment;
 pub mod fleet;
 pub mod fleet_manager;
+pub(crate) mod fleet_daemon;
 pub mod fleet_join;
 pub mod fleet_mdns;
 pub mod fleet_token;
@@ -430,6 +431,34 @@ struct Ground<'a> {
 }
 
 impl Serving {
+    fn over_fleet(
+        codec: std::sync::Arc<dyn TextCodec + Send + Sync>,
+        ground: Ground<'_>,
+        fleet: std::sync::Arc<fleet_manager::FleetManager>,
+        model: String,
+        opts: DaemonOptions,
+    ) -> Serving {
+        let sched = fleet_daemon::spawn(fleet_daemon::Dispatch {
+            fleet,
+            model,
+            store: std::sync::Arc::clone(ground.store),
+            codec: std::sync::Arc::clone(&codec),
+            cancels: std::sync::Arc::clone(ground.cancels),
+            active: std::sync::Arc::clone(ground.active),
+            stats: std::sync::Arc::clone(ground.stats),
+            tool_lease_ms: opts.tool_lease_ms,
+        });
+        Serving {
+            capabilities: std::sync::Arc::new(std::sync::RwLock::new(capabilities::Capabilities::default())),
+            retired: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_sampling: std::sync::OnceLock::new(),
+            codec,
+            sched,
+            speculation: std::sync::Arc::new(scheduler::Speculation::default()),
+            staged_tokens: 0,
+        }
+    }
+
     fn start(
         host: EngineHost,
         codec: std::sync::Arc<dyn TextCodec + Send + Sync>,
@@ -813,6 +842,26 @@ impl Daemon {
         codec: Box<dyn TextCodec + Send + Sync>,
         opts: DaemonOptions,
     ) -> Result<Daemon, DaemonError> {
+        Self::assemble(store, opts, |ground, opts| Serving::start(host, std::sync::Arc::from(codec), ground, opts))
+    }
+
+    /// A daemon with no engine of its own: every generation runs on a node of `fleet` that
+    /// serves `model`, and the head keeps the handlers, the codec and the sessions.
+    pub fn over_fleet(
+        store: SessionStore,
+        codec: Box<dyn TextCodec + Send + Sync>,
+        fleet: std::sync::Arc<fleet_manager::FleetManager>,
+        model: String,
+        opts: DaemonOptions,
+    ) -> Result<Daemon, DaemonError> {
+        Self::assemble(store, opts, |ground, opts| Ok(Serving::over_fleet(std::sync::Arc::from(codec), ground, fleet, model, opts)))
+    }
+
+    fn assemble(
+        store: SessionStore,
+        opts: DaemonOptions,
+        start: impl FnOnce(Ground<'_>, DaemonOptions) -> Result<Serving, DaemonError>,
+    ) -> Result<Daemon, DaemonError> {
         if opts.pressure_high_pct == 0 || opts.pressure_high_pct > 100 {
             return Err(DaemonError::Config(
                 "pressure_high_pct must be in 1..=100",
@@ -876,9 +925,7 @@ impl Daemon {
                 })
         });
         let trace_scope = opts.trace_scope.clone();
-        let serving = Serving::start(
-            host,
-            std::sync::Arc::from(codec),
+        let serving = start(
             Ground {
                 store: &store,
                 cancels: &cancels,
