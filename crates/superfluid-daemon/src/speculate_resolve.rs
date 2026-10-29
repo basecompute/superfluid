@@ -202,6 +202,14 @@ pub fn read_base_header(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_slice(&json).ok()
 }
 
+/// The `kind`s the bare `mtp-head` directive serves: the checkpoint's own
+/// one-layer head (`mtp`: Qwen3.5/3.6/3.8, GLM nextn), or Gemma 4's separate
+/// head embedded whole by `basert add-speculator` (`gemma4-mtp`), which the
+/// engine builds as it builds the sidecar, drafting over the target's KV.
+pub fn is_mtp_head_kind(kind: Option<&str>) -> bool {
+    matches!(kind, Some("mtp" | "gemma4-mtp"))
+}
+
 pub fn header_speculator_kind(h: &serde_json::Value) -> Option<&str> {
     if let Some(k) = h
         .get("speculator")
@@ -246,7 +254,7 @@ pub fn resolve(directive: &str, target: &Path) -> Result<Option<String>, String>
     if d == "mtp-head" {
         if let Some(h) = read_base_header(target) {
             let kind = header_speculator_kind(&h);
-            if kind != Some("mtp") {
+            if !is_mtp_head_kind(kind) {
                 let built = h
                     .get("baserT_version")
                     .and_then(|v| v.as_str())
@@ -255,8 +263,9 @@ pub fn resolve(directive: &str, target: &Path) -> Result<Option<String>, String>
                 return Err(match kind {
                     None => format!(
                         "--speculate mtp-head: {} carries no speculator head{built}; reconvert it with \
-                         base-convert >= 0.2.5 from a checkpoint that ships an MTP head, or use \
-                         --speculate auto to pair an installed drafter",
+                         base-convert >= 0.2.5 from a checkpoint that ships an MTP head, embed Google's \
+                         Gemma 4 head with `basert add-speculator`, or use --speculate auto to pair an \
+                         installed drafter",
                         target.display()
                     ),
                     Some(k) => format!(
@@ -306,7 +315,7 @@ pub fn resolve_all(directive: &str, target: &Path) -> Result<Vec<String>, String
         .ok_or_else(|| format!("--speculate auto: cannot read the bundle header of {}", target.display()))?;
     let head = header_speculator_kind(&h);
     let mut ranked = Vec::new();
-    if head == Some("mtp") {
+    if is_mtp_head_kind(head) {
         ranked.push("mtp-head".to_string());
     }
     let pairings = Pairings::load(hub_roots().first().map(PathBuf::as_path));
@@ -704,6 +713,15 @@ mod tests {
         let m = bundle(&dir, "m.base", serde_json::json!({"arch": "qwen35", "speculator": {"config": {"kind": "mtp"}}}));
         assert_eq!(resolve("auto", &m).unwrap().as_deref(), Some("mtp-head"));
         assert_eq!(resolve("mtp-head", &m).unwrap().as_deref(), Some("mtp-head"));
+        // Gemma 4's separate head embedded whole (basert add-speculator):
+        // an MTP head to both directives, under its own kind.
+        let g = bundle(
+            &dir,
+            "g.base",
+            serde_json::json!({"arch": "gemma4", "speculator": {"arch": "gemma4-mtp", "config": {"kind": "gemma4-mtp"}}}),
+        );
+        assert_eq!(resolve("auto", &g).unwrap().as_deref(), Some("mtp-head"));
+        assert_eq!(resolve("mtp-head", &g).unwrap().as_deref(), Some("mtp-head"));
         let old = bundle(&dir, "old-mtp.base", serde_json::json!({"arch": "qwen35", "baserT_version": "0.2.3"}));
         let err = resolve("mtp-head", &old).unwrap_err();
         assert!(err.contains("carries no speculator head") && err.contains("baseRT 0.2.3"), "{err}");
