@@ -57,6 +57,11 @@ fn fail(msg: impl std::fmt::Display) -> ! {
 }
 
 fn join(args: &[String]) {
+    // The node-agent's warnings (a fenced session, a silent head) go to stderr, as noded's do.
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string());
+    if let Err(e) = crate::telemetry::init_stderr(&filter) {
+        eprintln!("superfluid: logging: {e}");
+    }
     let (mut head, mut model, mut token, mut runtime, mut identity, mut model_name) = (None, None, None, None, None, None);
     let (mut max_context, mut max_batch, mut offline) = (None, 8u32, false);
     let mut it = args.iter();
@@ -115,7 +120,7 @@ fn join(args: &[String]) {
     let links: Vec<_> = (0..max_batch)
         .map(|lane| {
             let (target, token, node) = (Arc::clone(&target), token.clone(), node.connection());
-            std::thread::spawn(move || keep_dialing(&target, &token, node, lane == 0))
+            std::thread::spawn(move || keep_dialing(&target, &token, node, lane))
         })
         .collect();
     for link in links {
@@ -181,9 +186,9 @@ fn discover() -> (Vec<SocketAddr>, String) {
 
 /// Dials the head and serves until the link ends, then dials again; the first lane speaks
 /// for the node in the log.
-fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, first: bool) {
+fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, lane: u32) {
     let say = |msg: String| {
-        if first {
+        if lane == 0 {
             eprintln!("superfluid: {msg}");
         }
     };
@@ -195,9 +200,15 @@ fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, first: bool)
                 say(format!("joined the head at {target}"));
                 backoff = Duration::from_secs(2);
                 match conn.serve(ep) {
-                    Ok(()) => say("the head closed the link".into()),
+                    Ok(()) => {
+                        tracing::debug!(lane, "the link to the head closed");
+                        say("the head closed the link".into())
+                    }
                     Err(crate::DaemonError::Fleet(LinkFError::Unauthorized)) => fail(REFUSED),
-                    Err(e) => say(format!("the link to the head ended: {e}")),
+                    Err(e) => {
+                        tracing::debug!(lane, error = %e, "the link to the head ended");
+                        say(format!("the link to the head ended: {e}"))
+                    }
                 }
             }
             Err(LinkFError::Unauthorized) => fail(REFUSED),

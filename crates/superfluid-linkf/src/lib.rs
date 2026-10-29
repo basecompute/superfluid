@@ -7,7 +7,7 @@ pub mod secure;
 pub mod wal;
 
 pub use agent::{AgentAction, AgentSession};
-pub use driver::Endpoint;
+pub use driver::{Endpoint, Liveness};
 pub use secure::{key_from, Role, SecureStream};
 pub use head::HeadSession;
 pub use wal::WalStub;

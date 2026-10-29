@@ -13,7 +13,24 @@ use superfluid_proto::{encode_frame, Frame, FrameDecoder};
 use crate::secure::{key_from, Role, SecureStream};
 use crate::LinkFError;
 
-pub const PROTO_VERSION: u16 = 2;
+pub const PROTO_VERSION: u16 = 3;
+
+/// The oldest version this end still speaks: 2 has no heartbeat, so a peer on it is never given
+/// up for silence.
+pub const OLDEST_VERSION: u16 = 2;
+
+/// How an end tells a quiet peer from a gone one: it sends a keepalive when it has sent nothing
+/// for `heartbeat`, and gives the link up when it has heard nothing for `silence` (never, when
+/// zero). Both are kept by `pump`, so any loop that reads the link keeps it alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Liveness {
+    pub heartbeat: Duration,
+    pub silence: Duration,
+}
+
+impl Liveness {
+    pub const DEFAULT: Liveness = Liveness { heartbeat: Duration::from_secs(5), silence: Duration::from_secs(30) };
+}
 
 enum Transport {
     Unix(UnixStream),
@@ -66,10 +83,17 @@ impl Write for Transport {
     }
 }
 
+const POLL: Duration = Duration::from_millis(20);
+
 pub struct Endpoint {
     stream: Transport,
     decoder: FrameDecoder<fn(u16) -> bool>,
     seq: u64,
+    /// The version the handshake settled on; 0 before it.
+    version: u16,
+    liveness: Option<Liveness>,
+    last_sent: Instant,
+    last_heard: Instant,
 }
 
 impl Endpoint {
@@ -129,12 +153,39 @@ impl Endpoint {
     }
 
     fn wrap(stream: Transport) -> Result<Endpoint, LinkFError> {
-        stream.set_read_timeout(Some(Duration::from_millis(20)))?;
+        stream.set_read_timeout(Some(POLL))?;
+        let now = Instant::now();
         Ok(Endpoint {
             stream,
             decoder: FrameDecoder::new(linkf::is_known_type as fn(u16) -> bool),
             seq: 1,
+            version: 0,
+            liveness: None,
+            last_sent: now,
+            last_heard: now,
         })
+    }
+
+    /// Keeps the link alive from here on, as `liveness` says.
+    pub fn keep_alive(&mut self, liveness: Liveness) {
+        self.liveness = Some(liveness);
+        self.last_heard = Instant::now();
+    }
+
+    /// How long one `pump` waits for bytes (20 ms unless set).
+    pub fn poll_every(&self, every: Duration) -> Result<(), LinkFError> {
+        self.stream.set_read_timeout(Some(every.max(Duration::from_millis(1))))?;
+        Ok(())
+    }
+
+    /// The version the handshake settled on.
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    /// How long since the peer last sent anything.
+    pub fn quiet_for(&self) -> Duration {
+        self.last_heard.elapsed()
     }
 
     pub fn send<T: serde::Serialize>(&mut self, msg_type: u16, msg: &T) -> Result<(), LinkFError> {
@@ -147,6 +198,7 @@ impl Endpoint {
         let bytes = encode_frame(PROTO_VERSION, msg_type, self.seq, 0, class, &payload)?;
         self.seq += 1;
         self.stream.write_all(&bytes)?;
+        self.last_sent = Instant::now();
         Ok(())
     }
 
@@ -155,7 +207,10 @@ impl Endpoint {
         let mut buf = [0u8; 64 * 1024];
         match self.stream.read(&mut buf) {
             Ok(0) => return Err(LinkFError::Closed),
-            Ok(n) => self.decoder.feed(&buf[..n]),
+            Ok(n) => {
+                self.decoder.feed(&buf[..n]);
+                self.last_heard = Instant::now();
+            }
             Err(e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
@@ -163,6 +218,14 @@ impl Endpoint {
         }
         while let Some(frame) = self.decoder.decode_next()? {
             out.push(frame);
+        }
+        if let Some(l) = self.liveness {
+            if self.version >= 3 && !l.silence.is_zero() && self.last_heard.elapsed() >= l.silence {
+                return Err(LinkFError::TimedOut);
+            }
+            if self.last_sent.elapsed() >= l.heartbeat {
+                self.send(msg_type::KEEPALIVE, &())?;
+            }
         }
         Ok(out)
     }
@@ -188,7 +251,7 @@ impl Endpoint {
         self.send(
             msg_type::HELLO,
             &Hello {
-                proto_versions: (PROTO_VERSION, PROTO_VERSION),
+                proto_versions: (OLDEST_VERSION, PROTO_VERSION),
                 link_role: LinkRole::HeadDaemon,
                 auth,
             },
@@ -200,7 +263,9 @@ impl Endpoint {
                     .iter()
                     .find(|f| f.msg_type == msg_type::HELLO_ACK_F)
                     .ok_or(LinkFError::Protocol("expected HelloAckF"))?;
-                return Ok(postcard::from_bytes(&ack.payload)?);
+                let ack: HelloAckF = postcard::from_bytes(&ack.payload)?;
+                self.version = ack.chosen_version;
+                return Ok(ack);
             }
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 return Err(LinkFError::TimedOut);
@@ -224,13 +289,12 @@ impl Endpoint {
             .find(|f| f.msg_type == msg_type::HELLO)
             .ok_or(LinkFError::Protocol("expected Hello"))?;
         let hello: Hello = postcard::from_bytes(&hello_frame.payload)?;
-        self.validate_hello(&hello, expected_auth)?;
-        self.send(msg_type::HELLO_ACK_F, ack)?;
-        Ok(())
+        self.answer(&hello, ack, expected_auth)
     }
 
-    fn validate_hello(&self, hello: &Hello, expected_auth: &[u8]) -> Result<(), LinkFError> {
-        negotiate(hello.proto_versions, (PROTO_VERSION, PROTO_VERSION))
+    /// Checks the head's hello and answers it with `ack`, at the version the two share.
+    fn answer(&mut self, hello: &Hello, ack: &HelloAckF, expected_auth: &[u8]) -> Result<(), LinkFError> {
+        let version = negotiate(hello.proto_versions, (OLDEST_VERSION, PROTO_VERSION))
             .ok_or(LinkFError::Protocol("no common proto version"))?;
         if hello.link_role != LinkRole::HeadDaemon {
             return Err(LinkFError::Protocol("peer is not a head daemon"));
@@ -238,6 +302,8 @@ impl Endpoint {
         if !expected_auth.is_empty() && !ct_eq(&hello.auth, expected_auth) {
             return Err(LinkFError::Unauthorized);
         }
+        self.send(msg_type::HELLO_ACK_F, &HelloAckF { chosen_version: version, ..ack.clone() })?;
+        self.version = version;
         Ok(())
     }
 
@@ -261,9 +327,7 @@ impl Endpoint {
             }
         };
         let hello: Hello = postcard::from_bytes(&hello_frame.payload)?;
-        self.validate_hello(&hello, expected_auth)?;
-        self.send(msg_type::HELLO_ACK_F, ack)?;
-        Ok(())
+        self.answer(&hello, ack, expected_auth)
     }
 }
 
@@ -307,6 +371,46 @@ mod tests {
             feature_flags: 0,
             limits: linkf::LinkFLimits { max_frame: 1 << 20, transfer_window: 4, max_transfer: 1 << 30, transfer_budget: 1 << 30 },
         }
+    }
+
+    /// A node's end after a head offered `versions`, kept alive with a 50 ms silence limit.
+    fn answered(versions: (u16, u16)) -> (Endpoint, Endpoint) {
+        let (a, b) = UnixStream::pair().unwrap();
+        let (mut head, mut node) = (Endpoint::new(a).unwrap(), Endpoint::new(b).unwrap());
+        let hello = Hello { proto_versions: versions, link_role: LinkRole::HeadDaemon, auth: Vec::new() };
+        head.send(msg_type::HELLO, &hello).unwrap();
+        node.answer_hello_as_agent(&ack(), b"").unwrap();
+        let sent = head.wait_frames().unwrap();
+        let ack: HelloAckF = postcard::from_bytes(&sent[0].payload).unwrap();
+        assert_eq!(ack.chosen_version, node.version());
+        node.keep_alive(Liveness { heartbeat: Duration::from_secs(60), silence: Duration::from_millis(50) });
+        (head, node)
+    }
+
+    #[test]
+    fn a_head_on_version_2_is_answered_at_2_and_never_given_up_for_silence() {
+        let (_head, mut node) = answered((2, 2));
+        assert_eq!(node.version(), 2);
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(node.pump().is_ok(), "a version 2 head sends no heartbeat, so its silence is no sign");
+    }
+
+    #[test]
+    fn a_silent_head_on_version_3_is_given_up() {
+        let (_head, mut node) = answered((OLDEST_VERSION, PROTO_VERSION));
+        assert_eq!(node.version(), 3);
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(matches!(node.pump(), Err(LinkFError::TimedOut)));
+    }
+
+    #[test]
+    fn an_end_that_sent_nothing_for_a_heartbeat_sends_a_keepalive() {
+        let (mut head, mut node) = answered((OLDEST_VERSION, PROTO_VERSION));
+        node.keep_alive(Liveness { heartbeat: Duration::from_millis(30), silence: Duration::ZERO });
+        std::thread::sleep(Duration::from_millis(40));
+        node.pump().unwrap();
+        let frames = head.wait_frames().unwrap();
+        assert!(frames.iter().any(|f| f.msg_type == msg_type::KEEPALIVE));
     }
 
     #[test]

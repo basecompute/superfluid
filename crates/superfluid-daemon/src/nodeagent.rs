@@ -1,11 +1,12 @@
 //! The node-agent.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use superfluid_abi::finish;
-use superfluid_linkf::{AgentAction, AgentSession, Endpoint};
+use superfluid_linkf::{AgentAction, AgentSession, Endpoint, LinkFError, Liveness};
 use superfluid_proto::handshake::{CapacitySummary, HelloAckF};
 use superfluid_proto::linkf::{self, msg_type, LinkFLimits, TokenEventPayload};
 
@@ -21,10 +22,14 @@ pub const FINISH_DECLINED: u32 = u32::MAX - 2;
 
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the head may be silent on a connection before the node drops it: six of the
+/// head's heartbeats.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct AgentShared {
     agent: AgentSession,
+    /// The connection each session was placed over, the one the head answers its renewals on.
+    owners: HashMap<u64, u64>,
     contexts: HashMap<u64, Vec<u32>>,
     params: HashMap<u64, GenParams>,
     last_load_sample: Option<(u64, u64, u64)>,
@@ -75,9 +80,23 @@ pub struct NodeAgent {
     auth: Vec<u8>,
     max_lanes: u32,
     last_status_ms: u64,
+    conn: u64,
+    /// When this connection last asked for each lease it has not had granted yet.
+    asked: HashMap<u64, Duration>,
 }
 
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
+
 const STATUS_INTERVAL_MS: u64 = 2_000;
+
+/// A renewal the head has not answered is asked for again after this long.
+const RENEW_RETRY: Duration = Duration::from_secs(1);
+
+/// How long one read of the link waits while a generation runs, which bounds how late its
+/// tokens leave.
+const POLL_RUNNING: Duration = Duration::from_millis(2);
+
+const POLL_IDLE: Duration = Duration::from_millis(20);
 
 const EMIT_COALESCE_TOKENS: usize = 16;
 
@@ -88,9 +107,12 @@ impl NodeAgent {
         NodeAgent {
             max_lanes: 0,
             last_status_ms: 0,
+            conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
+            asked: HashMap::new(),
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
+                owners: HashMap::new(),
                 contexts: HashMap::new(),
                 params: HashMap::new(),
                 last_load_sample: None,
@@ -124,9 +146,13 @@ impl NodeAgent {
             auth: self.auth.clone(),
             max_lanes: self.max_lanes,
             last_status_ms: 0,
+            conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
+            asked: HashMap::new(),
         }
     }
 
+    /// `idle` is how long the head may be silent before a connection is dropped; zero keeps
+    /// every connection. Keep it well above the head's heartbeat, 5 s.
     pub fn with_timeouts(mut self, handshake: Duration, idle: Duration) -> NodeAgent {
         self.handshake_timeout = handshake;
         self.idle_timeout = idle;
@@ -248,50 +274,95 @@ impl NodeAgent {
         };
         match hs {
             Ok(()) => {}
-            Err(superfluid_linkf::LinkFError::TimedOut) => {
+            Err(LinkFError::TimedOut) => {
                 tracing::warn!("node-agent dropped a silent connection (no Hello)");
                 return Ok(());
             }
-            Err(superfluid_linkf::LinkFError::Unauthorized) => {
-                return Err(superfluid_linkf::LinkFError::Unauthorized.into());
-            }
+            Err(LinkFError::Unauthorized) => return Err(LinkFError::Unauthorized.into()),
             Err(e) => return Err(e.into()),
         }
-        let mut last_activity = Instant::now();
+        let heartbeat = match self.idle_timeout {
+            t if t.is_zero() => Liveness::DEFAULT.heartbeat,
+            t => Liveness::DEFAULT.heartbeat.min(t / 3),
+        };
+        endpoint.keep_alive(Liveness { heartbeat, silence: self.idle_timeout });
+        // Dropped on the way out, which stops a generation still running.
+        let mut running = None;
+        self.serve_link(&mut endpoint, &mut running)
+    }
+
+    fn serve_link(&mut self, endpoint: &mut Endpoint, running: &mut Option<Running>) -> Result<(), DaemonError> {
         loop {
             let now = self.start.elapsed();
-            for renew in self.shared.lock().expect("agent shared").agent.needs_renew(now) {
-                endpoint.send(msg_type::LEASE_RENEW, &renew)?;
-            }
-            {
-                let mut sh = self.shared.lock().expect("agent shared");
-                for action in sh.agent.poll(now) {
-                    match action {
-                        AgentAction::SelfFence { session_id } => {
-                            tracing::warn!(session_id, "node-agent self-fenced on lease expiry");
-                            sh.contexts.remove(&session_id);
-                            sh.params.remove(&session_id);
-                        }
-                    }
-                }
-            }
+            self.renew(endpoint, now)?;
+            self.fence(now);
             if now.as_millis() as u64 >= self.last_status_ms + STATUS_INTERVAL_MS {
-                self.send_status(&mut endpoint);
+                self.send_status(endpoint);
+            }
+            if let Some(run) = running.as_mut() {
+                if self.forward(endpoint, run, now)? {
+                    *running = None;
+                    endpoint.poll_every(POLL_IDLE)?;
+                }
             }
             let frames = match endpoint.pump() {
                 Ok(f) => f,
-                Err(superfluid_linkf::LinkFError::Closed) => return Ok(()),
-                Err(e) => return Err(e.into()),
-            };
-            if frames.is_empty() {
-                if !self.idle_timeout.is_zero() && last_activity.elapsed() >= self.idle_timeout {
-                    tracing::info!("node-agent dropped an idle connection");
+                Err(LinkFError::Closed) => return Ok(()),
+                Err(LinkFError::TimedOut) => {
+                    tracing::warn!(
+                        quiet_ms = endpoint.quiet_for().as_millis() as u64,
+                        "node-agent dropped a connection the head went silent on"
+                    );
                     return Ok(());
                 }
-            } else {
-                last_activity = Instant::now();
-                for frame in frames {
-                    self.handle(&mut endpoint, frame)?;
+                Err(e) => return Err(e.into()),
+            };
+            for frame in frames {
+                self.handle(endpoint, frame, running)?;
+            }
+            // A head on version 2 sends no heartbeat while it waits on a generation, so only
+            // a connection with none running is idle.
+            if endpoint.version() < 3
+                && running.is_none()
+                && !self.idle_timeout.is_zero()
+                && endpoint.quiet_for() >= self.idle_timeout
+            {
+                tracing::info!("node-agent dropped an idle connection");
+                return Ok(());
+            }
+        }
+    }
+
+    /// Asks the head to renew the leases of the sessions placed over this connection, which is
+    /// where it answers them; again after [`RENEW_RETRY`] until a grant comes.
+    fn renew(&mut self, endpoint: &mut Endpoint, now: Duration) -> Result<(), DaemonError> {
+        let due: Vec<_> = {
+            let sh = self.shared.lock().expect("agent shared");
+            sh.agent
+                .needs_renew(now)
+                .into_iter()
+                .filter(|r| sh.owners.get(&r.session_id) == Some(&self.conn))
+                .collect()
+        };
+        for renew in due {
+            if self.asked.get(&renew.session_id).is_some_and(|&at| now.saturating_sub(at) < RENEW_RETRY) {
+                continue;
+            }
+            endpoint.send(msg_type::LEASE_RENEW, &renew)?;
+            self.asked.insert(renew.session_id, now);
+        }
+        Ok(())
+    }
+
+    fn fence(&mut self, now: Duration) {
+        let mut sh = self.shared.lock().expect("agent shared");
+        for action in sh.agent.poll(now) {
+            match action {
+                AgentAction::SelfFence { session_id } => {
+                    tracing::warn!(session_id, "node-agent self-fenced on lease expiry");
+                    sh.contexts.remove(&session_id);
+                    sh.params.remove(&session_id);
+                    sh.owners.remove(&session_id);
                 }
             }
         }
@@ -301,13 +372,18 @@ impl NodeAgent {
         &mut self,
         endpoint: &mut Endpoint,
         frame: superfluid_proto::Frame,
+        running: &mut Option<Running>,
     ) -> Result<(), DaemonError> {
         let now = self.start.elapsed();
         match frame.msg_type {
             msg_type::RECONCILE => {
                 let m: linkf::ReconcileMsg = postcard::from_bytes(&frame.payload)?;
-                let (ack, retransmissions) =
-                    self.shared.lock().expect("agent shared").agent.on_reconcile(&m, now);
+                let mut sh = self.shared.lock().expect("agent shared");
+                let (ack, retransmissions) = sh.agent.on_reconcile(&m, now);
+                for s in ack.sessions.iter().filter(|s| s.held) {
+                    sh.owners.insert(s.session_id, self.conn);
+                }
+                drop(sh);
                 endpoint.send(msg_type::RECONCILE_ACK, &ack)?;
                 for batch in retransmissions {
                     endpoint.send(msg_type::TOKEN_EVENTS, &batch)?;
@@ -315,11 +391,11 @@ impl NodeAgent {
             }
             msg_type::SESSION_ASSIGN => {
                 let m: linkf::SessionAssignMsg = postcard::from_bytes(&frame.payload)?;
-                {
-                    let mut sh = self.shared.lock().expect("agent shared");
-                    if sh.agent.on_assign(&m, now) {
-                        sh.params.insert(m.session_id, decode_params(&m.params));
-                    }
+                let mut sh = self.shared.lock().expect("agent shared");
+                if sh.agent.on_assign(&m, now) {
+                    sh.params.insert(m.session_id, decode_params(&m.params));
+                    sh.owners.insert(m.session_id, self.conn);
+                    self.asked.remove(&m.session_id);
                 }
             }
             msg_type::SESSION_REVOKE => {
@@ -328,6 +404,8 @@ impl NodeAgent {
                 if sh.agent.on_revoke(&m) {
                     sh.contexts.remove(&m.session_id);
                     sh.params.remove(&m.session_id);
+                    sh.owners.remove(&m.session_id);
+                    self.asked.remove(&m.session_id);
                 }
             }
             msg_type::APPEND_CONTENT => {
@@ -340,14 +418,15 @@ impl NodeAgent {
             }
             msg_type::GENERATE_REQ => {
                 let m: linkf::GenerateReqMsg = postcard::from_bytes(&frame.payload)?;
-                let declined = !self.shared.lock().expect("agent shared").agent.on_generate(&m);
+                let declined = running.is_some() || !self.shared.lock().expect("agent shared").agent.on_generate(&m);
                 if declined {
                     tracing::warn!(
                         session = m.session_id,
                         generation = m.generation_id,
                         epoch = m.epoch,
-                        "declining a generate (unknown session, superseded epoch, or \
-                         replayed command); reporting it rather than going silent"
+                        "declining a generate (unknown session, superseded epoch, replayed \
+                         command, or one already running on this connection); reporting it \
+                         rather than going silent"
                     );
                     let msg = linkf::TokenEventsMsg {
                         events: vec![linkf::TokenEvent {
@@ -362,29 +441,18 @@ impl NodeAgent {
                     };
                     endpoint.send(msg_type::TOKEN_EVENTS, &msg)?;
                 } else {
-                    match self.run_generation(endpoint, &m) {
-                        Ok(()) => {}
-                        Err(e) if is_client_refusal(&e) => {
-                            tracing::warn!(
-                                session = m.session_id,
-                                generation = m.generation_id,
-                                error = %e,
-                                "refusing a generation the node cannot stage; \
-                                 the head should have caught this before dispatch"
-                            );
-                            let batch = self.shared.lock().expect("agent shared").agent.emit(
-                                m.session_id,
-                                m.generation_id,
-                                TokenEventPayload::Finish {
-                                    reason: FINISH_REFUSED,
-                                },
-                            );
-                            if let Some(batch) = batch {
-                                endpoint.send(msg_type::TOKEN_EVENTS, &batch)?;
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    }
+                    *running = Some(self.start_generation(&m));
+                    endpoint.poll_every(POLL_RUNNING)?;
+                }
+            }
+            msg_type::GENERATE_CANCEL => {
+                let m: linkf::GenerateCancelMsg = postcard::from_bytes(&frame.payload)?;
+                if let Some(run) = running
+                    .as_mut()
+                    .filter(|r| r.session_id == m.session_id && r.generation_id == m.generation_id)
+                {
+                    run.cancelled = true;
+                    run.cancel.store(true, Ordering::Relaxed);
                 }
             }
             msg_type::STAGE_FORWARD_REQ => {
@@ -420,149 +488,157 @@ impl NodeAgent {
             msg_type::LEASE_GRANT => {
                 let m: linkf::LeaseGrantMsg = postcard::from_bytes(&frame.payload)?;
                 self.shared.lock().expect("agent shared").agent.on_lease_grant(&m, now);
+                self.asked.remove(&m.session_id);
             }
             _ => {  }
         }
         Ok(())
     }
 
-    fn flush_emit(
-        endpoint: &mut Endpoint,
-        shared: &Arc<Mutex<AgentShared>>,
-        session_id: u64,
-        generation_id: u64,
-        pending: &mut Vec<u32>,
-        now: Duration,
-    ) -> Result<(), Stop> {
-        let emitted = shared.lock().expect("agent shared").agent.emit(
-            session_id,
-            generation_id,
-            TokenEventPayload::Tokens(std::mem::take(pending)),
-        );
-        match emitted {
-            Some(b) => {
-                if endpoint.send(msg_type::TOKEN_EVENTS, &b).is_err() {
-                    return Err(Stop::Peer);
-                }
-            }
-            None => return Err(Stop::Fenced),
-        }
-        let frames = endpoint.pump().map_err(|_| Stop::Peer)?;
-        for frame in frames {
-            match frame.msg_type {
-                msg_type::GENERATE_CANCEL => {
-                    if let Ok(m) = postcard::from_bytes::<linkf::GenerateCancelMsg>(&frame.payload) {
-                        if m.session_id == session_id && m.generation_id == generation_id {
-                            return Err(Stop::Cancelled);
-                        }
-                    }
-                }
-                msg_type::WATERMARK_ACK => {
-                    if let Ok(m) = postcard::from_bytes::<linkf::WatermarkAckMsg>(&frame.payload) {
-                        shared.lock().expect("agent shared").agent.on_watermark_ack(&m);
-                    }
-                }
-                msg_type::LEASE_GRANT => {
-                    if let Ok(m) = postcard::from_bytes::<linkf::LeaseGrantMsg>(&frame.payload) {
-                        shared.lock().expect("agent shared").agent.on_lease_grant(&m, now);
-                    }
-                }
-                _ => {  }
-            }
-        }
-        Ok(())
-    }
-
-    fn run_generation(
-        &mut self,
-        endpoint: &mut Endpoint,
-        req: &linkf::GenerateReqMsg,
-    ) -> Result<(), DaemonError> {
-        let session_id = req.session_id;
-        let generation_id = req.generation_id;
+    /// Starts `req` on a thread of its own, so this connection goes on reading the head
+    /// (cancels, lease grants, heartbeats) and sending status while it runs.
+    fn start_generation(&self, req: &linkf::GenerateReqMsg) -> Running {
         let (context, params) = {
             let sh = self.shared.lock().expect("agent shared");
             (
-                sh.contexts.get(&session_id).cloned().unwrap_or_default(),
-                sh.params.get(&session_id).copied().unwrap_or_default(),
+                sh.contexts.get(&req.session_id).cloned().unwrap_or_default(),
+                sh.params.get(&req.session_id).copied().unwrap_or_default(),
             )
         };
         let max_new = req.budgets.max_new_tokens.min(u32::MAX as u64) as u32;
-
-        let daemon = Arc::clone(&self.daemon);
-        let start = self.start;
-        let shared = Arc::clone(&self.shared);
-        let mut stop: Option<Stop> = None;
-        let mut pending: Vec<u32> = Vec::with_capacity(EMIT_COALESCE_TOKENS);
-        let mut last_flush = start.elapsed();
-        let extras = crate::scheduler::GenExtras::default();
-        self.shared.lock().expect("agent shared").busy.start();
-        let generated = daemon.generate_tokens_streaming(
-            context,
-            params,
+        let max_wall_ms = req.budgets.max_wall_ms;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, out) = mpsc::channel();
+        let (daemon, shared, stop) = (Arc::clone(&self.daemon), Arc::clone(&self.shared), Arc::clone(&cancel));
+        shared.lock().expect("agent shared").busy.start();
+        std::thread::Builder::new()
+            .name("node-generation".into())
+            .spawn(move || {
+                let generated = daemon.generate_tokens_streaming(
+                    context,
+                    params,
+                    max_new,
+                    max_wall_ms,
+                    crate::scheduler::GenExtras::default(),
+                    |batch| {
+                        if stop.load(Ordering::Relaxed) || tx.send(Out::Tokens(batch.to_vec())).is_err() {
+                            return std::ops::ControlFlow::Break(());
+                        }
+                        std::ops::ControlFlow::Continue(())
+                    },
+                );
+                shared.lock().expect("agent shared").busy.stop();
+                let _ = tx.send(Out::Done(generated));
+            })
+            .expect("spawn a node generation");
+        Running {
+            session_id: req.session_id,
+            generation_id: req.generation_id,
             max_new,
-            req.budgets.max_wall_ms,
-            extras,
-            |batch| {
-                pending.extend_from_slice(batch);
-                let now = start.elapsed();
-                let due = pending.len() >= EMIT_COALESCE_TOKENS
-                    || now.saturating_sub(last_flush).as_millis() as u64 >= EMIT_COALESCE_MS;
-                if !due {
-                    return std::ops::ControlFlow::Continue(());
-                }
-                last_flush = now;
-                match Self::flush_emit(
-                    endpoint,
-                    &shared,
-                    session_id,
-                    generation_id,
-                    &mut pending,
-                    now,
-                ) {
-                    Ok(()) => std::ops::ControlFlow::Continue(()),
-                    Err(s) => {
-                        stop = Some(s);
-                        std::ops::ControlFlow::Break(())
+            cancel,
+            cancelled: false,
+            out,
+            pending: Vec::with_capacity(EMIT_COALESCE_TOKENS),
+            last_flush: self.start.elapsed(),
+        }
+    }
+
+    /// Sends what `run` produced since the last pass, coalesced, and its finish once it ends;
+    /// `true` once it has ended, or was fenced and goes silent.
+    fn forward(&mut self, endpoint: &mut Endpoint, run: &mut Running, now: Duration) -> Result<bool, DaemonError> {
+        let mut done = None;
+        loop {
+            match run.out.try_recv() {
+                Ok(Out::Tokens(t)) => {
+                    run.pending.extend_from_slice(&t);
+                    if run.pending.len() >= EMIT_COALESCE_TOKENS && !self.flush(endpoint, run, now)? {
+                        return Ok(true);
                     }
                 }
-            },
-        );
-        self.shared.lock().expect("agent shared").busy.stop();
-        let (tokens, _finish, expired) = generated?;
-
-        if stop.is_none() && !pending.is_empty() {
-            let now = start.elapsed();
-            if let Err(s) = Self::flush_emit(
-                endpoint,
-                &self.shared,
-                session_id,
-                generation_id,
-                &mut pending,
-                now,
-            ) {
-                stop = Some(s);
+                Ok(Out::Done(r)) => {
+                    done = Some(r);
+                    break;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    done = Some(Err(DaemonError::Generation("the generation ended without a result".into())));
+                    break;
+                }
             }
         }
-
-        let reason = match stop {
-            Some(Stop::Fenced) | Some(Stop::Peer) => return Ok(()),
-            Some(Stop::Cancelled) => finish::CANCELLED,
-            None if expired => FINISH_EXPIRED,
-            None if tokens.len() as u32 >= max_new => finish::LENGTH,
-            None => finish::EOS,
+        let due = done.is_some() || now.saturating_sub(run.last_flush).as_millis() as u64 >= EMIT_COALESCE_MS;
+        if due && !run.pending.is_empty() && !self.flush(endpoint, run, now)? {
+            return Ok(true);
+        }
+        let mut sh = self.shared.lock().expect("agent shared");
+        if sh.agent.is_fenced(run.session_id) != Some(false) {
+            return Ok(true);
+        }
+        let Some(generated) = done else { return Ok(false) };
+        let reason = match generated {
+            Ok(_) if run.cancelled => finish::CANCELLED,
+            Ok((_, _, true)) => FINISH_EXPIRED,
+            Ok((tokens, _, _)) if tokens.len() as u32 >= run.max_new => finish::LENGTH,
+            Ok(_) => finish::EOS,
+            Err(e) if is_client_refusal(&e) => {
+                tracing::warn!(
+                    session = run.session_id,
+                    generation = run.generation_id,
+                    error = %e,
+                    "refusing a generation the node cannot stage; \
+                     the head should have caught this before dispatch"
+                );
+                FINISH_REFUSED
+            }
+            Err(e) => return Err(e),
         };
-        if let Some(batch) =
-            self.shared
-                .lock()
-                .expect("agent shared")
-                .agent
-                .emit(session_id, generation_id, TokenEventPayload::Finish { reason })
-        {
+        if let Some(batch) = sh.agent.emit(run.session_id, run.generation_id, TokenEventPayload::Finish { reason }) {
             endpoint.send(msg_type::TOKEN_EVENTS, &batch)?;
         }
-        Ok(())
+        Ok(true)
     }
+
+    /// Sends `run`'s pending tokens; `false` when its session is fenced, which sends nothing.
+    fn flush(&mut self, endpoint: &mut Endpoint, run: &mut Running, now: Duration) -> Result<bool, DaemonError> {
+        run.last_flush = now;
+        let tokens = std::mem::take(&mut run.pending);
+        let batch = self.shared.lock().expect("agent shared").agent.emit(
+            run.session_id,
+            run.generation_id,
+            TokenEventPayload::Tokens(tokens),
+        );
+        match batch {
+            Some(batch) => {
+                endpoint.send(msg_type::TOKEN_EVENTS, &batch)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+}
+
+/// A generation running on a connection; dropping it stops the generation at its next step.
+struct Running {
+    session_id: u64,
+    generation_id: u64,
+    max_new: u32,
+    cancel: Arc<AtomicBool>,
+    /// The head asked for the stop.
+    cancelled: bool,
+    out: mpsc::Receiver<Out>,
+    pending: Vec<u32>,
+    last_flush: Duration,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+enum Out {
+    Tokens(Vec<u32>),
+    Done(Result<(Vec<u32>, u32, bool), DaemonError>),
 }
 
 fn is_client_refusal(e: &DaemonError) -> bool {
@@ -570,10 +646,4 @@ fn is_client_refusal(e: &DaemonError) -> bool {
         e,
         DaemonError::StreamTooLong { .. } | DaemonError::Constraint(_)
     )
-}
-
-enum Stop {
-    Cancelled,
-    Fenced,
-    Peer,
 }
