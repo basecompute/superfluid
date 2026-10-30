@@ -309,7 +309,7 @@ fn an_image_reaches_the_node_and_is_answered_as_on_one_machine() {
     );
 }
 
-fn post_multipart(addr: &str, path: &str, fields: &[(&str, &str)], file: &[u8]) -> (u16, String) {
+fn send_multipart(addr: &str, path: &str, fields: &[(&str, &str)], file: &[u8]) -> ureq::http::Response<ureq::Body> {
     let boundary = "FLEETBND";
     let mut body: Vec<u8> = Vec::new();
     for (k, v) in fields {
@@ -318,11 +318,15 @@ fn post_multipart(addr: &str, path: &str, fields: &[(&str, &str)], file: &[u8]) 
     body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n").as_bytes());
     body.extend_from_slice(file);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    let mut resp = agent()
+    agent()
         .post(&format!("http://{addr}{path}"))
         .header("content-type", &format!("multipart/form-data; boundary={boundary}"))
         .send(&body[..])
-        .unwrap();
+        .unwrap()
+}
+
+fn post_multipart(addr: &str, path: &str, fields: &[(&str, &str)], file: &[u8]) -> (u16, String) {
+    let mut resp = send_multipart(addr, path, fields, file);
     (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap())
 }
 
@@ -337,6 +341,30 @@ fn a_transcription_runs_on_a_node_as_on_one_machine() {
         assert_eq!(said(&hb), said(&lb), "{format} stream={stream}");
         assert!(lb.contains("mock transcription"), "{lb}");
     }
+}
+
+#[test]
+fn a_streamed_transcription_tells_each_segment_as_the_node_has_it() {
+    // The mock engine takes a moment for each word, so 400 of them run for most of a second.
+    let words = vec!["word"; 400].join(" ");
+    let head = head(node());
+    let fields = [("model", "mock-model"), ("stream", "true"), ("prompt", words.as_str())];
+    let mut resp = send_multipart(&head, "/v1/audio/transcriptions", &fields, b"RIFF....WAVEfake");
+    assert_eq!(resp.status().as_u16(), 200);
+    let start = std::time::Instant::now();
+    let (mut first, mut done, mut deltas) = (None, None, 0);
+    for line in std::io::BufRead::lines(std::io::BufReader::new(resp.body_mut().as_reader())) {
+        let line = line.unwrap();
+        if line.contains("transcript.text.delta") {
+            deltas += 1;
+            first.get_or_insert(start.elapsed());
+        } else if line.contains("transcript.text.done") {
+            done = Some(start.elapsed());
+        }
+    }
+    let (first, done) = (first.expect("deltas"), done.expect("a done event"));
+    assert_eq!(deltas, 402, "a delta for each word");
+    assert!(done - first > std::time::Duration::from_millis(300), "the first delta came at {first:?}, the end at {done:?}");
 }
 
 #[test]

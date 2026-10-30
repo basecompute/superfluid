@@ -342,13 +342,18 @@ impl NodeAgent {
                     work.generation = None;
                 }
             }
-            work.syncs.retain(|rx| match rx.try_recv() {
-                Ok(resp) => {
-                    let _ = endpoint.send(msg_type::STATE_SYNC_RESP, &resp);
-                    false
+            work.syncs.retain(|rx| loop {
+                match rx.try_recv() {
+                    Ok(Synced::Segment(seg)) => {
+                        let _ = endpoint.send(msg_type::STATE_SYNC_SEGMENT, &seg);
+                    }
+                    Ok(Synced::Done(resp)) => {
+                        let _ = endpoint.send(msg_type::STATE_SYNC_RESP, &resp);
+                        break false;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break true,
+                    Err(mpsc::TryRecvError::Disconnected) => break false,
                 }
-                Err(mpsc::TryRecvError::Empty) => true,
-                Err(mpsc::TryRecvError::Disconnected) => false,
             });
             if let Some(stage) = &work.stage {
                 match stage.try_recv() {
@@ -557,8 +562,24 @@ impl NodeAgent {
                 std::thread::Builder::new()
                     .name("node-state-sync".into())
                     .spawn(move || {
-                        let result = daemon.state_sync(m.req).map_err(crate::fleet_daemon::message);
-                        let _ = tx.send(linkf::StateSyncRespF { request_id: m.request_id, result });
+                        let request_id = m.request_id;
+                        let streamed = matches!(m.req, superfluid_proto::linkw::StateSyncReqMsg::Transcribe { stream: true, .. });
+                        let result = if streamed {
+                            let (seg_tx, seg_rx) = mpsc::channel();
+                            let told = tx.clone();
+                            let tell = std::thread::spawn(move || {
+                                for segment in seg_rx {
+                                    let _ = told.send(Synced::Segment(linkf::StateSyncSegmentF { request_id, segment }));
+                                }
+                            });
+                            let result = daemon.state_sync_stream(m.req, seg_tx);
+                            let _ = tell.join();
+                            result
+                        } else {
+                            daemon.state_sync(m.req)
+                        };
+                        let result = result.map_err(crate::fleet_daemon::message);
+                        let _ = tx.send(Synced::Done(linkf::StateSyncRespF { request_id, result }));
                     })
                     .expect("spawn a node state operation");
                 work.syncs.push(rx);
@@ -834,7 +855,14 @@ struct Work {
     /// A stage forward's answer, once it has one.
     stage: Option<mpsc::Receiver<linkf::StageForwardRespMsg>>,
     /// State operations' answers, once each has one.
-    syncs: Vec<mpsc::Receiver<linkf::StateSyncRespF>>,
+    syncs: Vec<mpsc::Receiver<Synced>>,
+}
+
+/// What a state operation has to tell the head: a streamed transcription's segments, then its
+/// answer.
+enum Synced {
+    Segment(linkf::StateSyncSegmentF),
+    Done(linkf::StateSyncRespF),
 }
 
 impl Work {

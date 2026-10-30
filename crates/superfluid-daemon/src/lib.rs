@@ -1381,6 +1381,25 @@ impl Daemon {
         self.engine_sync(req)
     }
 
+    /// [`Daemon::state_sync`] for a streamed transcription: each segment goes to `segments` as
+    /// the engine has it, ahead of the answer.
+    pub fn state_sync_stream(
+        &self,
+        req: proto_linkw::StateSyncReqMsg,
+        segments: std::sync::mpsc::Sender<proto_linkw::TranscribeSegmentMsg>,
+    ) -> Result<proto_linkw::StateSyncOkMsg, DaemonError> {
+        self.ensure_serving()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.sched_tx()
+            .send(scheduler::SchedCmd::SyncStream(req, segments, tx))
+            .map_err(|_| DaemonError::Protocol("scheduler is gone"))?;
+        match rx.recv() {
+            Ok(Ok(ok)) => Ok(ok),
+            Ok(Err(e)) => Err(DaemonError::Generation(e)),
+            Err(_) => Err(DaemonError::Protocol("scheduler dropped the query")),
+        }
+    }
+
     pub fn forward_stage(
         &self,
         tokens: Vec<u32>,

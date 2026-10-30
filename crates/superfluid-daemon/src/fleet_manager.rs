@@ -1287,6 +1287,29 @@ impl FleetManager {
         self.on_a_node(model, |head| head.state_sync(req.clone(), blobs))
     }
 
+    /// [`FleetManager::state_sync`] for a streamed transcription, each segment told as the node
+    /// has it. Once one has been told, a node lost after it fails the call rather than starting
+    /// over on another, which would tell those segments twice.
+    pub fn state_sync_streaming(
+        &self,
+        model: &str,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[crate::fleet::Blob],
+        on_segment: &mut dyn FnMut(superfluid_proto::linkw::TranscribeSegmentMsg),
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        let mut told = false;
+        self.on_a_node(model, |head| {
+            let answer = head.state_sync_streaming(req.clone(), blobs, &mut |seg| {
+                told = true;
+                on_segment(seg);
+            });
+            match answer {
+                Err(e) if told && is_fatal_node(&e) => Err(DaemonError::Generation(format!("the node transcribing was lost: {e}"))),
+                answer => answer,
+            }
+        })
+    }
+
     /// Runs a state operation on every node up that serves `model`, as a LoRA must be on each
     /// node a request can land on; the answer is the last node's.
     pub fn state_sync_all(

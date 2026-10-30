@@ -193,8 +193,7 @@ fn sync(d: &Arc<Dispatch>, req: StateSyncReqMsg, reply: Reply) {
     let _ = reply.send(Ok(answer));
 }
 
-/// A transcription streamed to its caller: it runs whole on a node, and its segments are told
-/// on as the stream.
+/// A transcription streamed to its caller: its segments are told on as the node has them.
 fn sync_stream(
     d: &Arc<Dispatch>,
     req: StateSyncReqMsg,
@@ -224,15 +223,14 @@ fn transcribe(
         translate,
         timestamps,
         prompt,
-        stream: false,
+        stream: segments.is_some(),
     };
-    let answer = d.fleet.state_sync(&d.model, req, &[blob])?;
-    if let (Some(segments), StateSyncOkMsg::Transcribe { segments: done, .. }) = (segments, &answer) {
-        for s in done {
-            let _ = segments.send(superfluid_proto::linkw::TranscribeSegmentMsg { start_ms: s.start_ms, end_ms: s.end_ms, text: s.text.clone() });
-        }
+    match segments {
+        Some(segments) => d.fleet.state_sync_streaming(&d.model, req, &[blob], &mut |seg| {
+            let _ = segments.send(seg);
+        }),
+        None => d.fleet.state_sync(&d.model, req, &[blob]),
     }
-    Ok(answer)
 }
 
 /// The blob a media file on the head is: the media pool names a file by its SHA-256 already;

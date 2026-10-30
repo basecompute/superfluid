@@ -49,6 +49,9 @@ pub mod msg_type {
     /// Text the node's tokenizer encodes for the head (version 3).
     pub const TOKENIZE_REQ: u16 = 0x0021;
     pub const TOKENIZE_RESP: u16 = 0x0022;
+    /// A streamed transcription's segment, told as the node has it, ahead of its answer
+    /// (version 3).
+    pub const STATE_SYNC_SEGMENT: u16 = 0x0023;
 
     pub const TELEMETRY: u16 = 0x8001;
     /// An idle head's sign of life; droppable, so a node that predates it skips it.
@@ -89,6 +92,7 @@ pub mod msg_type {
         TOKENIZER_EXPORT,
         TOKENIZE_REQ,
         TOKENIZE_RESP,
+        STATE_SYNC_SEGMENT,
         TELEMETRY,
         KEEPALIVE,
     ];
@@ -388,6 +392,12 @@ pub struct StateSyncReqF {
 pub struct StateSyncRespF {
     pub request_id: u64,
     pub result: Result<crate::linkw::StateSyncOkMsg, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSyncSegmentF {
+    pub request_id: u64,
+    pub segment: crate::linkw::TranscribeSegmentMsg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

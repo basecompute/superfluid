@@ -739,6 +739,17 @@ impl FleetHead {
         req: superfluid_proto::linkw::StateSyncReqMsg,
         blobs: &[Blob],
     ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.state_sync_streaming(req, blobs, &mut |_| {})
+    }
+
+    /// [`FleetHead::state_sync`], a streamed transcription's segments told to `on_segment` as
+    /// the node has them.
+    pub fn state_sync_streaming(
+        &mut self,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[Blob],
+        on_segment: &mut dyn FnMut(superfluid_proto::linkw::TranscribeSegmentMsg),
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
         self.needs_v3("this operation")?;
         self.send_blobs(blobs)?;
         let request_id = self.next_generation;
@@ -746,9 +757,17 @@ impl FleetHead {
         self.endpoint.send(msg_type::STATE_SYNC_REQ, &linkf::StateSyncReqF { request_id, req })?;
         loop {
             for frame in self.endpoint.wait_frames()? {
-                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::STATE_SYNC_RESP) else {
+                let Some(frame) = self.absorb(frame)? else { continue };
+                if frame.msg_type == msg_type::STATE_SYNC_SEGMENT {
+                    let m: linkf::StateSyncSegmentF = postcard::from_bytes(&frame.payload)?;
+                    if m.request_id == request_id {
+                        on_segment(m.segment);
+                    }
                     continue;
-                };
+                }
+                if frame.msg_type != msg_type::STATE_SYNC_RESP {
+                    continue;
+                }
                 let m: linkf::StateSyncRespF = postcard::from_bytes(&frame.payload)?;
                 if m.request_id == request_id {
                     return m
