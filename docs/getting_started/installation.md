@@ -44,9 +44,10 @@ Each installs the release for this machine (macOS 15 or later on Apple silicon; 
 
 ```sh
 cargo install superfluid
+cargo install superfluid-adapter-basert
 ```
 
-Builds `superfluid`, `superfluid-workerd` and `superfluid-noded` from [crates.io](https://crates.io/crates/superfluid) with the baseRT adapter and the terminal monitor; a C compiler is required. The llama.cpp and MLX workers are installed on first use, as with a release.
+The first builds `superfluid`, `superfluid-workerd` and `superfluid-noded` from [crates.io](https://crates.io/crates/superfluid) with the baseRT adapter and the terminal monitor; a C compiler is required. The second puts `superfluid-worker-basert` beside them, which `superfluid runtime install basert` installs the baseRT engine with. Without it, `.base` bundles are served only from an engine that `--basert-lib` or `BASERT_LIB` names. The llama.cpp and MLX workers are installed on first use, as with a release.
 
 ## Build from source
 
