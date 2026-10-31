@@ -248,6 +248,9 @@ pub enum DaemonError {
     Unsupported(Refusal),
     #[error("configuration: {0}")]
     Config(&'static str),
+    /// A fleet head has no node up that serves the model: the request may succeed later.
+    #[error("fleet: {0}")]
+    NoNode(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

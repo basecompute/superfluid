@@ -903,7 +903,7 @@ impl FleetManager {
             e
         };
         if cand.is_empty() {
-            return Err(release_on_error(DaemonError::Config(
+            return Err(release_on_error(DaemonError::NoNode(
                 "no healthy node can serve the model",
             )));
         }
@@ -933,7 +933,7 @@ impl FleetManager {
         if let Some(e) = self.length_refusal(&cand, model, len) {
             return Err(release_on_error(e));
         }
-        Err(release_on_error(last_err.unwrap_or(DaemonError::Config(
+        Err(release_on_error(last_err.unwrap_or(DaemonError::NoNode(
             "no reachable node serves the model",
         ))))
     }
@@ -1395,7 +1395,7 @@ impl FleetManager {
         req: superfluid_proto::linkw::StateSyncReqMsg,
     ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
         let cand = self.candidates_claiming(model, None, RequestShape::default());
-        let mut answer = Err(DaemonError::Config("no healthy node can serve the model"));
+        let mut answer = Err(DaemonError::NoNode("no healthy node can serve the model"));
         for i in cand {
             answer = Ok(self.state_sync_on(i, req.clone(), &[])?);
         }
@@ -1441,7 +1441,7 @@ impl FleetManager {
                 Err(e) => return Err(e),
             }
         }
-        Err(last.unwrap_or(DaemonError::Config("no healthy node can serve the model")))
+        Err(last.unwrap_or(DaemonError::NoNode("no healthy node can serve the model")))
     }
 
     /// The tokenizer of a node serving `model`, for a head with no copy of it; encoding asks a
@@ -1516,7 +1516,7 @@ impl FleetManager {
         );
         if cand.is_empty() {
             InFlight::release(&self.shared, session);
-            return Err(DaemonError::Config("no healthy node can serve the model"));
+            return Err(DaemonError::NoNode("no healthy node can serve the model"));
         }
         let mut last_err = None;
         for i in cand {
@@ -1538,7 +1538,7 @@ impl FleetManager {
                 }
             }
         }
-        Err(last_err.unwrap_or(DaemonError::Config("no reachable node serves the model")))
+        Err(last_err.unwrap_or(DaemonError::NoNode("no reachable node serves the model")))
     }
 
     /// Ends a session the caller is done with: the head drops its record, and the node the

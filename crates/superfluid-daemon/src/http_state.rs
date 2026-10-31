@@ -71,7 +71,7 @@ impl AppState {
         } else {
             self.registry.try_resolve(model)
         };
-        hit.map_err(|e| match e {
+        let (name, daemon) = hit.map_err(|e| match e {
             crate::registry::ResolveError::Load(e) => load_failed(model.unwrap_or(""), e),
             crate::registry::ResolveError::NotFound => error_response(
                 StatusCode::NOT_FOUND,
@@ -81,7 +81,12 @@ impl AppState {
                     self.registry.names().join(", ")
                 ),
             ),
-        })
+        })?;
+        // Refused before a stream starts, so a streamed request gets the status too.
+        if daemon.fleet_serving().is_some_and(|(up, _)| up == 0) {
+            return Err(no_node_response(format!("fleet: no node serving model '{name}' is up")));
+        }
+        Ok((name, daemon))
     }
 }
 
@@ -271,6 +276,7 @@ fn load_failed(model: &str, e: DaemonError) -> Response {
         | E::Rejected(_)
         | E::Generation(_)
         | E::Protocol(_)
+        | E::NoNode(_)
         | E::CompletionThrottled { .. } => StatusCode::SERVICE_UNAVAILABLE,
         E::UnknownSession(_)
         | E::EmptySession(_)
@@ -327,6 +333,9 @@ pub(crate) fn daemon_error(e: DaemonError) -> Response {
     if let DaemonError::Unsupported(r) = &e {
         return refusal_response(StatusCode::BAD_REQUEST, r);
     }
+    if matches!(e, DaemonError::NoNode(_)) {
+        return no_node_response(e.to_string());
+    }
     let status = match &e {
         DaemonError::UnknownSession(_)
         | DaemonError::EmptySession(_)
@@ -340,6 +349,11 @@ pub(crate) fn daemon_error(e: DaemonError) -> Response {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     error_response(status, e.to_string())
+}
+
+/// A fleet head with no node up for the model: 503, so a client retries rather than gives up.
+pub(crate) fn no_node_response(message: String) -> Response {
+    error_response_typed(StatusCode::SERVICE_UNAVAILABLE, message, "server_error", "no_node_up")
 }
 
 pub(crate) fn throttled_response(wait: std::time::Duration) -> Response {

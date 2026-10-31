@@ -748,3 +748,23 @@ fn a_node_runs_a_generation_in_the_qos_class_its_head_gave_the_session() {
     ran.sort();
     assert!(ran[1].0 >= ran[0].1, "two agent sessions ran at once on a node that gives the class one lane");
 }
+
+#[test]
+fn a_head_with_no_node_up_answers_503_in_every_format_streamed_or_not() {
+    // A node address nothing listens on: the head knows a node, none is up.
+    let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+    let head = head(gone);
+    let messages = serde_json::json!([{"role": "user", "content": "hi"}]);
+    for stream in [false, true] {
+        for (path, body) in [
+            ("/v1/chat/completions", serde_json::json!({"model": "mock-model", "messages": messages, "max_tokens": 4, "stream": stream})),
+            ("/v1/messages", serde_json::json!({"model": "mock-model", "messages": messages, "max_tokens": 4, "stream": stream})),
+            ("/api/chat", serde_json::json!({"model": "mock-model", "messages": messages, "options": {"num_predict": 4}, "stream": stream})),
+            ("/v1/completions", serde_json::json!({"model": "mock-model", "prompt": "hi", "max_tokens": 4, "stream": stream})),
+        ] {
+            let (status, said) = post(&head, path, &body);
+            assert_eq!(status, 503, "{path} stream={stream}: {said}");
+            assert!(said.contains("no node"), "{path}: {said}");
+        }
+    }
+}
