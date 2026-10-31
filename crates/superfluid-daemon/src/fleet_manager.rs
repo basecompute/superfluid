@@ -126,6 +126,35 @@ impl NodeConn {
         (i, self.conns[i].lock().expect("node conn"))
     }
 
+    /// A lane's connection for a new session: the next in turn that no call holds (connected,
+    /// or for a node the head lists, one it can dial), else the first of those to come free.
+    /// Taken strictly in turn, a session would wait out a generation still running while
+    /// another lane is idle.
+    fn checkout_free(&self) -> (usize, std::sync::MutexGuard<'_, Option<FleetHead>>) {
+        let open = self.open.load(std::sync::atomic::Ordering::Relaxed).clamp(1, self.conns.len());
+        let start = self.cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dials = !self.spec.addr.starts_with(JOINED);
+        let mut pause = std::time::Duration::from_millis(1);
+        loop {
+            let mut busy = false;
+            for k in 0..open {
+                let i = (start + k) % open;
+                match self.conns[i].try_lock() {
+                    Ok(guard) if guard.is_some() || dials => return (i, guard),
+                    Ok(_) | Err(std::sync::TryLockError::Poisoned(_)) => {}
+                    Err(std::sync::TryLockError::WouldBlock) => busy = true,
+                }
+            }
+            // None taken and none busy: a joined node's lanes not adopted yet.
+            if !busy {
+                let i = start % open;
+                return (i, self.conns[i].lock().expect("node conn"));
+            }
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// A connection no call is using, so a short operation does not wait out a generation:
     /// a lane's when one is idle, else the control connection, else (a joined node without
     /// one) the next lane's in turn.
@@ -921,7 +950,7 @@ impl FleetManager {
         tokens: &[u32],
     ) -> Result<bool, DaemonError> {
         let node = self.node(i);
-        let (slot, mut guard) = node.checkout_next();
+        let (slot, mut guard) = node.checkout_free();
         if let Some(h) = guard.as_mut() {
             if h.drain_status().is_err() {
                 *guard = None;

@@ -168,6 +168,45 @@ fn a_joined_node_keeps_a_connection_for_short_calls_when_its_head_asks() {
 }
 
 #[test]
+fn a_session_goes_to_a_joined_nodes_idle_lane_rather_than_wait_behind_a_generation() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let head_addr = listener.local_addr().unwrap().to_string();
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
+    let m = Arc::clone(&manager);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), vec!["mock".into()]));
+    // Steps slow enough that the long generation outlasts the short ones by seconds.
+    let node = NodeAgent::new(Arc::new(mock_daemon_ticking(Duration::from_millis(400))), "box-e", "mock")
+        .with_max_lanes(2)
+        .with_auth(TOKEN.to_vec());
+    for _ in 0..2 {
+        keep_dialing(head_addr.clone(), node.connection());
+    }
+    wait_for("both lanes' connections", || manager.load().len() == 1 && manager.connections(0) == 2);
+
+    // A long generation holds one lane; short ones come and go on the other. Lanes taken in
+    // turn would put the second short one behind the long one.
+    let params = GenParams::default();
+    let prompt = |k: u32| (100 * k..100 * k + 24).collect::<Vec<u32>>();
+    manager.place(1, params, 0, "chatml", "mock", &prompt(1), 8).expect("placed");
+    let long = {
+        let m = Arc::clone(&manager);
+        std::thread::spawn(move || {
+            m.generate(1, 2000, 60_000).expect("generated");
+            Instant::now()
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    for k in 2..5u64 {
+        manager.place(k, params, 0, "chatml", "mock", &prompt(k as u32), 8).expect("placed");
+        manager.generate(k, 4, 60_000).expect("generated");
+        manager.finish(k);
+    }
+    let shorts_done = Instant::now();
+    assert!(shorts_done < long.join().unwrap(), "a short session waited for the long generation to end");
+}
+
+#[test]
 fn a_node_with_another_token_does_not_join() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let head_addr = listener.local_addr().unwrap().to_string();
