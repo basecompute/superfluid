@@ -18,13 +18,15 @@ fn usage() -> ! {
     eprintln!(
         "usage: superfluid-noded --model <path|org/model[:tag]> [--listen <ip:port>] [--auth-file <path>] \
          [--runtime <id>] [--model-name <id>] [--max-context N] [--max-batch N] [--identity <name>] \
-         [--offline] [--insecure-no-auth] [--idle-timeout-ms N] [--handshake-timeout-ms N]\n\
+         [--offline] [--park] [--insecure-no-auth] [--idle-timeout-ms N] [--handshake-timeout-ms N]\n\
          \n\
          A model given by id is pulled, and its runtime installed, as `superfluid serve` does; the\n\
          context window is sized for this device unless --max-context pins it.\n\
          (--listen defaults to 0.0.0.0:8454, the fleet-worker port next to BASE 8453;\n\
           --auth-file holds the fleet token (default $SUPERFLUID_HOME/fleet/token, from\n\
           `superfluid fleet token`); with it the link is encrypted and both ends checked.\n\
+          --park keeps each prompt's prefix on disk under $SUPERFLUID_HOME/fleet/nodes/<identity>/park,\n\
+          so a restarted node starts the head's sessions warm.\n\
           There is no sampling flag here: a fleet generation must match the local path\n\
           token for token, so the node applies only what the request carries.)"
     );
@@ -58,6 +60,7 @@ fn main() {
     let mut auth_file: Option<PathBuf> = None;
     let mut insecure_no_auth = false;
     let mut offline = false;
+    let mut park = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| usage());
@@ -72,6 +75,7 @@ fn main() {
             "--auth-file" => auth_file = Some(PathBuf::from(val())),
             "--insecure-no-auth" => insecure_no_auth = true,
             "--offline" => offline = true,
+            "--park" => park = true,
             "--handshake-timeout-ms" => {
                 handshake_timeout = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
@@ -123,11 +127,17 @@ fn main() {
     // during a long pull is refused at once instead of waiting out its handshake.
     drop(TcpListener::bind(&listen).unwrap_or_else(|e| fail(1, format!("bind {listen} failed: {e}"))));
 
+    let state = if park {
+        superfluid_daemon::fleet_join::NodeState::open(&home, &identity, true)
+    } else {
+        superfluid_daemon::fleet_join::NodeState::scratch()
+    }
+    .unwrap_or_else(|e| fail(3, e));
     let loaded = if mock {
-        superfluid_daemon::fleet_join::load_mock_node(max_context, lanes, &superfluid_daemon::fleet_join::scratch_wal())
+        superfluid_daemon::fleet_join::load_mock_node(max_context, lanes, &state)
     } else {
         let model = model.expect("checked above");
-        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, lanes, offline, &superfluid_daemon::fleet_join::scratch_wal())
+        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, lanes, offline, &state)
     }
     .unwrap_or_else(|e| fail(3, e));
     let model_name = model_name_override.unwrap_or(loaded.model_name);

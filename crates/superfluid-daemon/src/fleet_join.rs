@@ -30,6 +30,9 @@ Options:
   --model-name <id>       The name the head matches on [default: what the head announces,
                           else the model's id]
   --offline               Pull nothing; the model must be in the runtime's cache
+  --park                  Keep each prompt's prefix on disk, under
+                          $SUPERFLUID_HOME/fleet/nodes/<identity>/park, so a restarted node
+                          starts the head's sessions warm
 ";
 
 const CONNECT: Duration = Duration::from_secs(5);
@@ -63,7 +66,7 @@ fn join(args: &[String]) {
         eprintln!("superfluid: logging: {e}");
     }
     let (mut head, mut model, mut token, mut runtime, mut identity, mut model_name) = (None, None, None, None, None, None);
-    let (mut max_context, mut max_batch, mut offline) = (None, 8u32, false);
+    let (mut max_context, mut max_batch, mut offline, mut park) = (None, 8u32, false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| fail(format!("{a} takes a value")));
@@ -76,6 +79,7 @@ fn join(args: &[String]) {
             "--max-context" => max_context = Some(val().parse().unwrap_or_else(|_| fail("--max-context takes a number"))),
             "--max-batch" => max_batch = val().parse().unwrap_or_else(|_| fail("--max-batch takes a number")),
             "--offline" => offline = true,
+            "--park" => park = true,
             "-h" | "--help" => {
                 print!("{HELP}");
                 return;
@@ -107,8 +111,8 @@ fn join(args: &[String]) {
     }
     let identity = identity.unwrap_or_else(crate::metrics::hostname);
     let max_batch = max_batch.max(1);
-    let loaded = load_node(&model, runtime.as_deref(), max_context, max_batch, offline, &node_wal(&home, &identity))
-        .unwrap_or_else(|e| fail(e));
+    let state = NodeState::open(&home, &identity, park).unwrap_or_else(|e| fail(e));
+    let loaded = load_node(&model, runtime.as_deref(), max_context, max_batch, offline, &state).unwrap_or_else(|e| fail(e));
     eprintln!("superfluid: {}", loaded.summary);
     let model_name = model_name.unwrap_or_else(|| name_among(announced.as_deref().unwrap_or_default(), loaded.model_name));
     let mut node = NodeAgent::new(Arc::new(loaded.daemon), identity.clone(), model_name.clone()).with_max_lanes(max_batch);
@@ -268,7 +272,7 @@ pub fn load_node(
     max_context: Option<i32>,
     lanes: u32,
     offline: bool,
-    wal: &Path,
+    state: &NodeState,
 ) -> Result<LoadedNode, String> {
     let lanes = lanes.max(1);
     let catalog = Catalog::from_env();
@@ -301,13 +305,13 @@ pub fn load_node(
         runtime.id.name(),
         path.display()
     );
-    let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, wal)?;
+    let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, state)?;
     node.tokenizer = crate::serve::open_tokenizer(&runtime, &path).ok();
     Ok(node)
 }
 
 /// A node on the test engine, which needs no model.
-pub fn load_mock_node(max_context: Option<i32>, lanes: u32, wal: &Path) -> Result<LoadedNode, String> {
+pub fn load_mock_node(max_context: Option<i32>, lanes: u32, state: &NodeState) -> Result<LoadedNode, String> {
     let lanes = lanes.max(1);
     let engine = crate::linked::engine("mock").ok_or("this build does not link the mock engine")?;
     let args = superfluid_adapter_kit::WorkerArgs {
@@ -316,7 +320,7 @@ pub fn load_mock_node(max_context: Option<i32>, lanes: u32, wal: &Path) -> Resul
         ..Default::default()
     };
     let host = EngineHost::try_spawn_loaded(move || engine.open(&args)).map_err(|e| format!("model load failed: {e}"))?;
-    loaded(host, Box::new(crate::MockCodec), lanes, "mock".into(), "the mock engine".into(), wal)
+    loaded(host, Box::new(crate::MockCodec), lanes, "mock".into(), "the mock engine".into(), state)
 }
 
 fn loaded(
@@ -325,10 +329,11 @@ fn loaded(
     lanes: u32,
     model_name: String,
     summary: String,
-    wal: &Path,
+    state: &NodeState,
 ) -> Result<LoadedNode, String> {
-    let store = SessionStore::open(wal).map_err(|e| format!("node store: {e}"))?;
-    Ok(LoadedNode { daemon: Daemon::new(store, host, codec, lanes as usize), model_name, summary, tokenizer: None })
+    let store = SessionStore::open(&state.wal).map_err(|e| format!("node store: {e}"))?;
+    let daemon = Daemon::with_park(store, host, codec, lanes as usize, state.park.clone());
+    Ok(LoadedNode { daemon, model_name, summary, tokenizer: None })
 }
 
 /// The window this device holds for `lanes` lanes of the model, as `superfluid serve` sizes it.
@@ -370,19 +375,31 @@ pub fn loopback(addr: &str) -> bool {
 }
 
 /// A session store under the system temp dir, for `superfluid-noded`.
-pub fn scratch_wal() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("superfluid-node-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
-    dir.join("wal.log")
+/// Where a node keeps its state, under `$SUPERFLUID_HOME/fleet/nodes/<identity>`. Its session
+/// store starts empty each run: a node's sessions last one generation, and the head keeps the
+/// conversations. Its parked prefixes, with `--park`, are kept across runs.
+pub struct NodeState {
+    pub wal: PathBuf,
+    pub park: Option<PathBuf>,
 }
 
-/// The node's session store, under `$SUPERFLUID_HOME/fleet/nodes/<identity>`; a node has no
-/// state worth keeping across runs, so it starts empty.
-fn node_wal(home: &Path, identity: &str) -> PathBuf {
-    let dir = home.join("fleet").join("nodes").join(identity.replace(['/', '\\'], "_"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap_or_else(|e| fail(format!("{}: {e}", dir.display())));
-    dir.join("wal.log")
+impl NodeState {
+    pub fn open(home: &Path, identity: &str, park: bool) -> Result<NodeState, String> {
+        let dir = home.join("fleet").join("nodes").join(identity.replace(['/', '\\'], "_"));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let wal = dir.join("wal.log");
+        for stale in [wal.clone(), dir.join("wal.log.prev")] {
+            let _ = std::fs::remove_file(stale);
+        }
+        Ok(NodeState { wal, park: park.then(|| dir.join("park")) })
+    }
+
+    /// A session store of this process's own, and no parking.
+    pub fn scratch() -> Result<NodeState, String> {
+        let dir = std::env::temp_dir().join(format!("superfluid-node-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        Ok(NodeState { wal: dir.join("wal.log"), park: None })
+    }
 }
 
 /// The model's path (pulled when given by id), the name the head sees it under, and its runtime.

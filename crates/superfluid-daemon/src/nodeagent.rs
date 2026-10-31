@@ -923,7 +923,9 @@ struct Extras {
 
 impl Extras {
     fn of(daemon: &Daemon, opts: Option<&linkf::GenerateOptsMsg>) -> Result<Extras, DaemonError> {
-        let mut extras = crate::scheduler::GenExtras::default();
+        // A node started with --park keeps each prompt's prefix on disk, so it starts warm after
+        // a restart.
+        let mut extras = crate::scheduler::GenExtras { keep_prefix: true, ..Default::default() };
         let Some(o) = opts else { return Ok(Extras { extras }) };
         extras.presence_penalty = f32::from_bits(o.presence_penalty_bits);
         extras.frequency_penalty = f32::from_bits(o.frequency_penalty_bits);

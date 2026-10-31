@@ -181,6 +181,9 @@ pub struct GenExtras {
     pub top_logprobs: u8,
     pub wants_deltas: bool,
     pub ephemeral: bool,
+    /// A completion whose prompt prefix is kept on disk with parking on, as an ephemeral
+    /// session's is: a fleet node's generations, so a restarted node starts them warm.
+    pub keep_prefix: bool,
     pub open_channel: u32,
     pub thinking: Option<bool>,
     pub ignore_eos: bool,
@@ -2605,7 +2608,11 @@ impl Scheduler {
             return Ok(());
         };
         let lane = &self.lanes[i];
-        if lane.job.completion || !lane.job.media.is_empty() || self.host.multi_space() || self.host.has_unservable_space() {
+        if (lane.job.completion && !lane.job.extras.keep_prefix)
+            || !lane.job.media.is_empty()
+            || self.host.multi_space()
+            || self.host.has_unservable_space()
+        {
             return Ok(());
         }
         let n = lane.all_tokens.len() as u64;
@@ -3488,9 +3495,11 @@ impl Scheduler {
 
         if self.park_dir.is_some() {
             for i in 0..self.lanes.len() {
+                let keeps_prefix = self.lanes[i].job.completion && self.lanes[i].job.extras.keep_prefix;
                 if matches!(self.lanes[i].phase, LanePhase::Finishing)
                     && self.lanes[i].admitted
                     && !self.lanes[i].parked
+                    && !keeps_prefix
                     && (!self.lanes[i].job.extras.ephemeral || self.lanes[i].preempted)
                 {
                     self.lanes[i].parked = true;

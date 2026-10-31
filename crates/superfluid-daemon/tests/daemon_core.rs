@@ -877,6 +877,48 @@ fn an_http_requests_prompt_prefix_is_kept_and_starts_the_same_prompt_warm_after_
 }
 
 #[test]
+fn a_fleet_nodes_prompt_prefix_is_kept_and_starts_it_warm_after_a_restart() {
+    // A node's generations are completions; one that asks keeps its prompt's prefix as an
+    // HTTP request's is, so a restarted node starts the head's next turn warm.
+    let dir = test_dir();
+    let park = dir.join("park");
+    let prompt: Vec<u32> = (0..1100).collect();
+    let ask = |d: &Daemon, keep_prefix: bool| {
+        let extras = superfluid_daemon::scheduler::GenExtras { keep_prefix, ..Default::default() };
+        d.generate_tokens_streaming(prompt.clone(), GenParams::default(), 8, 0, extras, |_| std::ops::ControlFlow::Continue(())).unwrap().0
+    };
+    let resumes = |d: &Daemon| {
+        d.metrics_text().lines().find_map(|l| l.strip_prefix("superfluid_resumes_total ")?.trim().parse::<u64>().ok()).unwrap_or(0)
+    };
+    let kept_in = |park: &std::path::Path| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let n = std::fs::read_dir(park.join("prefix")).map(|r| r.count()).unwrap_or(0);
+            if n > 0 || std::time::Instant::now() > deadline {
+                return n;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+
+    let node = kv_only_daemon(&dir.join("wal.log"), Some(&park));
+    let first = ask(&node, true);
+    assert_eq!(kept_in(&park), 1, "its prompt prefix is kept");
+    drop(node);
+
+    let restarted = kv_only_daemon(&dir.join("wal.log"), Some(&park));
+    let again = ask(&restarted, true);
+    assert_eq!(resumes(&restarted), 1, "after a restart the prompt starts from it");
+    assert_eq!(again, first, "and continues the exact stream");
+
+    let other = test_dir();
+    let plain = kv_only_daemon(&other.join("wal.log"), Some(&other.join("park")));
+    ask(&plain, false);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(std::fs::read_dir(other.join("park").join("prefix")).map(|r| r.count()).unwrap_or(0), 0, "a completion that does not ask keeps nothing");
+}
+
+#[test]
 fn an_ephemeral_session_writes_no_park_artifact() {
     let dir = test_dir();
     let wal = dir.join("wal.log");
