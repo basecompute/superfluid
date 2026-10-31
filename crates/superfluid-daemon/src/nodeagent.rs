@@ -563,10 +563,13 @@ impl NodeAgent {
             msg_type::XFER_END => {
                 let m: linkf::XferEndMsg = postcard::from_bytes(&frame.payload)?;
                 if let Some((want, bytes)) = self.incoming.remove(&m.transfer_id) {
-                    let got = self.daemon.media_put(&bytes).map_err(DaemonError::Io)?;
                     let want: String = want.iter().map(|b| format!("{b:02x}")).collect();
-                    if got != want {
+                    if crate::media::content_hash(&bytes) != want {
                         return Err(DaemonError::Protocol("a blob from the head is not what its hash says"));
+                    }
+                    // A blob this node cannot keep fails the request that brings it, not the link.
+                    if let Err(e) = self.daemon.media_put(&bytes) {
+                        tracing::warn!("node-agent cannot keep a blob from the head: {e}");
                     }
                 }
             }
