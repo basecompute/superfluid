@@ -878,6 +878,11 @@ impl Daemon {
         self.fleet.as_ref().map(|(fleet, model)| fleet.serving(model))
     }
 
+    /// For a daemon over a fleet: the nodes up of all the head knows, whatever each serves.
+    pub fn fleet_nodes(&self) -> Option<(usize, usize)> {
+        self.fleet.as_ref().map(|(fleet, _)| fleet.nodes_up())
+    }
+
     fn assemble(
         store: SessionStore,
         opts: DaemonOptions,

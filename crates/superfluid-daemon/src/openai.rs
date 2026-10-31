@@ -1794,21 +1794,29 @@ async fn models_unload(State(st): State<AppState>, body: axum::body::Bytes) -> R
     unload_response(&st, req.id).await
 }
 
-/// On a fleet head, 503 while no node that is up serves the model, so a load balancer sends the
-/// head nothing it could not place.
+/// On a fleet head, 503 while no node that is up serves any of its models, so a load balancer
+/// sends the head nothing it could not place; each model's nodes are counted under `models`.
 async fn health(State(st): State<AppState>) -> Response {
-    let loaded = st.registry.names().len();
+    let names = st.registry.names();
     let known = st.registry.all_names().len();
-    let Some((up, nodes)) = st.default_daemon().fleet_serving() else {
-        return Json(serde_json::json!({"status": "ok", "models_loaded": loaded, "models_known": known})).into_response();
+    let Some((up, nodes)) = st.default_daemon().fleet_nodes() else {
+        return Json(serde_json::json!({"status": "ok", "models_loaded": names.len(), "models_known": known})).into_response();
     };
-    let status = if up > 0 { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+    let mut models = serde_json::Map::new();
+    for name in &names {
+        if let Some((serving, _)) = st.registry.resolve(Some(name)).and_then(|(_, d)| d.fleet_serving()) {
+            models.insert(name.clone(), serde_json::json!({"nodes_up": serving}));
+        }
+    }
+    let servable = models.values().any(|m| m["nodes_up"].as_u64().is_some_and(|n| n > 0));
+    let status = if servable { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
     let body = serde_json::json!({
-        "status": if up > 0 { "ok" } else { "no_nodes" },
-        "models_loaded": loaded,
+        "status": if servable { "ok" } else { "no_nodes" },
+        "models_loaded": names.len(),
         "models_known": known,
         "nodes_up": up,
         "nodes_known": nodes,
+        "models": models,
     });
     (status, Json(body)).into_response()
 }

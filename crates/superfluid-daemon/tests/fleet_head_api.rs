@@ -488,6 +488,17 @@ fn two_models_on_two_nodes_are_routed_by_model() {
 }
 
 #[test]
+fn health_counts_every_node_and_each_models_own() {
+    let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+    let (head, _) = multi_head(vec![named_node("alpha-node", "alpha", 7), gone], &[("alpha", 7), ("beta", 7)]);
+    let mut resp = agent().get(&format!("http://{head}/health")).call().unwrap();
+    let health = json(&resp.body_mut().read_to_string().unwrap());
+    assert_eq!(resp.status().as_u16(), 200, "a model still served keeps the head in: {health}");
+    assert_eq!((&health["nodes_up"], &health["nodes_known"]), (&1.into(), &2.into()), "{health}");
+    assert_eq!((&health["models"]["alpha"]["nodes_up"], &health["models"]["beta"]["nodes_up"]), (&1.into(), &0.into()), "{health}");
+}
+
+#[test]
 fn a_node_whose_tokenizer_differs_is_not_used_for_the_model() {
     let (same, other, unknown) = (named_node("same", "alpha", 7), named_node("other", "alpha", 8), named_node("silent", "beta", 0));
     let (head, fleet) = multi_head(vec![other.clone(), same], &[("alpha", 7), ("beta", 9)]);
