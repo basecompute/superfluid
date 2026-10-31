@@ -151,7 +151,16 @@ Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has
 The head keeps every conversation; a node keeps only what makes the next turn fast, its cache of prompt prefixes. Two things make that survive a restart:
 
 - The head remembers which node ran each prompt prefix and sends a conversation's next turn there (see [Placement policies](#placement-policies)), across a head restart too.
-- A node started with `--park` writes each prompt's prefix of 1024 tokens or more to disk under `$SUPERFLUID_HOME/fleet/nodes/<identity>/park`, up to 20 GB, the oldest swept first. After the node restarts, a turn whose prompt one covers starts from it instead of prefilling the whole conversation again. Writing it copies the cache at the end of each generation, which holds up the lanes beside it a moment, so it is off by default. Prompts with images or audio, and models whose cache holds more than one kind of state (hybrid or sliding-window attention), are not kept.
+- A node started with `--park` writes each prompt's prefix of 1024 tokens or more to disk under `$SUPERFLUID_HOME/fleet/nodes/<identity>/park`, up to 20 GB, the oldest swept first. After the node restarts, a turn whose prompt one covers starts from it instead of prefilling the whole conversation again. Writing a new prefix copies its cache at the end of that generation, which delays that response's finish and holds up the lanes beside it, so it is off by default; a prefix that one kept already mostly covers is not written again. Prompts with images or audio, and models whose cache holds more than one kind of state (hybrid or sliding-window attention), are not kept.
+
+It pays off where prefilling is slower than reading the prefix back. With Qwen3 4B (baseRT, 4-bit) and a 9.3k-token conversation:
+
+| node | cold first token | warm in the node's cache | after a node restart, with `--park` |
+|---|---|---|---|
+| Apple M4 Pro | 19.1 s | 0.39 s | 1.6 s |
+| NVIDIA GB10 | 1.6 s | 0.2 s | 4.6 s |
+
+On the GB10 the restart is faster without `--park`.
 
 A request a head restart cut short runs again when the client retries it with its `Idempotency-Key`; it is not continued from where it stopped.
 
