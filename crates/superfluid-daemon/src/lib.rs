@@ -1265,6 +1265,7 @@ impl Daemon {
         let mut emitted = 0usize;
         let result = scheduler::run_completion_streaming(
             &self.sched_tx(),
+            &self.cancels,
             stream,
             params,
             req.max_tokens,
@@ -1324,7 +1325,7 @@ impl Daemon {
         self.check_stream_fits(stream.len())?;
         let deadline = self.effective_deadline(deadline_ms);
         let (tokens, _finish, expired) =
-            scheduler::run_completion(&self.sched_tx(), stream, params, max_tokens, deadline, 0)?;
+            scheduler::run_completion(&self.sched_tx(), &self.cancels, stream, params, max_tokens, deadline, 0)?;
         Ok((tokens, expired))
     }
 
@@ -1337,11 +1338,11 @@ impl Daemon {
         extras: scheduler::GenExtras,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
     ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
-        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, extras, Vec::new(), on_tokens, |_| {})
+        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, qos::INLINE_COMPLETION, extras, Vec::new(), on_tokens, |_| {})
     }
 
-    /// As [`Self::generate_tokens_streaming`], telling `on_logprobs` the log-probabilities the
-    /// extras ask for.
+    /// As [`Self::generate_tokens_streaming`] in QoS class `class`, telling `on_logprobs` the
+    /// log-probabilities the extras ask for.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_tokens_streaming_lp(
         &self,
@@ -1349,6 +1350,7 @@ impl Daemon {
         params: GenParams,
         max_tokens: u32,
         deadline_ms: u64,
+        class: u8,
         extras: scheduler::GenExtras,
         media: Vec<(u64, std::path::PathBuf, u32)>,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
@@ -1360,10 +1362,12 @@ impl Daemon {
         let deadline = self.effective_deadline(deadline_ms);
         scheduler::run_completion_streaming_lp(
             &self.sched_tx(),
+            &self.cancels,
             stream,
             params,
             max_tokens,
             deadline,
+            class,
             extras,
             media,
             on_tokens,
@@ -1460,7 +1464,7 @@ impl Daemon {
         };
         let deadline = self.effective_deadline(deadline_ms);
         let result =
-            scheduler::run_completion(&self.sched_tx(), stream, params, max_tokens, deadline, handle);
+            scheduler::run_completion(&self.sched_tx(), &self.cancels, stream, params, max_tokens, deadline, handle);
         let _ = self.engine_sync(proto_linkw::StateSyncReqMsg::FreeGrammar {
             grammar_handle: handle,
         });
@@ -3526,5 +3530,16 @@ mod latency_tests {
         assert!(worker.latency_wanted() && worker.yield_requested(), "short steps, and the running tick ends at its next");
         assert!(cancels.latency_recent(Duration::from_secs(300)));
         assert!(!cancels.latency_recent(Duration::ZERO), "past the hold");
+    }
+
+    #[test]
+    fn a_completion_asks_the_running_tick_to_end_as_a_chat_does() {
+        // A fleet node runs every generation as a completion: one that arrived mid-tick waited
+        // for the tick to end by itself.
+        let host = crate::EngineHost::spawn(|| (superfluid_engine::MockEngine::new(superfluid_engine::EngineConfig::default()), None)).unwrap();
+        let daemon = crate::Daemon::new(crate::SessionStore::ephemeral(), host, Box::new(crate::MockCodec), 2);
+        assert!(!daemon.cancels.latency_recent(Duration::from_secs(300)));
+        daemon.generate_tokens(vec![1, 2, 3], crate::GenParams::default(), 4, 0).unwrap();
+        assert!(daemon.cancels.latency_recent(Duration::from_secs(300)), "a completion is latency-sensitive");
     }
 }

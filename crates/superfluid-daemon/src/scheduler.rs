@@ -4303,6 +4303,7 @@ fn draft_weights_identity(path: &str) -> Result<(u64, u64), DaemonError> {
 
 pub fn run_completion(
     tx: &Sender<SchedCmd>,
+    cancels: &std::sync::Arc<crate::CancelSet>,
     stream: Vec<u32>,
     params: GenParams,
     max_tokens: u32,
@@ -4311,6 +4312,7 @@ pub fn run_completion(
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
     run_completion_streaming(
         tx,
+        cancels,
         stream,
         params,
         max_tokens,
@@ -4320,8 +4322,10 @@ pub fn run_completion(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_completion_streaming(
     tx: &Sender<SchedCmd>,
+    cancels: &std::sync::Arc<crate::CancelSet>,
     stream: Vec<u32>,
     params: GenParams,
     max_tokens: u32,
@@ -4329,18 +4333,21 @@ pub fn run_completion_streaming(
     extras: GenExtras,
     on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
-    run_completion_streaming_lp(tx, stream, params, max_tokens, deadline_ms, extras, Vec::new(), on_tokens, |_| {})
+    run_completion_streaming_lp(tx, cancels, stream, params, max_tokens, deadline_ms, crate::qos::INLINE_COMPLETION, extras, Vec::new(), on_tokens, |_| {})
 }
 
-/// As [`run_completion_streaming`], telling `on_logprobs` each token's log-probabilities when
-/// the extras ask for them.
+/// As [`run_completion_streaming`] in QoS class `class` (a fleet node runs the class its head
+/// gave the session), telling `on_logprobs` each token's log-probabilities when the extras ask
+/// for them.
 #[allow(clippy::too_many_arguments)]
 pub fn run_completion_streaming_lp(
     tx: &Sender<SchedCmd>,
+    cancels: &std::sync::Arc<crate::CancelSet>,
     stream: Vec<u32>,
     params: GenParams,
     max_tokens: u32,
     deadline_ms: u64,
+    class: u8,
     extras: GenExtras,
     media: Vec<(u64, std::path::PathBuf, u32)>,
     mut on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
@@ -4354,7 +4361,7 @@ pub fn run_completion_streaming_lp(
         params,
         max_tokens,
         events: etx,
-        class: crate::qos::INLINE_COMPLETION,
+        class,
         batch_invariant: false,
         carry: None,
         queued_at: 0,
@@ -4366,6 +4373,10 @@ pub fn run_completion_streaming_lp(
         trace: tracing::Span::current(),
     })))
     .map_err(|_| DaemonError::Protocol("scheduler is gone"))?;
+    if class <= crate::qos::INLINE_COMPLETION {
+        // As for a chat: the running tick ends at its next step instead of making it wait.
+        cancels.latency_request();
+    }
     let mut tokens = Vec::new();
     loop {
         match erx.recv() {

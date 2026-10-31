@@ -31,7 +31,8 @@ struct AgentShared {
     /// The connection each session was placed over, the one the head answers its renewals on.
     owners: HashMap<u64, u64>,
     contexts: HashMap<u64, Vec<u32>>,
-    params: HashMap<u64, GenParams>,
+    /// Each session's sampling and the QoS class the head gave it, which its generations run in.
+    params: HashMap<u64, (GenParams, u8)>,
     last_load_sample: Option<(u64, u64, u64)>,
     decode_rate_ewma: u32,
     prefill_rate_ewma: u32,
@@ -469,7 +470,7 @@ impl NodeAgent {
                 let m: linkf::SessionAssignMsg = postcard::from_bytes(&frame.payload)?;
                 let mut sh = self.shared.lock().expect("agent shared");
                 if sh.agent.on_assign(&m, now) {
-                    sh.params.insert(m.session_id, decode_params(&m.params));
+                    sh.params.insert(m.session_id, (decode_params(&m.params), m.qos_class.min(crate::qos::BACKGROUND_AGENT)));
                     sh.owners.insert(m.session_id, self.conn);
                     self.asked.remove(&m.session_id);
                 }
@@ -712,11 +713,11 @@ impl NodeAgent {
     /// Starts `req` on a thread of its own, so this connection goes on reading the head
     /// (cancels, lease grants, heartbeats) and sending status while it runs.
     fn start_generation(&mut self, req: &linkf::GenerateReqMsg) -> Running {
-        let (context, params) = {
+        let (context, (params, class)) = {
             let sh = self.shared.lock().expect("agent shared");
             (
                 sh.contexts.get(&req.session_id).cloned().unwrap_or_default(),
-                sh.params.get(&req.session_id).copied().unwrap_or_default(),
+                sh.params.get(&req.session_id).copied().unwrap_or((GenParams::default(), crate::qos::FOREGROUND_AGENT)),
             )
         };
         let max_new = req.budgets.max_new_tokens.min(u32::MAX as u64) as u32;
@@ -743,6 +744,7 @@ impl NodeAgent {
                             params,
                             max_new,
                             max_wall_ms,
+                            class,
                             extras.extras.clone(),
                             media,
                             |batch| {

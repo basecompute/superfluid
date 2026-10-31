@@ -703,3 +703,48 @@ fn requests_past_every_lane_wait_their_turn_on_a_head_that_encodes_on_a_node() {
         assert!(run.join().unwrap().tokens_generated > 0);
     }
 }
+
+#[test]
+fn a_node_runs_a_generation_in_the_qos_class_its_head_gave_the_session() {
+    // The node caps its agent class at one lane: two agent sessions take turns there, where in
+    // another class they would run side by side.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let config = EngineConfig { vocab: 512, tick_delay: std::time::Duration::from_millis(20), ..EngineConfig::default() };
+        let host = EngineHost::spawn(move || (MockEngine::new(config), None)).unwrap();
+        let opts = DaemonOptions { max_lanes: 2, class_lanes: [0, 0, 1, 0], ..DaemonOptions::default() };
+        let daemon = Arc::new(Daemon::with_options(store("node"), host, Box::new(MockCodec), opts).unwrap());
+        let node = NodeAgent::new(daemon, "classes", "mock-model").with_max_lanes(2);
+        for sock in listener.incoming() {
+            let Ok(sock) = sock else { break };
+            let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+            let mut conn = node.connection();
+            std::thread::spawn(move || {
+                let _ = conn.serve(ep);
+            });
+        }
+    });
+    let fleet = fleet_of(addr);
+    let agent = superfluid_daemon::qos::FOREGROUND_AGENT;
+    for s in 1..=2u64 {
+        fleet.place(s, superfluid_daemon::GenParams::default(), agent, "raw", "mock-model", &[1, 2, 3], 64).unwrap();
+    }
+    let runs: Vec<_> = (1..=2u64)
+        .map(|s| {
+            let fleet = Arc::clone(&fleet);
+            std::thread::spawn(move || {
+                let mut first = None;
+                fleet
+                    .generate_streaming(s, 64, 60_000, |_| {
+                        first.get_or_insert_with(std::time::Instant::now);
+                    })
+                    .unwrap();
+                (first.expect("tokens"), std::time::Instant::now())
+            })
+        })
+        .collect();
+    let mut ran: Vec<_> = runs.into_iter().map(|r| r.join().unwrap()).collect();
+    ran.sort();
+    assert!(ran[1].0 >= ran[0].1, "two agent sessions ran at once on a node that gives the class one lane");
+}
