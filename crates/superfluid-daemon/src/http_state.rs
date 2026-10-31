@@ -31,6 +31,16 @@ impl AppState {
             .map(|(_, d)| d)
             .expect("a default model is always loaded")
     }
+    /// The window `/v1/models` gives for `id`: on a fleet head, the largest a node serving it
+    /// has, as it is the nodes that hold the context.
+    pub(crate) fn window_of(&self, id: &str) -> u32 {
+        let fleet = self.registry.is_loaded(id).then(|| self.registry.resolve(Some(id))).flatten();
+        match fleet.and_then(|(_, d)| d.fleet_window()) {
+            Some(n) => n.min(u32::MAX as u64) as u32,
+            None => self.limits.max_context,
+        }
+    }
+
     pub(crate) fn default_name(&self) -> String {
         self.registry.default_name()
     }
@@ -294,18 +304,6 @@ fn load_failed(model: &str, e: DaemonError) -> Response {
     error_response(status, message)
 }
 
-pub(crate) fn sse_error_frame(e: &DaemonError, kind: &str) -> serde_json::Value {
-    let mut err = serde_json::json!({"message": e.to_string(), "type": kind});
-    if matches!(e, DaemonError::StreamTooLong { .. }) {
-        err["code"] = "context_length_exceeded".into();
-    }
-    if let DaemonError::Unsupported(r) = e {
-        err["code"] = r.code.into();
-        err["param"] = serde_json::json!(r.param);
-    }
-    serde_json::json!({"error": err})
-}
-
 pub(crate) fn daemon_error(e: DaemonError) -> Response {
     if matches!(e, DaemonError::StreamTooLong { .. }) {
         return error_response_typed(
@@ -361,27 +359,9 @@ pub(crate) fn throttled_response(wait: std::time::Duration) -> Response {
 }
 
 #[cfg(test)]
-mod sse_error_frame_tests {
-    use super::sse_error_frame;
+mod stream_failure_tests {
     use crate::generation_output::StreamFailure;
     use crate::{DaemonError, Refusal};
-
-    #[test]
-    fn the_frame_carries_the_code_a_client_branches_on() {
-        let long = sse_error_frame(&DaemonError::StreamTooLong { len: 9000, max: 8192 }, "invalid_request_error");
-        assert_eq!(long["error"]["code"], "context_length_exceeded", "{long}");
-        assert_eq!(long["error"]["type"], "invalid_request_error", "{long}");
-        assert!(long["error"].get("param").is_none(), "{long}");
-
-        let refusal = Refusal::new("unsupported_input", Some("messages[0].content"), "model 'm' on runtime r does not accept images: no media path");
-        let refused = sse_error_frame(&DaemonError::Unsupported(refusal), "invalid_request_error");
-        assert_eq!(refused["error"]["code"], "unsupported_input", "{refused}");
-        assert_eq!(refused["error"]["param"], "messages[0].content", "{refused}");
-        assert_eq!(refused["error"]["message"], "model 'm' on runtime r does not accept images: no media path", "{refused}");
-
-        let other = sse_error_frame(&DaemonError::Protocol("sse client gone"), "server_error");
-        assert!(other["error"].get("code").is_none() && other["error"]["type"] == "server_error", "{other}");
-    }
 
     #[test]
     fn a_stream_failure_carries_them_too() {

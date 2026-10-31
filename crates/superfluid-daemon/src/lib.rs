@@ -23,6 +23,9 @@ pub mod template_codec;
 pub mod tool_fragment;
 pub mod fleet;
 pub mod fleet_manager;
+pub mod fleet_warm;
+pub(crate) mod fleet_daemon;
+pub mod idempotency;
 pub mod fleet_join;
 pub mod fleet_mdns;
 pub mod fleet_token;
@@ -41,7 +44,7 @@ mod keepalive;
 mod responses;
 pub mod openai;
 pub mod ollama;
-pub mod fleet_openai;
+pub mod fleet_metrics;
 pub mod park;
 pub mod pins;
 pub mod runtime;
@@ -430,6 +433,37 @@ struct Ground<'a> {
 }
 
 impl Serving {
+    fn over_fleet(
+        codec: std::sync::Arc<dyn TextCodec + Send + Sync>,
+        ground: Ground<'_>,
+        fleet: std::sync::Arc<fleet_manager::FleetManager>,
+        model: String,
+        opts: DaemonOptions,
+    ) -> Serving {
+        let capabilities = std::sync::Arc::new(std::sync::RwLock::new(fleet_daemon::capability_record()));
+        let sched = fleet_daemon::spawn(fleet_daemon::Dispatch {
+            fleet,
+            model,
+            store: std::sync::Arc::clone(ground.store),
+            codec: std::sync::Arc::clone(&codec),
+            cancels: std::sync::Arc::clone(ground.cancels),
+            active: std::sync::Arc::clone(ground.active),
+            stats: std::sync::Arc::clone(ground.stats),
+            tool_lease_ms: opts.tool_lease_ms,
+            handles: Default::default(),
+            capabilities: std::sync::Arc::clone(&capabilities),
+        });
+        Serving {
+            capabilities,
+            retired: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            model_sampling: std::sync::OnceLock::new(),
+            codec,
+            sched,
+            speculation: std::sync::Arc::new(scheduler::Speculation::default()),
+            staged_tokens: 0,
+        }
+    }
+
     fn start(
         host: EngineHost,
         codec: std::sync::Arc<dyn TextCodec + Send + Sync>,
@@ -531,6 +565,8 @@ pub struct Daemon {
     completion: std::sync::Arc<CompletionSatellite>,
     fim_satellite: std::sync::OnceLock<FimSatellite>,
     built_with: DaemonOptions,
+    /// The fleet and model this daemon's generations run on, when it has no engine of its own.
+    fleet: Option<(std::sync::Arc<fleet_manager::FleetManager>, String)>,
 }
 
 impl CompletionSatellite {
@@ -813,6 +849,46 @@ impl Daemon {
         codec: Box<dyn TextCodec + Send + Sync>,
         opts: DaemonOptions,
     ) -> Result<Daemon, DaemonError> {
+        Self::assemble(store, opts, |ground, opts| Serving::start(host, std::sync::Arc::from(codec), ground, opts))
+    }
+
+    /// A daemon with no engine of its own: every generation runs on a node of `fleet` that
+    /// serves `model`, and the head keeps the handlers, the codec and the sessions.
+    pub fn over_fleet(
+        store: SessionStore,
+        codec: Box<dyn TextCodec + Send + Sync>,
+        fleet: std::sync::Arc<fleet_manager::FleetManager>,
+        model: String,
+        opts: DaemonOptions,
+    ) -> Result<Daemon, DaemonError> {
+        let backing = (std::sync::Arc::clone(&fleet), model.clone());
+        let mut daemon =
+            Self::assemble(store, opts, |ground, opts| Ok(Serving::over_fleet(std::sync::Arc::from(codec), ground, fleet, model, opts)))?;
+        daemon.fleet = Some(backing);
+        Ok(daemon)
+    }
+
+    /// For a daemon over a fleet: the largest window a node serving its model has, once one has
+    /// answered.
+    pub fn fleet_window(&self) -> Option<u64> {
+        self.fleet.as_ref().and_then(|(fleet, model)| fleet.advertised_context(model))
+    }
+
+    /// For a daemon over a fleet: the nodes up now that serve its model, and every node known.
+    pub fn fleet_serving(&self) -> Option<(usize, usize)> {
+        self.fleet.as_ref().map(|(fleet, model)| fleet.serving(model))
+    }
+
+    /// For a daemon over a fleet: the nodes up of all the head knows, whatever each serves.
+    pub fn fleet_nodes(&self) -> Option<(usize, usize)> {
+        self.fleet.as_ref().map(|(fleet, _)| fleet.nodes_up())
+    }
+
+    fn assemble(
+        store: SessionStore,
+        opts: DaemonOptions,
+        start: impl FnOnce(Ground<'_>, DaemonOptions) -> Result<Serving, DaemonError>,
+    ) -> Result<Daemon, DaemonError> {
         if opts.pressure_high_pct == 0 || opts.pressure_high_pct > 100 {
             return Err(DaemonError::Config(
                 "pressure_high_pct must be in 1..=100",
@@ -876,9 +952,7 @@ impl Daemon {
                 })
         });
         let trace_scope = opts.trace_scope.clone();
-        let serving = Serving::start(
-            host,
-            std::sync::Arc::from(codec),
+        let serving = start(
             Ground {
                 store: &store,
                 cancels: &cancels,
@@ -924,6 +998,7 @@ impl Daemon {
             }),
             fim_satellite: std::sync::OnceLock::new(),
             built_with,
+            fleet: None,
         })
     }
 
@@ -998,6 +1073,9 @@ impl Daemon {
     }
 
     pub fn max_stream_tokens(&self) -> u64 {
+        if let Some((fleet, model)) = &self.fleet {
+            return fleet.advertised_context(model).unwrap_or(0);
+        }
         let serving = self.serving();
         let record = serving.capabilities.read().expect("capability record");
         runtime::stream_ceiling(serving.staged_tokens, &record)
@@ -1014,12 +1092,12 @@ impl Daemon {
 
     pub fn session_fits(&self, session: u64, thinking: Option<bool>) -> Result<(), DaemonError> {
         self.ensure_serving()?;
-        let len = {
+        let (len, turn) = {
             let store = self.store.lock().expect("store");
             let s = store.session(session)?;
-            s.tokens.len() + self.generation_opener(&s.events, thinking).map_or(0, |op| op.len())
+            (s.tokens.len(), Self::opener_turn(&s.events))
         };
-        self.check_stream_fits(len)
+        self.check_stream_fits(len + self.generation_opener(turn, thinking).map_or(0, |op| op.len()))
     }
 
     pub fn fim_fits(&self, req: &FimRequest) -> Result<(), DaemonError> {
@@ -1187,6 +1265,7 @@ impl Daemon {
         let mut emitted = 0usize;
         let result = scheduler::run_completion_streaming(
             &self.sched_tx(),
+            &self.cancels,
             stream,
             params,
             req.max_tokens,
@@ -1246,7 +1325,7 @@ impl Daemon {
         self.check_stream_fits(stream.len())?;
         let deadline = self.effective_deadline(deadline_ms);
         let (tokens, _finish, expired) =
-            scheduler::run_completion(&self.sched_tx(), stream, params, max_tokens, deadline, 0)?;
+            scheduler::run_completion(&self.sched_tx(), &self.cancels, stream, params, max_tokens, deadline, 0)?;
         Ok((tokens, expired))
     }
 
@@ -1259,19 +1338,76 @@ impl Daemon {
         extras: scheduler::GenExtras,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
     ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
+        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, qos::INLINE_COMPLETION, extras, Vec::new(), on_tokens, |_| {})
+    }
+
+    /// As [`Self::generate_tokens_streaming`] in QoS class `class`, telling `on_logprobs` the
+    /// log-probabilities the extras ask for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_tokens_streaming_lp(
+        &self,
+        stream: Vec<u32>,
+        params: GenParams,
+        max_tokens: u32,
+        deadline_ms: u64,
+        class: u8,
+        extras: scheduler::GenExtras,
+        media: Vec<(u64, std::path::PathBuf, u32)>,
+        on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
+        on_logprobs: impl FnMut(&[scheduler::TokenLogprob]),
+    ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
         self.ensure_serving()?;
         let _span = self.raw_generate_span(max_tokens);
         self.check_stream_fits(stream.len())?;
         let deadline = self.effective_deadline(deadline_ms);
-        scheduler::run_completion_streaming(
+        scheduler::run_completion_streaming_lp(
             &self.sched_tx(),
+            &self.cancels,
             stream,
             params,
             max_tokens,
             deadline,
+            class,
             extras,
+            media,
             on_tokens,
+            on_logprobs,
         )
+    }
+
+    /// Keeps `bytes` in this daemon's media pool, by their SHA-256 in hex.
+    pub fn media_put(&self, bytes: &[u8]) -> std::io::Result<String> {
+        self.media.put(bytes)
+    }
+
+    /// Where a blob named by its SHA-256 in hex sits in this daemon's media pool.
+    pub fn media_path(&self, hash: &str) -> std::path::PathBuf {
+        self.media.path_of(hash)
+    }
+
+    /// Runs one Link W state operation on this daemon's engine, as a fleet node does for its head.
+    pub fn state_sync(&self, req: proto_linkw::StateSyncReqMsg) -> Result<proto_linkw::StateSyncOkMsg, DaemonError> {
+        self.ensure_serving()?;
+        self.engine_sync(req)
+    }
+
+    /// [`Daemon::state_sync`] for a streamed transcription: each segment goes to `segments` as
+    /// the engine has it, ahead of the answer.
+    pub fn state_sync_stream(
+        &self,
+        req: proto_linkw::StateSyncReqMsg,
+        segments: std::sync::mpsc::Sender<proto_linkw::TranscribeSegmentMsg>,
+    ) -> Result<proto_linkw::StateSyncOkMsg, DaemonError> {
+        self.ensure_serving()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.sched_tx()
+            .send(scheduler::SchedCmd::SyncStream(req, segments, tx))
+            .map_err(|_| DaemonError::Protocol("scheduler is gone"))?;
+        match rx.recv() {
+            Ok(Ok(ok)) => Ok(ok),
+            Ok(Err(e)) => Err(DaemonError::Generation(e)),
+            Err(_) => Err(DaemonError::Protocol("scheduler dropped the query")),
+        }
     }
 
     pub fn forward_stage(
@@ -1328,7 +1464,7 @@ impl Daemon {
         };
         let deadline = self.effective_deadline(deadline_ms);
         let result =
-            scheduler::run_completion(&self.sched_tx(), stream, params, max_tokens, deadline, handle);
+            scheduler::run_completion(&self.sched_tx(), &self.cancels, stream, params, max_tokens, deadline, handle);
         let _ = self.engine_sync(proto_linkw::StateSyncReqMsg::FreeGrammar {
             grammar_handle: handle,
         });
@@ -1835,6 +1971,9 @@ impl Daemon {
 
     pub fn metrics_text(&self) -> String {
         let mut out = metrics::render_prometheus(&self.stats);
+        if let Some((fleet, model)) = &self.fleet {
+            out.push_str(&fleet_metrics::fleet_metrics(&fleet.status(), &metrics::hostname(), model));
+        }
         out.push_str(&format!(
             "# HELP superfluid_telemetry_dropped_total Telemetry records dropped by the bounded sinks (log lines and OTLP spans).\n# TYPE superfluid_telemetry_dropped_total counter\nsuperfluid_telemetry_dropped_total {}\n",
             telemetry::dropped_total()
@@ -2392,21 +2531,27 @@ impl Daemon {
         self.store.lock().expect("store").append(session, text, span)
     }
 
+    /// Read under the store's lock and rendered after it, as [`Daemon::opener_turn`] is.
     fn separator_for(&self, session: u64) -> Vec<u32> {
-        let store = self.store.lock().expect("store");
-        let Ok(s) = store.session(session) else {
-            return Vec::new();
+        let (empty, ended) = {
+            let store = self.store.lock().expect("store");
+            let Ok(s) = store.session(session) else {
+                return Vec::new();
+            };
+            (
+                s.tokens.is_empty(),
+                matches!(
+                    Self::last_stream_record(&s.events),
+                    Some(EventBody::Generated { finish, .. }) if *finish == superfluid_abi::finish::EOS
+                ),
+            )
         };
-        if s.tokens.is_empty() {
-            return self.codec().stream_prologue();
-        }
-        match Self::last_stream_record(&s.events) {
-            Some(EventBody::Generated { finish, .. })
-                if *finish == superfluid_abi::finish::EOS =>
-            {
-                self.codec().turn_separator().unwrap_or_default()
-            }
-            _ => Vec::new(),
+        if empty {
+            self.codec().stream_prologue()
+        } else if ended {
+            self.codec().turn_separator().unwrap_or_default()
+        } else {
+            Vec::new()
         }
     }
 
@@ -2974,16 +3119,21 @@ impl Daemon {
         self.generate_streaming_inner(session, max_tokens, extras, on_event, on_logprobs, on_delta)
     }
 
-    fn generation_opener(&self, events: &[store::CommittedEvent], thinking: Option<bool>) -> Option<Vec<u32>> {
+    /// The turn a generation after `events` opens, read under the store's lock. Its tokens are
+    /// made after the lock is let go: a fleet head's codec may encode them on a node, and the
+    /// generations holding that node's connections commit through the store.
+    fn opener_turn(events: &[store::CommittedEvent]) -> Option<codec::TurnState> {
         match Self::last_stream_record(events) {
-            Some(EventBody::Message { .. }) | Some(EventBody::ToolResult { .. }) => self
-                .codec()
-                .generation_prefix_with(codec::TurnState::AfterInput, thinking),
-            Some(EventBody::Generated { finish, .. }) if *finish == superfluid_abi::finish::EOS => self
-                .codec()
-                .generation_prefix_with(codec::TurnState::AfterFinishedTurn, thinking),
+            Some(EventBody::Message { .. }) | Some(EventBody::ToolResult { .. }) => Some(codec::TurnState::AfterInput),
+            Some(EventBody::Generated { finish, .. }) if *finish == superfluid_abi::finish::EOS => {
+                Some(codec::TurnState::AfterFinishedTurn)
+            }
             _ => None,
         }
+    }
+
+    fn generation_opener(&self, turn: Option<codec::TurnState>, thinking: Option<bool>) -> Option<Vec<u32>> {
+        turn.and_then(|t| self.codec().generation_prefix_with(t, thinking))
     }
 
     /// Where a continuation of `session` forks (one past its last event),
@@ -3137,17 +3287,13 @@ impl Daemon {
             }
         }
         let mut stream = stream;
-        let (opener, open_turn) = {
+        let (turn, open_turn) = {
             let store = self.store.lock().expect("store");
             let events = &store.session(session)?.events;
-            let opener = self.generation_opener(events, extras.thinking);
-            let open_turn: Vec<u32> = if opener.is_some() {
-                Vec::new()
-            } else {
-                Self::open_turn_tokens(events)
-            };
-            (opener, open_turn)
+            (Self::opener_turn(events), Self::open_turn_tokens(events))
         };
+        let opener = self.generation_opener(turn, extras.thinking);
+        let open_turn = if opener.is_some() { Vec::new() } else { open_turn };
         let opener_len = opener.as_ref().map(Vec::len);
         let input_end = if opener.is_some() { stream.len() as u64 } else { 0 };
         if let Some(op) = opener {
@@ -3384,5 +3530,16 @@ mod latency_tests {
         assert!(worker.latency_wanted() && worker.yield_requested(), "short steps, and the running tick ends at its next");
         assert!(cancels.latency_recent(Duration::from_secs(300)));
         assert!(!cancels.latency_recent(Duration::ZERO), "past the hold");
+    }
+
+    #[test]
+    fn a_completion_asks_the_running_tick_to_end_as_a_chat_does() {
+        // A fleet node runs every generation as a completion: one that arrived mid-tick waited
+        // for the tick to end by itself.
+        let host = crate::EngineHost::spawn(|| (superfluid_engine::MockEngine::new(superfluid_engine::EngineConfig::default()), None)).unwrap();
+        let daemon = crate::Daemon::new(crate::SessionStore::ephemeral(), host, Box::new(crate::MockCodec), 2);
+        assert!(!daemon.cancels.latency_recent(Duration::from_secs(300)));
+        daemon.generate_tokens(vec![1, 2, 3], crate::GenParams::default(), 4, 0).unwrap();
+        assert!(daemon.cancels.latency_recent(Duration::from_secs(300)), "a completion is latency-sensitive");
     }
 }

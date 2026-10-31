@@ -18,13 +18,18 @@ const REGISTERED: Duration = Duration::from_secs(2);
 
 /// Announces this head's node listener, and its HTTP port for `superfluid top` when it has one
 /// off loopback; the service stays announced while the daemon lives.
-pub fn advertise(port: u16, model: &str, http: Option<u16>) -> Result<ServiceDaemon, String> {
+pub fn advertise(port: u16, models: &[String], http: Option<u16>) -> Result<ServiceDaemon, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     daemon.set_service_name_len_max(SERVICE_NAME_LEN_MAX).map_err(|e| e.to_string())?;
     // mdns-sd checks a registration on its own thread and tells only its monitors of a refusal.
     let events = daemon.monitor().map_err(|e| e.to_string())?;
     let host = host_label(&crate::metrics::hostname()).to_string();
-    let mut props: HashMap<String, String> = [("model".to_string(), model.to_string())].into();
+    // `model` is the first, as a node from before `models` reads it.
+    let mut props: HashMap<String, String> = [
+        ("model".to_string(), models.first().cloned().unwrap_or_default()),
+        ("models".to_string(), models.join(",")),
+    ]
+    .into();
     if let Some(http) = http {
         props.insert("http".to_string(), http.to_string());
     }
@@ -60,8 +65,8 @@ fn host_label(host: &str) -> &str {
 pub struct Head {
     /// Where its node listener answers, IPv4 first.
     pub nodes: Vec<SocketAddr>,
-    /// The model it serves.
-    pub model: String,
+    /// The models it serves.
+    pub models: Vec<String>,
     /// Where its HTTP API answers, IPv4 first; empty when it announced none.
     pub http: Vec<SocketAddr>,
 }
@@ -90,7 +95,10 @@ fn find_head_where(wait: Duration, wanted: impl Fn(&Head) -> bool) -> Result<Hea
                     let http: Option<u16> = txt("http").parse().ok();
                     let head = Head {
                         nodes: ips.iter().map(|&ip| SocketAddr::new(ip, s.port)).collect(),
-                        model: txt("model").to_string(),
+                        models: match txt("models") {
+                            "" => vec![txt("model").to_string()].into_iter().filter(|m| !m.is_empty()).collect(),
+                            all => all.split(',').map(str::to_string).collect(),
+                        },
                         http: http.map(|p| ips.iter().map(|&ip| SocketAddr::new(ip, p)).collect()).unwrap_or_default(),
                     };
                     if wanted(&head) {
@@ -146,10 +154,10 @@ mod tests {
     #[test]
     #[ignore = "needs multicast on an interface: cargo test -p superfluid --lib fleet_mdns -- --ignored"]
     fn a_node_finds_the_head_it_announced() {
-        let _head = advertise(48456, "test-model", Some(48453)).unwrap();
-        // Another head on this network may answer first; this one serves its own model.
-        let head = find_head_where(Duration::from_secs(10), |h| h.model == "test-model").unwrap();
-        assert_eq!(head.model, "test-model");
+        let _head = advertise(48456, &["test-model".into(), "other-model".into()], Some(48453)).unwrap();
+        // Another head on this network may answer first; this one serves its own models.
+        let head = find_head_where(Duration::from_secs(10), |h| h.models.contains(&"test-model".to_string())).unwrap();
+        assert_eq!(head.models, ["test-model", "other-model"]);
         assert!(head.nodes.iter().all(|a| a.port() == 48456));
         assert!(!head.http.is_empty() && head.http.iter().all(|a| a.port() == 48453));
     }

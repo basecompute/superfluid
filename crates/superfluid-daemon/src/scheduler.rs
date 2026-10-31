@@ -100,6 +100,16 @@ const SHARED_PREFIX_MIN_TOKENS: u64 = 1024;
 const SHARED_PREFIX_TAIL_TOKENS: u32 = 64;
 /// Never hold a request longer than this.
 const SHARED_PREFIX_MAX_HOLD_TICKS: u64 = 64;
+/// With parking on, an HTTP request's prompt prefix of at least this many
+/// tokens is kept on disk when it retires, and a later request (after a
+/// restart too) restores it instead of prefilling it: less is cheap to
+/// prefill again.
+const PREFIX_KEEP_MIN_TOKENS: u64 = 1024;
+/// A prefix is not kept when one on disk already covers this share of it
+/// (in quarters): a burst on one system prompt writes it once.
+const PREFIX_KEPT_QUARTERS: u64 = 3;
+/// The prefixes remembered; the park budget sweeps their files.
+const PREFIX_INDEX_MAX: usize = 256;
 /// On a runtime whose state cannot be cut back, a chat's input of at least
 /// this many tokens is checkpointed where it ends (the executor's floor for
 /// the checkpoint where a prompt ends): less costs little to run again.
@@ -171,6 +181,10 @@ pub struct GenExtras {
     pub top_logprobs: u8,
     pub wants_deltas: bool,
     pub ephemeral: bool,
+    /// A completion whose prompt is kept as a session's is: published to the prefix cache when
+    /// it retires, and on disk with parking on. A fleet node's generations ask for it, so the
+    /// next turn of a conversation, and one after a restart, starts warm.
+    pub keep_prefix: bool,
     pub open_channel: u32,
     pub thinking: Option<bool>,
     pub ignore_eos: bool,
@@ -179,11 +193,7 @@ pub struct GenExtras {
 }
 
 pub struct LaneCarry {
-    seg: Box<dyn Channelizer>,
-    utf8: Utf8Stream,
-    disp_seg: Box<dyn Channelizer>,
-    disp_utf8: Utf8Stream,
-    tool_buf: String,
+    out: LaneOutput,
     produced_before: u32,
     spec_before: (u64, u64),
     decode_before: (u64, f64),
@@ -213,45 +223,184 @@ pub enum LaneEvent {
         decode: (u64, f64),
     },
     Failed(String),
+    /// The generation ended with this error, passed on as it is, so a client's mistake stays
+    /// a client's error.
+    Error(DaemonError),
 }
 
-fn provisional_ingest(
-    codec: &Arc<dyn TextCodec + Send + Sync>,
-    bus: &SessionBus,
-    lane: &mut Lane,
-    tokens: &[u32],
-) {
-    if tokens.is_empty() {
-        return;
-    }
-    lane.disp_tokens += tokens.len() as u32;
-    let produced = lane.disp_tokens;
-    for run in lane.disp_seg.split(tokens) {
-        let mut text = String::new();
-        for &t in &run.text {
-            text.push_str(&lane.disp_utf8.push(&codec.token_bytes(t)));
+/// How a lane's tokens become text, tool calls and committed events: the channel each run is
+/// on, the UTF-8 not yet whole and a tool call still open, kept once for what is committed and
+/// once for the text shown as it streams. The scheduler keeps one per lane; a generation a fleet
+/// node runs keeps one on the head.
+pub struct LaneOutput {
+    seg: Box<dyn Channelizer>,
+    utf8: Utf8Stream,
+    disp_seg: Box<dyn Channelizer>,
+    disp_utf8: Utf8Stream,
+    tool_buf: String,
+    disp_tokens: u32,
+}
+
+/// Where a lane's committed output goes.
+pub struct OutputSink<'a> {
+    pub codec: &'a Arc<dyn TextCodec + Send + Sync>,
+    pub store: &'a Arc<Mutex<SessionStore>>,
+    pub bus: &'a SessionBus,
+    pub tool_lease_ms: u64,
+}
+
+impl LaneOutput {
+    /// Output that starts on `open_channel` (0: the codec's first), after `produced_before`
+    /// tokens an earlier run of the job streamed.
+    pub fn new(codec: &Arc<dyn TextCodec + Send + Sync>, open_channel: u32, produced_before: u32) -> LaneOutput {
+        let mk = || {
+            let mut seg = codec.channelizer();
+            if open_channel != 0 {
+                seg.prime(open_channel);
+            }
+            seg
+        };
+        LaneOutput {
+            seg: mk(),
+            utf8: Utf8Stream::default(),
+            disp_seg: mk(),
+            disp_utf8: Utf8Stream::default(),
+            tool_buf: String::new(),
+            disp_tokens: produced_before,
         }
+    }
+
+    /// Streams `tokens` as provisional text, before they are committed.
+    pub fn provisional(
+        &mut self,
+        codec: &Arc<dyn TextCodec + Send + Sync>,
+        bus: &SessionBus,
+        session: u64,
+        events: &Sender<LaneEvent>,
+        tokens: &[u32],
+    ) {
+        if tokens.is_empty() {
+            return;
+        }
+        self.disp_tokens += tokens.len() as u32;
+        let produced = self.disp_tokens;
+        for run in self.disp_seg.split(tokens) {
+            let mut text = String::new();
+            for &t in &run.text {
+                text.push_str(&self.disp_utf8.push(&codec.token_bytes(t)));
+            }
+            if text.is_empty() {
+                continue;
+            }
+            let channel = run.channel;
+            if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
+                bus.publish_provisional(session, channel, &text);
+                let _ = events.send(LaneEvent::Provisional { channel, text, produced });
+            }
+        }
+    }
+
+    pub fn provisional_flush(&mut self, bus: &SessionBus, session: u64, events: &Sender<LaneEvent>) {
+        let text = self.disp_utf8.flush();
         if text.is_empty() {
-            continue;
+            return;
         }
-        let channel = run.channel;
+        let channel = self.disp_seg.current_channel();
         if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
-            bus.publish_provisional(lane.session, channel, &text);
-            let _ = lane.job.events.send(LaneEvent::Provisional { channel, text, produced });
+            bus.publish_provisional(session, channel, &text);
+            let produced = self.disp_tokens;
+            let _ = events.send(LaneEvent::Provisional { channel, text, produced });
         }
     }
-}
 
-fn provisional_flush(bus: &SessionBus, lane: &mut Lane) {
-    let text = lane.disp_utf8.flush();
-    if text.is_empty() {
-        return;
+    /// Ends the output with `fin`: what is left of the provisional text and the UTF-8 is
+    /// flushed, and the ending committed on the channel it is on, and sent unless `quiet`.
+    pub fn close(
+        &mut self,
+        sink: &OutputSink<'_>,
+        session: u64,
+        events: &Sender<LaneEvent>,
+        fin: u32,
+        quiet: bool,
+    ) -> Result<(), DaemonError> {
+        self.provisional_flush(sink.bus, session, events);
+        let text = self.utf8.flush();
+        let e = sink.store.lock().expect("store").commit_generated(
+            session,
+            Vec::new(),
+            text,
+            self.seg.current_channel(),
+            fin,
+        )?;
+        if !quiet {
+            let _ = events.send(LaneEvent::Committed(e));
+        }
+        Ok(())
     }
-    let channel = lane.disp_seg.current_channel();
-    if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
-        bus.publish_provisional(lane.session, channel, &text);
-        let produced = lane.disp_tokens;
-        let _ = lane.job.events.send(LaneEvent::Provisional { channel, text, produced });
+
+    /// Commits `tokens`, split by channel, with a tool call parsed once its block closes;
+    /// `terminal` flushes everything left. `false` when the caller has gone, and nothing more
+    /// was sent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit(
+        &mut self,
+        sink: &OutputSink<'_>,
+        session: u64,
+        events: &Sender<LaneEvent>,
+        tokens: &[u32],
+        fin: u32,
+        terminal: bool,
+        schemas: Option<&crate::codec::ToolSchemas>,
+    ) -> Result<bool, DaemonError> {
+        if terminal {
+            self.provisional_flush(sink.bus, session, events);
+        }
+        let runs = self.seg.split(tokens);
+        let n_runs = runs.len().max(1);
+        for (i, run) in runs.into_iter().enumerate() {
+            let last = i + 1 == n_runs;
+            let mut text = String::new();
+            for &t in &run.text {
+                text.push_str(&self.utf8.push(&sink.codec.token_bytes(t)));
+            }
+            if last && terminal {
+                text.push_str(&self.utf8.flush());
+            }
+            let channel = run.channel;
+            let tool_closed = run.closes && channel == crate::wal::channel::TOOL_CALL;
+            if channel == crate::wal::channel::TOOL_CALL {
+                self.tool_buf.push_str(&text);
+            }
+            let e = sink.store.lock().expect("store").commit_generated(
+                session,
+                run.span,
+                text,
+                channel,
+                if last { fin } else { finish::NONE },
+            )?;
+            let tool_event = if tool_closed {
+                let raw = std::mem::take(&mut self.tool_buf);
+                Scheduler::commit_tool_block(sink.codec, sink.store, sink.tool_lease_ms, session, raw, schemas)?
+            } else {
+                None
+            };
+            if events.send(LaneEvent::Committed(e)).is_err() {
+                return Ok(false);
+            }
+            if let Some(te) = tool_event {
+                if events.send(LaneEvent::Committed(te)).is_err() {
+                    return Ok(false);
+                }
+            }
+        }
+        if terminal && !self.tool_buf.is_empty() {
+            let raw = std::mem::take(&mut self.tool_buf);
+            let te = Scheduler::commit_tool_block(sink.codec, sink.store, sink.tool_lease_ms, session, raw, schemas)?;
+            if let Some(te) = te {
+                let _ = events.send(LaneEvent::Committed(te));
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -276,6 +425,11 @@ pub struct SchedulerHandle {
 }
 
 impl SchedulerHandle {
+    /// The handle of a thread that answers `tx` as the scheduler does.
+    pub(crate) fn new(tx: Sender<SchedCmd>, join: std::thread::JoinHandle<()>) -> SchedulerHandle {
+        SchedulerHandle { tx, join: std::sync::Mutex::new(Some(join)) }
+    }
+
     pub fn signal_shutdown(&self) {
         let _ = self.tx.send(SchedCmd::Shutdown);
     }
@@ -310,13 +464,9 @@ struct Lane {
     produced: u32,
     fin: u32,
     warm_prefix: u64,
-    utf8: Utf8Stream,
-    seg: Box<dyn Channelizer>,
-    disp_seg: Box<dyn Channelizer>,
-    disp_utf8: Utf8Stream,
+    out: LaneOutput,
     frame_fed: usize,
     emit_dead: bool,
-    tool_buf: String,
     admitted: bool,
     seed_handle: u64,
     span: linkw::TokenRefMsg,
@@ -345,7 +495,6 @@ struct Lane {
     /// The open span: (end of its first tick, tokens by then, end of its
     /// latest tick, tokens by then).
     decode_ticks: Option<(std::time::Instant, u32, std::time::Instant, u32)>,
-    disp_tokens: u32,
     warm_prefix_first: Option<u64>,
     admitted_at: std::time::Instant,
     ttft_observed: bool,
@@ -1129,6 +1278,8 @@ impl From<&str> for ParkRefused {
 enum ParkTask {
     Write(Box<ParkJob>),
     Remove { dir: PathBuf, session: u64 },
+    /// A prompt prefix kept across restarts, found again by its tokens.
+    WritePrefix { dir: PathBuf, tokens: Vec<u32>, encoding: u8, sealed: Vec<u8> },
 }
 
 struct ParkJob {
@@ -1159,6 +1310,8 @@ pub struct Scheduler {
     trace_scope: crate::otlp::TraceScope,
     park_tx: Option<std::sync::mpsc::SyncSender<ParkTask>>,
     ephemeral_parked: std::collections::HashSet<u64>,
+    /// Prompt prefixes kept on disk (newest first) and the tokens each covers.
+    prefixes: Vec<(PathBuf, Vec<u32>)>,
     park_removals_pending: Vec<u64>,
     park_writer: Option<std::thread::JoinHandle<()>>,
     bus: Arc<SessionBus>,
@@ -1232,6 +1385,10 @@ impl Scheduler {
                     ring_slots(&mut host, superfluid_shm::TOKEN_RING_OUT),
                 );
                 let park_refused = host.park_refused();
+                let prefixes = match (&park_refused, &opts.park_dir) {
+                    (None, Some(dir)) => park::prefix_index(&park::prefix_dir(dir)),
+                    _ => Vec::new(),
+                };
                 let lossy_allowed = host.lossy_park_allowed();
                 let tick_shape = if host.round_granular() { ROUND_TICKS } else { NATIVE_TICKS };
                 let (park_tx, park_writer) = if opts.park_dir.is_some() && park_refused.is_none() {
@@ -1245,6 +1402,15 @@ impl Scheduler {
                                     ParkTask::Write(job) => job,
                                     ParkTask::Remove { dir, session } => {
                                         park::remove(&dir, session);
+                                        continue;
+                                    }
+                                    ParkTask::WritePrefix { dir, tokens, encoding, sealed } => {
+                                        if let Err(e) = park::write_prefix(&dir, &tokens, encoding, &sealed) {
+                                            eprintln!("[superfluid] prefix write failed: {e}");
+                                        }
+                                        if park_budget > 0 {
+                                            park::sweep(&dir, park_budget);
+                                        }
                                         continue;
                                     }
                                 };
@@ -1313,6 +1479,7 @@ impl Scheduler {
                     park_tx,
                     park_writer,
                     ephemeral_parked: std::collections::HashSet::new(),
+                    prefixes,
                     park_removals_pending: Vec::new(),
                     bus,
                     plan_seq: 0,
@@ -2304,36 +2471,13 @@ impl Scheduler {
             }
             let spec_before = job.carry.as_ref().map(|c| c.spec_before).unwrap_or_default();
             let decode_before = job.carry.as_ref().map(|c| c.decode_before).unwrap_or_default();
-            let (seg, utf8, disp_seg, disp_utf8, tool_buf, produced_before, warm_prefix_first) =
-                match job.carry.take() {
-                    Some(c) => (
-                        c.seg,
-                        c.utf8,
-                        c.disp_seg,
-                        c.disp_utf8,
-                        c.tool_buf,
-                        c.produced_before,
-                        c.warm_prefix_first,
-                    ),
-                    None => {
-                        let mk = || {
-                            let mut seg = self.codec.channelizer();
-                            if job.extras.open_channel != 0 {
-                                seg.prime(job.extras.open_channel);
-                            }
-                            seg
-                        };
-                        (
-                            mk(),
-                            Utf8Stream::default(),
-                            mk(),
-                            Utf8Stream::default(),
-                            String::new(),
-                            0,
-                            None,
-                        )
-                    }
-                };
+            let (out, produced_before, warm_prefix_first) = match job.carry.take() {
+                Some(mut c) => {
+                    c.out.disp_tokens = c.produced_before;
+                    (c.out, c.produced_before, c.warm_prefix_first)
+                }
+                None => (LaneOutput::new(&self.codec, job.extras.open_channel, 0), 0, None),
+            };
             let all_tokens = job.stream.clone();
             self.lanes.push(Lane {
                 tag,
@@ -2344,13 +2488,9 @@ impl Scheduler {
                 produced: 0,
                 fin: finish::NONE,
                 warm_prefix,
-                utf8,
-                seg,
-                disp_seg,
-                disp_utf8,
+                out,
                 frame_fed: 0,
                 emit_dead: false,
-                tool_buf,
                 admitted: false,
                 seed_handle,
                 span,
@@ -2365,7 +2505,6 @@ impl Scheduler {
                 checkpointed: 0,
                 turn_kept: false,
                 produced_before,
-                disp_tokens: produced_before,
                 spec: spec_before,
                 decode: decode_before,
                 decode_ticks: None,
@@ -2394,7 +2533,7 @@ impl Scheduler {
             return (seed_handle, warm_prefix);
         };
         let Some(p) = park::read(&dir, job.session) else {
-            return (seed_handle, warm_prefix);
+            return self.resume_from_prefix(job, span, page, seed_handle, warm_prefix);
         };
         if p.multi_space {
             if !self.host.multi_space() && self.host.parkable_spaces().len() != p.spaces.len() {
@@ -2457,6 +2596,109 @@ impl Scheduler {
                     "[superfluid] park resume restored but could not seed (session {}): {e}",
                     job.session
                 );
+                (seed_handle, warm_prefix)
+            }
+        }
+    }
+
+    /// Keep a retiring HTTP request's prompt prefix on disk, found again by
+    /// its tokens ([`Self::resume_from_prefix`]), unless it is short or one
+    /// kept already covers most of it.
+    fn persist_prefix(&mut self, i: usize) -> Result<(), ParkRefused> {
+        let (Some(dir), Some(page)) = (self.park_dir.clone(), self.host.page_size()) else {
+            return Ok(());
+        };
+        let lane = &self.lanes[i];
+        if (lane.job.completion && !lane.job.extras.keep_prefix)
+            || !lane.job.media.is_empty()
+            || self.host.multi_space()
+            || self.host.has_unservable_space()
+        {
+            return Ok(());
+        }
+        let n = lane.all_tokens.len() as u64;
+        let aligned = n.saturating_sub(1) / page * page;
+        if aligned < PREFIX_KEEP_MIN_TOKENS {
+            return Ok(());
+        }
+        let covered = self.prefixes.iter().map(|(_, t)| park::common_prefix(t, &lane.all_tokens) as u64).max().unwrap_or(0);
+        if covered * 4 >= aligned * PREFIX_KEPT_QUARTERS {
+            return Ok(());
+        }
+        let Some((aligned, encoding, sealed)) = self.export_lane_kv(i)? else {
+            return Ok(());
+        };
+        let tokens = self.lanes[i].all_tokens[..aligned as usize].to_vec();
+        let dir = park::prefix_dir(&dir);
+        let path = dir.join(format!("{:016x}.park", park::stream_digest(&tokens)));
+        let task = ParkTask::WritePrefix { dir, tokens: tokens.clone(), encoding, sealed };
+        match self.park_tx.as_ref().expect("writer exists with park_dir").try_send(task) {
+            Ok(()) => {
+                self.prefixes.retain(|(p, _)| *p != path);
+                self.prefixes.insert(0, (path, tokens));
+                self.prefixes.truncate(PREFIX_INDEX_MAX);
+                Ok(())
+            }
+            Err(std::sync::mpsc::TrySendError::Full(_)) => Err("park writer backlogged; prefix dropped".into()),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err("park writer gone".into()),
+        }
+    }
+
+    /// Start `job` from the kept prefix that covers most of its prompt, when
+    /// that is more than the cache has: the prefix goes back into the cache
+    /// (as a parked session resumes) and the request is seeded from it.
+    fn resume_from_prefix(
+        &mut self,
+        job: &GenerateJob,
+        span: linkw::TokenRefMsg,
+        page: u64,
+        seed_handle: u64,
+        warm_prefix: u64,
+    ) -> (u64, u64) {
+        if self.prefixes.is_empty() || self.host.multi_space() || !job.media.is_empty() || job.stream.is_empty() {
+            return (seed_handle, warm_prefix);
+        }
+        let align_down = |l: u64| l.checked_div(page).unwrap_or(0) * page;
+        let aligned_cap = align_down(job.stream.len() as u64 - 1);
+        let Some((at, usable)) = self
+            .prefixes
+            .iter()
+            .enumerate()
+            .map(|(at, (_, t))| (at, align_down((park::common_prefix(t, &job.stream) as u64).min(aligned_cap))))
+            .max_by_key(|&(at, usable)| (usable, std::cmp::Reverse(at)))
+        else {
+            return (seed_handle, warm_prefix);
+        };
+        if usable < PREFIX_KEEP_MIN_TOKENS.min(aligned_cap) || usable <= warm_prefix + page {
+            return (seed_handle, warm_prefix);
+        }
+        let (path, tokens) = self.prefixes[at].clone();
+        let Some(p) = park::read_prefix(&path) else {
+            self.prefixes.remove(at);
+            return (seed_handle, warm_prefix);
+        };
+        let kept = match self.stage(&tokens) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[superfluid] prefix restore fell back cold (session {}): stage: {e}", job.session);
+                return (seed_handle, warm_prefix);
+            }
+        };
+        if let Err(msg) = self.restore_to_cache(job.session, &p, kept) {
+            eprintln!("[superfluid] prefix restore fell back cold (session {}): {msg}", job.session);
+            self.prefixes.remove(at);
+            return (seed_handle, warm_prefix);
+        }
+        match self.host.client().seed_acquire(span, usable, 0) {
+            Ok(h) => {
+                if seed_handle != 0 {
+                    let _ = self.host.client().seed_release(seed_handle);
+                }
+                self.stats.resumes.fetch_add(1, Ordering::Relaxed);
+                (h, usable)
+            }
+            Err(e) => {
+                eprintln!("[superfluid] prefix restored but could not seed (session {}): {e}", job.session);
                 (seed_handle, warm_prefix)
             }
         }
@@ -2695,33 +2937,21 @@ impl Scheduler {
         }
     }
 
-    fn park_lane(&mut self, i: usize) -> Result<(), ParkRefused> {
-        let Some(dir) = self.park_dir.clone() else {
-            return Ok(());
-        };
-        if self.lanes[i].job.completion {
-            return Ok(());
-        }
-        if (self.host.multi_space() || !self.lanes[i].job.media.is_empty()) && !self.host.has_unservable_space() {
-            return self.park_lane_multi(i, dir);
-        }
-        if self.host.has_unservable_space() {
-            self.stats
-                .unservable_park_refusals
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(ParkRefused::SpaceUnservable);
-        }
+    /// A lane's KV up to the last whole page before its last token, sealed
+    /// as the park encoding asks: (tokens covered, encoding, payload), or
+    /// None when that is not a page.
+    fn export_lane_kv(&mut self, i: usize) -> Result<Option<(u64, u8, Vec<u8>)>, ParkRefused> {
         let Some(page) = self.host.page_size() else {
-            return Ok(());
+            return Ok(None);
         };
         let (tag, session) = (self.lanes[i].tag, self.lanes[i].session);
         let n = self.lanes[i].all_tokens.len() as u64;
         if n <= 1 {
-            return Ok(());
+            return Ok(None);
         }
         let mut aligned = ((n - 1) / page) * page;
         if aligned < page {
-            return Ok(());
+            return Ok(None);
         }
         let park_encoding = if self.park_lossy {
             encoding::Q8
@@ -2739,10 +2969,9 @@ impl Scheduler {
         {
             aligned = aligned.min(boundary);
             if aligned < page {
-                return Ok(());
+                return Ok(None);
             }
         }
-        let digest = park::stream_digest(&self.lanes[i].all_tokens[..aligned as usize]);
         let _span = tracing::info_span!(
             "park",
             session,
@@ -2810,6 +3039,30 @@ impl Scheduler {
         })();
         let _ = client.buf_release(buf);
         let sealed = result.map_err(ParkRefused::from)?;
+        Ok(Some((aligned, park_encoding, sealed)))
+    }
+
+    fn park_lane(&mut self, i: usize) -> Result<(), ParkRefused> {
+        let Some(dir) = self.park_dir.clone() else {
+            return Ok(());
+        };
+        if self.lanes[i].job.completion {
+            return Ok(());
+        }
+        if (self.host.multi_space() || !self.lanes[i].job.media.is_empty()) && !self.host.has_unservable_space() {
+            return self.park_lane_multi(i, dir);
+        }
+        if self.host.has_unservable_space() {
+            self.stats
+                .unservable_park_refusals
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ParkRefused::SpaceUnservable);
+        }
+        let session = self.lanes[i].session;
+        let Some((aligned, park_encoding, sealed)) = self.export_lane_kv(i)? else {
+            return Ok(());
+        };
+        let digest = park::stream_digest(&self.lanes[i].all_tokens[..aligned as usize]);
         let job = ParkJob {
             dir,
             session,
@@ -3124,18 +3377,10 @@ impl Scheduler {
             let session = self.lanes[i].session;
             let is_active = !matches!(self.lanes[i].phase, LanePhase::Finishing);
             if is_active && self.cancels.lock().expect("cancels").remove(&session) {
+                let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
                 let lane = &mut self.lanes[i];
                 lane.fin = finish::CANCELLED;
-                provisional_flush(&self.bus, lane);
-                let text = lane.utf8.flush();
-                let e = self.store.lock().expect("store").commit_generated(
-                    session,
-                    Vec::new(),
-                    text,
-                    lane.seg.current_channel(),
-                    finish::CANCELLED,
-                )?;
-                let _ = lane.job.events.send(LaneEvent::Committed(e));
+                lane.out.close(&sink, session, &lane.job.events, finish::CANCELLED, false)?;
                 if lane.admitted {
                     lane.phase = LanePhase::Finishing;
                 } else {
@@ -3160,18 +3405,10 @@ impl Scheduler {
             let completion = self.lanes[i].job.completion;
             let session = self.lanes[i].session;
             if !completion {
-                provisional_flush(&self.bus, &mut self.lanes[i]);
-                let text = self.lanes[i].utf8.flush();
-                let channel = self.lanes[i].seg.current_channel();
-                let e = self.store.lock().expect("store").commit_generated(
-                    session,
-                    Vec::new(),
-                    text,
-                    channel,
-                    finish::LENGTH,
-                )?;
-                let _ = self.lanes[i].job.events.send(LaneEvent::Committed(e));
-                self.lanes[i].fin = finish::LENGTH;
+                let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
+                let lane = &mut self.lanes[i];
+                lane.out.close(&sink, session, &lane.job.events, finish::LENGTH, false)?;
+                lane.fin = finish::LENGTH;
             } else {
                 let _ = self.lanes[i].job.events.send(LaneEvent::Expired);
             }
@@ -3259,9 +3496,11 @@ impl Scheduler {
 
         if self.park_dir.is_some() {
             for i in 0..self.lanes.len() {
+                let keeps_prefix = self.lanes[i].job.completion && self.lanes[i].job.extras.keep_prefix;
                 if matches!(self.lanes[i].phase, LanePhase::Finishing)
                     && self.lanes[i].admitted
                     && !self.lanes[i].parked
+                    && !keeps_prefix
                     && (!self.lanes[i].job.extras.ephemeral || self.lanes[i].preempted)
                 {
                     self.lanes[i].parked = true;
@@ -3270,6 +3509,14 @@ impl Scheduler {
                             "[superfluid] park skipped (session {}): {msg}",
                             self.lanes[i].session
                         );
+                    }
+                } else if matches!(self.lanes[i].phase, LanePhase::Finishing)
+                    && self.lanes[i].admitted
+                    && !self.lanes[i].parked
+                {
+                    self.lanes[i].parked = true;
+                    if let Err(msg) = self.persist_prefix(i) {
+                        eprintln!("[superfluid] prefix not kept (session {}): {msg}", self.lanes[i].session);
                     }
                 }
             }
@@ -3377,7 +3624,7 @@ impl Scheduler {
                     lane_tag: lane.tag,
                     publish_to_cache: !lane.parked_lossy
                         && lane.job.media.is_empty()
-                        && !lane.job.completion,
+                        && (!lane.job.completion || lane.job.extras.keep_prefix),
                 });
                 retiring.push(lane.tag);
                 continue;
@@ -3624,7 +3871,7 @@ impl Scheduler {
                         lane.emit_dead = true;
                     }
                 } else {
-                    provisional_ingest(codec, bus, lane, &em.tokens);
+                    lane.out.provisional(codec, bus, lane.session, &lane.job.events, &em.tokens);
                 }
             };
             let retry = pins.any_held().then(|| plan.clone());
@@ -3822,16 +4069,8 @@ impl Scheduler {
                 }
                 lane.fault_code = Some(f.code);
                 lane.fin = finish::ERROR;
-                provisional_flush(&self.bus, lane);
-                let text = lane.utf8.flush();
-                let e = self.store.lock().expect("store").commit_generated(
-                    lane.session,
-                    Vec::new(),
-                    text,
-                    lane.seg.current_channel(),
-                    finish::ERROR,
-                )?;
-                let _ = lane.job.events.send(LaneEvent::Committed(e));
+                let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
+                lane.out.close(&sink, lane.session, &lane.job.events, finish::ERROR, false)?;
                 lane.phase = LanePhase::Finishing;
                 tracing::warn!(session = lane.session, lane = lane.tag, code = f.code, "engine lane fault");
             }
@@ -3895,6 +4134,7 @@ impl Scheduler {
             self.stats.work_ticks.fetch_add(1, Ordering::Relaxed);
         }
         let terminators = self.codec.turn_terminators();
+        let sink = OutputSink { codec: &self.codec, store: &self.store, bus: &self.bus, tool_lease_ms: self.tool_lease_ms };
         for lane in &mut self.lanes {
             lane.admitted = true;
             let Some((tokens, fin)) = emitted.remove(&lane.tag) else {
@@ -3903,16 +4143,7 @@ impl Scheduler {
             if tokens.is_empty() {
                 lane.fin = fin;
                 if !lane.job.completion {
-                    provisional_flush(&self.bus, lane);
-                    let text = lane.utf8.flush();
-                    let e = self.store.lock().expect("store").commit_generated(
-                        lane.session,
-                        Vec::new(),
-                        text,
-                        lane.seg.current_channel(),
-                        fin,
-                    )?;
-                    let _ = lane.job.events.send(LaneEvent::Committed(e));
+                    lane.out.close(&sink, lane.session, &lane.job.events, fin, false)?;
                 }
                 lane.phase = LanePhase::Finishing;
                 continue;
@@ -3926,7 +4157,7 @@ impl Scheduler {
             });
             let frame_fed = std::mem::take(&mut lane.frame_fed).min(tokens.len());
             if !lane.job.completion {
-                provisional_ingest(&self.codec, &self.bus, lane, &tokens[frame_fed..]);
+                lane.out.provisional(sink.codec, sink.bus, lane.session, &lane.job.events, &tokens[frame_fed..]);
             }
             if lane.fin == finish::NONE
                 && !lane.job.extras.ignore_eos
@@ -3973,86 +4204,22 @@ impl Scheduler {
                 }
                 continue;
             }
-            if terminal_now {
-                provisional_flush(&self.bus, lane);
-            }
-            let runs = lane.seg.split(&tokens);
-            let n_runs = runs.len().max(1);
-            let mut dead = false;
-            for (i, run) in runs.into_iter().enumerate() {
-                let last = i + 1 == n_runs;
-                let mut text = String::new();
-                for &t in &run.text {
-                    text.push_str(&lane.utf8.push(&self.codec.token_bytes(t)));
-                }
-                if last && terminal_now {
-                    text.push_str(&lane.utf8.flush());
-                }
-                let channel = run.channel;
-                let tool_closed = run.closes && channel == crate::wal::channel::TOOL_CALL;
-                if channel == crate::wal::channel::TOOL_CALL {
-                    lane.tool_buf.push_str(&text);
-                }
-                let e = self.store.lock().expect("store").commit_generated(
-                    lane.session,
-                    run.span,
-                    text,
-                    channel,
-                    if last { fin } else { finish::NONE },
-                )?;
-                let tool_event = if tool_closed {
-                    let raw = std::mem::take(&mut lane.tool_buf);
-                    Self::commit_tool_block(
-                        &self.codec,
-                        &self.store,
-                        self.tool_lease_ms,
-                        lane.session,
-                        raw,
-                        lane.job.extras.tool_schemas.as_deref(),
-                    )?
-                } else {
-                    None
-                };
-                if lane.job.events.send(LaneEvent::Committed(e)).is_err() {
-                    dead = true;
-                    break;
-                }
-                if let Some(te) = tool_event {
-                    if lane.job.events.send(LaneEvent::Committed(te)).is_err() {
-                        dead = true;
-                        break;
-                    }
-                }
-            }
-            if dead {
+            let delivered = lane.out.commit(
+                &sink,
+                lane.session,
+                &lane.job.events,
+                &tokens,
+                fin,
+                terminal_now,
+                lane.job.extras.tool_schemas.as_deref(),
+            )?;
+            if !delivered {
                 lane.fin = finish::CANCELLED;
-                provisional_flush(&self.bus, lane);
-                let text = lane.utf8.flush();
-                let _ = self.store.lock().expect("store").commit_generated(
-                    lane.session,
-                    Vec::new(),
-                    text,
-                    lane.seg.current_channel(),
-                    finish::CANCELLED,
-                )?;
+                lane.out.close(&sink, lane.session, &lane.job.events, finish::CANCELLED, true)?;
                 lane.phase = LanePhase::Finishing;
                 continue;
             }
             if terminal_now {
-                if !lane.tool_buf.is_empty() {
-                    let raw = std::mem::take(&mut lane.tool_buf);
-                    let te = Self::commit_tool_block(
-                        &self.codec,
-                        &self.store,
-                        self.tool_lease_ms,
-                        lane.session,
-                        raw,
-                        lane.job.extras.tool_schemas.as_deref(),
-                    )?;
-                    if let Some(te) = te {
-                        let _ = lane.job.events.send(LaneEvent::Committed(te));
-                    }
-                }
                 lane.phase = LanePhase::Finishing;
             }
         }
@@ -4072,11 +4239,7 @@ impl Scheduler {
                     job.stream = lane.all_tokens;
                     job.max_tokens -= lane.produced;
                     job.carry = Some(LaneCarry {
-                        seg: lane.seg,
-                        utf8: lane.utf8,
-                        disp_seg: lane.disp_seg,
-                        disp_utf8: lane.disp_utf8,
-                        tool_buf: lane.tool_buf,
+                        out: lane.out,
                         produced_before: lane.produced_before + lane.produced,
                         spec_before: lane.spec,
                         decode_before,
@@ -4140,6 +4303,7 @@ fn draft_weights_identity(path: &str) -> Result<(u64, u64), DaemonError> {
 
 pub fn run_completion(
     tx: &Sender<SchedCmd>,
+    cancels: &std::sync::Arc<crate::CancelSet>,
     stream: Vec<u32>,
     params: GenParams,
     max_tokens: u32,
@@ -4148,6 +4312,7 @@ pub fn run_completion(
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
     run_completion_streaming(
         tx,
+        cancels,
         stream,
         params,
         max_tokens,
@@ -4157,14 +4322,36 @@ pub fn run_completion(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_completion_streaming(
     tx: &Sender<SchedCmd>,
+    cancels: &std::sync::Arc<crate::CancelSet>,
     stream: Vec<u32>,
     params: GenParams,
     max_tokens: u32,
     deadline_ms: u64,
     extras: GenExtras,
+    on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
+) -> Result<(Vec<u32>, u32, bool), DaemonError> {
+    run_completion_streaming_lp(tx, cancels, stream, params, max_tokens, deadline_ms, crate::qos::INLINE_COMPLETION, extras, Vec::new(), on_tokens, |_| {})
+}
+
+/// As [`run_completion_streaming`] in QoS class `class` (a fleet node runs the class its head
+/// gave the session), telling `on_logprobs` each token's log-probabilities when the extras ask
+/// for them.
+#[allow(clippy::too_many_arguments)]
+pub fn run_completion_streaming_lp(
+    tx: &Sender<SchedCmd>,
+    cancels: &std::sync::Arc<crate::CancelSet>,
+    stream: Vec<u32>,
+    params: GenParams,
+    max_tokens: u32,
+    deadline_ms: u64,
+    class: u8,
+    extras: GenExtras,
+    media: Vec<(u64, std::path::PathBuf, u32)>,
     mut on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
+    mut on_logprobs: impl FnMut(&[TokenLogprob]),
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
     let (etx, erx) = std::sync::mpsc::channel();
     tx.send(SchedCmd::Submit(Box::new(GenerateJob {
@@ -4174,11 +4361,11 @@ pub fn run_completion_streaming(
         params,
         max_tokens,
         events: etx,
-        class: crate::qos::INLINE_COMPLETION,
+        class,
         batch_invariant: false,
         carry: None,
         queued_at: 0,
-        media: Vec::new(),
+        media,
         completion: true,
         deadline: (deadline_ms > 0).then(|| std::time::Instant::now() + std::time::Duration::from_millis(deadline_ms)),
         grammar_handle: extras.grammar_handle,
@@ -4186,6 +4373,10 @@ pub fn run_completion_streaming(
         trace: tracing::Span::current(),
     })))
     .map_err(|_| DaemonError::Protocol("scheduler is gone"))?;
+    if class <= crate::qos::INLINE_COMPLETION {
+        // As for a chat: the running tick ends at its next step instead of making it wait.
+        cancels.latency_request();
+    }
     let mut tokens = Vec::new();
     loop {
         match erx.recv() {
@@ -4200,8 +4391,9 @@ pub fn run_completion_streaming(
             Ok(LaneEvent::Done { finish, .. }) => return Ok((tokens, finish, false)),
             Ok(LaneEvent::Expired) => return Ok((Vec::new(), finish::NONE, true)),
             Ok(LaneEvent::Committed(_)) => {}
-            Ok(LaneEvent::TokenLogprobs(_)) => {}
+            Ok(LaneEvent::TokenLogprobs(items)) => on_logprobs(&items),
             Ok(LaneEvent::Failed(msg)) => return Err(DaemonError::Generation(msg)),
+            Ok(LaneEvent::Error(e)) => return Err(e),
             Err(_) => return Err(DaemonError::Protocol("scheduler dropped the lane")),
         }
     }
@@ -4293,6 +4485,9 @@ pub fn run_job(
             }
             Ok(LaneEvent::Failed(msg)) => {
                 return Err(delivery_err.unwrap_or(DaemonError::Generation(msg)));
+            }
+            Ok(LaneEvent::Error(e)) => {
+                return Err(delivery_err.unwrap_or(e));
             }
             Ok(LaneEvent::CompletionTokens(_)) | Ok(LaneEvent::Expired) => {
                 return Err(DaemonError::Protocol("completion event on a generate lane"));

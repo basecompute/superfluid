@@ -558,7 +558,7 @@ fn tag_entry(name: &str, modified: &str) -> Value {
 
 async fn ps(State(st): State<AppState>) -> Json<Value> {
     Json(
-        json!({"models":st.registry.names().iter().map(|name| json!({"name":name,"model":name,"context_length":st.limits.max_context})).collect::<Vec<_>>()}),
+        json!({"models":st.registry.names().iter().map(|name| json!({"name":name,"model":name,"context_length":st.window_of(name)})).collect::<Vec<_>>()}),
     )
 }
 
@@ -620,7 +620,7 @@ async fn show(
                     if let Some(arch) = c["architecture"].as_str() {
                         result["details"]["family"] = json!(arch);
                         result["model_info"]["general.architecture"] = json!(arch);
-                        result["model_info"][format!("{arch}.context_length")] = json!(st.limits.max_context);
+                        result["model_info"][format!("{arch}.context_length")] = json!(st.window_of(&model));
                     }
                 }
                 let probe = r#"{"type":"function","function":{"name":"capability_probe","parameters":{"type":"object","properties":{}}}}"#.to_owned();

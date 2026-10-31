@@ -31,7 +31,8 @@ struct AgentShared {
     /// The connection each session was placed over, the one the head answers its renewals on.
     owners: HashMap<u64, u64>,
     contexts: HashMap<u64, Vec<u32>>,
-    params: HashMap<u64, GenParams>,
+    /// Each session's sampling and the QoS class the head gave it, which its generations run in.
+    params: HashMap<u64, (GenParams, u8)>,
     last_load_sample: Option<(u64, u64, u64)>,
     decode_rate_ewma: u32,
     prefill_rate_ewma: u32,
@@ -83,7 +84,20 @@ pub struct NodeAgent {
     conn: u64,
     /// When this connection last asked for each lease it has not had granted yet.
     asked: HashMap<u64, Duration>,
+    /// What each generation the head is about to start asks beyond its sampling.
+    opts: HashMap<(u64, u64), linkf::GenerateOptsMsg>,
+    /// Blobs the head is sending: the SHA-256 each should have, and the bytes so far.
+    incoming: HashMap<u64, ([u8; 32], Vec<u8>)>,
+    /// The model's tokenizer digest, told to the head (0: not known).
+    tokenizer: u64,
+    /// The model's tokenizer, for a head that has no copy of the model to export and encode with.
+    tokenizer_impl: Option<Arc<dyn superfluid_engine::Tokenizer>>,
+    /// Called when a head this node dialed asks for a connection for short calls.
+    on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
 }
+
+/// The largest blob a node takes from its head.
+const MAX_BLOB: u64 = 1 << 30;
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
@@ -98,9 +112,11 @@ const POLL_RUNNING: Duration = Duration::from_millis(2);
 
 const POLL_IDLE: Duration = Duration::from_millis(20);
 
+/// Tokens are sent in batches of this many, or after [`EMIT_COALESCE_MS`]; a generation's first
+/// tokens go at once, so the head's first token waits on nothing.
 const EMIT_COALESCE_TOKENS: usize = 16;
 
-const EMIT_COALESCE_MS: u64 = 200;
+const EMIT_COALESCE_MS: u64 = 50;
 
 impl NodeAgent {
     pub fn new(daemon: Arc<Daemon>, identity: impl Into<String>, model_name: impl Into<String>) -> NodeAgent {
@@ -109,6 +125,11 @@ impl NodeAgent {
             last_status_ms: 0,
             conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
             asked: HashMap::new(),
+            opts: HashMap::new(),
+            incoming: HashMap::new(),
+            tokenizer: 0,
+            tokenizer_impl: None,
+            on_control_ask: None,
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -148,6 +169,11 @@ impl NodeAgent {
             last_status_ms: 0,
             conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
             asked: HashMap::new(),
+            opts: HashMap::new(),
+            incoming: HashMap::new(),
+            tokenizer: self.tokenizer,
+            tokenizer_impl: self.tokenizer_impl.clone(),
+            on_control_ask: self.on_control_ask.clone(),
         }
     }
 
@@ -156,6 +182,28 @@ impl NodeAgent {
     pub fn with_timeouts(mut self, handshake: Duration, idle: Duration) -> NodeAgent {
         self.handshake_timeout = handshake;
         self.idle_timeout = idle;
+        self
+    }
+
+    /// Tells each head the model's tokenizer by `digest` ([`crate::fleet::tokenizer_digest`]),
+    /// so one whose tokenizer differs places nothing here.
+    pub fn with_tokenizer(mut self, digest: u64) -> NodeAgent {
+        self.tokenizer = digest;
+        self
+    }
+
+    /// Serves the model's tokenizer to a head: its digest, all it says without encoding, and
+    /// the text it encodes, so a head with no copy of the model tokenizes as this node does.
+    pub fn with_tokenizer_of(mut self, tok: Arc<dyn superfluid_engine::Tokenizer>) -> NodeAgent {
+        self.tokenizer = crate::fleet::tokenizer_digest(&*tok);
+        self.tokenizer_impl = Some(tok);
+        self
+    }
+
+    /// For a node that dials its head: `dial` is called when the head asks for one connection
+    /// more, which it keeps for short calls; it may be called more than once.
+    pub fn with_on_control_ask(mut self, dial: impl Fn() + Send + Sync + 'static) -> NodeAgent {
+        self.on_control_ask = Some(Arc::new(dial));
         self
     }
 
@@ -286,6 +334,9 @@ impl NodeAgent {
             t => Liveness::DEFAULT.heartbeat.min(t / 3),
         };
         endpoint.keep_alive(Liveness { heartbeat, silence: self.idle_timeout });
+        if endpoint.version() >= 3 {
+            endpoint.send(msg_type::TOKENIZER, &linkf::TokenizerMsg { digest: self.tokenizer })?;
+        }
         // Dropped on the way out, which stops a generation still running.
         let mut work = Work::default();
         self.serve_link(&mut endpoint, &mut work)
@@ -305,6 +356,19 @@ impl NodeAgent {
                     work.generation = None;
                 }
             }
+            work.syncs.retain(|rx| loop {
+                match rx.try_recv() {
+                    Ok(Synced::Segment(seg)) => {
+                        let _ = endpoint.send(msg_type::STATE_SYNC_SEGMENT, &seg);
+                    }
+                    Ok(Synced::Done(resp)) => {
+                        let _ = endpoint.send(msg_type::STATE_SYNC_RESP, &resp);
+                        break false;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break true,
+                    Err(mpsc::TryRecvError::Disconnected) => break false,
+                }
+            });
             if let Some(stage) = &work.stage {
                 match stage.try_recv() {
                     Ok(resp) => {
@@ -406,7 +470,7 @@ impl NodeAgent {
                 let m: linkf::SessionAssignMsg = postcard::from_bytes(&frame.payload)?;
                 let mut sh = self.shared.lock().expect("agent shared");
                 if sh.agent.on_assign(&m, now) {
-                    sh.params.insert(m.session_id, decode_params(&m.params));
+                    sh.params.insert(m.session_id, (decode_params(&m.params), m.qos_class.min(crate::qos::BACKGROUND_AGENT)));
                     sh.owners.insert(m.session_id, self.conn);
                     self.asked.remove(&m.session_id);
                 }
@@ -458,6 +522,91 @@ impl NodeAgent {
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
+            msg_type::CONTROL_ASK => {
+                if let Some(dial) = &self.on_control_ask {
+                    dial();
+                }
+            }
+            msg_type::TOKENIZER_EXPORT_REQ => {
+                let m: linkf::TokenizerExportReqMsg = postcard::from_bytes(&frame.payload)?;
+                endpoint.send(msg_type::TOKENIZER_EXPORT, &self.export(m.request_id))?;
+            }
+            msg_type::TOKENIZE_REQ => {
+                let m: linkf::TokenizeReqMsg = postcard::from_bytes(&frame.payload)?;
+                let tokens = self.tokenizer_impl.as_ref().and_then(|t| match &m.text {
+                    linkf::TokenizeMsg::Encode(text) => Some(t.encode(text)),
+                    linkf::TokenizeMsg::Plain(text) => t.encode_plain(text),
+                    linkf::TokenizeMsg::Pieces(pieces) => {
+                        let pieces: Vec<(&str, bool)> = pieces.iter().map(|(p, s)| (p.as_str(), *s)).collect();
+                        t.encode_pieces(&pieces)
+                    }
+                });
+                endpoint.send(msg_type::TOKENIZE_RESP, &linkf::TokenizeRespMsg { request_id: m.request_id, tokens })?;
+            }
+            msg_type::GENERATE_OPTS => {
+                let m: linkf::GenerateOptsMsg = postcard::from_bytes(&frame.payload)?;
+                self.opts.insert((m.session_id, m.generation_id), m);
+            }
+            msg_type::XFER_BEGIN => {
+                let m: linkf::XferBeginMsg = postcard::from_bytes(&frame.payload)?;
+                if m.total_len > MAX_BLOB {
+                    return Err(DaemonError::Protocol("the head sent a blob larger than a node takes"));
+                }
+                self.incoming.insert(m.transfer_id, (m.content_hash, Vec::with_capacity(m.total_len as usize)));
+            }
+            msg_type::XFER_CHUNK => {
+                let m: linkf::XferChunkMsg = postcard::from_bytes(&frame.payload)?;
+                if let Some((_, bytes)) = self.incoming.get_mut(&m.transfer_id) {
+                    if m.offset != bytes.len() as u64 || bytes.len() as u64 + m.data.len() as u64 > MAX_BLOB {
+                        return Err(DaemonError::Protocol("a blob's pieces came out of order"));
+                    }
+                    bytes.extend_from_slice(&m.data);
+                }
+            }
+            msg_type::XFER_END => {
+                let m: linkf::XferEndMsg = postcard::from_bytes(&frame.payload)?;
+                if let Some((want, bytes)) = self.incoming.remove(&m.transfer_id) {
+                    let want: String = want.iter().map(|b| format!("{b:02x}")).collect();
+                    if crate::media::content_hash(&bytes) != want {
+                        return Err(DaemonError::Protocol("a blob from the head is not what its hash says"));
+                    }
+                    // A blob this node cannot keep fails the request that brings it, not the link.
+                    if let Err(e) = self.daemon.media_put(&bytes) {
+                        tracing::warn!("node-agent cannot keep a blob from the head: {e}");
+                    }
+                }
+            }
+            msg_type::STATE_SYNC_REQ => {
+                let mut m: linkf::StateSyncReqF = postcard::from_bytes(&frame.payload)?;
+                self.localize(&mut m.req);
+                let (tx, rx) = mpsc::channel();
+                let daemon = Arc::clone(&self.daemon);
+                std::thread::Builder::new()
+                    .name("node-state-sync".into())
+                    .spawn(move || {
+                        let request_id = m.request_id;
+                        let streamed = matches!(m.req, superfluid_proto::linkw::StateSyncReqMsg::Transcribe { stream: true, .. });
+                        let result = if streamed {
+                            let (seg_tx, seg_rx) = mpsc::channel();
+                            let told = tx.clone();
+                            let tell = std::thread::spawn(move || {
+                                for segment in seg_rx {
+                                    let _ = told.send(Synced::Segment(linkf::StateSyncSegmentF { request_id, segment }));
+                                }
+                            });
+                            let result = daemon.state_sync_stream(m.req, seg_tx);
+                            let _ = tell.join();
+                            result
+                        } else {
+                            daemon.state_sync(m.req)
+                        };
+                        let result = result.map_err(crate::fleet_daemon::message);
+                        let _ = tx.send(Synced::Done(linkf::StateSyncRespF { request_id, result }));
+                    })
+                    .expect("spawn a node state operation");
+                work.syncs.push(rx);
+                endpoint.poll_every(POLL_RUNNING)?;
+            }
             msg_type::GENERATE_CANCEL => {
                 let m: linkf::GenerateCancelMsg = postcard::from_bytes(&frame.payload)?;
                 if let Some(run) = work
@@ -495,6 +644,53 @@ impl NodeAgent {
         Ok(())
     }
 
+    /// The tokenizer as a head without the model takes it; no vocabulary when this node has none.
+    fn export(&self, request_id: u64) -> linkf::TokenizerExportMsg {
+        let Some(t) = &self.tokenizer_impl else {
+            return linkf::TokenizerExportMsg {
+                request_id,
+                digest: 0,
+                vocab: Vec::new(),
+                specials: Vec::new(),
+                bos: None,
+                eos: 0,
+                chat_template: String::new(),
+                named_templates: Vec::new(),
+                plain: false,
+                pieces: false,
+            };
+        };
+        linkf::TokenizerExportMsg {
+            request_id,
+            digest: self.tokenizer,
+            vocab: (0..t.vocab_size()).map(|i| t.token_bytes(i)).collect(),
+            specials: t.special_tokens(),
+            bos: t.bos_token(),
+            eos: t.eos_token(),
+            chat_template: t.chat_template_jinja(),
+            named_templates: ["tool_use"].iter().filter_map(|n| Some((n.to_string(), t.chat_template_named(n)?))).collect(),
+            plain: t.encode_plain("a").is_some(),
+            pieces: t.encode_pieces(&[("a", false)]).is_some(),
+        }
+    }
+
+    /// A path the head sent as a blob, where the blob sits in this node's media pool.
+    fn local(&self, path: &str) -> String {
+        match path.strip_prefix(linkf::BLOB_PREFIX) {
+            Some(hash) if crate::media::MediaPool::is_valid_id(hash) => self.daemon.media_path(hash).to_string_lossy().into_owned(),
+            _ => path.to_string(),
+        }
+    }
+
+    fn localize(&self, req: &mut superfluid_proto::linkw::StateSyncReqMsg) {
+        use superfluid_proto::linkw::StateSyncReqMsg as R;
+        match req {
+            R::MediaProbe { image_path } | R::MediaEncode { image_path } => *image_path = self.local(image_path),
+            R::Transcribe { audio_path, .. } => *audio_path = self.local(audio_path),
+            _ => {}
+        }
+    }
+
     /// Runs a stage forward on a thread of its own, as a generation runs, so a long one does not
     /// silence the connection.
     fn start_stage(&self, m: linkf::StageForwardReqMsg) -> mpsc::Receiver<linkf::StageForwardRespMsg> {
@@ -516,16 +712,23 @@ impl NodeAgent {
 
     /// Starts `req` on a thread of its own, so this connection goes on reading the head
     /// (cancels, lease grants, heartbeats) and sending status while it runs.
-    fn start_generation(&self, req: &linkf::GenerateReqMsg) -> Running {
-        let (context, params) = {
+    fn start_generation(&mut self, req: &linkf::GenerateReqMsg) -> Running {
+        let (context, (params, class)) = {
             let sh = self.shared.lock().expect("agent shared");
             (
                 sh.contexts.get(&req.session_id).cloned().unwrap_or_default(),
-                sh.params.get(&req.session_id).copied().unwrap_or_default(),
+                sh.params.get(&req.session_id).copied().unwrap_or((GenParams::default(), crate::qos::FOREGROUND_AGENT)),
             )
         };
         let max_new = req.budgets.max_new_tokens.min(u32::MAX as u64) as u32;
         let max_wall_ms = req.budgets.max_wall_ms;
+        let opts = self.opts.remove(&(req.session_id, req.generation_id));
+        self.opts.clear();
+        let media: Vec<(u64, std::path::PathBuf, u32)> = opts
+            .iter()
+            .flat_map(|o| &o.media)
+            .map(|(offset, hash, n)| (*offset, std::path::PathBuf::from(self.local(&format!("{}{hash}", linkf::BLOB_PREFIX))), *n))
+            .collect();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, out) = mpsc::channel();
         let (daemon, shared, stop) = (Arc::clone(&self.daemon), Arc::clone(&self.shared), Arc::clone(&cancel));
@@ -533,19 +736,32 @@ impl NodeAgent {
         std::thread::Builder::new()
             .name("node-generation".into())
             .spawn(move || {
-                let generated = daemon.generate_tokens_streaming(
-                    context,
-                    params,
-                    max_new,
-                    max_wall_ms,
-                    crate::scheduler::GenExtras::default(),
-                    |batch| {
-                        if stop.load(Ordering::Relaxed) || tx.send(Out::Tokens(batch.to_vec())).is_err() {
-                            return std::ops::ControlFlow::Break(());
-                        }
-                        std::ops::ControlFlow::Continue(())
-                    },
-                );
+                let generated = match Extras::of(&daemon, opts.as_ref()) {
+                    Ok(extras) => {
+                        let lp = tx.clone();
+                        let generated = daemon.generate_tokens_streaming_lp(
+                            context,
+                            params,
+                            max_new,
+                            max_wall_ms,
+                            class,
+                            extras.extras.clone(),
+                            media,
+                            |batch| {
+                                if stop.load(Ordering::Relaxed) || tx.send(Out::Tokens(batch.to_vec())).is_err() {
+                                    return std::ops::ControlFlow::Break(());
+                                }
+                                std::ops::ControlFlow::Continue(())
+                            },
+                            |items| {
+                                let _ = lp.send(Out::Logprobs(items.to_vec()));
+                            },
+                        );
+                        extras.free(&daemon);
+                        generated
+                    }
+                    Err(e) => Err(e),
+                };
                 shared.lock().expect("agent shared").busy.stop();
                 let _ = tx.send(Out::Done(generated));
             })
@@ -559,6 +775,7 @@ impl NodeAgent {
             out,
             pending: Vec::with_capacity(EMIT_COALESCE_TOKENS),
             last_flush: self.start.elapsed(),
+            sent: false,
         }
     }
 
@@ -574,6 +791,25 @@ impl NodeAgent {
                         return Ok(true);
                     }
                 }
+                Ok(Out::Logprobs(items)) => {
+                    let msgs = items
+                        .into_iter()
+                        .map(|lp| linkf::TokenLogprobMsg {
+                            token: lp.token,
+                            logprob_bits: lp.logprob.to_bits(),
+                            top: lp.top.into_iter().map(|(t, p)| (t, p.to_bits())).collect(),
+                        })
+                        .collect();
+                    let emitted = self.shared.lock().expect("agent shared").agent.emit(
+                        run.session_id,
+                        run.generation_id,
+                        TokenEventPayload::Logprobs(msgs),
+                    );
+                    match emitted {
+                        Some(batch) => endpoint.send(msg_type::TOKEN_EVENTS, &batch)?,
+                        None => return Ok(true),
+                    }
+                }
                 Ok(Out::Done(r)) => {
                     done = Some(r);
                     break;
@@ -585,7 +821,7 @@ impl NodeAgent {
                 }
             }
         }
-        let due = done.is_some() || now.saturating_sub(run.last_flush).as_millis() as u64 >= EMIT_COALESCE_MS;
+        let due = done.is_some() || !run.sent || now.saturating_sub(run.last_flush).as_millis() as u64 >= EMIT_COALESCE_MS;
         if due && !run.pending.is_empty() && !self.flush(endpoint, run, now)? {
             return Ok(true);
         }
@@ -620,6 +856,7 @@ impl NodeAgent {
     /// Sends `run`'s pending tokens; `false` when its session is fenced, which sends nothing.
     fn flush(&mut self, endpoint: &mut Endpoint, run: &mut Running, now: Duration) -> Result<bool, DaemonError> {
         run.last_flush = now;
+        run.sent = true;
         let tokens = std::mem::take(&mut run.pending);
         let batch = self.shared.lock().expect("agent shared").agent.emit(
             run.session_id,
@@ -642,11 +879,20 @@ struct Work {
     generation: Option<Running>,
     /// A stage forward's answer, once it has one.
     stage: Option<mpsc::Receiver<linkf::StageForwardRespMsg>>,
+    /// State operations' answers, once each has one.
+    syncs: Vec<mpsc::Receiver<Synced>>,
+}
+
+/// What a state operation has to tell the head: a streamed transcription's segments, then its
+/// answer.
+enum Synced {
+    Segment(linkf::StateSyncSegmentF),
+    Done(linkf::StateSyncRespF),
 }
 
 impl Work {
     fn busy(&self) -> bool {
-        self.generation.is_some() || self.stage.is_some()
+        self.generation.is_some() || self.stage.is_some() || !self.syncs.is_empty()
     }
 }
 
@@ -661,6 +907,8 @@ struct Running {
     out: mpsc::Receiver<Out>,
     pending: Vec<u32>,
     last_flush: Duration,
+    /// Tokens have gone to the head.
+    sent: bool,
 }
 
 impl Drop for Running {
@@ -671,7 +919,58 @@ impl Drop for Running {
 
 enum Out {
     Tokens(Vec<u32>),
+    Logprobs(Vec<crate::scheduler::TokenLogprob>),
     Done(Result<(Vec<u32>, u32, bool), DaemonError>),
+}
+
+/// A generation's extras as its options ask, with the grammar and logit bias compiled on this
+/// node's engine and freed once it ends.
+struct Extras {
+    extras: crate::scheduler::GenExtras,
+}
+
+impl Extras {
+    fn of(daemon: &Daemon, opts: Option<&linkf::GenerateOptsMsg>) -> Result<Extras, DaemonError> {
+        // Each prompt stays in the cache for the conversation's next turn, and with --park on
+        // disk, so a restarted node starts it warm too.
+        let mut extras = crate::scheduler::GenExtras { keep_prefix: true, ..Default::default() };
+        let Some(o) = opts else { return Ok(Extras { extras }) };
+        extras.presence_penalty = f32::from_bits(o.presence_penalty_bits);
+        extras.frequency_penalty = f32::from_bits(o.frequency_penalty_bits);
+        extras.repeat_penalty = f32::from_bits(o.repeat_penalty_bits);
+        extras.ignore_eos = o.ignore_eos;
+        if let Some(top) = o.top_logprobs {
+            extras.want_logprobs = true;
+            extras.top_logprobs = top;
+        }
+        extras.grammar_handle = match &o.grammar {
+            Some(linkf::GrammarSpecMsg::JsonSchema(schema)) => daemon.grammar_create(schema)?,
+            Some(linkf::GrammarSpecMsg::Structural(tag)) => daemon.grammar_create_structural(tag)?,
+            None => 0,
+        };
+        if let Some((tokens, values)) = &o.logit_bias {
+            let values: Vec<f32> = values.iter().map(|b| f32::from_bits(*b)).collect();
+            match daemon.logit_bias_create(tokens, &values) {
+                Ok(h) => extras.logit_bias_handle = h,
+                Err(e) => {
+                    if extras.grammar_handle != 0 {
+                        daemon.grammar_free(extras.grammar_handle);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Ok(Extras { extras })
+    }
+
+    fn free(&self, daemon: &Daemon) {
+        if self.extras.grammar_handle != 0 {
+            daemon.grammar_free(self.extras.grammar_handle);
+        }
+        if self.extras.logit_bias_handle != 0 {
+            daemon.logit_bias_free(self.extras.logit_bias_handle);
+        }
+    }
 }
 
 fn is_client_refusal(e: &DaemonError) -> bool {

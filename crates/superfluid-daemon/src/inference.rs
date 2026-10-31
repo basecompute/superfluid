@@ -1244,6 +1244,7 @@ pub(crate) fn extras_of(
     }
     crate::scheduler::GenExtras {
         ephemeral: true,
+        keep_prefix: false,
         presence_penalty: presence.unwrap_or(0.0),
         frequency_penalty,
         repeat_penalty,
