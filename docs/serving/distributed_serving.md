@@ -35,8 +35,9 @@ The node finds the head on the local network (`_superfluid-fleet._tcp`, which al
 | `--identity <name>` | the host name | the name in the head's logs |
 | `--model-name <id>` | what the head announces, else the model's id | the name the head matches on |
 | `--offline` | off | pull nothing |
+| `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
 
-A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed.
+A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed. The head also asks it for one connection more, which no generation takes: a short call (a prompt's encoding, a state operation) goes over it while every lane is generating. A node from before this release opens only its lanes.
 
 ## Run a node by hand
 
@@ -61,6 +62,7 @@ superfluid-noded: node 'box-a' serving 'unsloth/Qwen3.8-27B-GGUF' on 100.64.0.2:
 | `--max-batch <N>` | 8 | the node's lanes |
 | `--identity <name>` | the host name | the name in the head's logs |
 | `--offline` | off | pull and install nothing |
+| `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
 | `--auth-file <path>` | `$SUPERFLUID_HOME/fleet/token` | the fleet token; with it the link is encrypted and both ends are checked |
 | `--insecure-no-auth` | off | accept any peer on a non-loopback address |
 | `--handshake-timeout-ms <N>` | 10000 | time a connecting head has to say hello |
@@ -68,7 +70,7 @@ superfluid-noded: node 'box-a' serving 'unsloth/Qwen3.8-27B-GGUF' on 100.64.0.2:
 
 Nodes can run different runtimes for the same model, such as a Mac on baseRT with the `.base` build and a Linux box on llama.cpp with a GGUF. Give each the same `--model-name`. The head sends token ids, so the builds must share the model's tokenizer, which builds of one model do; nothing checks this yet. Each node's answers follow its own build's quantization.
 
-`superfluid fleet token` makes the token (32 random bytes as hex, owner-readable) at `$SUPERFLUID_HOME/fleet/token` on the head; copy that file, or its value, to the same path on each node. With a token the link between head and node is encrypted (Noise, keyed by the token) and a peer with another token is refused at the handshake. A node bound off loopback refuses to start without a token unless `--insecure-no-auth` is given. A node has no sampling flags and no durable state: `superfluid-noded` keeps its session store under the system temp dir, and `node join` under `$SUPERFLUID_HOME/fleet/nodes/<identity>`, emptied at each start.
+`superfluid fleet token` makes the token (32 random bytes as hex, owner-readable) at `$SUPERFLUID_HOME/fleet/token` on the head; copy that file, or its value, to the same path on each node. With a token the link between head and node is encrypted (Noise, keyed by the token) and a peer with another token is refused at the handshake. A node bound off loopback refuses to start without a token unless `--insecure-no-auth` is given. A node has no sampling flags. Its session store lasts one run: a node's sessions last one generation, and the head keeps the conversations. `superfluid-noded` keeps it under the system temp dir, and `node join` under `$SUPERFLUID_HOME/fleet/nodes/<identity>`.
 
 ## Run the head
 
@@ -113,6 +115,8 @@ Refused on the head (set them on each node's own `superfluid serve`): `--class-l
 | `least-loaded` | fewest sessions in progress plus requests in flight on that node, whatever its speed |
 | `round-robin` | rotate through capable nodes; use it to prove a fleet is distributing |
 
+`load-aware` and `least-loaded` first try the node that last ran the longest prefix of the prompt, 128 tokens or more, while it has a lane free. A conversation's turns so stay on the node that has its prefix cached, and other prompts are placed by load. The head keeps this in `<sessions>/fleet-warm.json`, so it holds across a head restart.
+
 A prompt no node can hold is refused with `context_length_exceeded`.
 
 ## What the head serves
@@ -136,11 +140,20 @@ Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has
 |---|---|
 | node fails mid-stream | delivered tokens become context; the session is re-placed on the next capable node, which generates the rest. No token is delivered twice |
 | node unreachable | skipped; the head tries it again every 10 s and uses it once it answers |
-| node restarts | comes back empty; the head reconnects and new placements use it |
+| node restarts | comes back with an empty cache, or with the prefixes it kept under `--park`; the head reconnects, and a conversation's next turn goes back to it |
 | connection idle or busy | each end sends a heartbeat when it has sent nothing for 5 s, during a generation too; a connection a node closed anyway is replaced before it is used |
 | node goes silent | after 30 s with nothing from it, the head gives the connection up and re-places what ran there, as for a node that failed |
-| head restarts | in-flight requests fail; a client that retries with its `Idempotency-Key` gets a finished answer replayed, and one the restart cut short runs again ([Retrying with Idempotency-Key](openai_compatible_server.md#retrying-with-idempotency-key)) |
+| head restarts | in-flight requests fail; a client that retries with its `Idempotency-Key` gets a finished answer replayed, and one the restart cut short runs again ([Retrying with Idempotency-Key](openai_compatible_server.md#retrying-with-idempotency-key)). The head still knows which node ran each conversation, so the next turn goes where it is warm |
 | head misses a lease renewal | the node fences the session and emits nothing more; the head stops waiting 30 s past the generation's wall-clock budget |
+
+## Durable sessions
+
+The head keeps every conversation; a node keeps only what makes the next turn fast, its cache of prompt prefixes. Two things make that survive a restart:
+
+- The head remembers which node ran each prompt prefix and sends a conversation's next turn there (see [Placement policies](#placement-policies)), across a head restart too.
+- A node started with `--park` writes each prompt's prefix of 1024 tokens or more to disk under `$SUPERFLUID_HOME/fleet/nodes/<identity>/park`, up to 20 GB, the oldest swept first. After the node restarts, a turn whose prompt one covers starts from it instead of prefilling the whole conversation again. Writing it copies the cache at the end of each generation, which holds up the lanes beside it a moment, so it is off by default. Prompts with images or audio, and models whose cache holds more than one kind of state (hybrid or sliding-window attention), are not kept.
+
+A request a head restart cut short runs again when the client retries it with its `Idempotency-Key`; it is not continued from where it stopped.
 
 ## Limits
 

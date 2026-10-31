@@ -206,6 +206,8 @@ pub struct FleetManager {
     /// for that model.
     tokenizers: std::sync::RwLock<std::collections::HashMap<String, u64>>,
     shared: Mutex<Shared>,
+    /// Which node last ran each prompt prefix, to place the next turn where it is warm.
+    warm: Mutex<crate::fleet_warm::Warm>,
     policy: PlacementPolicy,
     lease: Lease,
     pool_high_pct: u32,
@@ -260,6 +262,9 @@ impl Drop for InFlight<'_> {
 pub struct RequestShape {
     pub prompt_tokens: u64,
     pub expected_out: u64,
+    /// The node holding the longest prefix of the prompt warm, tried first while it has a
+    /// lane free.
+    pub warm: Option<usize>,
 }
 
 pub const DEFAULT_POOL_HIGH_PCT: u32 = 90;
@@ -347,6 +352,7 @@ impl FleetManager {
             retry_every: RETRY_DOWN_AFTER,
             liveness: Liveness::DEFAULT,
             tokenizers: Default::default(),
+            warm: Default::default(),
             shared: Mutex::new(Shared {
                 meta,
                 sessions: BTreeMap::new(),
@@ -531,6 +537,13 @@ impl FleetManager {
     /// background tend reads each idle one every `heartbeat`.
     pub fn with_liveness(mut self, liveness: Liveness) -> FleetManager {
         self.liveness = liveness;
+        self
+    }
+
+    /// Remembers in `path` which node ran each prompt prefix, so a restarted head still places
+    /// a conversation's next turn on the node that has it warm.
+    pub fn with_warm_log(mut self, path: std::path::PathBuf) -> FleetManager {
+        self.warm = Mutex::new(crate::fleet_warm::Warm::kept_in(path));
         self
     }
 
@@ -723,6 +736,7 @@ impl FleetManager {
         RequestShape {
             prompt_tokens: tokens.len() as u64,
             expected_out,
+            warm: None,
         }
     }
 
@@ -785,6 +799,15 @@ impl FleetManager {
                 sh.rr_cursor = sh.rr_cursor.wrapping_add(1);
             }
         }
+        if let Some(w) = shape.warm.filter(|_| self.policy != PlacementPolicy::RoundRobin) {
+            if let Some(at) = cand.iter().position(|&i| i == w) {
+                let lanes = self.node(w).open.load(Ordering::Relaxed).max(1);
+                if (sh.inflight[w] as usize) < lanes {
+                    let w = cand.remove(at);
+                    cand.insert(0, w);
+                }
+            }
+        }
         if let (Some(session), Some(&winner)) = (claim_for, cand.first()) {
             Self::claim_locked(&mut sh, winner, session);
         }
@@ -836,12 +859,14 @@ impl FleetManager {
         tokens: &[u32],
         expected_out: u64,
     ) -> Result<usize, DaemonError> {
+        let warm = self.warm_node(model, tokens);
         let cand = self.candidates_claiming(
             model,
             Some(session),
             RequestShape {
                 prompt_tokens: tokens.len() as u64,
                 expected_out,
+                warm,
             },
         );
         let release_on_error = |e: DaemonError| {
@@ -1497,6 +1522,10 @@ impl FleetManager {
         };
         InFlight::release(&self.shared, session);
         let Some(p) = placed else { return };
+        let identity = self.shared.lock().expect("shared").meta[p.node].identity.clone();
+        if !identity.is_empty() {
+            self.warm.lock().expect("warm").ran(&p.model, &p.tokens, &identity);
+        }
         self.shared.lock().expect("shared").forgets.push((p.node, p.slot, session, p.epoch));
         let node = self.node(p.node);
         let lock = node.conns[p.slot].try_lock();
@@ -1627,6 +1656,15 @@ impl FleetManager {
     pub fn tend(&self) {
         self.keepalive();
         self.retry_down();
+        self.warm.lock().expect("warm").save();
+    }
+
+    /// The node, up and serving `model`, that last ran the longest prefix of `tokens`.
+    fn warm_node(&self, model: &str, tokens: &[u32]) -> Option<usize> {
+        let warm = self.warm.lock().expect("warm");
+        let (identity, _) = warm.warmest(model, tokens)?;
+        let sh = self.shared.lock().expect("shared");
+        (0..sh.meta.len()).find(|&i| sh.meta[i].identity == identity && sh.meta[i].up() && Self::serves(&sh, i, model))
     }
 
     pub fn spawn_keepalive(self: &Arc<Self>) {

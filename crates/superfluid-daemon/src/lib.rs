@@ -23,6 +23,7 @@ pub mod template_codec;
 pub mod tool_fragment;
 pub mod fleet;
 pub mod fleet_manager;
+pub mod fleet_warm;
 pub(crate) mod fleet_daemon;
 pub mod idempotency;
 pub mod fleet_join;

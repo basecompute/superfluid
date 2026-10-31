@@ -748,13 +748,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
         };
         let lease = superfluid_proto::linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
         let n_nodes = specs.len();
-        let manager = Arc::new(FleetManager::with_options(
-            specs,
-            policy,
-            lease,
-            fleet_pool_high,
-            fleet_conns,
-        ));
+        let manager = Arc::new(
+            FleetManager::with_options(specs, policy, lease, fleet_pool_high, fleet_conns)
+                .with_warm_log(sessions.join("fleet-warm.json")),
+        );
         // Every model the head serves: one given by path is opened here for its tokenizer and
         // chat template only; one given by id takes them from a node serving it, below.
         let mut served: Vec<(String, Option<Box<dyn superfluid_daemon::TextCodec + Send + Sync>>)> = Vec::new();
