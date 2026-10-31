@@ -1739,15 +1739,25 @@ mod tests {
     /// A copy of this test binary rather than a system one: macOS kills a platform binary run from elsewhere.
     fn sleeper_at(exe: &Path) -> Sleeper {
         std::fs::copy(std::env::current_exe().unwrap(), exe).unwrap();
-        Sleeper(
-            Command::new(exe)
+        // A process another test forks while the copy is open for writing holds it open until
+        // it execs, and running the copy meanwhile fails as busy: try again until it lets go.
+        let mut tries = 0;
+        loop {
+            let spawned = Command::new(exe)
                 .args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
                 .env(SLEEP_ENV, "1")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
+                .spawn();
+            match spawned {
+                Ok(child) => return Sleeper(child),
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("run {}: {e}", exe.display()),
+            }
+        }
     }
 
     /// Whether a process is seen running from `dir` within five seconds.
