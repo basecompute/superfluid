@@ -70,16 +70,59 @@ pub fn tokenizer_digest(tok: &dyn superfluid_engine::Tokenizer) -> u64 {
 
 /// A tokenizer a head without the model takes from a node serving it: what it says without
 /// encoding is the node's own, kept here, and text is encoded by a node serving the model,
-/// once per request rather than once per token.
+/// once per request rather than once per token. Text it encoded before is answered here: a
+/// conversation sends its system prompt and earlier turns again with every turn.
 pub struct RemoteTokenizer {
     fleet: std::sync::Arc<crate::fleet_manager::FleetManager>,
     model: String,
     export: linkf::TokenizerExportMsg,
+    encoded: std::sync::Mutex<Encoded>,
+}
+
+/// Encodings kept by the SHA-256 of what was encoded, up to [`ENCODED_TOKENS`] tokens, the
+/// least recently used going first.
+#[derive(Default)]
+struct Encoded {
+    by_text: std::collections::HashMap<[u8; 32], (Vec<u32>, u64)>,
+    tokens: usize,
+    clock: u64,
+}
+
+const ENCODED_TOKENS: usize = 2_000_000;
+
+impl Encoded {
+    fn get(&mut self, key: &[u8; 32]) -> Option<Vec<u32>> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.by_text.get_mut(key).map(|(tokens, at)| {
+            *at = clock;
+            tokens.clone()
+        })
+    }
+
+    fn put(&mut self, key: [u8; 32], tokens: Vec<u32>) {
+        self.clock += 1;
+        self.tokens += tokens.len();
+        if let Some((old, _)) = self.by_text.insert(key, (tokens, self.clock)) {
+            self.tokens -= old.len();
+        }
+        if self.tokens > ENCODED_TOKENS {
+            let mut ages: Vec<([u8; 32], u64, usize)> = self.by_text.iter().map(|(k, (t, at))| (*k, *at, t.len())).collect();
+            ages.sort_unstable_by_key(|&(_, at, _)| at);
+            for (k, _, n) in ages {
+                if self.tokens <= ENCODED_TOKENS / 2 {
+                    break;
+                }
+                self.by_text.remove(&k);
+                self.tokens -= n;
+            }
+        }
+    }
 }
 
 impl RemoteTokenizer {
     pub fn new(fleet: std::sync::Arc<crate::fleet_manager::FleetManager>, model: String, export: linkf::TokenizerExportMsg) -> RemoteTokenizer {
-        RemoteTokenizer { fleet, model, export }
+        RemoteTokenizer { fleet, model, export, encoded: Default::default() }
     }
 
     /// The node's tokenizer digest, which every node serving the model is held to.
@@ -88,7 +131,16 @@ impl RemoteTokenizer {
     }
 
     fn encode_by(&self, text: linkf::TokenizeMsg) -> Option<Vec<u32>> {
+        use sha2::Digest;
+        let key: [u8; 32] = sha2::Sha256::digest(postcard::to_allocvec(&text).ok()?).into();
+        if let Some(tokens) = self.encoded.lock().expect("encoded").get(&key) {
+            return Some(tokens);
+        }
         match self.fleet.tokenize(&self.model, &text) {
+            Ok(Some(tokens)) => {
+                self.encoded.lock().expect("encoded").put(key, tokens.clone());
+                Some(tokens)
+            }
             Ok(tokens) => tokens,
             Err(e) => {
                 tracing::warn!("fleet: no node serving {} could encode a request's text: {e}", self.model);
@@ -1088,5 +1140,29 @@ impl PipelineFleet {
             ctx.push(tok);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Encoded, ENCODED_TOKENS};
+
+    #[test]
+    fn text_encoded_before_is_answered_and_the_least_used_goes_first() {
+        let mut enc = Encoded::default();
+        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        enc.put(a, vec![7; 10]);
+        assert_eq!(enc.get(&a), Some(vec![7; 10]));
+        assert_eq!(enc.get(&b), None);
+        enc.put(a, vec![8; 4]);
+        assert_eq!((enc.get(&a), enc.tokens), (Some(vec![8; 4]), 4), "the same text again replaces it");
+
+        enc.put(b, vec![0; ENCODED_TOKENS / 2]);
+        assert!(enc.get(&a).is_some(), "a is used after b");
+        enc.put(c, vec![0; ENCODED_TOKENS / 2]);
+        // Over the bound, the least recently used go until half of it is left.
+        assert_eq!((enc.get(&b), enc.get(&a)), (None, None));
+        assert!(enc.get(&c).is_some(), "the newest stays");
+        assert_eq!(enc.tokens, ENCODED_TOKENS / 2);
     }
 }
