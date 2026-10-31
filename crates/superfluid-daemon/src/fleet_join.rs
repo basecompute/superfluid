@@ -115,17 +115,22 @@ fn join(args: &[String]) {
     if let Some(tok) = loaded.tokenizer {
         node = node.with_tokenizer_of(tok);
     }
-    let node = node
-        .with_auth(token.clone());
+    // A head that keeps a connection for short calls asks for it; one connection more, once.
+    let (ask, asked) = std::sync::mpsc::sync_channel::<()>(1);
+    let node = node.with_auth(token.clone()).with_on_control_ask(move || {
+        let _ = ask.try_send(());
+    });
     eprintln!("superfluid: node '{identity}' serves {model_name}; dialing the head at {target} once per lane ({max_batch})");
     // One connection per lane, each its own generation at a time on the head.
     let target = Arc::new(target);
-    let links: Vec<_> = (0..max_batch)
-        .map(|lane| {
-            let (target, token, node) = (Arc::clone(&target), token.clone(), node.connection());
-            std::thread::spawn(move || keep_dialing(&target, &token, node, lane))
-        })
-        .collect();
+    let dial = |lane: u32| {
+        let (target, token, node) = (Arc::clone(&target), token.clone(), node.connection());
+        std::thread::spawn(move || keep_dialing(&target, &token, node, lane))
+    };
+    let mut links: Vec<_> = (0..max_batch).map(dial).collect();
+    if asked.recv().is_ok() {
+        links.push(dial(max_batch));
+    }
     for link in links {
         let _ = link.join();
     }

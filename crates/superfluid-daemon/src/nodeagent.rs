@@ -91,6 +91,8 @@ pub struct NodeAgent {
     tokenizer: u64,
     /// The model's tokenizer, for a head that has no copy of the model to export and encode with.
     tokenizer_impl: Option<Arc<dyn superfluid_engine::Tokenizer>>,
+    /// Called when a head this node dialed asks for a connection for short calls.
+    on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// The largest blob a node takes from its head.
@@ -124,6 +126,7 @@ impl NodeAgent {
             incoming: HashMap::new(),
             tokenizer: 0,
             tokenizer_impl: None,
+            on_control_ask: None,
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -167,6 +170,7 @@ impl NodeAgent {
             incoming: HashMap::new(),
             tokenizer: self.tokenizer,
             tokenizer_impl: self.tokenizer_impl.clone(),
+            on_control_ask: self.on_control_ask.clone(),
         }
     }
 
@@ -190,6 +194,13 @@ impl NodeAgent {
     pub fn with_tokenizer_of(mut self, tok: Arc<dyn superfluid_engine::Tokenizer>) -> NodeAgent {
         self.tokenizer = crate::fleet::tokenizer_digest(&*tok);
         self.tokenizer_impl = Some(tok);
+        self
+    }
+
+    /// For a node that dials its head: `dial` is called when the head asks for one connection
+    /// more, which it keeps for short calls; it may be called more than once.
+    pub fn with_on_control_ask(mut self, dial: impl Fn() + Send + Sync + 'static) -> NodeAgent {
+        self.on_control_ask = Some(Arc::new(dial));
         self
     }
 
@@ -506,6 +517,11 @@ impl NodeAgent {
                 } else {
                     work.generation = Some(self.start_generation(&m));
                     endpoint.poll_every(POLL_RUNNING)?;
+                }
+            }
+            msg_type::CONTROL_ASK => {
+                if let Some(dial) = &self.on_control_ask {
+                    dial();
                 }
             }
             msg_type::TOKENIZER_EXPORT_REQ => {

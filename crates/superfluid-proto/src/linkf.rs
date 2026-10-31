@@ -56,6 +56,9 @@ pub mod msg_type {
     pub const TELEMETRY: u16 = 0x8001;
     /// An idle head's sign of life; droppable, so a node that predates it skips it.
     pub const KEEPALIVE: u16 = 0x8002;
+    /// The head asks a node that dialed it for one connection more, kept for short calls
+    /// while generations hold the rest; droppable, so a node that predates it dials no more.
+    pub const CONTROL_ASK: u16 = 0x8003;
 
     pub const ALL: &[u16] = &[
         HELLO,
@@ -95,6 +98,7 @@ pub mod msg_type {
         STATE_SYNC_SEGMENT,
         TELEMETRY,
         KEEPALIVE,
+        CONTROL_ASK,
     ];
 }
 

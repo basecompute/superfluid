@@ -386,6 +386,12 @@ impl FleetHead {
 
     /// Reads what the node sent while the connection sat idle, which also sends it a heartbeat
     /// when one is due; an error means it is gone.
+    /// Asks a node that dialed in for a connection for short calls ([`msg_type::CONTROL_ASK`]).
+    pub fn ask_control(&mut self) -> Result<(), DaemonError> {
+        self.endpoint.send(msg_type::CONTROL_ASK, &())?;
+        Ok(())
+    }
+
     pub fn drain_status(&mut self) -> Result<(), DaemonError> {
         for frame in self.endpoint.pump()? {
             self.absorb(frame)?;

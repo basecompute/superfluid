@@ -86,8 +86,8 @@ struct NodeConn {
     spec: NodeSpec,
     conns: Vec<Mutex<Option<FleetHead>>>,
     /// A connection no generation takes, for short calls (a prompt's encoding, a state
-    /// operation) while every lane's connection is held by a generation. A node the head dials
-    /// has one; a joined node, which opens its own connections, has none.
+    /// operation) while every lane's connection is held by a generation. The head dials it for
+    /// a node it lists; a joined node dials it when asked, and one that predates the ask has none.
     control: Mutex<Option<FleetHead>>,
     /// How many of `conns` are in use: the count asked for, or the node's lanes once learned.
     open: std::sync::atomic::AtomicUsize,
@@ -127,8 +127,8 @@ impl NodeConn {
     }
 
     /// A connection no call is using, so a short operation does not wait out a generation:
-    /// a lane's when one is idle, else the control connection, else (a joined node) the next
-    /// lane's in turn.
+    /// a lane's when one is idle, else the control connection, else (a joined node without
+    /// one) the next lane's in turn.
     fn checkout_idle(&self) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
         let open = self.open.load(std::sync::atomic::Ordering::Relaxed).clamp(1, self.conns.len());
         for slot in &self.conns[..open] {
@@ -136,10 +136,12 @@ impl NodeConn {
                 return guard;
             }
         }
-        if self.spec.addr.starts_with(JOINED) {
-            return self.checkout_next().1;
+        let control = self.control.lock().expect("node conn");
+        if control.is_some() || !self.spec.addr.starts_with(JOINED) {
+            return control;
         }
-        self.control.lock().expect("node conn")
+        drop(control);
+        self.checkout_next().1
     }
 
     fn checkout_at(&self, i: usize) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
@@ -383,7 +385,7 @@ impl FleetManager {
             match sh.meta.iter().position(|m| m.identity == identity) {
                 Some(i) => {
                     let node = self.node(i);
-                    let connected = node.conns.iter().any(|c| c.lock().expect("node conn").is_some());
+                    let connected = node.conns.iter().any(in_use);
                     if connected && sh.meta[i].peer.is_some_and(|p| p != peer) {
                         return Err(format!(
                             "another node named '{identity}' is joined from {}; give this one --identity",
@@ -421,15 +423,20 @@ impl FleetManager {
         let mut head = head;
         head.keep_alive(self.liveness);
         watch(&node, &mut head);
-        let mut slot = 0;
-        for (s, conn) in node.conns.iter().enumerate() {
-            if conn.lock().expect("node conn").is_none() {
-                slot = s;
-                break;
+        let slot = node.conns.iter().position(|c| !in_use(c));
+        let has_control = node.control.lock().expect("node conn").is_some();
+        match slot {
+            Some(slot) => {
+                if !has_control {
+                    let _ = head.ask_control();
+                }
+                *node.checkout_at(slot) = Some(head);
             }
+            // One past its lanes is the connection it dialed when asked.
+            None if !has_control => *node.control.lock().expect("node conn") = Some(head),
+            None => *node.checkout_at(0) = Some(head),
         }
-        *node.checkout_at(slot) = Some(head);
-        let open = node.conns.iter().filter(|c| c.lock().expect("node conn").is_some()).count();
+        let open = node.conns.iter().filter(|c| in_use(c)).count();
         node.open.store(open.max(1), std::sync::atomic::Ordering::Relaxed);
         if new {
             // Listed as down only until this connection was in place: not a return.
@@ -1634,6 +1641,13 @@ impl FleetManager {
             })
             .expect("spawn the fleet keepalive");
     }
+}
+
+/// Whether a slot holds a connection, for [`FleetManager::adopt`], which must not wait on one:
+/// a call holds a slot's lock while it waits for the shared state adopt holds. A slot whose lock
+/// is held is in use, so connected.
+fn in_use(slot: &Mutex<Option<FleetHead>>) -> bool {
+    slot.try_lock().map_or(true, |g| g.is_some())
 }
 
 fn is_fatal_node(e: &DaemonError) -> bool {
