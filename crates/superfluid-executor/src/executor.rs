@@ -23,6 +23,9 @@ pub const KV_SPACE: u32 = 1;
 /// entry is exported into host memory.
 const HOST_SHORT_TICKS: u64 = 64;
 
+/// An export shorter than this says little of what a token costs to export.
+const EXPORT_RATE_MIN_TOKENS: u64 = 64;
+
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     pub seed_ttl_ticks: u64,
@@ -110,6 +113,8 @@ pub struct Executor<P: RuntimePrimitives> {
     pub(crate) spec_gate: crate::speculate::ThroughputGate,
     /// Seconds a prompt token takes to prefill here, as ticks have run them.
     pub(crate) prefill_secs_per_token: Option<f64>,
+    /// Seconds a token of state takes to export here, as exports have run.
+    pub(crate) export_secs_per_token: Option<f64>,
     grant_store: Option<AbiStore<StrategyGrant>>,
     pub(crate) bare: HashSet<Seq>,
     /// Bare sequences forked from another: published, they are copies kept
@@ -189,6 +194,7 @@ impl<P: RuntimePrimitives> Executor<P> {
             strategy: None,
             spec_gate: Default::default(),
             prefill_secs_per_token: None,
+            export_secs_per_token: None,
             grant_store: None,
             bare: HashSet::new(),
             forks: HashSet::new(),
@@ -539,7 +545,23 @@ impl<P: RuntimePrimitives> Executor<P> {
         if over > 0 {
             return false;
         }
+        // Kept only where exporting costs less than prefilling the tokens again, as this
+        // machine has run both: a GB10's llama.cpp took 0.6 s to export 700 tokens it
+        // prefills in 0.16 s, in the tick every lane waits on.
+        if let (Some(export), Some(prefill)) = (self.export_secs_per_token, self.prefill_secs_per_token) {
+            if export > prefill {
+                return false;
+            }
+        }
+        let started = std::time::Instant::now();
         let Ok(payload) = self.prim.seq_export(seq, len, LOSSLESS) else { return false };
+        if len >= EXPORT_RATE_MIN_TOKENS {
+            let sample = started.elapsed().as_secs_f64() / len as f64;
+            self.export_secs_per_token = Some(match self.export_secs_per_token {
+                Some(e) => 0.7 * e + 0.3 * sample,
+                None => sample,
+            });
+        }
         for o in out {
             if let Some(gone) = self.cache.remove(o) {
                 self.forget_seq(o);

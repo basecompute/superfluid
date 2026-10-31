@@ -33,6 +33,8 @@ pub struct FakeConfig {
     pub sampling_defaults: SamplingDefaults,
     /// Wall time each model step takes, for tests that need ticks to last.
     pub step_delay: std::time::Duration,
+    /// Wall time each export takes: a runtime whose copies out of the device are slow.
+    pub export_delay: std::time::Duration,
     /// Serve `step_rows` (a row after every token of a feed).
     pub verify_rows: bool,
     /// Predict the token that followed the last earlier occurrence of the
@@ -67,6 +69,7 @@ impl Default for FakeConfig {
             vocabulary: None,
             sampling_defaults: SamplingDefaults::default(),
             step_delay: std::time::Duration::ZERO,
+            export_delay: std::time::Duration::ZERO,
             verify_rows: false,
             copy_model: false,
             copy_miss_every: 0,
@@ -348,6 +351,9 @@ impl RuntimePrimitives for FakePrimitives {
         let s = self.seqs.get(&seq).ok_or(PrimError::UnknownSeq)?;
         if !self.cut_ok(len, s.len() as u64) {
             return Err(PrimError::OutOfBoundary);
+        }
+        if !self.cfg.export_delay.is_zero() {
+            std::thread::sleep(self.cfg.export_delay);
         }
         Ok(s[..len as usize].iter().flat_map(|t| t.to_le_bytes()).collect())
     }
