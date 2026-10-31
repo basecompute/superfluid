@@ -877,6 +877,31 @@ fn an_http_requests_prompt_prefix_is_kept_and_starts_the_same_prompt_warm_after_
 }
 
 #[test]
+fn a_completion_that_keeps_its_prefix_starts_the_next_turn_from_the_cache() {
+    // A fleet node runs each turn of a conversation as a completion: the next one finds the
+    // last one's prompt in the cache, as a session's next turn does.
+    let warm = |d: &Daemon| {
+        d.metrics_text().lines().find_map(|l| l.strip_prefix("superfluid_warm_prefix_tokens_total ")?.trim().parse::<u64>().ok()).unwrap_or(0)
+    };
+    let turns = |keep_prefix: bool| {
+        let dir = test_dir();
+        let d = kv_only_daemon(&dir.join("wal.log"), None);
+        let extras = superfluid_daemon::scheduler::GenExtras { keep_prefix, ..Default::default() };
+        let mut convo: Vec<u32> = (0..600).collect();
+        for turn in 0..2u32 {
+            let (out, _, _) = d
+                .generate_tokens_streaming(convo.clone(), GenParams::default(), 8, 0, extras.clone(), |_| std::ops::ControlFlow::Continue(()))
+                .unwrap();
+            convo.extend(out);
+            convo.extend((0..20).map(|k| 3000 + 20 * turn + k));
+        }
+        warm(&d)
+    };
+    assert!(turns(true) >= 512, "the second turn starts from the first one's prompt");
+    assert_eq!(turns(false), 0, "a completion that does not ask leaves the cache as it was");
+}
+
+#[test]
 fn a_fleet_nodes_prompt_prefix_is_kept_and_starts_it_warm_after_a_restart() {
     // A node's generations are completions; one that asks keeps its prompt's prefix as an
     // HTTP request's is, so a restarted node starts the head's next turn warm.

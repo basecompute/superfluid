@@ -181,8 +181,9 @@ pub struct GenExtras {
     pub top_logprobs: u8,
     pub wants_deltas: bool,
     pub ephemeral: bool,
-    /// A completion whose prompt prefix is kept on disk with parking on, as an ephemeral
-    /// session's is: a fleet node's generations, so a restarted node starts them warm.
+    /// A completion whose prompt is kept as a session's is: published to the prefix cache when
+    /// it retires, and on disk with parking on. A fleet node's generations ask for it, so the
+    /// next turn of a conversation, and one after a restart, starts warm.
     pub keep_prefix: bool,
     pub open_channel: u32,
     pub thinking: Option<bool>,
@@ -3623,7 +3624,7 @@ impl Scheduler {
                     lane_tag: lane.tag,
                     publish_to_cache: !lane.parked_lossy
                         && lane.job.media.is_empty()
-                        && !lane.job.completion,
+                        && (!lane.job.completion || lane.job.extras.keep_prefix),
                 });
                 retiring.push(lane.tag);
                 continue;

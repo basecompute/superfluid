@@ -111,9 +111,11 @@ const POLL_RUNNING: Duration = Duration::from_millis(2);
 
 const POLL_IDLE: Duration = Duration::from_millis(20);
 
+/// Tokens are sent in batches of this many, or after [`EMIT_COALESCE_MS`]; a generation's first
+/// tokens go at once, so the head's first token waits on nothing.
 const EMIT_COALESCE_TOKENS: usize = 16;
 
-const EMIT_COALESCE_MS: u64 = 200;
+const EMIT_COALESCE_MS: u64 = 50;
 
 impl NodeAgent {
     pub fn new(daemon: Arc<Daemon>, identity: impl Into<String>, model_name: impl Into<String>) -> NodeAgent {
@@ -771,6 +773,7 @@ impl NodeAgent {
             out,
             pending: Vec::with_capacity(EMIT_COALESCE_TOKENS),
             last_flush: self.start.elapsed(),
+            sent: false,
         }
     }
 
@@ -816,7 +819,7 @@ impl NodeAgent {
                 }
             }
         }
-        let due = done.is_some() || now.saturating_sub(run.last_flush).as_millis() as u64 >= EMIT_COALESCE_MS;
+        let due = done.is_some() || !run.sent || now.saturating_sub(run.last_flush).as_millis() as u64 >= EMIT_COALESCE_MS;
         if due && !run.pending.is_empty() && !self.flush(endpoint, run, now)? {
             return Ok(true);
         }
@@ -851,6 +854,7 @@ impl NodeAgent {
     /// Sends `run`'s pending tokens; `false` when its session is fenced, which sends nothing.
     fn flush(&mut self, endpoint: &mut Endpoint, run: &mut Running, now: Duration) -> Result<bool, DaemonError> {
         run.last_flush = now;
+        run.sent = true;
         let tokens = std::mem::take(&mut run.pending);
         let batch = self.shared.lock().expect("agent shared").agent.emit(
             run.session_id,
@@ -901,6 +905,8 @@ struct Running {
     out: mpsc::Receiver<Out>,
     pending: Vec<u32>,
     last_flush: Duration,
+    /// Tokens have gone to the head.
+    sent: bool,
 }
 
 impl Drop for Running {
@@ -923,8 +929,8 @@ struct Extras {
 
 impl Extras {
     fn of(daemon: &Daemon, opts: Option<&linkf::GenerateOptsMsg>) -> Result<Extras, DaemonError> {
-        // A node started with --park keeps each prompt's prefix on disk, so it starts warm after
-        // a restart.
+        // Each prompt stays in the cache for the conversation's next turn, and with --park on
+        // disk, so a restarted node starts it warm too.
         let mut extras = crate::scheduler::GenExtras { keep_prefix: true, ..Default::default() };
         let Some(o) = opts else { return Ok(Extras { extras }) };
         extras.presence_penalty = f32::from_bits(o.presence_penalty_bits);
