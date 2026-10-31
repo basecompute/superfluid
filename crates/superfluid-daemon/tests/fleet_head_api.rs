@@ -524,7 +524,8 @@ fn a_request_sent_again_with_its_key_through_the_head_gets_the_first_answer() {
     assert_eq!(again, first);
 }
 
-/// A byte-level tokenizer with ChatML's markers, for a head to take from its node.
+/// A byte-level tokenizer with ChatML's and Qwen's tool-call markers, for a head to take from its
+/// node.
 struct Bytes;
 
 impl superfluid_engine::Tokenizer for Bytes {
@@ -537,6 +538,12 @@ impl superfluid_engine::Tokenizer for Bytes {
                 rest = r;
             } else if let Some(r) = rest.strip_prefix("<|im_end|>") {
                 out.push(257);
+                rest = r;
+            } else if let Some(r) = rest.strip_prefix("<tool_call>") {
+                out.push(258);
+                rest = r;
+            } else if let Some(r) = rest.strip_prefix("</tool_call>") {
+                out.push(259);
                 rest = r;
             } else {
                 let c = rest.chars().next().unwrap();
@@ -551,6 +558,8 @@ impl superfluid_engine::Tokenizer for Bytes {
             0..=255 => vec![token as u8],
             256 => b"<|im_start|>".to_vec(),
             257 => b"<|im_end|>".to_vec(),
+            258 => b"<tool_call>".to_vec(),
+            259 => b"</tool_call>".to_vec(),
             _ => Vec::new(),
         }
     }
@@ -558,7 +567,12 @@ impl superfluid_engine::Tokenizer for Bytes {
         512
     }
     fn special_tokens(&self) -> Vec<(String, u32)> {
-        vec![("<|im_start|>".into(), 256), ("<|im_end|>".into(), 257)]
+        vec![
+            ("<|im_start|>".into(), 256),
+            ("<|im_end|>".into(), 257),
+            ("<tool_call>".into(), 258),
+            ("</tool_call>".into(), 259),
+        ]
     }
     fn bos_token(&self) -> Option<u32> {
         None
@@ -571,30 +585,38 @@ impl superfluid_engine::Tokenizer for Bytes {
     }
 }
 
+/// A node that shares its tokenizer, with `lanes` lanes, its engine taking `tick` a step.
+fn sharing_node(tok: Arc<dyn superfluid_engine::Tokenizer>, lanes: u32, tick: std::time::Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let host = EngineHost::spawn(move || (MockEngine::new(EngineConfig { vocab: 512, tick_delay: tick, ..EngineConfig::default() }), None)).unwrap();
+        let daemon = Arc::new(Daemon::new(store("node"), host, Box::new(MockCodec), lanes as usize));
+        let node = NodeAgent::new(daemon, "sharer", "mock-model").with_max_lanes(lanes).with_tokenizer_of(tok);
+        for sock in listener.incoming() {
+            let Ok(sock) = sock else { break };
+            let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+            let mut conn = node.connection();
+            std::thread::spawn(move || {
+                let _ = conn.serve(ep);
+            });
+        }
+    });
+    addr
+}
+
+fn fleet_of(node: String) -> Arc<FleetManager> {
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let fleet = Arc::new(FleetManager::new(vec![NodeSpec { addr: node, auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease));
+    let _ = fleet.probe();
+    fleet
+}
+
 #[test]
 fn a_head_with_no_copy_of_the_model_takes_its_tokenizer_from_a_node() {
     use superfluid_engine::Tokenizer;
     let tok: Arc<dyn Tokenizer> = Arc::new(Bytes);
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let node_addr = listener.local_addr().unwrap().to_string();
-    {
-        let tok = Arc::clone(&tok);
-        std::thread::spawn(move || {
-            let daemon = Arc::new(Daemon::new(store("node"), engine(), Box::new(MockCodec), 8));
-            let node = NodeAgent::new(daemon, "sharer", "mock-model").with_max_lanes(8).with_tokenizer_of(tok);
-            for sock in listener.incoming() {
-                let Ok(sock) = sock else { break };
-                let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
-                let mut conn = node.connection();
-                std::thread::spawn(move || {
-                    let _ = conn.serve(ep);
-                });
-            }
-        });
-    }
-    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
-    let fleet = Arc::new(FleetManager::new(vec![NodeSpec { addr: node_addr, auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease));
-    let _ = fleet.probe();
+    let fleet = fleet_of(sharing_node(Arc::clone(&tok), 8, std::time::Duration::ZERO));
     let remote = fleet.remote_tokenizer("mock-model").expect("the node shares its tokenizer");
     assert_eq!(remote.digest(), superfluid_daemon::fleet::tokenizer_digest(&*tok));
     for text in ["hello there", "<|im_start|>user\nhi<|im_end|>", "naïve ✓"] {
@@ -613,5 +635,60 @@ fn a_head_with_no_copy_of_the_model_takes_its_tokenizer_from_a_node() {
         let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 12, "temperature": 0, "stream": stream});
         let said = same(&local, &head, "/v1/chat/completions", &body);
         assert!(said.to_string().contains("completion_tokens"), "{said}");
+    }
+}
+
+#[test]
+fn requests_past_every_lane_wait_their_turn_on_a_head_that_encodes_on_a_node() {
+    // Every lane's connection is held by a generation that commits as it goes, while more
+    // sessions start; each one's turn opener is encoded on the node, which must not happen
+    // under a lock those generations need.
+    use superfluid_daemon::{scheduler::GenExtras, wal::role, GenParams};
+    let fleet = fleet_of(sharing_node(Arc::new(Bytes), 2, std::time::Duration::from_millis(50)));
+    let remote = fleet.remote_tokenizer("mock-model").unwrap();
+    // The curated ChatML codec, as Qwen's models get: it renders each message alone and the
+    // turn's opener when the turn is generated.
+    let codec = Box::new(superfluid_daemon::codec::ChatMlCodec::from_tokenizer(Arc::new(remote)).unwrap());
+    let head = Arc::new(Daemon::over_fleet(store("head"), codec, fleet, "mock-model".into(), DaemonOptions::default()).unwrap());
+    let turn = |text: &str| {
+        let s = head.create(None, GenParams::default()).unwrap();
+        head.append_message(s, role::USER, text.into()).unwrap();
+        s
+    };
+    let (started, first) = std::sync::mpsc::channel();
+    let long: Vec<_> = (0..2)
+        .map(|i| {
+            let (head, started, s) = (Arc::clone(&head), started.clone(), turn(&format!("long {i}")));
+            std::thread::spawn(move || {
+                let extras = GenExtras { ignore_eos: true, ..GenExtras::default() };
+                let mut told = false;
+                head.generate_streaming_ex(s, 1000, extras, |_| {
+                    if !std::mem::replace(&mut told, true) {
+                        let _ = started.send(());
+                    }
+                    Ok(())
+                })
+                .unwrap()
+            })
+        })
+        .collect();
+    for _ in 0..2 {
+        first.recv_timeout(std::time::Duration::from_secs(20)).expect("both lanes generating");
+    }
+    let (done, finished) = std::sync::mpsc::channel();
+    for i in 0..3 {
+        let (head, done) = (Arc::clone(&head), done.clone());
+        std::thread::spawn(move || {
+            let s = head.create(None, GenParams::default()).unwrap();
+            head.append_message(s, role::USER, format!("short {i}")).unwrap();
+            let _ = done.send(head.generate(s, 10).map(|o| o.tokens_generated));
+        });
+    }
+    for _ in 0..3 {
+        let generated = finished.recv_timeout(std::time::Duration::from_secs(20)).expect("a session past every lane is answered");
+        assert!(generated.unwrap() > 0);
+    }
+    for run in long {
+        assert!(run.join().unwrap().tokens_generated > 0);
     }
 }

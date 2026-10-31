@@ -1086,12 +1086,12 @@ impl Daemon {
 
     pub fn session_fits(&self, session: u64, thinking: Option<bool>) -> Result<(), DaemonError> {
         self.ensure_serving()?;
-        let len = {
+        let (len, turn) = {
             let store = self.store.lock().expect("store");
             let s = store.session(session)?;
-            s.tokens.len() + self.generation_opener(&s.events, thinking).map_or(0, |op| op.len())
+            (s.tokens.len(), Self::opener_turn(&s.events))
         };
-        self.check_stream_fits(len)
+        self.check_stream_fits(len + self.generation_opener(turn, thinking).map_or(0, |op| op.len()))
     }
 
     pub fn fim_fits(&self, req: &FimRequest) -> Result<(), DaemonError> {
@@ -2521,21 +2521,27 @@ impl Daemon {
         self.store.lock().expect("store").append(session, text, span)
     }
 
+    /// Read under the store's lock and rendered after it, as [`Daemon::opener_turn`] is.
     fn separator_for(&self, session: u64) -> Vec<u32> {
-        let store = self.store.lock().expect("store");
-        let Ok(s) = store.session(session) else {
-            return Vec::new();
+        let (empty, ended) = {
+            let store = self.store.lock().expect("store");
+            let Ok(s) = store.session(session) else {
+                return Vec::new();
+            };
+            (
+                s.tokens.is_empty(),
+                matches!(
+                    Self::last_stream_record(&s.events),
+                    Some(EventBody::Generated { finish, .. }) if *finish == superfluid_abi::finish::EOS
+                ),
+            )
         };
-        if s.tokens.is_empty() {
-            return self.codec().stream_prologue();
-        }
-        match Self::last_stream_record(&s.events) {
-            Some(EventBody::Generated { finish, .. })
-                if *finish == superfluid_abi::finish::EOS =>
-            {
-                self.codec().turn_separator().unwrap_or_default()
-            }
-            _ => Vec::new(),
+        if empty {
+            self.codec().stream_prologue()
+        } else if ended {
+            self.codec().turn_separator().unwrap_or_default()
+        } else {
+            Vec::new()
         }
     }
 
@@ -3103,16 +3109,21 @@ impl Daemon {
         self.generate_streaming_inner(session, max_tokens, extras, on_event, on_logprobs, on_delta)
     }
 
-    fn generation_opener(&self, events: &[store::CommittedEvent], thinking: Option<bool>) -> Option<Vec<u32>> {
+    /// The turn a generation after `events` opens, read under the store's lock. Its tokens are
+    /// made after the lock is let go: a fleet head's codec may encode them on a node, and the
+    /// generations holding that node's connections commit through the store.
+    fn opener_turn(events: &[store::CommittedEvent]) -> Option<codec::TurnState> {
         match Self::last_stream_record(events) {
-            Some(EventBody::Message { .. }) | Some(EventBody::ToolResult { .. }) => self
-                .codec()
-                .generation_prefix_with(codec::TurnState::AfterInput, thinking),
-            Some(EventBody::Generated { finish, .. }) if *finish == superfluid_abi::finish::EOS => self
-                .codec()
-                .generation_prefix_with(codec::TurnState::AfterFinishedTurn, thinking),
+            Some(EventBody::Message { .. }) | Some(EventBody::ToolResult { .. }) => Some(codec::TurnState::AfterInput),
+            Some(EventBody::Generated { finish, .. }) if *finish == superfluid_abi::finish::EOS => {
+                Some(codec::TurnState::AfterFinishedTurn)
+            }
             _ => None,
         }
+    }
+
+    fn generation_opener(&self, turn: Option<codec::TurnState>, thinking: Option<bool>) -> Option<Vec<u32>> {
+        turn.and_then(|t| self.codec().generation_prefix_with(t, thinking))
     }
 
     /// Where a continuation of `session` forks (one past its last event),
@@ -3266,17 +3277,13 @@ impl Daemon {
             }
         }
         let mut stream = stream;
-        let (opener, open_turn) = {
+        let (turn, open_turn) = {
             let store = self.store.lock().expect("store");
             let events = &store.session(session)?.events;
-            let opener = self.generation_opener(events, extras.thinking);
-            let open_turn: Vec<u32> = if opener.is_some() {
-                Vec::new()
-            } else {
-                Self::open_turn_tokens(events)
-            };
-            (opener, open_turn)
+            (Self::opener_turn(events), Self::open_turn_tokens(events))
         };
+        let opener = self.generation_opener(turn, extras.thinking);
+        let open_turn = if opener.is_some() { Vec::new() } else { open_turn };
         let opener_len = opener.as_ref().map(Vec::len);
         let input_end = if opener.is_some() { stream.len() as u64 } else { 0 };
         if let Some(op) = opener {

@@ -85,6 +85,10 @@ pub struct NodeSpec {
 struct NodeConn {
     spec: NodeSpec,
     conns: Vec<Mutex<Option<FleetHead>>>,
+    /// A connection no generation takes, for short calls (a prompt's encoding, a state
+    /// operation) while every lane's connection is held by a generation. A node the head dials
+    /// has one; a joined node, which opens its own connections, has none.
+    control: Mutex<Option<FleetHead>>,
     /// How many of `conns` are in use: the count asked for, or the node's lanes once learned.
     open: std::sync::atomic::AtomicUsize,
     cursor: std::sync::atomic::AtomicUsize,
@@ -122,16 +126,20 @@ impl NodeConn {
         (i, self.conns[i].lock().expect("node conn"))
     }
 
-    /// A connection no call is using, so a short operation does not wait out a generation;
-    /// the next in turn when every one is busy.
-    fn checkout_idle(&self) -> (usize, std::sync::MutexGuard<'_, Option<FleetHead>>) {
+    /// A connection no call is using, so a short operation does not wait out a generation:
+    /// a lane's when one is idle, else the control connection, else (a joined node) the next
+    /// lane's in turn.
+    fn checkout_idle(&self) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
         let open = self.open.load(std::sync::atomic::Ordering::Relaxed).clamp(1, self.conns.len());
-        for (i, slot) in self.conns[..open].iter().enumerate() {
+        for slot in &self.conns[..open] {
             if let Ok(guard) = slot.try_lock() {
-                return (i, guard);
+                return guard;
             }
         }
-        self.checkout_next()
+        if self.spec.addr.starts_with(JOINED) {
+            return self.checkout_next().1;
+        }
+        self.control.lock().expect("node conn")
     }
 
     fn checkout_at(&self, i: usize) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
@@ -139,7 +147,7 @@ impl NodeConn {
     }
 
     fn reset(&self) {
-        for slot in &self.conns {
+        for slot in self.conns.iter().chain([&self.control]) {
             if let Ok(mut g) = slot.try_lock() {
                 *g = None;
             }
@@ -323,6 +331,7 @@ impl FleetManager {
                     conns: (0..if conns_per_node == 0 { MAX_CONNS_PER_NODE } else { conns_per_node })
                         .map(|_| Mutex::new(None))
                         .collect(),
+                    control: Mutex::new(None),
                     open: std::sync::atomic::AtomicUsize::new(conns_per_node.max(1)),
                     cursor: std::sync::atomic::AtomicUsize::new(0),
                     decoded: std::sync::atomic::AtomicU64::new(0),
@@ -389,6 +398,7 @@ impl FleetManager {
                     nodes.push(Arc::new(NodeConn {
                         spec: NodeSpec { addr: format!("{JOINED}{identity}"), auth: Vec::new() },
                         conns: (0..lanes).map(|_| Mutex::new(None)).collect(),
+                        control: Mutex::new(None),
                         open: std::sync::atomic::AtomicUsize::new(1),
                         cursor: std::sync::atomic::AtomicUsize::new(0),
                         decoded: std::sync::atomic::AtomicU64::new(0),
@@ -1338,7 +1348,7 @@ impl FleetManager {
     /// whose link fails is down.
     fn on_node<R>(&self, i: usize, call: impl FnOnce(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
         let node = self.node(i);
-        let (_, mut guard) = node.checkout_idle();
+        let mut guard = node.checkout_idle();
         if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
             *guard = None;
         }
@@ -1540,6 +1550,11 @@ impl FleetManager {
                         *guard = None;
                         dropped = Some(e);
                     }
+                }
+            }
+            if let Ok(mut guard) = node.control.try_lock() {
+                if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
+                    *guard = None;
                 }
             }
             // With its last connection gone the node is down until the background retry reaches
