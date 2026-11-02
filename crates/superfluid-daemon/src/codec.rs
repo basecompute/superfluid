@@ -3309,6 +3309,8 @@ pub struct ChatMlCodec {
     /// What the template puts between an assistant turn's role line and its
     /// content: in history (a user query follows it), and where none does.
     assistant_openers: std::sync::OnceLock<AssistantOpeners>,
+    /// Whether the template trims a message's content before placing it.
+    trims_content: std::sync::OnceLock<bool>,
 }
 
 /// See `ChatMlCodec::assistant_openers`. Qwen3.5 opens only a turn no
@@ -3365,6 +3367,7 @@ impl ChatMlCodec {
             template: tmpl.map(Box::new),
             thinking_switch: false,
             assistant_openers: std::sync::OnceLock::new(),
+            trims_content: std::sync::OnceLock::new(),
         };
         codec.think = codec.derive_think_suffixes().unwrap_or_else(|| codec.assumed_think_suffixes());
         codec.thinking_switch = thinking_switch_changes(|msgs, tools, on| {
@@ -3506,6 +3509,19 @@ impl ChatMlCodec {
         self.assistant_openers.get_or_init(|| self.derived_assistant_openers())
     }
 
+    fn trims_content(&self) -> bool {
+        *self.trims_content.get_or_init(|| {
+            let Some(t) = self.template.as_deref() else { return false };
+            let padded = format!("\n {CONTENT_STAND_IN} \n");
+            t.render_turns_structured(&[ChatMessage::new(crate::wal::role::USER, padded.as_str())], &[])
+                .map(|toks| {
+                    let text = self.inner.decode(&toks);
+                    text.contains(CONTENT_STAND_IN) && !text.contains(&padded)
+                })
+                .unwrap_or(false)
+        })
+    }
+
     /// An assistant turn with `opener` after its role line; the turn as it is
     /// where the opener is empty or the turn does not begin as one.
     fn opened(&self, turn: Vec<u32>, opener: &str) -> Vec<u32> {
@@ -3552,7 +3568,9 @@ impl ChatMlCodec {
             let body = &toks[open + 1..end];
             let text = self.inner.decode(body);
             let role = format!("{}\n", Self::role_str(crate::wal::role::SYSTEM));
-            Some(text.strip_prefix(&role).unwrap_or(&text).to_string())
+            // A template that drops this system message renders the user's turn first; that is
+            // no system body, not one.
+            Some(text.strip_prefix(&role)?.to_string())
         };
         let non_empty = |pieces: Vec<(String, bool)>| -> Option<Vec<(String, bool)>> {
             let joined: String = pieces.iter().map(|(s, _)| s.as_str()).collect();
@@ -3696,6 +3714,7 @@ impl TextCodec for ChatMlCodec {
         self.inner.encode_pieces(pieces)
     }
     fn render_message(&self, role: u32, text: &str) -> Option<Vec<u32>> {
+        let text = if role == crate::wal::role::USER && self.trims_content() { text.trim() } else { text };
         let turn = self.turn(role, &[Piece::Content(text)]);
         if role == crate::wal::role::ASSISTANT {
             return Some(self.opened(turn, &self.assistant_openers().in_history));
