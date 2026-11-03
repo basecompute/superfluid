@@ -311,6 +311,18 @@ fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<(GenerateOptsMsg, V
     Ok(Some((opts, blobs)))
 }
 
+/// A batch-invariant lane asked of a fleet-backed daemon: a node batches each generation with
+/// the others it runs, and Link F cannot ask it not to, so the head refuses rather than answer
+/// from a shared batch.
+pub(crate) fn batch_invariant_refused() -> DaemonError {
+    DaemonError::Unsupported(crate::Refusal::new(
+        "unsupported_on_fleet",
+        None,
+        "a fleet head cannot give a batch-invariant lane: its nodes batch each generation with the others they run; \
+         ask a node's own server for one",
+    ))
+}
+
 /// What a fleet-backed daemon says it can do: generation, and a reason for each thing that does
 /// not reach nodes yet, so a route refuses it as the descriptor says.
 pub(crate) fn capability_record() -> crate::capabilities::Capabilities {
@@ -340,6 +352,10 @@ fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
 /// Places the job on a node, streams its tokens through a lane output, and ends the lane as
 /// the scheduler would.
 fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, DaemonError> {
+    // A session made batch-invariant before its store was served over the fleet still asks.
+    if job.batch_invariant {
+        return Err(batch_invariant_refused());
+    }
     let opts = options(d, job)?;
     let fs = NEXT_FLEET_SESSION.fetch_add(1, Ordering::Relaxed);
     // A deadline that passes while every connection to a node is held expires the job unstarted,

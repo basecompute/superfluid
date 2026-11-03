@@ -2053,6 +2053,9 @@ impl Daemon {
         class: u8,
         batch_invariant: bool,
     ) -> Result<CommittedEvent, DaemonError> {
+        if batch_invariant && self.fleet.is_some() {
+            return Err(fleet_daemon::batch_invariant_refused());
+        }
         self.store
             .lock()
             .expect("store")

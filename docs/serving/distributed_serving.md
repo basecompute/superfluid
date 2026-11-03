@@ -105,7 +105,7 @@ superfluid serve /models/qwen.base /models/gemma.base --http 0.0.0.0:8453 --flee
 
 The head loads no engine but still reads the model for its tokenizer and chat template; its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no `--max-context`. It logs where each session is placed and every move to another node. `--dialect`, `--tool-call-parser` and `--temperature`/`--top-p`/`--top-k`/`--min-p` apply on the head. `--api-key`, `--key-policy` and `--rate-limit` protect its listener; a policy's `class` and `max_class` do not apply, since the head has no scheduler.
 
-Refused on the head (set them on each node's own `superfluid serve`): `--class-lanes`, `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant`, `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--otlp-endpoint`.
+Refused on the head (set them on each node's own `superfluid serve`): `--class-lanes`, `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant`, `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--otlp-endpoint`. A batch-invariant lane is refused however it is asked for (a key whose policy grants `batch_invariant`, or `SetQos`) with 400 `unsupported_on_fleet`: a node batches each generation with the others it runs.
 
 ## Placement policies
 

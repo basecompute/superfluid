@@ -805,3 +805,57 @@ fn a_completion_whose_deadline_passes_while_it_waits_for_a_connection_expires_un
     assert!(!waited_out, "the expired completion waited out the generation holding the lane ({took:?})");
     long.join().unwrap().unwrap();
 }
+
+#[test]
+fn a_fleet_head_refuses_a_batch_invariant_lane_its_nodes_cannot_keep() {
+    // Nodes batch every generation with the others they run, and Link F has no way to ask one
+    // not to: a head that took the request would answer it from a shared batch.
+    use superfluid_daemon::{qos, GenParams};
+    let fleet = fleet_of(sharing_node(Arc::new(Bytes), 2, std::time::Duration::ZERO));
+    let head = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), DaemonOptions::default()).unwrap();
+    let s = head.create(None, GenParams::default()).unwrap();
+    match head.set_qos(s, qos::FOREGROUND_AGENT, true) {
+        Err(superfluid_daemon::DaemonError::Unsupported(r)) => {
+            assert_eq!(r.code, "unsupported_on_fleet");
+            assert!(r.message.contains("batch-invariant"), "{}", r.message);
+        }
+        other => panic!("a batch-invariant lane was taken on a fleet head: {:?}", other.map(|_| ()).map_err(|e| e.to_string())),
+    }
+    head.set_qos(s, qos::FOREGROUND_AGENT, false).expect("any other QoS is taken");
+
+    // A session made batch-invariant before its store was served over the fleet is not run.
+    let mut kept = store("kept");
+    let old = kept.create(None, GenParams::default()).unwrap();
+    kept.append(old, None, vec![1, 2, 3]).unwrap();
+    kept.set_qos(old, qos::FOREGROUND_AGENT, true).unwrap();
+    let over = Daemon::over_fleet(kept, Box::new(MockChatCodec), fleet_of(sharing_node(Arc::new(Bytes), 2, std::time::Duration::ZERO)), "mock-model".into(), DaemonOptions::default()).unwrap();
+    let refused = over.generate(old, 4).map(|o| o.tokens_generated).map_err(|e| e.to_string());
+    assert!(refused.as_ref().is_err_and(|e| e.contains("batch-invariant")), "{refused:?}");
+
+    // Over HTTP, a key whose policy grants it is answered 400, streamed or not.
+    let keys = superfluid_daemon::keypolicy::KeyTable::parse(r#"{"keys":[{"key":"sk-det","name":"det","batch_invariant":true}]}"#, |_| None).unwrap();
+    let registry = Arc::new(ModelRegistry::single("mock-model", Arc::new(head)));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = openai::serve_blocking_config(listener, registry, openai::ServeConfig { keys: Some(Arc::new(keys)), ..Default::default() });
+    });
+    for (invariant, stream) in [(true, false), (true, true), (false, false)] {
+        let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4, "stream": stream});
+        let mut req = agent()
+            .post(&format!("http://{addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer sk-det");
+        if invariant {
+            req = req.header("x-superfluid-batch-invariant", "true");
+        }
+        let mut resp = req.send(body.to_string().as_bytes()).unwrap();
+        let (status, said) = (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap());
+        if invariant {
+            assert_eq!(status, 400, "stream={stream}: {said}");
+            assert!(said.contains("unsupported_on_fleet") && said.contains("batch-invariant"), "stream={stream}: {said}");
+        } else {
+            assert_eq!(status, 200, "{said}");
+        }
+    }
+}
