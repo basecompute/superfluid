@@ -373,9 +373,11 @@ fn a_step_slower_than_the_silence_limit_keeps_the_link() {
 #[test]
 fn a_placed_session_waiting_past_its_lease_is_kept() {
     // Between placement and generation the session's connection sits idle; the head's tend is
-    // what answers its renewals.
+    // what answers its renewals. A renewal is due from 300 ms and the lease lapses at 1.5 s, so a
+    // loaded runner can hold up the tend or the node's poll for over a second; the wait spans two
+    // leases.
     let (addr, _) = slow_node("waiting", Duration::ZERO, Duration::from_secs(30));
-    let lease = Lease { duration_ms: 400, renew_by_ms: 200 };
+    let lease = Lease { duration_ms: 1_500, renew_by_ms: 300 };
     let mgr = Arc::new(
         FleetManager::with_options(vec![NodeSpec { addr, auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease, 90, 1)
             .with_liveness(quick(50, Duration::from_secs(30))),
@@ -383,7 +385,7 @@ fn a_placed_session_waiting_past_its_lease_is_kept() {
     let _tend = tend(&mgr);
     let prompt = [1u32, 2, 3, 10];
     mgr.place(1, GenParams::default(), 0, "mock", "mock", &prompt, 8).unwrap();
-    std::thread::sleep(Duration::from_millis(1_200));
+    std::thread::sleep(Duration::from_millis(3_000));
     let mut got = Vec::new();
     mgr.generate_streaming(1, 8, 60_000, |b| got.extend_from_slice(b)).expect("the lease was kept, so the node takes it");
     assert_eq!(got, reference(&prompt, 8));
