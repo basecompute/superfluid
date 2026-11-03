@@ -93,7 +93,10 @@ case "$kind" in
     if brew list --formula superfluid >/dev/null 2>&1; then fail "Homebrew has a superfluid installed already; this would replace it"; fi
     tap=superfluid-packaging/try
     brew tap-new --no-git "$tap" >/dev/null
-    cleanup() { brew uninstall --formula "$tap/superfluid" >/dev/null 2>&1 || true; brew untap "$tap" >/dev/null 2>&1 || true; rm -rf "$tmp"; }
+    # Homebrew 6 and later load a non-official tap's formula only once the tap
+    # is trusted; an older Homebrew has no such command and needs none.
+    brew trust --tap "$tap" >/dev/null 2>&1 || true
+    cleanup() { brew uninstall --formula "$tap/superfluid" >/dev/null 2>&1 || true; brew untap "$tap" >/dev/null 2>&1 || true; brew untrust --tap "$tap" >/dev/null 2>&1 || true; rm -rf "$tmp"; }
     cp "$out/homebrew/superfluid.rb" "$(brew --repository "$tap")/Formula/superfluid.rb"
     brew style "$tap/superfluid"
     brew audit --strict --formula "$tap/superfluid"
