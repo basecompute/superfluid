@@ -306,6 +306,13 @@ pub fn resolve(directive: &str, target: &Path) -> Result<Option<String>, String>
     ))
 }
 
+/// `<strategy>:<hub id>` for a strategy that takes a drafter (`dflash:basecompute/Qwen3-4B-DFlash`,
+/// `eagle3:org/head:default-q4`), told from a path the way a model id is (`pulls::looks_like_id`).
+pub fn drafter_id(directive: &str) -> Option<(&str, &str)> {
+    let (kind, rest) = directive.trim().split_once(':')?;
+    (PATH_STRATEGIES.contains(&kind) && crate::pulls::looks_like_id(rest)).then_some((kind, rest))
+}
+
 pub fn resolve_all(directive: &str, target: &Path) -> Result<Vec<String>, String> {
     let d = directive.trim();
     if d != "auto" {
@@ -688,6 +695,22 @@ mod tests {
     fn pick_with(t: &Path, dirs: &[(PathBuf, usize)], cat: &Pairings) -> Option<String> {
         let h = read_base_header(t).unwrap();
         find_drafter(t, &h, dirs, cat).map(|(k, p)| format!("{k}:{}", p.file_name().unwrap().to_string_lossy()))
+    }
+
+    #[test]
+    fn a_drafter_id_is_told_from_a_drafter_path() {
+        assert_eq!(drafter_id("dflash:basecompute/Qwen3-4B-DFlash"), Some(("dflash", "basecompute/Qwen3-4B-DFlash")));
+        assert_eq!(drafter_id(" eagle3:org/head:default-q4 "), Some(("eagle3", "org/head:default-q4")));
+        assert_eq!(drafter_id("draft-model:Qwen/Qwen3-0.6B"), Some(("draft-model", "Qwen/Qwen3-0.6B")));
+        for path in ["dflash:./drafters/x.base", "dspark:/abs/x.base", "dflash:~/d/x", "dflash:x.base", "dflash:d/x.base"] {
+            assert_eq!(drafter_id(path), None, "{path}");
+        }
+        let dir = scratch("drafter-id");
+        std::fs::create_dir_all(dir.join("org/name")).unwrap();
+        assert_eq!(drafter_id(&format!("dflash:{}", dir.join("org/name").display())), None);
+        for other in ["prompt-lookup", "mtp-head", "auto", "nope:org/model"] {
+            assert_eq!(drafter_id(other), None, "{other}");
+        }
     }
 
     #[test]
