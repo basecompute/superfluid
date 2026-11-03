@@ -167,3 +167,28 @@ fn a_request_a_restart_cut_short_runs_again_under_its_key() {
     let (_, replayed, once_more) = post(&second, &chat(false), Some("crash"), None);
     assert_eq!((replayed.as_deref(), once_more), (Some("true"), again), "and kept for its key from then on");
 }
+
+/// Sets every file under `dir` as last written `ago`.
+fn age(dir: &std::path::Path, ago: std::time::Duration) {
+    let then = std::time::SystemTime::now() - ago;
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        std::fs::File::options().write(true).open(e.path()).unwrap().set_modified(then).unwrap();
+    }
+}
+
+#[test]
+fn an_answer_kept_past_its_day_is_not_replayed_by_a_server_still_running() {
+    let keep = temp("expired");
+    let addr = quick(Some(keep.clone()));
+    let (_, _, answer) = post(&addr, &chat(false), Some("old"), None);
+    age(&keep, std::time::Duration::from_secs(25 * 3600));
+    let (status, replayed, again) = post(&addr, &chat(false), Some("old"), None);
+    assert_eq!((status, replayed), (200, None), "run again, not the answer kept a day ago: {again}");
+    assert_ne!(again, answer);
+    // And the key is free for another request, where one kept would refuse it.
+    age(&keep, std::time::Duration::from_secs(25 * 3600));
+    let mut other = chat(false);
+    other["max_tokens"] = 5.into();
+    let (status, replayed, body) = post(&addr, &other, Some("old"), None);
+    assert_eq!((status, replayed), (200, None), "{body}");
+}

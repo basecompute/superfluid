@@ -25,6 +25,14 @@ pub const REPLAYED: &str = "idempotent-replayed";
 /// How long a finished answer is kept for its key.
 const KEEP: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+/// How often a running server sweeps the answers kept past [`KEEP`] from disk.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Whether what was done at `t` has been kept past [`KEEP`].
+fn past_keep(t: std::time::SystemTime) -> bool {
+    t.elapsed().is_ok_and(|age| age > KEEP)
+}
+
 /// The largest request body a key is taken with.
 const MAX_BODY: usize = 256 << 20;
 
@@ -37,19 +45,26 @@ fn kept(name: &HeaderName) -> bool {
 pub struct Records {
     dir: Option<PathBuf>,
     live: Mutex<HashMap<String, Arc<Record>>>,
+    /// When `dir` was last swept.
+    swept: Mutex<Option<std::time::Instant>>,
 }
 
 struct Record {
     request: [u8; 32],
     state: Mutex<Recording>,
     changed: tokio::sync::Notify,
-    /// When it was done, for one kept in memory alone.
-    done_at: Mutex<Option<std::time::Instant>>,
+    /// When it was done, for one kept in memory alone: by the wall clock, as one on disk is aged
+    /// by its file's time.
+    done_at: Mutex<Option<std::time::SystemTime>>,
 }
 
 impl Record {
     fn new(request: [u8; 32], recording: Recording) -> Arc<Record> {
         Arc::new(Record { request, state: Mutex::new(recording), changed: tokio::sync::Notify::new(), done_at: Mutex::new(None) })
+    }
+
+    fn expired(&self) -> bool {
+        self.done_at.lock().expect("record").is_some_and(past_keep)
     }
 }
 
@@ -75,16 +90,34 @@ impl Records {
         if let Some(dir) = &dir {
             sweep(dir);
         }
-        Records { dir, live: Mutex::new(HashMap::new()) }
+        let swept = Mutex::new(dir.is_some().then(std::time::Instant::now));
+        Records { dir, live: Mutex::new(HashMap::new()), swept }
+    }
+
+    /// Sweeps `dir` again, off the request's thread, once [`SWEEP_EVERY`] has passed since the
+    /// last time, so a server that stays up drops what it has kept past [`KEEP`].
+    fn sweep_when_due(&self) {
+        let Some(dir) = self.dir.clone() else { return };
+        {
+            let mut swept = self.swept.lock().expect("records");
+            if swept.is_some_and(|t| t.elapsed() < SWEEP_EVERY) {
+                return;
+            }
+            *swept = Some(std::time::Instant::now());
+        }
+        tokio::task::spawn_blocking(move || sweep(&dir));
     }
 
     fn paths(&self, id: &str) -> Option<(PathBuf, PathBuf)> {
         self.dir.as_ref().map(|d| (d.join(format!("{id}.json")), d.join(format!("{id}.body"))))
     }
 
-    /// A finished answer a run before this one recorded.
+    /// A finished answer recorded on disk, unless it has been kept past [`KEEP`].
     fn stored(&self, id: &str) -> Option<(String, Recording)> {
         let (meta, body) = self.paths(id)?;
+        if std::fs::metadata(&meta).and_then(|m| m.modified()).is_ok_and(past_keep) {
+            return None;
+        }
         let stored: Stored = serde_json::from_slice(&std::fs::read(meta).ok()?).ok()?;
         if !stored.recording.done {
             return None;
@@ -127,8 +160,7 @@ impl Records {
 fn sweep(dir: &std::path::Path) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
-        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age > KEEP);
-        if old {
+        if e.metadata().and_then(|m| m.modified()).is_ok_and(past_keep) {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -178,7 +210,7 @@ pub async fn layer(State(records): State<Arc<Records>>, req: Request, next: Next
     };
     let other = || refused(StatusCode::UNPROCESSABLE_ENTITY, "this Idempotency-Key was sent with another request; use a new key for it");
 
-    let live = { records.live.lock().expect("records").get(&id).cloned() };
+    let live = { records.live.lock().expect("records").get(&id).filter(|r| !r.expired()).cloned() };
     if let Some(rec) = live {
         return if rec.request == request { replay(rec, true).await } else { other() };
     }
@@ -192,7 +224,7 @@ pub async fn layer(State(records): State<Arc<Records>>, req: Request, next: Next
     // Another request with this key may have got here first.
     let (rec, first) = {
         let mut live = records.live.lock().expect("records");
-        live.retain(|_, r| r.done_at.lock().expect("record").is_none_or(|t| t.elapsed() < KEEP));
+        live.retain(|_, r| !r.expired());
         match live.get(&id) {
             Some(rec) => (Arc::clone(rec), false),
             None => {
@@ -205,6 +237,7 @@ pub async fn layer(State(records): State<Arc<Records>>, req: Request, next: Next
     if !first {
         return if rec.request == request { replay(rec, true).await } else { other() };
     }
+    records.sweep_when_due();
     records.start(&id);
     let req = Request::from_parts(parts, Body::from(bytes));
     let (records2, rec2) = (Arc::clone(&records), Arc::clone(&rec));
@@ -235,14 +268,16 @@ pub async fn layer(State(records): State<Arc<Records>>, req: Request, next: Next
             let mut st = rec2.state.lock().expect("recording");
             st.done = true;
             records2.persist(&id, &rec2, &st);
+            // On disk it is read back from there, where its age is checked, and leaves the live
+            // map before anyone can read that it is done; in memory alone it is kept until it
+            // expires.
+            if records2.dir.is_some() {
+                records2.live.lock().expect("records").remove(&id);
+            } else {
+                *rec2.done_at.lock().expect("record") = Some(std::time::SystemTime::now());
+            }
         }
         rec2.changed.notify_waiters();
-        // On disk it is read back from there; in memory alone it is kept until it expires.
-        if records2.dir.is_some() {
-            records2.live.lock().expect("records").remove(&id);
-        } else {
-            *rec2.done_at.lock().expect("record") = Some(std::time::Instant::now());
-        }
     });
     replay(rec, false).await
 }
@@ -292,4 +327,89 @@ async fn replay(rec: Arc<Record>, again: bool) -> Response {
         resp.headers_mut().insert(REPLAYED, HeaderValue::from_static("true"));
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A server behind the layer, answering each request that reaches it with how many have.
+    fn server(records: Arc<Records>) -> (String, tokio::runtime::Runtime) {
+        let calls = Arc::new(AtomicU64::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/x",
+                axum::routing::post(move || {
+                    let n = calls.fetch_add(1, Ordering::Relaxed) + 1;
+                    async move { n.to_string() }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(records, layer));
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        rt.spawn(async move { axum::serve(listener, app).await });
+        (addr, rt)
+    }
+
+    /// Whether the answer was replayed, and the answer.
+    fn post(addr: &str, key: &str) -> (bool, String) {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(20)))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
+        let mut resp = agent.post(&format!("http://{addr}/x")).header(HEADER, key).send("the request").unwrap();
+        (resp.headers().contains_key(REPLAYED), resp.body_mut().read_to_string().unwrap())
+    }
+
+    /// Waits for `what` to hold, for up to 20 s.
+    fn until(what: impl Fn() -> bool) -> bool {
+        let t = std::time::Instant::now();
+        while !what() {
+            if t.elapsed() > std::time::Duration::from_secs(20) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        true
+    }
+
+    #[test]
+    fn an_answer_kept_in_memory_past_its_day_is_not_replayed() {
+        let records = Arc::new(Records::new(None));
+        let (addr, _rt) = server(Arc::clone(&records));
+        assert_eq!(post(&addr, "k"), (false, "1".into()));
+        let rec = records.live.lock().unwrap().get(&record_id(&HeaderMap::new(), "k")).cloned().unwrap();
+        assert!(until(|| rec.done_at.lock().unwrap().is_some()), "the answer is done");
+        assert_eq!(post(&addr, "k"), (true, "1".into()));
+        // As a day and an hour after it was done.
+        *rec.done_at.lock().unwrap() = Some(std::time::SystemTime::now() - KEEP - std::time::Duration::from_secs(3600));
+        assert_eq!(post(&addr, "k"), (false, "2".into()), "run again, not the answer kept a day ago");
+    }
+
+    #[test]
+    fn a_running_server_sweeps_what_it_kept_past_its_day_from_disk() {
+        let dir = std::env::temp_dir().join(format!("superfluid-idem-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let records = Arc::new(Records::new(Some(dir.clone())));
+        let (addr, _rt) = server(Arc::clone(&records));
+        // A record no one asks for again, kept a day and an hour ago.
+        let old = [dir.join("old.json"), dir.join("old.body")];
+        for f in &old {
+            std::fs::write(f, "{}").unwrap();
+            let then = std::time::SystemTime::now() - KEEP - std::time::Duration::from_secs(3600);
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(then).unwrap();
+        }
+        // Swept when the server started: not again within the hour.
+        post(&addr, "a");
+        assert!(old.iter().all(|f| f.exists()));
+        // An hour on, the next new key sweeps it.
+        *records.swept.lock().unwrap() = None;
+        post(&addr, "b");
+        assert!(until(|| old.iter().all(|f| !f.exists())), "a record kept past its day is swept while the server runs");
+        assert_eq!(post(&addr, "a"), (true, "1".into()), "what is kept within its day stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
