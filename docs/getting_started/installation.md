@@ -31,11 +31,11 @@ Add `~/.local/bin` to your `PATH` if the script says it is missing.
 The same prebuilt release, through a package manager:
 
 ```sh
-brew install basecompute/tap/superfluid
+brew trust basecompute/tap && brew install basecompute/tap/superfluid
 npm install --global @basecompute/superfluid
 ```
 
-Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on npm, hence `@basecompute/superfluid`. Update with the package manager (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way superfluid came.
+Homebrew 6 and later install a formula from a tap outside Homebrew's own only once the tap is trusted, hence `brew trust basecompute/tap` first (`brew trust --formula basecompute/tap/superfluid` trusts the one formula); an older Homebrew has no `trust` command and needs none. Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on npm, hence `@basecompute/superfluid`. Update with the package manager (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way superfluid came.
 
 > [!NOTE]
 > These packages are published from 0.1.5 on.
