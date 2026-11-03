@@ -159,20 +159,33 @@ impl Records {
 }
 
 /// Drops what has been kept past [`KEEP`], but not the files of a key in `live`: a request
-/// reusing an expired key takes it there before it clears and rewrites them, so with `live` held
-/// from the check to the removal, a file seen old is never one just rewritten.
+/// reusing an expired key takes it there before it clears and rewrites them. With `live` held,
+/// a file is looked at again before it goes, so one rewritten and answered since the first look
+/// (its key out of `live` again) is not taken for the old one.
 fn sweep(dir: &std::path::Path, live: &Mutex<HashMap<String, Arc<Record>>>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for e in rd.flatten() {
         if e.metadata().and_then(|m| m.modified()).is_ok_and(past_keep) {
             let path = e.path();
+            #[cfg(test)]
+            if let Some(between) = AFTER_FIRST_LOOK.with(std::cell::Cell::get) {
+                between(&path);
+            }
             let live = live.lock().expect("records");
             if path.file_stem().and_then(|s| s.to_str()).is_some_and(|id| live.contains_key(id)) {
                 continue;
             }
-            let _ = std::fs::remove_file(path);
+            if std::fs::metadata(&path).and_then(|m| m.modified()).is_ok_and(past_keep) {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run by this thread's sweeps between the first look at an old file and the locked one.
+    static AFTER_FIRST_LOOK: std::cell::Cell<Option<fn(&std::path::Path)>> = const { std::cell::Cell::new(None) };
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -438,6 +451,29 @@ mod tests {
         sweep(&dir, &records.live);
         assert!(files[..2].iter().all(|f| f.exists()), "the key being answered again keeps its files");
         assert!(files[2..].iter().all(|f| !f.exists()), "a key no one holds is swept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_sweep_leaves_a_record_answered_again_since_it_first_looked() {
+        // Between the sweep's first look at an expired key's file and its removal, a request takes
+        // the key, rewrites the file, answers and leaves the live map.
+        let dir = std::env::temp_dir().join(format!("superfluid-idem-again-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let records = Records::new(None);
+        let files = [dir.join("again.json"), dir.join("again.body")];
+        for f in &files {
+            std::fs::write(f, "{}").unwrap();
+            let then = std::time::SystemTime::now() - KEEP - std::time::Duration::from_secs(3600);
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(then).unwrap();
+        }
+        fn answered_again(path: &std::path::Path) {
+            std::fs::write(path, "{\"answered\":\"again\"}").unwrap();
+        }
+        AFTER_FIRST_LOOK.with(|f| f.set(Some(answered_again)));
+        sweep(&dir, &records.live);
+        AFTER_FIRST_LOOK.with(|f| f.set(None));
+        assert!(files.iter().all(|f| f.exists()), "a record answered again since the sweep first looked is kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
