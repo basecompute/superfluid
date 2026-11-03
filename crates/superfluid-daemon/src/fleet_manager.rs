@@ -129,8 +129,8 @@ impl NodeConn {
     /// A lane's connection for a new session: the next in turn that no call holds (connected,
     /// or for a node the head lists, one it can dial), else the first of those to come free.
     /// Taken strictly in turn, a session would wait out a generation still running while
-    /// another lane is idle.
-    fn checkout_free(&self) -> (usize, std::sync::MutexGuard<'_, Option<FleetHead>>) {
+    /// another lane is idle. None once `deadline` passes with every one still held.
+    fn checkout_free(&self, deadline: Option<std::time::Instant>) -> Option<(usize, std::sync::MutexGuard<'_, Option<FleetHead>>)> {
         let open = self.open.load(std::sync::atomic::Ordering::Relaxed).clamp(1, self.conns.len());
         let start = self.cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dials = !self.spec.addr.starts_with(JOINED);
@@ -140,7 +140,7 @@ impl NodeConn {
             for k in 0..open {
                 let i = (start + k) % open;
                 match self.conns[i].try_lock() {
-                    Ok(guard) if guard.is_some() || dials => return (i, guard),
+                    Ok(guard) if guard.is_some() || dials => return Some((i, guard)),
                     Ok(_) | Err(std::sync::TryLockError::Poisoned(_)) => {}
                     Err(std::sync::TryLockError::WouldBlock) => busy = true,
                 }
@@ -148,7 +148,10 @@ impl NodeConn {
             // None taken and none busy: a joined node's lanes not adopted yet.
             if !busy {
                 let i = start % open;
-                return (i, self.conns[i].lock().expect("node conn"));
+                return Some((i, self.conns[i].lock().expect("node conn")));
+            }
+            if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+                return None;
             }
             std::thread::sleep(pause);
             pause = (pause * 2).min(std::time::Duration::from_millis(10));
@@ -888,6 +891,25 @@ impl FleetManager {
         tokens: &[u32],
         expected_out: u64,
     ) -> Result<usize, DaemonError> {
+        let placed = self.place_by(session, params, qos_class, codec, model, tokens, expected_out, None)?;
+        Ok(placed.expect("no deadline to pass"))
+    }
+
+    /// As [`Self::place`], for a generation that must start by `deadline`: none once it passes
+    /// before the session is placed (every connection to a node serving the model held by
+    /// another generation meanwhile), rather than placed for a generation already too late.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_by(
+        &self,
+        session: u64,
+        params: GenParams,
+        qos_class: u8,
+        codec: &str,
+        model: &str,
+        tokens: &[u32],
+        expected_out: u64,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<usize>, DaemonError> {
         let warm = self.warm_node(model, tokens);
         let cand = self.candidates_claiming(
             model,
@@ -911,16 +933,20 @@ impl FleetManager {
         if let Some(e) = self.length_refusal(&cand, model, len) {
             return Err(release_on_error(e));
         }
+        let late = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
         let mut last_err = None;
         for &i in &cand {
-            match self.try_place_on(i, session, params, qos_class, codec, model, tokens) {
+            if late() {
+                break;
+            }
+            match self.try_place_by(i, session, params, qos_class, codec, model, tokens, deadline) {
                 Ok(true) => {
                     tracing::info!(
                         "fleet: session {session} ({} prompt tokens) placed on {}",
                         tokens.len(),
                         self.identity(i)
                     );
-                    return Ok(i);
+                    return Ok(Some(i));
                 }
                 Ok(false) => continue,
                 Err(e) => {
@@ -929,6 +955,10 @@ impl FleetManager {
                     last_err = Some(e);
                 }
             }
+        }
+        if late() {
+            InFlight::release(&self.shared, session);
+            return Ok(None);
         }
         if let Some(e) = self.length_refusal(&cand, model, len) {
             return Err(release_on_error(e));
@@ -949,8 +979,27 @@ impl FleetManager {
         model: &str,
         tokens: &[u32],
     ) -> Result<bool, DaemonError> {
+        self.try_place_by(i, session, params, qos_class, codec, model, tokens, None)
+    }
+
+    /// As [`Self::try_place_on`], not placed once `deadline` passes while every connection to
+    /// the node is held.
+    #[allow(clippy::too_many_arguments)]
+    fn try_place_by(
+        &self,
+        i: usize,
+        session: u64,
+        params: GenParams,
+        qos_class: u8,
+        codec: &str,
+        model: &str,
+        tokens: &[u32],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<bool, DaemonError> {
         let node = self.node(i);
-        let (slot, mut guard) = node.checkout_free();
+        let Some((slot, mut guard)) = node.checkout_free(deadline) else {
+            return Ok(false);
+        };
         if let Some(h) = guard.as_mut() {
             if h.drain_status().is_err() {
                 *guard = None;

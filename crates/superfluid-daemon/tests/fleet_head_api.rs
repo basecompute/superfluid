@@ -768,3 +768,40 @@ fn a_head_with_no_node_up_answers_503_in_every_format_streamed_or_not() {
         }
     }
 }
+
+#[test]
+fn a_completion_whose_deadline_passes_while_it_waits_for_a_connection_expires_unstarted() {
+    // The node's one lane is held by a long generation; a completion with a short deadline
+    // waits for its connection, and the deadline passes while it waits.
+    use std::ops::ControlFlow;
+    use std::sync::atomic::AtomicBool;
+    use superfluid_daemon::{scheduler::GenExtras, GenParams};
+    let fleet = fleet_of(sharing_node(Arc::new(Bytes), 1, std::time::Duration::from_millis(50)));
+    let head = Arc::new(Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), DaemonOptions::default()).unwrap());
+    let (stop, long_done) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let (started, first) = std::sync::mpsc::channel();
+    let long = {
+        let (head, stop, long_done) = (Arc::clone(&head), Arc::clone(&stop), Arc::clone(&long_done));
+        std::thread::spawn(move || {
+            let extras = GenExtras { ignore_eos: true, ..GenExtras::default() };
+            let r = head.generate_tokens_streaming(vec![1, 2, 3], GenParams::default(), 10_000, 0, extras, |_| {
+                let _ = started.send(());
+                if stop.load(Ordering::Relaxed) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+            long_done.store(true, Ordering::Relaxed);
+            r
+        })
+    };
+    first.recv_timeout(std::time::Duration::from_secs(20)).expect("the long generation holds the lane");
+    let asked = std::time::Instant::now();
+    let (tokens, expired) = head.generate_tokens(vec![4, 5, 6], GenParams::default(), 8, 50).unwrap();
+    let (took, waited_out) = (asked.elapsed(), long_done.load(Ordering::Relaxed));
+    stop.store(true, Ordering::Relaxed);
+    assert_eq!((tokens.len(), expired), (0, true), "a completion past its deadline is not started (answered after {took:?})");
+    assert!(!waited_out, "the expired completion waited out the generation holding the lane ({took:?})");
+    long.join().unwrap().unwrap();
+}

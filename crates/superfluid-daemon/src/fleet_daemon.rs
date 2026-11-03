@@ -342,7 +342,11 @@ fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
 fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, DaemonError> {
     let opts = options(d, job)?;
     let fs = NEXT_FLEET_SESSION.fetch_add(1, Ordering::Relaxed);
-    d.fleet.place(fs, job.params, job.class, "raw", &d.model, &job.stream, job.max_tokens as u64)?;
+    // A deadline that passes while every connection to a node is held expires the job unstarted,
+    // as a local scheduler expires one it could not admit in time.
+    if d.fleet.place_by(fs, job.params, job.class, "raw", &d.model, &job.stream, job.max_tokens as u64, job.deadline)?.is_none() {
+        return Ok(LaneEvent::Expired);
+    }
     // Removes the session from the fleet however this ends.
     struct Placed<'a>(&'a FleetManager, u64);
     impl Drop for Placed<'_> {
@@ -352,8 +356,9 @@ fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEve
     }
     let _placed = Placed(&d.fleet, fs);
 
-    let max_wall_ms = match job.deadline {
-        Some(at) => at.saturating_duration_since(std::time::Instant::now()).as_millis().max(1) as u64,
+    let max_wall_ms = match job.deadline.map(|at| at.saturating_duration_since(std::time::Instant::now())) {
+        Some(left) if left.is_zero() => return Ok(LaneEvent::Expired),
+        Some(left) => left.as_millis().max(1) as u64,
         None => MAX_WALL_MS,
     };
     let sink = OutputSink { codec: &d.codec, store: &d.store, bus, tool_lease_ms: d.tool_lease_ms };
