@@ -3398,8 +3398,13 @@ fn an_idle_daemon_releases_expired_pins() {
     let d = pin_daemon(&dir, 64, Default::default());
     let stats = d.sched_stats();
     let s = run_session(&d, 0..96, 16);
-    d.pin(s, 100).unwrap();
-    assert_eq!(stats.pins_held.load(Ordering::Relaxed), 1);
+    let deadline = d.pin(s, 1_000).unwrap();
+    let held = stats.pins_held.load(Ordering::Relaxed);
+    // A runner stalled past the deadline before that read may have swept the pin already, so
+    // the read counts only if it came before the deadline.
+    if superfluid_daemon::wal::now_unix_ms() < deadline {
+        assert_eq!(held, 1, "the pin is held until its deadline");
+    }
     // The idle daemon sweeps on its own clock; a loaded runner may take seconds.
     for _ in 0..5000 {
         if stats.pins_held.load(Ordering::Relaxed) == 0 {

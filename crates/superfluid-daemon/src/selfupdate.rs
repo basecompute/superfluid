@@ -604,7 +604,7 @@ fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
         report.hand_off = Some(run);
         return Ok(report);
     }
-    let status = run.status().map_err(|e| format!("running {}: {e}", argv[0]))?;
+    let status = crate::exec::when_not_busy(|| run.status()).map_err(|e| format!("running {}: {e}", argv[0]))?;
     if !status.success() {
         return Err(format!("`{shown}` failed ({status})"));
     }
@@ -1736,18 +1736,17 @@ mod tests {
     }
 
     /// This test binary copied to `exe` and run from there, asleep: a server running from the install script's layout.
-    /// A copy of this test binary rather than a system one: macOS kills a platform binary run from elsewhere.
+    /// A copy of this test binary rather than a system one: macOS kills a platform binary run from elsewhere. Started
+    /// as `when_not_busy` starts a program: on Linux a child another test forks while the copy is still open for
+    /// writing holds that write until it execs, and the copy cannot be run until then (ETXTBSY).
     fn sleeper_at(exe: &Path) -> Sleeper {
         std::fs::copy(std::env::current_exe().unwrap(), exe).unwrap();
-        Sleeper(
-            Command::new(exe)
-                .args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
-                .env(SLEEP_ENV, "1")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap(),
-        )
+        let mut cmd = Command::new(exe);
+        cmd.args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
+            .env(SLEEP_ENV, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        Sleeper(crate::exec::when_not_busy(|| cmd.spawn()).unwrap())
     }
 
     /// Whether a process is seen running from `dir` within five seconds.
@@ -2131,7 +2130,7 @@ mod tests {
         let opts = Options { yes: true, ..Options::default() };
         let mut hand_off = update(&home, &catalog, &copy, &opts).unwrap().hand_off.expect("basert is handed off to");
         assert!(!dir.join("log").exists());
-        assert!(hand_off.status().unwrap().success());
+        assert!(crate::exec::when_not_busy(|| hand_off.status()).unwrap().success());
         assert!(std::fs::read_to_string(dir.join("log")).unwrap().starts_with("superfluid install|"));
         assert!(!home.join("versions").exists());
         let _ = std::fs::remove_dir_all(&dir);
