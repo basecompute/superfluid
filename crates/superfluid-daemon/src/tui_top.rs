@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn a_fleet_heads_address_stands_for_each_of_its_nodes() {
         let render = |nodes: &[crate::fleet_manager::NodeStatus]| {
-            crate::fleet_openai::fleet_metrics(nodes, "head", "qwen")
+            crate::fleet_metrics::fleet_metrics(nodes, "head", "qwen")
         };
         let body = Arc::new(Mutex::new(render(&[node("m3-ultra", "10.0.0.57", true, 100)])));
         let head = head_metrics_server(Arc::clone(&body));
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn a_head_with_no_nodes_yet_shows_no_rows_not_itself() {
-        let head = head_metrics_server(Arc::new(Mutex::new(crate::fleet_openai::fleet_metrics(&[], "head", "qwen"))));
+        let head = head_metrics_server(Arc::new(Mutex::new(crate::fleet_metrics::fleet_metrics(&[], "head", "qwen"))));
         assert!(poll(&head, None, &mut HashMap::new()).is_empty());
     }
 

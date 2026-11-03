@@ -18,7 +18,7 @@ pub use crate::http_state::{HttpQosPolicy, QOS_HEADER, BATCH_INVARIANT_HEADER};
 use crate::inference::{
     advertised_generation_defaults, repeat_penalty_for, next_id, unix_now,
     ChatRequest, CompletionRequest, RequestPolicy, DEFAULT_MAX_CONTEXT,
-    Kind, Message,
+    Kind,
 };
 use crate::http_state::{
     AppState, AuthenticatedCredential, error_response, error_response_code,
@@ -40,6 +40,9 @@ pub struct ServeConfig {
     pub surface: HttpSurface,
     pub model_naming: ModelNaming,
     pub identity: ServerIdentity,
+    /// Where answers recorded under an `Idempotency-Key` are kept across restarts; in memory
+    /// alone when none.
+    pub idempotency_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ServeConfig {
@@ -57,6 +60,7 @@ impl Default for ServeConfig {
             surface: HttpSurface::default(),
             model_naming: ModelNaming::default(),
             identity: ServerIdentity::default(),
+            idempotency_dir: None,
         }
     }
 }
@@ -514,7 +518,9 @@ pub(crate) fn access_layers(
     ip_limiter: Arc<crate::ratelimit::RateLimiter>,
     listens_on_loopback: bool,
 ) -> Router {
-    app.layer(axum::middleware::from_fn_with_state(Arc::clone(&ip_limiter), rate_limit_layer))
+    let records = Arc::new(crate::idempotency::Records::new(cfg.idempotency_dir.clone()));
+    app.layer(axum::middleware::from_fn_with_state(records, crate::idempotency::layer))
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&ip_limiter), rate_limit_layer))
         .layer(axum::middleware::from_fn_with_state(
             AuthState {
                 api_key_digest: cfg.api_key.as_deref().map(crate::keypolicy::sha256),
@@ -1651,7 +1657,7 @@ fn models_data(st: &AppState, created: u64) -> Vec<serde_json::Value> {
                 ModelObject {
                     id: &id,
                     created,
-                    n_ctx: Some(st.limits.max_context),
+                    n_ctx: Some(st.window_of(&id)),
                     owned_by: &st.identity.name,
                     loaded,
                     capabilities,
@@ -1687,7 +1693,7 @@ async fn models_retrieve(
         let obj = ModelObject {
             id: &model,
             created: unix_now(),
-            n_ctx: Some(st.limits.max_context),
+            n_ctx: Some(st.window_of(&model)),
             owned_by: &st.identity.name,
             loaded,
             capabilities,
@@ -1766,7 +1772,7 @@ async fn models_load(
                 ModelObject {
                     id: &req.id,
                     created: unix_now(),
-                    n_ctx: Some(st.limits.max_context),
+                    n_ctx: Some(st.window_of(&req.id)),
                     owned_by: &st.identity.name,
                     loaded: true,
                     capabilities,
@@ -1788,10 +1794,31 @@ async fn models_unload(State(st): State<AppState>, body: axum::body::Bytes) -> R
     unload_response(&st, req.id).await
 }
 
-async fn health(State(st): State<AppState>) -> Json<serde_json::Value> {
-    let loaded = st.registry.names().len();
+/// On a fleet head, 503 while no node that is up serves any of its models, so a load balancer
+/// sends the head nothing it could not place; each model's nodes are counted under `models`.
+async fn health(State(st): State<AppState>) -> Response {
+    let names = st.registry.names();
     let known = st.registry.all_names().len();
-    Json(serde_json::json!({"status": "ok", "models_loaded": loaded, "models_known": known}))
+    let Some((up, nodes)) = st.default_daemon().fleet_nodes() else {
+        return Json(serde_json::json!({"status": "ok", "models_loaded": names.len(), "models_known": known})).into_response();
+    };
+    let mut models = serde_json::Map::new();
+    for name in &names {
+        if let Some((serving, _)) = st.registry.resolve(Some(name)).and_then(|(_, d)| d.fleet_serving()) {
+            models.insert(name.clone(), serde_json::json!({"nodes_up": serving}));
+        }
+    }
+    let servable = models.values().any(|m| m["nodes_up"].as_u64().is_some_and(|n| n > 0));
+    let status = if servable { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE };
+    let body = serde_json::json!({
+        "status": if servable { "ok" } else { "no_nodes" },
+        "models_loaded": names.len(),
+        "models_known": known,
+        "nodes_up": up,
+        "nodes_known": nodes,
+        "models": models,
+    });
+    (status, Json(body)).into_response()
 }
 
 #[derive(Deserialize, Default)]
@@ -1963,10 +1990,6 @@ async fn tokenize(State(st): State<AppState>, body: axum::body::Bytes) -> Respon
     let tokens = st.default_daemon().tokenize(&text);
     let count = tokens.len();
     (StatusCode::OK, Json(serde_json::json!({"tokens": tokens, "count": count}))).into_response()
-}
-
-pub(crate) fn tool_call_delta(d: &crate::tool_fragment::ToolDelta, index: usize, id: &str) -> serde_json::Value {
-    crate::openai_output::message_json(&Message::tool(d, index, id))
 }
 
 async fn chat_completions(

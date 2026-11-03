@@ -80,4 +80,4 @@ Completions run in the `completion` class with no session log, a per-client toke
 
 ## Fleet head
 
-A fleet head has no local scheduler and refuses `--class-lanes`, `--http-default-qos`, `--no-http-qos-header` and `--http-allow-batch-invariant`; set them on each node's own `serve`. See [Distributed serving](../serving/distributed_serving.md).
+A fleet head has no local scheduler and refuses `--class-lanes`, `--http-default-qos`, `--no-http-qos-header` and `--http-allow-batch-invariant`; set them on each node's own `serve`. It refuses a batch-invariant lane however it is asked for (400 `unsupported_on_fleet`), since a node batches each generation with the others it runs. See [Distributed serving](../serving/distributed_serving.md).

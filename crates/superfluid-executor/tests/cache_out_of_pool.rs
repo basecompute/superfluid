@@ -532,3 +532,30 @@ fn an_entry_out_of_the_pool_holds_no_slot() {
     assert_eq!((cells_used(&h), h.engine.cache_exported_tokens()), (0, 5), "five cells are more than the four afforded");
     assert_eq!(h.engine.match_lengths(&tokens), vec![5]);
 }
+
+/// An entry whose export costs more than prefilling its tokens again, as the machine has
+/// measured both, leaves the pool for good instead: on a GB10, llama.cpp's export of a
+/// 700-token prompt took 0.6 s inside the tick every lane waits on, where prefilling it
+/// takes 0.16 s.
+#[test]
+fn an_entry_whose_export_costs_more_than_its_prefill_is_dropped_instead() {
+    let long: Vec<Vec<u32>> = (0..3u32).map(|k| (1000 * (k + 1)..1000 * (k + 1) + 200).collect()).collect();
+    let slow = FakeConfig { export_delay: std::time::Duration::from_millis(20), ..pool(200, 1000) };
+    let mut h = with(slow);
+    publish(&mut h, 1, &long[0]);
+    // Nothing measured yet: the first entry out of the pool is exported, and timed.
+    publish(&mut h, 2, &long[1]);
+    assert_eq!((offered(&h, &long[0]), h.engine.cache_exported_tokens()), (vec![200], 200));
+    // Its export cost more than its prefill: the next one goes, and frees its cells.
+    let ev = publish(&mut h, 3, &long[2]);
+    assert_eq!((offered(&h, &long[1]), h.engine.cache_exported_tokens()), (vec![], 200));
+    assert_eq!(left(&ev), vec![(shed_kind::CACHE_EVICTION, 200, 200)]);
+    assert_eq!(offered(&h, &long[2]), vec![200], "the newest stays in the pool");
+
+    // Where an export costs less, entries go on being exported.
+    let mut h = with(pool(200, 1000));
+    for (k, t) in long.iter().enumerate() {
+        publish(&mut h, 1 + k as u64, t);
+    }
+    assert_eq!(h.engine.cache_exported_tokens(), 400);
+}

@@ -621,3 +621,42 @@ fn load_aware_still_refuses_a_prompt_no_node_can_hold() {
     mgr.place(2, GenParams::default(), 0, "mock", "mock", &(0..8).collect::<Vec<u32>>(), 64)
         .expect("a fitting prompt still places");
 }
+
+#[test]
+fn a_conversations_next_turn_goes_to_the_node_that_ran_it_and_does_after_a_head_restart() {
+    let (a, b) = (spawn_node("warm-a"), spawn_node("warm-b"));
+    let log = std::env::temp_dir().join(format!("superfluid-fleet-warm-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&log);
+    let head = || {
+        let mgr = FleetManager::new(vec![spec(a.clone()), spec(b.clone())], PlacementPolicy::LeastLoaded, lease()).with_warm_log(log.clone());
+        let _ = mgr.probe();
+        mgr
+    };
+    let params = GenParams::default();
+    let mgr = head();
+    // Both idle, a tie goes to the first node: hold it, so the conversation starts on the other.
+    let held = mgr.place(100, params, 0, "raw", "mock", &(9000..9008).collect::<Vec<u32>>(), 8).unwrap();
+    let mut convo: Vec<u32> = (0..300).collect();
+    let ran = mgr.place(1, params, 0, "raw", "mock", &convo, 8).unwrap();
+    assert_ne!(ran, held);
+    convo.extend(mgr.generate(1, 8, 60_000).unwrap().tokens);
+    mgr.finish(1);
+    mgr.finish(100);
+
+    for turn in 2..5u64 {
+        convo.extend((0..20).map(|k| 5000 + 20 * turn as u32 + k));
+        assert_eq!(mgr.place(turn, params, 0, "raw", "mock", &convo, 8).unwrap(), ran, "turn {turn} goes where the conversation is warm");
+        convo.extend(mgr.generate(turn, 8, 60_000).unwrap().tokens);
+        mgr.finish(turn);
+    }
+    let other = mgr.place(9, params, 0, "raw", "mock", &(7000..7300).collect::<Vec<u32>>(), 8).unwrap();
+    assert_eq!(other, held, "a prompt no node has run is placed by load");
+    mgr.finish(9);
+
+    mgr.tend();
+    drop(mgr);
+    let again = head();
+    convo.extend(6000..6020);
+    assert_eq!(again.place(1, params, 0, "raw", "mock", &convo, 8).unwrap(), ran, "a restarted head still knows where it is warm");
+    let _ = std::fs::remove_file(&log);
+}

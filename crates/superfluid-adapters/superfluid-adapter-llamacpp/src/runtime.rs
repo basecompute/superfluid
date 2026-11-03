@@ -643,6 +643,10 @@ pub struct LlamaRuntime {
     fills_batches: bool,
     /// A step that reads no row waits for its work (see `sync_steps`).
     sync_steps: bool,
+    /// The bytes a sequence passes through moving from one buffer to another, kept
+    /// between moves: a fresh buffer's pages fault in as llama.cpp writes them, which
+    /// on a GB10 took 0.1 to 1.2 s a move where a kept one takes 5 ms for 700 tokens.
+    moves: Vec<u8>,
 }
 
 impl LlamaRuntime {
@@ -965,6 +969,7 @@ impl LlamaRuntime {
             recent: Vec::new(),
             fills_batches,
             sync_steps: true,
+            moves: Vec::new(),
         })
     }
 
@@ -1058,13 +1063,15 @@ impl LlamaRuntime {
 
     fn transfer(&mut self, from: i32, to: i32) -> bool {
         self.clear(to);
-        // SAFETY: ctx is live; the buffer is sized by the size query, and
+        // SAFETY: ctx is live; the buffer holds at least the size query, and
         // the import reads the bytes the export wrote.
         let ok = unsafe {
             let size = sys::llama_state_seq_get_size(self.ctx, from);
-            let mut buf = vec![0u8; size];
-            let n = sys::llama_state_seq_get_data(self.ctx, buf.as_mut_ptr(), size, from);
-            n > 0 && sys::llama_state_seq_set_data(self.ctx, buf.as_ptr(), n, to) > 0
+            if self.moves.len() < size {
+                self.moves.resize(size, 0);
+            }
+            let n = sys::llama_state_seq_get_data(self.ctx, self.moves.as_mut_ptr(), size, from);
+            n > 0 && sys::llama_state_seq_set_data(self.ctx, self.moves.as_ptr(), n, to) > 0
         };
         if !ok {
             self.clear(to);

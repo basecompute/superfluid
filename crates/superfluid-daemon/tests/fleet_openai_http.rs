@@ -7,7 +7,7 @@ use std::sync::Arc;
 use superfluid_daemon::codec::MockChatCodec;
 use superfluid_daemon::fleet_manager::{FleetManager, NodeSpec, PlacementPolicy};
 use superfluid_daemon::nodeagent::NodeAgent;
-use superfluid_daemon::{Daemon, EngineHost, MockCodec, SessionStore, TextCodec};
+use superfluid_daemon::{Daemon, EngineHost, MockCodec, SessionStore};
 use superfluid_engine::{EngineConfig, MockEngine};
 use superfluid_proto::linkf::Lease;
 use superfluid_proto::linkw;
@@ -61,20 +61,18 @@ fn start_head_cfg(node_addr: String, max_context: u32, cfg: superfluid_daemon::o
     let specs = vec![NodeSpec { addr: node_addr, auth: Vec::new() }];
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::new(specs, PlacementPolicy::LeastLoaded, lease));
-    let codec: Arc<dyn TextCodec + Send + Sync> = Arc::new(MockChatCodec);
+    // As `serve` does, so the head knows what each node serves before the first request.
+    let _ = manager.probe();
+    let dir = std::env::temp_dir().join(format!("superfluid-fopenai-head-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+    let daemon = Daemon::over_fleet(store, Box::new(MockChatCodec), manager, "mock".into(), Default::default()).unwrap();
+    let registry = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock", Arc::new(daemon)));
     let http = TcpListener::bind("127.0.0.1:0").unwrap();
     let http_addr = http.local_addr().unwrap().to_string();
+    let cfg = superfluid_daemon::openai::ServeConfig { max_context, ..cfg };
     std::thread::spawn(move || {
-        let r = superfluid_daemon::fleet_openai::serve_blocking(
-            http,
-            manager,
-            codec,
-            "raw".to_string(),
-            "mock".to_string(),
-            max_context,
-            cfg,
-        );
-        if let Err(e) = r {
+        if let Err(e) = superfluid_daemon::openai::serve_blocking_config(http, registry, cfg) {
             eprintln!("fleet head: {e}");
         }
     });
@@ -267,7 +265,7 @@ fn fleet_openai_models_carries_capabilities() {
 
     assert_eq!(entry["id"], "mock", "{entry}");
     assert_eq!(entry["object"], "model", "{entry}");
-    assert_eq!(entry["owned_by"], "superfluid-fleet", "{entry}");
+    assert_eq!(entry["owned_by"], "superfluid", "{entry}");
 
     assert!(entry["meta"].is_object(), "{entry}");
     assert!(entry["meta"]["n_ctx"].as_u64().unwrap_or(0) > 0, "{entry}");
@@ -275,7 +273,7 @@ fn fleet_openai_models_carries_capabilities() {
     let caps = &entry["capabilities"];
     assert_eq!(caps["descriptor_version"], 1, "{caps}");
     assert_eq!(caps["workload"]["causal_generation"], true, "{caps}");
-    assert!(caps["workload"]["embedding"].is_string(), "{caps}");
+    assert!(!caps["workload"]["embedding"].is_string(), "embeddings reach a node, so they are not refused: {caps}");
     assert!(
         caps["dialect"]["reasoning_effort"].is_boolean(),
         "the head owns the template, so it answers this first-hand: {caps}"
@@ -287,25 +285,39 @@ fn fleet_openai_models_carries_capabilities() {
 }
 
 #[test]
-fn fleet_openai_media_refusal_matches_what_it_advertises() {
+fn the_head_advertises_what_its_node_does_and_answers_an_image_as_one_machine_would() {
     let http_addr = start_head(spawn_node());
     let a = agent();
     wait_ready(&a, &http_addr);
+    // The head takes its node's descriptor once the node answers.
+    let mut caps = serde_json::Value::Null;
+    for _ in 0..100 {
+        let mut resp = a.get(&format!("http://{http_addr}/v1/models")).call().expect("models");
+        let v: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
+        caps = v["data"][0]["capabilities"].clone();
+        if caps["architecture"] == "mock" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(caps["architecture"], "mock", "the node's descriptor: {caps}");
+    assert_eq!(caps["backend"], "fleet", "{caps}");
 
-    let mut resp = a
-        .get(&format!("http://{http_addr}/v1/models"))
-        .call()
-        .expect("models");
-    let v: serde_json::Value =
-        serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
-    let advertised = v["data"][0]["capabilities"]["modalities"]["image_encode"]
-        .as_str()
-        .expect("image_encode is a refusal reason on a text-only head")
-        .to_string();
-
-    let modalities = v["data"][0]["architecture"]["input_modalities"].clone();
-    assert_eq!(modalities, serde_json::json!(["text"]), "{modalities}");
-
+    let local = {
+        let dir = std::env::temp_dir().join(format!("superfluid-fopenai-local-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = EngineHost::spawn(|| (MockEngine::new(EngineConfig::default()), None)).unwrap();
+        let daemon = Arc::new(Daemon::new(store, host, Box::new(MockChatCodec), 8));
+        let registry = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock", daemon));
+        let http = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = http.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let _ = superfluid_daemon::openai::serve_blocking_config(http, registry, Default::default());
+        });
+        addr
+    };
+    wait_ready(&a, &local);
     let body = serde_json::json!({
         "model": "mock",
         "messages": [{"role": "user", "content": [
@@ -316,24 +328,20 @@ fn fleet_openai_media_refusal_matches_what_it_advertises() {
         "max_tokens": 4,
     })
     .to_string();
-    let body_reader = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(10)))
-        .http_status_as_error(false)
-        .build()
-        .new_agent();
-    let mut resp = body_reader
-        .post(&format!("http://{http_addr}/v1/chat/completions"))
-        .header("content-type", "application/json")
-        .send(body.as_bytes())
-        .expect("image request");
-    assert_eq!(resp.status().as_u16(), 400, "an image part must be refused");
-    let v: serde_json::Value =
-        serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
-    let actual = v["error"]["message"].as_str().unwrap();
-    assert!(
-        actual.contains(&advertised),
-        "the route refused with {actual:?} but the descriptor advertises {advertised:?}"
-    );
+    let status = |addr: &str| {
+        let reader = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(10)))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
+        let resp = reader
+            .post(&format!("http://{addr}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .send(body.as_bytes())
+            .expect("image request");
+        resp.status().as_u16()
+    };
+    assert_eq!(status(&http_addr), status(&local), "an engine that cannot take the image refuses it alike");
 }
 
 fn spawn_narrow_node(ctx: u32) -> String {
@@ -482,7 +490,7 @@ fn fleet_head_requires_the_api_key_when_one_is_set() {
     let mut resp = a.get(&url).header("authorization", "Bearer fleet-secret").call().unwrap();
     assert_eq!(resp.status().as_u16(), 200, "the key");
     let json: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
-    assert_eq!(json["data"][0]["owned_by"], "superfluid-fleet");
+    assert_eq!(json["data"][0]["owned_by"], "superfluid");
 
     let body = serde_json::json!({"model": "mock", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4})
         .to_string();
@@ -567,4 +575,33 @@ fn fleet_head_cancels_a_disconnected_stream_and_holds_its_slot_until_then() {
         .send(second.as_bytes())
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
+}
+
+#[test]
+fn fleet_head_health_says_whether_a_node_serves_the_model() {
+    let a: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let health = |addr: &str| {
+        let mut resp = a.get(&format!("http://{addr}/health")).call().expect("health");
+        let json: serde_json::Value = serde_json::from_str(&resp.body_mut().read_to_string().unwrap()).unwrap();
+        (resp.status().as_u16(), json)
+    };
+
+    let http_addr = start_head(spawn_node());
+    wait_ready(&agent(), &http_addr);
+    let (status, json) = health(&http_addr);
+    assert_eq!(status, 200, "{json}");
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["nodes_up"], 1);
+
+    let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string();
+    let http_addr = start_head(gone);
+    wait_ready(&agent(), &http_addr);
+    let (status, json) = health(&http_addr);
+    assert_eq!(status, 503, "{json}");
+    assert_eq!(json["status"], "no_nodes");
+    assert_eq!(json["nodes_known"], 1);
 }

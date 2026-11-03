@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -41,13 +42,15 @@ impl MediaPool {
     }
 
     pub fn put(&self, bytes: &[u8]) -> std::io::Result<String> {
+        // Several requests can bring the same file at once, so each write has a file of its own.
+        static WRITES: AtomicU64 = AtomicU64::new(0);
         let hash = content_hash(bytes);
         let path = self.path_of(&hash);
         if path.exists() {
             return Ok(hash);
         }
         std::fs::create_dir_all(&self.dir)?;
-        let tmp = self.dir.join(format!(".{hash}.tmp{}", std::process::id()));
+        let tmp = self.dir.join(format!(".{hash}.tmp{}-{}", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
         {
             let mut o = std::fs::OpenOptions::new();
             o.create(true).write(true).truncate(true);
@@ -92,7 +95,7 @@ impl MediaPool {
 
 #[cfg(test)]
 mod tests {
-    use super::MediaPool;
+    use super::{content_hash, MediaPool};
 
     #[test]
     fn valid_id_is_64_lowercase_hex() {
@@ -114,5 +117,22 @@ mod tests {
         assert!(!pool.exists("/etc/hosts"));
         assert!(pool.resolve("/etc/hosts").is_none());
         assert!(pool.resolve("../secrets").is_none());
+    }
+
+    #[test]
+    fn the_same_file_put_at_once_is_kept_once() {
+        let dir = std::env::temp_dir().join(format!("superfluid-media-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let pool = std::sync::Arc::new(MediaPool::new(dir.clone()));
+        let bytes = vec![7u8; 1 << 20];
+        let puts: Vec<_> = (0..16)
+            .map(|_| {
+                let (pool, bytes) = (std::sync::Arc::clone(&pool), bytes.clone());
+                std::thread::spawn(move || pool.put(&bytes))
+            })
+            .collect();
+        let hashes: Vec<String> = puts.into_iter().map(|p| p.join().unwrap().expect("every put succeeds")).collect();
+        assert!(hashes.iter().all(|h| *h == content_hash(&bytes)));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "one file, no temporary left behind");
     }
 }
