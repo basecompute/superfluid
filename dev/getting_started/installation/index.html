@@ -2205,8 +2205,9 @@
 </div>
 <h2 id="cargo-install">cargo install<a class="headerlink" href="#cargo-install" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>cargo<span class="w"> </span>install<span class="w"> </span>superfluid
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>cargo<span class="w"> </span>install<span class="w"> </span>superfluid-adapter-basert
 </code></pre></div>
-<p>Builds <code>superfluid</code>, <code>superfluid-workerd</code> and <code>superfluid-noded</code> from <a href="https://crates.io/crates/superfluid">crates.io</a> with the baseRT adapter and the terminal monitor; a C compiler is required. The llama.cpp and MLX workers are installed on first use, as with a release.</p>
+<p>The first builds <code>superfluid</code>, <code>superfluid-workerd</code> and <code>superfluid-noded</code> from <a href="https://crates.io/crates/superfluid">crates.io</a> with the baseRT adapter and the terminal monitor; a C compiler is required. The second puts <code>superfluid-worker-basert</code> beside them, which <code>superfluid runtime install basert</code> installs the baseRT engine with. Without it, <code>.base</code> bundles are served only from an engine that <code>--basert-lib</code> or <code>BASERT_LIB</code> names. The llama.cpp and MLX workers are installed on first use, as with a release.</p>
 <h2 id="build-from-source">Build from source<a class="headerlink" href="#build-from-source" title="Permanent link">&para;</a></h2>
 <p>Requirements: Rust (stable) and a C compiler.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/basecompute/superfluid<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>superfluid

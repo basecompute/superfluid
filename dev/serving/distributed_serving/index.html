@@ -804,6 +804,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#durable-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Durable sessions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#limits" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2064,6 +2075,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#durable-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Durable sessions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#limits" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2160,9 +2182,14 @@
 <td>off</td>
 <td>pull nothing</td>
 </tr>
+<tr>
+<td><code>--park</code></td>
+<td>off</td>
+<td>keep each prompt's prefix on disk, so a restarted node starts it warm (<a href="#durable-sessions">Durable sessions</a>)</td>
+</tr>
 </tbody>
 </table>
-<p>A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed.</p>
+<p>A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed. The head also asks it for one connection more, which no generation takes: a short call (a prompt's encoding, a state operation) goes over it while every lane is generating. A node from before this release opens only its lanes.</p>
 <h2 id="run-a-node-by-hand">Run a node by hand<a class="headerlink" href="#run-a-node-by-hand" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>superfluid-noded<span class="w"> </span>--model<span class="w"> </span>unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M<span class="w"> </span>--listen<span class="w"> </span><span class="m">100</span>.64.0.2:8454
 </code></pre></div>
@@ -2220,6 +2247,11 @@
 <td>pull and install nothing</td>
 </tr>
 <tr>
+<td><code>--park</code></td>
+<td>off</td>
+<td>keep each prompt's prefix on disk, so a restarted node starts it warm (<a href="#durable-sessions">Durable sessions</a>)</td>
+</tr>
+<tr>
 <td><code>--auth-file &lt;path&gt;</code></td>
 <td><code>$SUPERFLUID_HOME/fleet/token</code></td>
 <td>the fleet token; with it the link is encrypted and both ends are checked</td>
@@ -2242,7 +2274,7 @@
 </tbody>
 </table>
 <p>Nodes can run different runtimes for the same model, such as a Mac on baseRT with the <code>.base</code> build and a Linux box on llama.cpp with a GGUF. Give each the same <code>--model-name</code>. The head sends token ids, so the builds must share the model's tokenizer, which builds of one model do; nothing checks this yet. Each node's answers follow its own build's quantization.</p>
-<p><code>superfluid fleet token</code> makes the token (32 random bytes as hex, owner-readable) at <code>$SUPERFLUID_HOME/fleet/token</code> on the head; copy that file, or its value, to the same path on each node. With a token the link between head and node is encrypted (Noise, keyed by the token) and a peer with another token is refused at the handshake. A node bound off loopback refuses to start without a token unless <code>--insecure-no-auth</code> is given. A node has no sampling flags and no durable state: <code>superfluid-noded</code> keeps its session store under the system temp dir, and <code>node join</code> under <code>$SUPERFLUID_HOME/fleet/nodes/&lt;identity&gt;</code>, emptied at each start.</p>
+<p><code>superfluid fleet token</code> makes the token (32 random bytes as hex, owner-readable) at <code>$SUPERFLUID_HOME/fleet/token</code> on the head; copy that file, or its value, to the same path on each node. With a token the link between head and node is encrypted (Noise, keyed by the token) and a peer with another token is refused at the handshake. A node bound off loopback refuses to start without a token unless <code>--insecure-no-auth</code> is given. A node has no sampling flags. Its session store lasts one run: a node's sessions last one generation, and the head keeps the conversations. <code>superfluid-noded</code> keeps it under the system temp dir, and <code>node join</code> under <code>$SUPERFLUID_HOME/fleet/nodes/&lt;identity&gt;</code>.</p>
 <h2 id="run-the-head">Run the head<a class="headerlink" href="#run-the-head" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>superfluid<span class="w"> </span>serve<span class="w"> </span>/models/qwen.base<span class="w"> </span>--http<span class="w"> </span><span class="m">0</span>.0.0.0:8453<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">    </span>--fleet<span class="w"> </span><span class="m">100</span>.64.0.2:8454,100.64.0.3:8454<span class="w"> </span><span class="se">\</span>
@@ -2251,7 +2283,10 @@
 <p>At start the head connects to every node and reports each one, or why it cannot reach it:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>superfluid: fleet node 'box-a' at 100.64.0.2:8454: qwen, context window 32768 tokens, 8 lanes
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>superfluid: fleet node 100.64.0.3:8454: closed the connection at the handshake; check that --fleet-auth holds the key in the node's --auth-file; retrying it every 10 s
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>superfluid: context window 32768 tokens (the largest node's)
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>superfluid: qwen: context window 32768 tokens (the largest node's)
+</code></pre></div>
+<p>Give <code>--model</code> once per model the fleet serves; a request's <code>model</code> picks the nodes serving it, and <code>/v1/models</code> lists each. The head never loads a model's weights. A model given by path is opened there for its tokenizer and chat template only. A model given by id (<code>org/model[:tag]</code>) is not pulled at all: the head takes its tokenizer and chat template from the first node serving it, under the id without its tag (start the node with <code>--model-name org/model</code>), and has a node encode each request's text, once per request; the head waits for such a node before it serves, and needs no runtime installed. Each node tells the head its tokenizer, and a node whose tokenizer differs from the head's for that model gets none of its requests (the head says so in its log). A node that joins names its model after one the head serves when its own id is one of them, or after the head's only model; with several and none its own, give it <code>--model-name</code>.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>superfluid<span class="w"> </span>serve<span class="w"> </span>/models/qwen.base<span class="w"> </span>/models/gemma.base<span class="w"> </span>--http<span class="w"> </span><span class="m">0</span>.0.0.0:8453<span class="w"> </span>--fleet-listen<span class="w"> </span><span class="m">0</span>.0.0.0:8454
 </code></pre></div>
 <table>
 <thead>
@@ -2295,7 +2330,7 @@
 </tbody>
 </table>
 <p>The head loads no engine but still reads the model for its tokenizer and chat template; its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no <code>--max-context</code>. It logs where each session is placed and every move to another node. <code>--dialect</code>, <code>--tool-call-parser</code> and <code>--temperature</code>/<code>--top-p</code>/<code>--top-k</code>/<code>--min-p</code> apply on the head. <code>--api-key</code>, <code>--key-policy</code> and <code>--rate-limit</code> protect its listener; a policy's <code>class</code> and <code>max_class</code> do not apply, since the head has no scheduler.</p>
-<p>Refused on the head (set them on each node's own <code>superfluid serve</code>): <code>--class-lanes</code>, <code>--http-default-qos</code>, <code>--no-http-qos-header</code>, <code>--http-allow-batch-invariant</code>, <code>--spec-max-temperature</code>, <code>--fim-model</code>, <code>--repeat-penalty</code>, <code>--otlp-endpoint</code>.</p>
+<p>Refused on the head (set them on each node's own <code>superfluid serve</code>): <code>--class-lanes</code>, <code>--http-default-qos</code>, <code>--no-http-qos-header</code>, <code>--http-allow-batch-invariant</code>, <code>--spec-max-temperature</code>, <code>--fim-model</code>, <code>--repeat-penalty</code>, <code>--otlp-endpoint</code>. A batch-invariant lane is refused however it is asked for (a key whose policy grants <code>batch_invariant</code>, or <code>SetQos</code>) with 400 <code>unsupported_on_fleet</code>: a node batches each generation with the others it runs.</p>
 <h2 id="placement-policies">Placement policies<a class="headerlink" href="#placement-policies" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2319,14 +2354,19 @@
 </tr>
 </tbody>
 </table>
+<p><code>load-aware</code> and <code>least-loaded</code> first try the node that last ran the longest prefix of the prompt, 128 tokens or more, while it has a lane free. A conversation's turns so stay on the node that has its prefix cached, and other prompts are placed by load. The head keeps this in <code>&lt;sessions&gt;/fleet-warm.json</code>, so it holds across a head restart.</p>
 <p>A prompt no node can hold is refused with <code>context_length_exceeded</code>.</p>
 <h2 id="what-the-head-serves">What the head serves<a class="headerlink" href="#what-the-head-serves" title="Permanent link">&para;</a></h2>
+<p>The head runs the same HTTP server as <code>superfluid serve</code> on one machine, with the same handlers; each generation's decode loop runs on a node, so no token waits on the network between steps.</p>
 <ul>
-<li><code>POST /v1/chat/completions</code>, streaming or not, with tools (<a href="../openai_compatible_server/">OpenAI API</a>).</li>
-<li><code>GET /v1/models</code>: the one model the fleet serves.</li>
-<li><code>GET /metrics</code>: each node as the head sees it, labelled <code>node</code> and <code>addr</code>: <code>superfluid_fleet_node_up</code>, <code>_lanes</code>, <code>_lanes_active</code>, <code>_queue_depth</code>, <code>_pool_blocks_used</code>, <code>_pool_blocks_total</code> and <code>_decode_tokens_total</code>. A streamed generation's tokens count as they arrive; a non-streamed one's when it ends, as the node sends them in one reply. The KV pool is the node's latest status, sent every 2 s. <code>superfluid top</code> pointed at the head, or run with no address on the head's network, shows every node from it.</li>
+<li>Every API format, streaming or not, with tools: OpenAI Chat Completions, Completions and Responses (<a href="../openai_compatible_server/">OpenAI API</a>), Anthropic Messages, and Ollama <code>/api/chat</code> and <code>/api/generate</code>.</li>
+<li><code>GET /v1/models</code>: the model the fleet serves, with the largest window a node serving it has.</li>
+<li><code>GET /metrics</code>: the server's own series, and each node as the head sees it, labelled <code>node</code> and <code>addr</code>: <code>superfluid_fleet_node_up</code>, <code>_lanes</code>, <code>_lanes_active</code>, <code>_queue_depth</code>, <code>_pool_blocks_used</code>, <code>_pool_blocks_total</code> and <code>_decode_tokens_total</code>. A generation's tokens count as they arrive. The KV pool is the node's latest status, sent every 2 s. <code>superfluid top</code> pointed at the head, or run with no address on the head's network, shows every node from it.</li>
+<li><code>GET /health</code>: 200 with <code>{"status": "ok"}</code> while a node that is up serves at least one of the head's models, 503 with <code>"no_nodes"</code> while none does. Both carry <code>nodes_up</code> and <code>nodes_known</code> over every node, and <code>models</code>, each model's own <code>nodes_up</code>. It needs no API key.</li>
 </ul>
-<p>Refused with 400: non-zero <code>presence_penalty</code>/<code>frequency_penalty</code>, a <code>repeat_penalty</code> other than 1.0, <code>ignore_eos</code>, <code>stream_options.continuous_usage_stats</code>, and image or audio parts. Not read: <code>logprobs</code>, <code>logit_bias</code>, <code>response_format</code>, <code>tool_choice</code>. There is no <code>/health</code>, Anthropic, Ollama, embeddings, files or batches surface on the head. A generation has a ten-minute wall-clock ceiling.</p>
+<p>Structured output (<code>response_format</code>, tool grammars), <code>logit_bias</code>, <code>logprobs</code>, presence, frequency and repeat penalties and <code>ignore_eos</code> reach the node that runs the generation: the head keeps a grammar or bias and the node compiles it. Embeddings (<code>/v1/embeddings</code>, <code>/api/embed</code>) run on a node serving the model. A LoRA (<code>/v1/lora/load</code>, <code>/unload</code>) is loaded on every node serving the model, from a path on each node; load it again after a node joins. These need nodes on this release; an older node refuses them by name.</p>
+<p>Image and audio parts, and transcription (<code>/v1/audio/transcriptions</code>, <code>/translations</code>), reach the node too: the head sends each file once per connection, by its SHA-256, and the node keeps it in its own media pool. A streamed transcription's segments come through as the node has them. The head describes the model as the first node serving it does (<code>capabilities</code> in <code>/v1/models</code>), so a route refuses what the nodes cannot do as a single server refuses what its engine cannot.</p>
+<p>Slots (<code>/slots</code>) answer that they do not reach fleet nodes yet. A generation has a ten-minute wall-clock ceiling.</p>
 <h2 id="failure-handling">Failure handling<a class="headerlink" href="#failure-handling" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -2346,7 +2386,7 @@
 </tr>
 <tr>
 <td>node restarts</td>
-<td>comes back empty; the head reconnects and new placements use it</td>
+<td>comes back with an empty cache, or with the prefixes it kept under <code>--park</code>; the head reconnects, and a conversation's next turn goes back to it</td>
 </tr>
 <tr>
 <td>connection idle or busy</td>
@@ -2358,7 +2398,7 @@
 </tr>
 <tr>
 <td>head restarts</td>
-<td>in-flight requests fail; placement state is lost</td>
+<td>in-flight requests fail; a client that retries with its <code>Idempotency-Key</code> gets a finished answer replayed, and one the restart cut short runs again (<a href="../openai_compatible_server/#retrying-with-idempotency-key">Retrying with Idempotency-Key</a>). The head still knows which node ran each conversation, so the next turn goes where it is warm</td>
 </tr>
 <tr>
 <td>head misses a lease renewal</td>
@@ -2366,9 +2406,41 @@
 </tr>
 </tbody>
 </table>
+<h2 id="durable-sessions">Durable sessions<a class="headerlink" href="#durable-sessions" title="Permanent link">&para;</a></h2>
+<p>The head keeps every conversation; a node keeps only what makes the next turn fast, its cache of prompt prefixes. Two things make that survive a restart:</p>
+<ul>
+<li>The head remembers which node ran each prompt prefix and sends a conversation's next turn there (see <a href="#placement-policies">Placement policies</a>), across a head restart too.</li>
+<li>A node started with <code>--park</code> writes each prompt's prefix of 1024 tokens or more to disk under <code>$SUPERFLUID_HOME/fleet/nodes/&lt;identity&gt;/park</code>, up to 20 GB, the oldest swept first. After the node restarts, a turn whose prompt one covers starts from it instead of prefilling the whole conversation again. Writing a new prefix copies its cache at the end of that generation, which delays that response's finish and holds up the lanes beside it, so it is off by default; a prefix that one kept already mostly covers is not written again. Prompts with images or audio, and models whose cache holds more than one kind of state (hybrid or sliding-window attention), are not kept.</li>
+</ul>
+<p>It pays off where prefilling is slower than reading the prefix back. With Qwen3 4B (baseRT, 4-bit) and a 9.3k-token conversation:</p>
+<table>
+<thead>
+<tr>
+<th>node</th>
+<th>cold first token</th>
+<th>warm in the node's cache</th>
+<th>after a node restart, with <code>--park</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Apple M4 Pro</td>
+<td>19.1 s</td>
+<td>0.39 s</td>
+<td>1.6 s</td>
+</tr>
+<tr>
+<td>NVIDIA GB10</td>
+<td>1.6 s</td>
+<td>0.2 s</td>
+<td>4.6 s</td>
+</tr>
+</tbody>
+</table>
+<p>On the GB10 the restart is faster without <code>--park</code>.</p>
+<p>A request a head restart cut short runs again when the client retries it with its <code>Idempotency-Key</code>; it is not continued from where it stopped.</p>
 <h2 id="limits">Limits<a class="headerlink" href="#limits" title="Permanent link">&para;</a></h2>
 <ul>
-<li>One model per fleet.</li>
 <li>No KV transfer between nodes: a failover re-prefills.</li>
 <li>No QoS class crosses the wire.</li>
 </ul>

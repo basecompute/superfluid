@@ -2278,7 +2278,7 @@
 <h2 id="fill-in-the-middle">Fill-in-the-middle<a class="headerlink" href="#fill-in-the-middle" title="Permanent link">&para;</a></h2>
 <p>Completions run in the <code>completion</code> class with no session log, a per-client token bucket (<code>--completion-rate</code> 10/s, <code>--completion-burst</code> 20) and an optional start deadline (<code>--completion-deadline-ms</code>). <code>--fim-model</code> runs them on a dedicated model with its own lanes (<code>--fim-max-batch</code> 2, <code>--fim-max-context</code> up to 8192).</p>
 <h2 id="fleet-head">Fleet head<a class="headerlink" href="#fleet-head" title="Permanent link">&para;</a></h2>
-<p>A fleet head has no local scheduler and refuses <code>--class-lanes</code>, <code>--http-default-qos</code>, <code>--no-http-qos-header</code> and <code>--http-allow-batch-invariant</code>; set them on each node's own <code>serve</code>. See <a href="../../serving/distributed_serving/">Distributed serving</a>.</p>
+<p>A fleet head has no local scheduler and refuses <code>--class-lanes</code>, <code>--http-default-qos</code>, <code>--no-http-qos-header</code> and <code>--http-allow-batch-invariant</code>; set them on each node's own <code>serve</code>. It refuses a batch-invariant lane however it is asked for (400 <code>unsupported_on_fleet</code>), since a node batches each generation with the others it runs. See <a href="../../serving/distributed_serving/">Distributed serving</a>.</p>
 
 
 

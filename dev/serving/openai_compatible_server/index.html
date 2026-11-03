@@ -621,6 +621,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#retrying-with-idempotency-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying with Idempotency-Key
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2216,6 +2233,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Headers">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#retrying-with-idempotency-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Retrying with Idempotency-Key
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2671,9 +2705,29 @@
 <td>response</td>
 <td><code>--nonstream-keepalive</code> is padding the body with spaces</td>
 </tr>
+<tr>
+<td><code>Idempotency-Key</code></td>
+<td>request</td>
+<td>a POST sent again with its key gets the first one's answer; see below</td>
+</tr>
+<tr>
+<td><code>Idempotent-Replayed: true</code></td>
+<td>response</td>
+<td>this answer was recorded for an earlier request with the same key</td>
+</tr>
 </tbody>
 </table>
 <p>With <code>--nonstream-keepalive &lt;sec&gt;</code>, a non-streaming generation commits <code>200 OK</code> at admission and writes one space every interval until the JSON body, so an idle-timing proxy does not drop a long prefill. Leading whitespace is valid JSON.</p>
+<h3 id="retrying-with-idempotency-key">Retrying with <code>Idempotency-Key</code><a class="headerlink" href="#retrying-with-idempotency-key" title="Permanent link">&para;</a></h3>
+<p>Send <code>Idempotency-Key: &lt;any string up to 255 characters&gt;</code> with a POST, on any route and in any API format, and send the same request with the same key to retry it. The answer the first one got is replayed whole, from its start, with <code>Idempotent-Replayed: true</code>:</p>
+<ul>
+<li>A connection that dropped mid-stream does not stop the generation. A retry reads the stream from its first event, then follows it to its end, so a client that keeps nothing from the dropped attempt reads one complete stream.</li>
+<li>A finished answer is kept for 24 hours under <code>&lt;sessions&gt;/idempotency</code> and replayed after a restart.</li>
+<li>A request a restart cut short runs again under its key.</li>
+<li>A key belongs to the credential it came with: another API key with the same string is another request.</li>
+<li>The same key with another request body, or on another route, is refused with <code>422</code> (<code>code: idempotency_key</code>).</li>
+</ul>
+<p>Use a new key for each new request: a retry loop that sends the same request with the same key is safe, and it runs at most once.</p>
 <h2 id="errors">Errors<a class="headerlink" href="#errors" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span><span class="nt">"error"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">"message"</span><span class="p">:</span><span class="w"> </span><span class="s2">"..."</span><span class="p">,</span><span class="w"> </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"invalid_request_error"</span><span class="p">,</span><span class="w"> </span><span class="nt">"param"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span><span class="w"> </span><span class="nt">"code"</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">}}</span>
 </code></pre></div>
