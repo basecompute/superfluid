@@ -413,7 +413,9 @@ fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEve
             let _ = events.send(LaneEvent::TokenLogprobs(items));
         };
         let ask = opts.as_ref().map(|(opts, blobs)| Ask { opts, blobs });
-        let r = d.fleet.generate_streaming_with(fs, job.max_tokens as u64, max_wall_ms, ask.as_ref(), &mut on_logprobs, |batch| {
+        // The deadline, not only the budget left now: the session's connection may be taken by
+        // another before the generation gets it.
+        let r = d.fleet.generate_streaming_by(fs, job.max_tokens as u64, max_wall_ms, job.deadline, ask.as_ref(), &mut on_logprobs, |batch| {
             if gone || fin != finish::NONE || failure.is_some() {
                 return;
             }

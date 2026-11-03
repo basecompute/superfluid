@@ -807,6 +807,47 @@ fn a_completion_whose_deadline_passes_while_it_waits_for_a_connection_expires_un
 }
 
 #[test]
+fn a_placed_completion_whose_connection_is_taken_past_its_deadline_expires_unstarted() {
+    // Placed in time; then another session placed on the node's one connection takes it before
+    // this one's generation does, and holds it past the deadline.
+    use std::sync::atomic::AtomicBool;
+    use superfluid_daemon::GenParams;
+    // One connection to the node, so both sessions are placed on it.
+    let node = NodeSpec { addr: sharing_node(Arc::new(Bytes), 1, std::time::Duration::from_millis(50)), auth: Vec::new() };
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let fleet = Arc::new(FleetManager::with_options(vec![node], PlacementPolicy::LeastLoaded, lease, 90, 1));
+    let _ = fleet.probe();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    let placed = fleet.place_by(1, GenParams::default(), 0, "raw", "mock-model", &[1, 2, 3], 8, Some(deadline)).unwrap();
+    assert!(placed.is_some(), "placed before its deadline");
+    fleet.place(2, GenParams::default(), 0, "raw", "mock-model", &[4, 5, 6], 20_000).unwrap();
+    let long_done = Arc::new(AtomicBool::new(false));
+    let (started, first) = std::sync::mpsc::channel();
+    let long = {
+        let (fleet, long_done) = (Arc::clone(&fleet), Arc::clone(&long_done));
+        std::thread::spawn(move || {
+            // Well past the deadline: cancelled once the other call answers.
+            let r = fleet.generate_streaming(2, 20_000, 60_000, |_| {
+                let _ = started.send(());
+            });
+            long_done.store(true, Ordering::Relaxed);
+            r
+        })
+    };
+    first.recv_timeout(std::time::Duration::from_secs(20)).expect("the other session holds the connection");
+    // What the dispatcher has once placed: the budget left then, and the deadline itself.
+    let left = deadline.saturating_duration_since(std::time::Instant::now()).as_millis().max(1) as u64;
+    let g = fleet.generate_streaming_by(1, 8, left, Some(deadline), None, &mut |_| {}, |_| {}).unwrap();
+    let waited_out = long_done.load(Ordering::Relaxed);
+    let _ = fleet.cancel(2);
+    assert_eq!((g.tokens.len(), g.expired), (0, true), "a generation whose deadline passed while it waited is not started");
+    assert!(!waited_out, "the expired generation waited out the one holding its connection");
+    long.join().unwrap().unwrap();
+    fleet.finish(1);
+    fleet.finish(2);
+}
+
+#[test]
 fn a_fleet_head_refuses_a_batch_invariant_lane_its_nodes_cannot_keep() {
     // Nodes batch every generation with the others they run, and Link F has no way to ask one
     // not to: a head that took the request would answer it from a shared batch.

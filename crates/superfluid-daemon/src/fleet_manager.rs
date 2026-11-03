@@ -180,6 +180,30 @@ impl NodeConn {
         self.conns[i.min(self.conns.len() - 1)].lock().expect("node conn")
     }
 
+    /// As [`Self::checkout_at`], none once `deadline` passes with the slot still held.
+    fn checkout_at_by(
+        &self,
+        i: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<std::sync::MutexGuard<'_, Option<FleetHead>>> {
+        let Some(at) = deadline else { return Some(self.checkout_at(i)) };
+        let slot = &self.conns[i.min(self.conns.len() - 1)];
+        let mut pause = std::time::Duration::from_millis(1);
+        loop {
+            match slot.try_lock() {
+                Ok(guard) => return Some(guard),
+                Err(std::sync::TryLockError::Poisoned(_)) => return Some(self.checkout_at(i)),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            std::thread::sleep(pause.min(left));
+            pause = (pause * 2).min(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn reset(&self) {
         for slot in self.conns.iter().chain([&self.control]) {
             if let Ok(mut g) = slot.try_lock() {
@@ -849,11 +873,20 @@ impl FleetManager {
     /// The slot's connection, dropped first if the node closed it while it sat idle: a write
     /// into a closed socket can look like it succeeded.
     fn checkout_live(node_conn: &NodeConn, slot: usize) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
-        let mut guard = node_conn.checkout_at(slot);
+        Self::checkout_live_by(node_conn, slot, None).expect("no deadline to pass")
+    }
+
+    /// As [`Self::checkout_live`], none once `deadline` passes with the slot still held.
+    fn checkout_live_by(
+        node_conn: &NodeConn,
+        slot: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<std::sync::MutexGuard<'_, Option<FleetHead>>> {
+        let mut guard = node_conn.checkout_at_by(slot, deadline)?;
         if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
             *guard = None;
         }
-        guard
+        Some(guard)
     }
 
     fn slot_of(&self, session: u64) -> usize {
@@ -1259,6 +1292,23 @@ impl FleetManager {
         max_wall_ms: u64,
         opts: Option<&crate::fleet::Ask<'_>>,
         on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
+        on_tokens: impl FnMut(&[u32]),
+    ) -> Result<FleetGeneration, DaemonError> {
+        self.generate_streaming_by(session, max_new_tokens, max_wall_ms, None, opts, on_logprobs, on_tokens)
+    }
+
+    /// As [`Self::generate_streaming_with`], for a generation that must start by `deadline`: the
+    /// wait for the session's connection counts against it, one that passes meanwhile ends the
+    /// generation unstarted (expired, no tokens), and the node is given only the time left.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_streaming_by(
+        &self,
+        session: u64,
+        max_new_tokens: u64,
+        max_wall_ms: u64,
+        deadline: Option<std::time::Instant>,
+        opts: Option<&crate::fleet::Ask<'_>>,
+        on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let (node, flag) = {
@@ -1282,7 +1332,7 @@ impl FleetManager {
 
         let mut all_tokens: Vec<u32> = Vec::new();
 
-        match self.generate_streaming_on(node, session, max_new_tokens, max_wall_ms, &flag, opts, on_logprobs, |b| {
+        match self.generate_streaming_on(node, session, max_new_tokens, max_wall_ms, deadline, &flag, opts, on_logprobs, |b| {
             all_tokens.extend_from_slice(b);
             on_tokens(b);
         }) {
@@ -1310,6 +1360,13 @@ impl FleetManager {
                     expired: false,
                 });
             }
+            if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+                return Ok(FleetGeneration {
+                    tokens: all_tokens,
+                    finish: crate::nodeagent::FINISH_EXPIRED,
+                    expired: true,
+                });
+            }
             let cand: Vec<usize> = self
                 .candidates_claiming(
                     &placed.model,
@@ -1328,7 +1385,7 @@ impl FleetManager {
             tried.push(i);
             let mut ctx = input.clone();
             ctx.extend_from_slice(&all_tokens);
-            match self.try_place_on(
+            match self.try_place_by(
                 i,
                 session,
                 placed.params,
@@ -1336,6 +1393,7 @@ impl FleetManager {
                 &placed.codec,
                 &placed.model,
                 &ctx,
+                deadline,
             ) {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -1350,7 +1408,7 @@ impl FleetManager {
                 self.identity(i),
                 all_tokens.len()
             );
-            match self.generate_streaming_on(i, session, remaining, max_wall_ms, &flag, opts, on_logprobs, |b| {
+            match self.generate_streaming_on(i, session, remaining, max_wall_ms, deadline, &flag, opts, on_logprobs, |b| {
                 all_tokens.extend_from_slice(b);
                 on_tokens(b);
             }) {
@@ -1374,6 +1432,7 @@ impl FleetManager {
         session: u64,
         max_new_tokens: u64,
         max_wall_ms: u64,
+        deadline: Option<std::time::Instant>,
         flag: &AtomicBool,
         opts: Option<&crate::fleet::Ask<'_>>,
         on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
@@ -1381,7 +1440,17 @@ impl FleetManager {
     ) -> Result<FleetGeneration, DaemonError> {
         let _inflight = InFlight::guard(&self.shared, node, session);
         let node_conn = self.node(node);
-        let mut guard = Self::checkout_live(&node_conn, self.slot_of(session));
+        // Another session placed on the same connection may hold it now: the wait for it counts
+        // against the deadline, and the node is given what is left once it is had.
+        let unstarted = || FleetGeneration { tokens: Vec::new(), finish: crate::nodeagent::FINISH_EXPIRED, expired: true };
+        let Some(mut guard) = Self::checkout_live_by(&node_conn, self.slot_of(session), deadline) else {
+            return Ok(unstarted());
+        };
+        let max_wall_ms = match deadline.map(|at| at.saturating_duration_since(std::time::Instant::now())) {
+            Some(left) if left.is_zero() => return Ok(unstarted()),
+            Some(left) => max_wall_ms.min(left.as_millis().max(1) as u64),
+            None => max_wall_ms,
+        };
         self.ensure_connected(node, &mut guard)?;
         self.rebind_on(session, &mut guard)?;
         let head = guard.as_mut().expect("connected");
