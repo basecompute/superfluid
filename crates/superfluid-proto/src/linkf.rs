@@ -36,10 +36,29 @@ pub mod msg_type {
     pub const NODE_STATUS: u16 = 0x0017;
     pub const STAGE_FORWARD_REQ: u16 = 0x0019;
     pub const STAGE_FORWARD_RESP: u16 = 0x001A;
+    /// What a generation asks beyond its sampling, just before its GENERATE_REQ (version 3).
+    pub const GENERATE_OPTS: u16 = 0x001B;
+    /// A Link W state operation run on the node's engine, and its answer (version 3).
+    pub const STATE_SYNC_REQ: u16 = 0x001C;
+    pub const STATE_SYNC_RESP: u16 = 0x001D;
+    /// The node's tokenizer, by digest, just after the handshake (version 3).
+    pub const TOKENIZER: u16 = 0x001E;
+    /// The node's tokenizer whole, for a head that has no copy of the model (version 3).
+    pub const TOKENIZER_EXPORT_REQ: u16 = 0x001F;
+    pub const TOKENIZER_EXPORT: u16 = 0x0020;
+    /// Text the node's tokenizer encodes for the head (version 3).
+    pub const TOKENIZE_REQ: u16 = 0x0021;
+    pub const TOKENIZE_RESP: u16 = 0x0022;
+    /// A streamed transcription's segment, told as the node has it, ahead of its answer
+    /// (version 3).
+    pub const STATE_SYNC_SEGMENT: u16 = 0x0023;
 
     pub const TELEMETRY: u16 = 0x8001;
     /// An idle head's sign of life; droppable, so a node that predates it skips it.
     pub const KEEPALIVE: u16 = 0x8002;
+    /// The head asks a node that dialed it for one connection more, kept for short calls
+    /// while generations hold the rest; droppable, so a node that predates it dials no more.
+    pub const CONTROL_ASK: u16 = 0x8003;
 
     pub const ALL: &[u16] = &[
         HELLO,
@@ -68,8 +87,18 @@ pub mod msg_type {
         GENERATE_CANCEL,
         STAGE_FORWARD_REQ,
         STAGE_FORWARD_RESP,
+        GENERATE_OPTS,
+        STATE_SYNC_REQ,
+        STATE_SYNC_RESP,
+        TOKENIZER,
+        TOKENIZER_EXPORT_REQ,
+        TOKENIZER_EXPORT,
+        TOKENIZE_REQ,
+        TOKENIZE_RESP,
+        STATE_SYNC_SEGMENT,
         TELEMETRY,
         KEEPALIVE,
+        CONTROL_ASK,
     ];
 }
 
@@ -267,6 +296,112 @@ pub enum TokenEventPayload {
     Segment { kind: SegmentKind, data: Vec<u8> },
     Usage(UsageMsg),
     Finish { reason: u32 },
+    /// The log-probabilities of tokens already sent, for a generation that asked (version 3).
+    Logprobs(Vec<TokenLogprobMsg>),
+}
+
+/// A token's log-probability and its most likely alternatives, as f32 bits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenLogprobMsg {
+    pub token: u32,
+    pub logprob_bits: u32,
+    pub top: Vec<(u32, u32)>,
+}
+
+/// A grammar a generation is held to, as the node compiles it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GrammarSpecMsg {
+    JsonSchema(String),
+    Structural(String),
+}
+
+/// What a generation asks beyond its sampling parameters. Floats are f32 bits; the defaults
+/// (no penalty, EOS ends it, no logprobs, no grammar or bias) are what a generation with no
+/// options gets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateOptsMsg {
+    pub session_id: u64,
+    pub generation_id: u64,
+    pub presence_penalty_bits: u32,
+    pub frequency_penalty_bits: u32,
+    pub repeat_penalty_bits: u32,
+    pub ignore_eos: bool,
+    pub top_logprobs: Option<u8>,
+    pub grammar: Option<GrammarSpecMsg>,
+    pub logit_bias: Option<(Vec<i32>, Vec<u32>)>,
+    /// The images and audio in the context: where each starts, the blob it is (sent before, by
+    /// its SHA-256 in hex), and the tokens it takes.
+    pub media: Vec<(u64, String, u32)>,
+}
+
+/// What a node's model tokenizes with, by digest (0: not known), so a head refuses a node whose
+/// tokens would mean other text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizerMsg {
+    pub digest: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizerExportReqMsg {
+    pub request_id: u64,
+}
+
+/// What a tokenizer says without being asked to encode: every token's bytes, its specials and
+/// ends, and its chat templates. A head with this and a node to encode has the tokenizer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizerExportMsg {
+    pub request_id: u64,
+    pub digest: u64,
+    pub vocab: Vec<Vec<u8>>,
+    pub specials: Vec<(String, u32)>,
+    pub bos: Option<u32>,
+    pub eos: u32,
+    pub chat_template: String,
+    /// The templates asked for by name (`tool_use`), each the node has.
+    pub named_templates: Vec<(String, String)>,
+    /// Whether the tokenizer encodes plainly (no specials parsed) and by pieces.
+    pub plain: bool,
+    pub pieces: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenizeMsg {
+    Encode(String),
+    Plain(String),
+    Pieces(Vec<(String, bool)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizeReqMsg {
+    pub request_id: u64,
+    pub text: TokenizeMsg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenizeRespMsg {
+    pub request_id: u64,
+    pub tokens: Option<Vec<u32>>,
+}
+
+/// A media path the head sent as a blob: the node reads it from its own media pool.
+pub const BLOB_PREFIX: &str = "fleet-blob:";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSyncReqF {
+    pub request_id: u64,
+    pub req: crate::linkw::StateSyncReqMsg,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSyncRespF {
+    pub request_id: u64,
+    pub result: Result<crate::linkw::StateSyncOkMsg, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateSyncSegmentF {
+    pub request_id: u64,
+    pub segment: crate::linkw::TranscribeSegmentMsg,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -166,6 +166,92 @@ pub fn read(dir: &Path, session: u64) -> Option<Parked> {
     })
 }
 
+/// A cached prompt prefix kept across restarts, found by its tokens rather
+/// than a session (an HTTP request's session lasts one request): the header,
+/// then the tokens it covers, then the sealed KV.
+const MAGIC_PREFIX: &[u8; 8] = b"BRTPFX01";
+
+/// Where prefixes live under a park directory.
+pub fn prefix_dir(park: &Path) -> PathBuf {
+    park.join("prefix")
+}
+
+pub fn write_prefix(dir: &Path, tokens: &[u32], encoding: u8, sealed: &[u8]) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let digest = stream_digest(tokens);
+    let path = dir.join(format!("{digest:016x}.park"));
+    let tmp = dir.join(format!("{digest:016x}.park.tmp"));
+    {
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        f.write_all(MAGIC_PREFIX)?;
+        f.write_all(&(tokens.len() as u64).to_le_bytes())?;
+        f.write_all(&digest.to_le_bytes())?;
+        f.write_all(&(encoding as u64).to_le_bytes())?;
+        for t in tokens {
+            f.write_all(&t.to_le_bytes())?;
+        }
+        f.write_all(sealed)?;
+        f.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+fn prefix_head(f: &mut std::fs::File) -> Option<(Vec<u32>, u64, u8)> {
+    let mut head = [0u8; HEADER];
+    f.read_exact(&mut head).ok()?;
+    if &head[0..8] != MAGIC_PREFIX {
+        return None;
+    }
+    let covered = u64::from_le_bytes(head[8..16].try_into().ok()?);
+    let digest = u64::from_le_bytes(head[16..24].try_into().ok()?);
+    let encoding = u64::from_le_bytes(head[24..32].try_into().ok()?);
+    if covered == 0 || covered > (1 << 24) || encoding > u8::MAX as u64 {
+        return None;
+    }
+    let mut raw = vec![0u8; covered as usize * 4];
+    f.read_exact(&mut raw).ok()?;
+    let tokens: Vec<u32> = raw.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+    (stream_digest(&tokens) == digest).then_some((tokens, digest, encoding as u8))
+}
+
+/// The prefixes in `dir` and the tokens each covers, newest first; their KV
+/// is read when one is restored ([`read_prefix`]).
+pub fn prefix_index(dir: &Path) -> Vec<(PathBuf, Vec<u32>)> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, PathBuf, Vec<u32>)> = rd
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "park"))
+        .filter_map(|p| {
+            let modified = std::fs::metadata(&p).ok()?.modified().ok()?;
+            let (tokens, _, _) = prefix_head(&mut std::fs::File::open(&p).ok()?)?;
+            Some((modified, p, tokens))
+        })
+        .collect();
+    found.sort_by_key(|(m, _, _)| std::cmp::Reverse(*m));
+    found.into_iter().map(|(_, p, t)| (p, t)).collect()
+}
+
+pub fn read_prefix(path: &Path) -> Option<Parked> {
+    let mut f = std::fs::File::open(path).ok()?;
+    let (tokens, digest, encoding) = prefix_head(&mut f)?;
+    let mut sealed = Vec::new();
+    f.read_to_end(&mut sealed).ok()?;
+    if sealed.is_empty() {
+        return None;
+    }
+    // KV only: a prefix is restored into the cache, never adopted by spaces.
+    Some(Parked { covered: tokens.len() as u64, stream_digest: digest, encoding, sealed, spaces: Vec::new(), multi_space: false })
+}
+
+/// How many leading tokens `a` and `b` share.
+pub fn common_prefix(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 pub fn remove(dir: &Path, session: u64) {
     let _ = std::fs::remove_file(artifact_path(dir, session));
     let _ = std::fs::remove_file(dir.join(format!("{session}.park.tmp")));

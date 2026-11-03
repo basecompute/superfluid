@@ -85,6 +85,10 @@ pub struct NodeSpec {
 struct NodeConn {
     spec: NodeSpec,
     conns: Vec<Mutex<Option<FleetHead>>>,
+    /// A connection no generation takes, for short calls (a prompt's encoding, a state
+    /// operation) while every lane's connection is held by a generation. The head dials it for
+    /// a node it lists; a joined node dials it when asked, and one that predates the ask has none.
+    control: Mutex<Option<FleetHead>>,
     /// How many of `conns` are in use: the count asked for, or the node's lanes once learned.
     open: std::sync::atomic::AtomicUsize,
     cursor: std::sync::atomic::AtomicUsize,
@@ -106,6 +110,7 @@ impl NodeMeta {
             learned: false,
             max_context_tokens: 0,
             load: NodeLoad::default(),
+            tokenizer_refused: Vec::new(),
         }
     }
 
@@ -121,12 +126,86 @@ impl NodeConn {
         (i, self.conns[i].lock().expect("node conn"))
     }
 
+    /// A lane's connection for a new session: the next in turn that no call holds (connected,
+    /// or for a node the head lists, one it can dial), else the first of those to come free.
+    /// Taken strictly in turn, a session would wait out a generation still running while
+    /// another lane is idle. None once `deadline` passes with every one still held.
+    fn checkout_free(&self, deadline: Option<std::time::Instant>) -> Option<(usize, std::sync::MutexGuard<'_, Option<FleetHead>>)> {
+        let open = self.open.load(std::sync::atomic::Ordering::Relaxed).clamp(1, self.conns.len());
+        let start = self.cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dials = !self.spec.addr.starts_with(JOINED);
+        let mut pause = std::time::Duration::from_millis(1);
+        loop {
+            let mut busy = false;
+            for k in 0..open {
+                let i = (start + k) % open;
+                match self.conns[i].try_lock() {
+                    Ok(guard) if guard.is_some() || dials => return Some((i, guard)),
+                    Ok(_) | Err(std::sync::TryLockError::Poisoned(_)) => {}
+                    Err(std::sync::TryLockError::WouldBlock) => busy = true,
+                }
+            }
+            // None taken and none busy: a joined node's lanes not adopted yet.
+            if !busy {
+                let i = start % open;
+                return Some((i, self.conns[i].lock().expect("node conn")));
+            }
+            if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+                return None;
+            }
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A connection no call is using, so a short operation does not wait out a generation:
+    /// a lane's when one is idle, else the control connection, else (a joined node without
+    /// one) the next lane's in turn.
+    fn checkout_idle(&self) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
+        let open = self.open.load(std::sync::atomic::Ordering::Relaxed).clamp(1, self.conns.len());
+        for slot in &self.conns[..open] {
+            if let Ok(guard) = slot.try_lock() {
+                return guard;
+            }
+        }
+        let control = self.control.lock().expect("node conn");
+        if control.is_some() || !self.spec.addr.starts_with(JOINED) {
+            return control;
+        }
+        drop(control);
+        self.checkout_next().1
+    }
+
     fn checkout_at(&self, i: usize) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
         self.conns[i.min(self.conns.len() - 1)].lock().expect("node conn")
     }
 
+    /// As [`Self::checkout_at`], none once `deadline` passes with the slot still held.
+    fn checkout_at_by(
+        &self,
+        i: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<std::sync::MutexGuard<'_, Option<FleetHead>>> {
+        let Some(at) = deadline else { return Some(self.checkout_at(i)) };
+        let slot = &self.conns[i.min(self.conns.len() - 1)];
+        let mut pause = std::time::Duration::from_millis(1);
+        loop {
+            match slot.try_lock() {
+                Ok(guard) => return Some(guard),
+                Err(std::sync::TryLockError::Poisoned(_)) => return Some(self.checkout_at(i)),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+            }
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            std::thread::sleep(pause.min(left));
+            pause = (pause * 2).min(std::time::Duration::from_millis(10));
+        }
+    }
+
     fn reset(&self) {
-        for slot in &self.conns {
+        for slot in self.conns.iter().chain([&self.control]) {
             if let Ok(mut g) = slot.try_lock() {
                 *g = None;
             }
@@ -146,6 +225,8 @@ struct NodeMeta {
     learned: bool,
     max_context_tokens: u64,
     load: NodeLoad,
+    /// The models the node serves with a tokenizer other than the head's.
+    tokenizer_refused: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,7 +258,12 @@ pub struct FleetManager {
     conns_by_lanes: bool,
     retry_every: std::time::Duration,
     liveness: Liveness,
+    /// The tokenizer digest the head serves each model with: a node whose differs is not used
+    /// for that model.
+    tokenizers: std::sync::RwLock<std::collections::HashMap<String, u64>>,
     shared: Mutex<Shared>,
+    /// Which node last ran each prompt prefix, to place the next turn where it is warm.
+    warm: Mutex<crate::fleet_warm::Warm>,
     policy: PlacementPolicy,
     lease: Lease,
     pool_high_pct: u32,
@@ -232,6 +318,9 @@ impl Drop for InFlight<'_> {
 pub struct RequestShape {
     pub prompt_tokens: u64,
     pub expected_out: u64,
+    /// The node holding the longest prefix of the prompt warm, tried first while it has a
+    /// lane free.
+    pub warm: Option<usize>,
 }
 
 pub const DEFAULT_POOL_HIGH_PCT: u32 = 90;
@@ -305,6 +394,7 @@ impl FleetManager {
                     conns: (0..if conns_per_node == 0 { MAX_CONNS_PER_NODE } else { conns_per_node })
                         .map(|_| Mutex::new(None))
                         .collect(),
+                    control: Mutex::new(None),
                     open: std::sync::atomic::AtomicUsize::new(conns_per_node.max(1)),
                     cursor: std::sync::atomic::AtomicUsize::new(0),
                     decoded: std::sync::atomic::AtomicU64::new(0),
@@ -317,6 +407,8 @@ impl FleetManager {
             conns_by_lanes: conns_per_node == 0,
             retry_every: RETRY_DOWN_AFTER,
             liveness: Liveness::DEFAULT,
+            tokenizers: Default::default(),
+            warm: Default::default(),
             shared: Mutex::new(Shared {
                 meta,
                 sessions: BTreeMap::new(),
@@ -355,7 +447,7 @@ impl FleetManager {
             match sh.meta.iter().position(|m| m.identity == identity) {
                 Some(i) => {
                     let node = self.node(i);
-                    let connected = node.conns.iter().any(|c| c.lock().expect("node conn").is_some());
+                    let connected = node.conns.iter().any(in_use);
                     if connected && sh.meta[i].peer.is_some_and(|p| p != peer) {
                         return Err(format!(
                             "another node named '{identity}' is joined from {}; give this one --identity",
@@ -370,6 +462,7 @@ impl FleetManager {
                     nodes.push(Arc::new(NodeConn {
                         spec: NodeSpec { addr: format!("{JOINED}{identity}"), auth: Vec::new() },
                         conns: (0..lanes).map(|_| Mutex::new(None)).collect(),
+                        control: Mutex::new(None),
                         open: std::sync::atomic::AtomicUsize::new(1),
                         cursor: std::sync::atomic::AtomicUsize::new(0),
                         decoded: std::sync::atomic::AtomicU64::new(0),
@@ -392,15 +485,20 @@ impl FleetManager {
         let mut head = head;
         head.keep_alive(self.liveness);
         watch(&node, &mut head);
-        let mut slot = 0;
-        for (s, conn) in node.conns.iter().enumerate() {
-            if conn.lock().expect("node conn").is_none() {
-                slot = s;
-                break;
+        let slot = node.conns.iter().position(|c| !in_use(c));
+        let has_control = node.control.lock().expect("node conn").is_some();
+        match slot {
+            Some(slot) => {
+                if !has_control {
+                    let _ = head.ask_control();
+                }
+                *node.checkout_at(slot) = Some(head);
             }
+            // One past its lanes is the connection it dialed when asked.
+            None if !has_control => *node.control.lock().expect("node conn") = Some(head),
+            None => *node.checkout_at(0) = Some(head),
         }
-        *node.checkout_at(slot) = Some(head);
-        let open = node.conns.iter().filter(|c| c.lock().expect("node conn").is_some()).count();
+        let open = node.conns.iter().filter(|c| in_use(c)).count();
         node.open.store(open.max(1), std::sync::atomic::Ordering::Relaxed);
         if new {
             // Listed as down only until this connection was in place: not a return.
@@ -457,6 +555,21 @@ impl FleetManager {
             .collect()
     }
 
+    /// The nodes up now that serve `model`, and every node the head knows.
+    /// Nodes up of all the head knows, whatever each serves.
+    pub fn nodes_up(&self) -> (usize, usize) {
+        let sh = self.shared.lock().expect("shared");
+        (sh.meta.iter().filter(|m| m.up() && m.learned).count(), sh.meta.len())
+    }
+
+    pub fn serving(&self, model: &str) -> (usize, usize) {
+        let sh = self.shared.lock().expect("shared");
+        let up = (0..sh.meta.len())
+            .filter(|&i| sh.meta[i].up() && sh.meta[i].learned && Self::serves(&sh, i, model))
+            .count();
+        (up, sh.meta.len())
+    }
+
     pub fn node_of(&self, session: u64) -> Option<String> {
         let sh = self.shared.lock().expect("shared");
         let node = sh.sessions.get(&session)?.node;
@@ -470,10 +583,23 @@ impl FleetManager {
         self
     }
 
+    /// Serves `model` only on nodes whose tokenizer has `digest` ([`crate::fleet::tokenizer_digest`]);
+    /// a node that does not say is taken at its word.
+    pub fn expect_tokenizer(&self, model: &str, digest: u64) {
+        self.tokenizers.write().expect("tokenizers").insert(model.to_string(), digest);
+    }
+
     /// How the head's connections are kept alive (default [`Liveness::DEFAULT`]); the
     /// background tend reads each idle one every `heartbeat`.
     pub fn with_liveness(mut self, liveness: Liveness) -> FleetManager {
         self.liveness = liveness;
+        self
+    }
+
+    /// Remembers in `path` which node ran each prompt prefix, so a restarted head still places
+    /// a conversation's next turn on the node that has it warm.
+    pub fn with_warm_log(mut self, path: std::path::PathBuf) -> FleetManager {
+        self.warm = Mutex::new(crate::fleet_warm::Warm::kept_in(path));
         self
     }
 
@@ -616,7 +742,23 @@ impl FleetManager {
     fn sync_meta(&self, i: usize, head: &FleetHead) {
         let mut sh = self.shared.lock().expect("shared");
         let cap = &head.node().capacity;
-        sh.meta[i].models = head.node().loadable_models.clone();
+        let theirs = head.tokenizer();
+        let (models, refused): (Vec<String>, Vec<String>) = {
+            let ours = self.tokenizers.read().expect("tokenizers");
+            head.node().loadable_models.iter().cloned().partition(|m| {
+                ours.get(m).is_none_or(|&d| d == 0 || theirs == 0 || d == theirs)
+            })
+        };
+        if !refused.is_empty() && sh.meta[i].tokenizer_refused != refused {
+            tracing::warn!(
+                "fleet: node {} tokenizes {} otherwise than this head does, so nothing for it is placed there; \
+                 serve the same build of the model on both",
+                self.label(&sh, i),
+                refused.join(", ")
+            );
+        }
+        sh.meta[i].tokenizer_refused = refused;
+        sh.meta[i].models = models;
         sh.meta[i].max_context_tokens = cap.max_context_tokens;
         sh.meta[i].identity = head.node().node_identity.clone();
         sh.meta[i].learned = true;
@@ -650,6 +792,7 @@ impl FleetManager {
         RequestShape {
             prompt_tokens: tokens.len() as u64,
             expected_out,
+            warm: None,
         }
     }
 
@@ -712,6 +855,15 @@ impl FleetManager {
                 sh.rr_cursor = sh.rr_cursor.wrapping_add(1);
             }
         }
+        if let Some(w) = shape.warm.filter(|_| self.policy != PlacementPolicy::RoundRobin) {
+            if let Some(at) = cand.iter().position(|&i| i == w) {
+                let lanes = self.node(w).open.load(Ordering::Relaxed).max(1);
+                if (sh.inflight[w] as usize) < lanes {
+                    let w = cand.remove(at);
+                    cand.insert(0, w);
+                }
+            }
+        }
         if let (Some(session), Some(&winner)) = (claim_for, cand.first()) {
             Self::claim_locked(&mut sh, winner, session);
         }
@@ -721,11 +873,20 @@ impl FleetManager {
     /// The slot's connection, dropped first if the node closed it while it sat idle: a write
     /// into a closed socket can look like it succeeded.
     fn checkout_live(node_conn: &NodeConn, slot: usize) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
-        let mut guard = node_conn.checkout_at(slot);
+        Self::checkout_live_by(node_conn, slot, None).expect("no deadline to pass")
+    }
+
+    /// As [`Self::checkout_live`], none once `deadline` passes with the slot still held.
+    fn checkout_live_by(
+        node_conn: &NodeConn,
+        slot: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<std::sync::MutexGuard<'_, Option<FleetHead>>> {
+        let mut guard = node_conn.checkout_at_by(slot, deadline)?;
         if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
             *guard = None;
         }
-        guard
+        Some(guard)
     }
 
     fn slot_of(&self, session: u64) -> usize {
@@ -763,12 +924,33 @@ impl FleetManager {
         tokens: &[u32],
         expected_out: u64,
     ) -> Result<usize, DaemonError> {
+        let placed = self.place_by(session, params, qos_class, codec, model, tokens, expected_out, None)?;
+        Ok(placed.expect("no deadline to pass"))
+    }
+
+    /// As [`Self::place`], for a generation that must start by `deadline`: none once it passes
+    /// before the session is placed (every connection to a node serving the model held by
+    /// another generation meanwhile), rather than placed for a generation already too late.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_by(
+        &self,
+        session: u64,
+        params: GenParams,
+        qos_class: u8,
+        codec: &str,
+        model: &str,
+        tokens: &[u32],
+        expected_out: u64,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Option<usize>, DaemonError> {
+        let warm = self.warm_node(model, tokens);
         let cand = self.candidates_claiming(
             model,
             Some(session),
             RequestShape {
                 prompt_tokens: tokens.len() as u64,
                 expected_out,
+                warm,
             },
         );
         let release_on_error = |e: DaemonError| {
@@ -776,7 +958,7 @@ impl FleetManager {
             e
         };
         if cand.is_empty() {
-            return Err(release_on_error(DaemonError::Config(
+            return Err(release_on_error(DaemonError::NoNode(
                 "no healthy node can serve the model",
             )));
         }
@@ -784,16 +966,20 @@ impl FleetManager {
         if let Some(e) = self.length_refusal(&cand, model, len) {
             return Err(release_on_error(e));
         }
+        let late = || deadline.is_some_and(|at| std::time::Instant::now() >= at);
         let mut last_err = None;
         for &i in &cand {
-            match self.try_place_on(i, session, params, qos_class, codec, model, tokens) {
+            if late() {
+                break;
+            }
+            match self.try_place_by(i, session, params, qos_class, codec, model, tokens, deadline) {
                 Ok(true) => {
                     tracing::info!(
                         "fleet: session {session} ({} prompt tokens) placed on {}",
                         tokens.len(),
                         self.identity(i)
                     );
-                    return Ok(i);
+                    return Ok(Some(i));
                 }
                 Ok(false) => continue,
                 Err(e) => {
@@ -803,10 +989,14 @@ impl FleetManager {
                 }
             }
         }
+        if late() {
+            InFlight::release(&self.shared, session);
+            return Ok(None);
+        }
         if let Some(e) = self.length_refusal(&cand, model, len) {
             return Err(release_on_error(e));
         }
-        Err(release_on_error(last_err.unwrap_or(DaemonError::Config(
+        Err(release_on_error(last_err.unwrap_or(DaemonError::NoNode(
             "no reachable node serves the model",
         ))))
     }
@@ -822,8 +1012,27 @@ impl FleetManager {
         model: &str,
         tokens: &[u32],
     ) -> Result<bool, DaemonError> {
+        self.try_place_by(i, session, params, qos_class, codec, model, tokens, None)
+    }
+
+    /// As [`Self::try_place_on`], not placed once `deadline` passes while every connection to
+    /// the node is held.
+    #[allow(clippy::too_many_arguments)]
+    fn try_place_by(
+        &self,
+        i: usize,
+        session: u64,
+        params: GenParams,
+        qos_class: u8,
+        codec: &str,
+        model: &str,
+        tokens: &[u32],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<bool, DaemonError> {
         let node = self.node(i);
-        let (slot, mut guard) = node.checkout_next();
+        let Some((slot, mut guard)) = node.checkout_free(deadline) else {
+            return Ok(false);
+        };
         if let Some(h) = guard.as_mut() {
             if h.drain_status().is_err() {
                 *guard = None;
@@ -1069,6 +1278,37 @@ impl FleetManager {
         session: u64,
         max_new_tokens: u64,
         max_wall_ms: u64,
+        on_tokens: impl FnMut(&[u32]),
+    ) -> Result<FleetGeneration, DaemonError> {
+        self.generate_streaming_with(session, max_new_tokens, max_wall_ms, None, &mut |_| {}, on_tokens)
+    }
+
+    /// As [`Self::generate_streaming`], with what the generation asks beyond its sampling, sent
+    /// to whichever node runs it, and `on_logprobs` told the log-probabilities it asked for.
+    pub fn generate_streaming_with(
+        &self,
+        session: u64,
+        max_new_tokens: u64,
+        max_wall_ms: u64,
+        opts: Option<&crate::fleet::Ask<'_>>,
+        on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
+        on_tokens: impl FnMut(&[u32]),
+    ) -> Result<FleetGeneration, DaemonError> {
+        self.generate_streaming_by(session, max_new_tokens, max_wall_ms, None, opts, on_logprobs, on_tokens)
+    }
+
+    /// As [`Self::generate_streaming_with`], for a generation that must start by `deadline`: the
+    /// wait for the session's connection counts against it, one that passes meanwhile ends the
+    /// generation unstarted (expired, no tokens), and the node is given only the time left.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_streaming_by(
+        &self,
+        session: u64,
+        max_new_tokens: u64,
+        max_wall_ms: u64,
+        deadline: Option<std::time::Instant>,
+        opts: Option<&crate::fleet::Ask<'_>>,
+        on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let (node, flag) = {
@@ -1092,7 +1332,7 @@ impl FleetManager {
 
         let mut all_tokens: Vec<u32> = Vec::new();
 
-        match self.generate_streaming_on(node, session, max_new_tokens, max_wall_ms, &flag, |b| {
+        match self.generate_streaming_on(node, session, max_new_tokens, max_wall_ms, deadline, &flag, opts, on_logprobs, |b| {
             all_tokens.extend_from_slice(b);
             on_tokens(b);
         }) {
@@ -1120,6 +1360,13 @@ impl FleetManager {
                     expired: false,
                 });
             }
+            if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+                return Ok(FleetGeneration {
+                    tokens: all_tokens,
+                    finish: crate::nodeagent::FINISH_EXPIRED,
+                    expired: true,
+                });
+            }
             let cand: Vec<usize> = self
                 .candidates_claiming(
                     &placed.model,
@@ -1138,7 +1385,7 @@ impl FleetManager {
             tried.push(i);
             let mut ctx = input.clone();
             ctx.extend_from_slice(&all_tokens);
-            match self.try_place_on(
+            match self.try_place_by(
                 i,
                 session,
                 placed.params,
@@ -1146,6 +1393,7 @@ impl FleetManager {
                 &placed.codec,
                 &placed.model,
                 &ctx,
+                deadline,
             ) {
                 Ok(true) => {}
                 Ok(false) => continue,
@@ -1160,7 +1408,7 @@ impl FleetManager {
                 self.identity(i),
                 all_tokens.len()
             );
-            match self.generate_streaming_on(i, session, remaining, max_wall_ms, &flag, |b| {
+            match self.generate_streaming_on(i, session, remaining, max_wall_ms, deadline, &flag, opts, on_logprobs, |b| {
                 all_tokens.extend_from_slice(b);
                 on_tokens(b);
             }) {
@@ -1177,23 +1425,37 @@ impl FleetManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_streaming_on(
         &self,
         node: usize,
         session: u64,
         max_new_tokens: u64,
         max_wall_ms: u64,
+        deadline: Option<std::time::Instant>,
         flag: &AtomicBool,
+        opts: Option<&crate::fleet::Ask<'_>>,
+        on_logprobs: &mut dyn FnMut(&[superfluid_proto::linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let _inflight = InFlight::guard(&self.shared, node, session);
         let node_conn = self.node(node);
-        let mut guard = Self::checkout_live(&node_conn, self.slot_of(session));
+        // Another session placed on the same connection may hold it now: the wait for it counts
+        // against the deadline, and the node is given what is left once it is had.
+        let unstarted = || FleetGeneration { tokens: Vec::new(), finish: crate::nodeagent::FINISH_EXPIRED, expired: true };
+        let Some(mut guard) = Self::checkout_live_by(&node_conn, self.slot_of(session), deadline) else {
+            return Ok(unstarted());
+        };
+        let max_wall_ms = match deadline.map(|at| at.saturating_duration_since(std::time::Instant::now())) {
+            Some(left) if left.is_zero() => return Ok(unstarted()),
+            Some(left) => max_wall_ms.min(left.as_millis().max(1) as u64),
+            None => max_wall_ms,
+        };
         self.ensure_connected(node, &mut guard)?;
         self.rebind_on(session, &mut guard)?;
         let head = guard.as_mut().expect("connected");
         let decoded = &node_conn.decoded;
-        let r = head.generate_streaming(session, max_new_tokens, max_wall_ms, flag, |b: &[u32]| {
+        let r = head.generate_streaming_with(session, max_new_tokens, max_wall_ms, flag, opts, on_logprobs, |b: &[u32]| {
             decoded.fetch_add(b.len() as u64, Ordering::Relaxed);
             on_tokens(b);
         });
@@ -1207,6 +1469,114 @@ impl FleetManager {
         }
         drop(guard);
         self.map_refusal(node, session, r)
+    }
+
+    /// Runs a state operation on one node serving `model`, the next one tried when a node
+    /// fails.
+    pub fn state_sync(
+        &self,
+        model: &str,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[crate::fleet::Blob],
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.on_a_node(model, |head| head.state_sync(req.clone(), blobs))
+    }
+
+    /// [`FleetManager::state_sync`] for a streamed transcription, each segment told as the node
+    /// has it. Once one has been told, a node lost after it fails the call rather than starting
+    /// over on another, which would tell those segments twice.
+    pub fn state_sync_streaming(
+        &self,
+        model: &str,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[crate::fleet::Blob],
+        on_segment: &mut dyn FnMut(superfluid_proto::linkw::TranscribeSegmentMsg),
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        let mut told = false;
+        self.on_a_node(model, |head| {
+            let answer = head.state_sync_streaming(req.clone(), blobs, &mut |seg| {
+                told = true;
+                on_segment(seg);
+            });
+            match answer {
+                Err(e) if told && is_fatal_node(&e) => Err(DaemonError::Generation(format!("the node transcribing was lost: {e}"))),
+                answer => answer,
+            }
+        })
+    }
+
+    /// Runs a state operation on every node up that serves `model`, as a LoRA must be on each
+    /// node a request can land on; the answer is the last node's.
+    pub fn state_sync_all(
+        &self,
+        model: &str,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        let cand = self.candidates_claiming(model, None, RequestShape::default());
+        let mut answer = Err(DaemonError::NoNode("no healthy node can serve the model"));
+        for i in cand {
+            answer = Ok(self.state_sync_on(i, req.clone(), &[])?);
+        }
+        answer
+    }
+
+    fn state_sync_on(
+        &self,
+        i: usize,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[crate::fleet::Blob],
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.on_node(i, |head| head.state_sync(req, blobs))
+    }
+
+    /// Runs `call` on an idle connection to node `i`, connecting it first if it has to; a node
+    /// whose link fails is down.
+    fn on_node<R>(&self, i: usize, call: impl FnOnce(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
+        let node = self.node(i);
+        let mut guard = node.checkout_idle();
+        if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
+            *guard = None;
+        }
+        self.ensure_connected(i, &mut guard)?;
+        let r = call(guard.as_mut().expect("connected"));
+        if let Err(e) = &r {
+            if is_fatal_node(e) {
+                *guard = None;
+                self.mark_unhealthy(i, e);
+            }
+        }
+        r
+    }
+
+    /// Runs `call` on one node serving `model`, the next tried when a node fails.
+    fn on_a_node<R>(&self, model: &str, mut call: impl FnMut(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
+        let cand = self.candidates_claiming(model, None, RequestShape::default());
+        let mut last = None;
+        for i in cand {
+            match self.on_node(i, &mut call) {
+                Ok(r) => return Ok(r),
+                Err(e) if is_fatal_node(&e) => last = Some(e),
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or(DaemonError::NoNode("no healthy node can serve the model")))
+    }
+
+    /// The tokenizer of a node serving `model`, for a head with no copy of it; encoding asks a
+    /// node serving the model each time.
+    pub fn remote_tokenizer(self: &Arc<Self>, model: &str) -> Result<crate::fleet::RemoteTokenizer, DaemonError> {
+        let export = self.on_a_node(model, |head| head.tokenizer_export())?;
+        if export.vocab.is_empty() {
+            return Err(DaemonError::Generation(format!(
+                "no node serving {model} shares a tokenizer; give the head --model a path to the model's files"
+            )));
+        }
+        Ok(crate::fleet::RemoteTokenizer::new(Arc::clone(self), model.to_string(), export))
+    }
+
+    /// Text a node serving `model` encodes.
+    pub fn tokenize(&self, model: &str, text: &superfluid_proto::linkf::TokenizeMsg) -> Result<Option<Vec<u32>>, DaemonError> {
+        self.on_a_node(model, |head| head.tokenize(text.clone()))
     }
 
     pub fn cancel(&self, session: u64) -> Result<(), DaemonError> {
@@ -1264,7 +1634,7 @@ impl FleetManager {
         );
         if cand.is_empty() {
             InFlight::release(&self.shared, session);
-            return Err(DaemonError::Config("no healthy node can serve the model"));
+            return Err(DaemonError::NoNode("no healthy node can serve the model"));
         }
         let mut last_err = None;
         for i in cand {
@@ -1286,7 +1656,7 @@ impl FleetManager {
                 }
             }
         }
-        Err(last_err.unwrap_or(DaemonError::Config("no reachable node serves the model")))
+        Err(last_err.unwrap_or(DaemonError::NoNode("no reachable node serves the model")))
     }
 
     /// Ends a session the caller is done with: the head drops its record, and the node the
@@ -1299,6 +1669,10 @@ impl FleetManager {
         };
         InFlight::release(&self.shared, session);
         let Some(p) = placed else { return };
+        let identity = self.shared.lock().expect("shared").meta[p.node].identity.clone();
+        if !identity.is_empty() {
+            self.warm.lock().expect("warm").ran(&p.model, &p.tokens, &identity);
+        }
         self.shared.lock().expect("shared").forgets.push((p.node, p.slot, session, p.epoch));
         let node = self.node(p.node);
         let lock = node.conns[p.slot].try_lock();
@@ -1354,13 +1728,30 @@ impl FleetManager {
     pub fn keepalive(&self) {
         let nodes: Vec<Arc<NodeConn>> = self.nodes.read().expect("nodes").clone();
         for (i, node) in nodes.iter().enumerate() {
+            let mut dropped = None;
             for (slot, conn) in node.conns.iter().enumerate() {
                 let Ok(mut guard) = conn.try_lock() else { continue };
                 let Some(head) = guard.as_mut() else { continue };
                 self.flush_forgets(i, slot, head);
                 match head.drain_status() {
                     Ok(()) => self.sync_meta(i, head),
-                    Err(_) => *guard = None,
+                    Err(e) => {
+                        *guard = None;
+                        dropped = Some(e);
+                    }
+                }
+            }
+            if let Ok(mut guard) = node.control.try_lock() {
+                if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
+                    *guard = None;
+                }
+            }
+            // With its last connection gone the node is down until the background retry reaches
+            // it again, which also learns what it serves now: a node that restarted under another
+            // model name would otherwise be passed over for the name it had.
+            if let Some(e) = dropped {
+                if node.conns.iter().all(|c| c.try_lock().is_ok_and(|g| g.is_none())) {
+                    self.mark_unhealthy(i, &e);
                 }
             }
         }
@@ -1412,6 +1803,15 @@ impl FleetManager {
     pub fn tend(&self) {
         self.keepalive();
         self.retry_down();
+        self.warm.lock().expect("warm").save();
+    }
+
+    /// The node, up and serving `model`, that last ran the longest prefix of `tokens`.
+    fn warm_node(&self, model: &str, tokens: &[u32]) -> Option<usize> {
+        let warm = self.warm.lock().expect("warm");
+        let (identity, _) = warm.warmest(model, tokens)?;
+        let sh = self.shared.lock().expect("shared");
+        (0..sh.meta.len()).find(|&i| sh.meta[i].identity == identity && sh.meta[i].up() && Self::serves(&sh, i, model))
     }
 
     pub fn spawn_keepalive(self: &Arc<Self>) {
@@ -1426,6 +1826,13 @@ impl FleetManager {
             })
             .expect("spawn the fleet keepalive");
     }
+}
+
+/// Whether a slot holds a connection, for [`FleetManager::adopt`], which must not wait on one:
+/// a call holds a slot's lock while it waits for the shared state adopt holds. A slot whose lock
+/// is held is in use, so connected.
+fn in_use(slot: &Mutex<Option<FleetHead>>) -> bool {
+    slot.try_lock().map_or(true, |g| g.is_some())
 }
 
 fn is_fatal_node(e: &DaemonError) -> bool {

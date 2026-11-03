@@ -983,6 +983,32 @@ fn a_layout_llama_cpp_does_not_read_is_not_read_here() {
 }
 
 #[test]
+fn with_a_buffer_per_lane_a_shorter_copy_after_a_longer_one_answers_as_its_source() {
+    let Some(path) = gguf() else {
+        eprintln!("SKIP: no GGUF model");
+        return;
+    };
+    let mut rt = LlamaRuntime::open(LlamaConfig { model_path: path, max_seq_len: 512, max_batch: 2, streams: Some(true), ..Default::default() })
+        .expect("open gguf");
+    let row_tol = tolerances(&rt).0;
+    let toks: Vec<u32> = (0..201u32).map(|i| 100 + i * 7 % 5000).collect();
+    let (long, short) = (rt.seq_create().unwrap(), rt.seq_create().unwrap());
+    rt.step(&[Feed { seq: long, input: Input::Tokens(&toks[..200]), wants_row: false }]).unwrap();
+    rt.step(&[Feed { seq: short, input: Input::Tokens(&toks[..20]), wants_row: false }]).unwrap();
+    for (src, len) in [(long, 200usize), (short, 20)] {
+        let copy = rt.seq_create().unwrap();
+        rt.seq_copy(src, copy, len as u64).unwrap();
+        let got = row(&mut rt, copy, &toks[len..len + 1]);
+        rt.seq_free(copy);
+        let fresh = rt.seq_create().unwrap();
+        rt.step(&[Feed { seq: fresh, input: Input::Tokens(&toks[..len]), wants_row: false }]).unwrap();
+        let want = row(&mut rt, fresh, &toks[len..len + 1]);
+        rt.seq_free(fresh);
+        rows_agree(&want, &got, row_tol).unwrap_or_else(|e| panic!("a {len}-token copy answers as its source: {e}"));
+    }
+}
+
+#[test]
 fn cells_released_counts_only_what_no_other_sequence_holds() {
     let Some(path) = gguf() else {
         eprintln!("SKIP: no GGUF model");

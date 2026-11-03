@@ -52,6 +52,163 @@ struct Placement {
     tokens: Vec<u32>,
 }
 
+/// What a tokenizer turns tokens into, as a digest: two tokenizers with one digest give every
+/// token id the same bytes.
+pub fn tokenizer_digest(tok: &dyn superfluid_engine::Tokenizer) -> u64 {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    let n = tok.vocab_size();
+    h.update(n.to_le_bytes());
+    for t in 0..n {
+        let bytes = tok.token_bytes(t);
+        h.update((bytes.len() as u32).to_le_bytes());
+        h.update(&bytes);
+    }
+    let d = h.finalize();
+    u64::from_le_bytes(d[..8].try_into().expect("8 bytes")).max(1)
+}
+
+/// A tokenizer a head without the model takes from a node serving it: what it says without
+/// encoding is the node's own, kept here, and text is encoded by a node serving the model,
+/// once per request rather than once per token. Text it encoded before is answered here: a
+/// conversation sends its system prompt and earlier turns again with every turn.
+pub struct RemoteTokenizer {
+    fleet: std::sync::Arc<crate::fleet_manager::FleetManager>,
+    model: String,
+    export: linkf::TokenizerExportMsg,
+    encoded: std::sync::Mutex<Encoded>,
+}
+
+/// Encodings kept by the SHA-256 of what was encoded, up to [`ENCODED_TOKENS`] tokens, the
+/// least recently used going first.
+#[derive(Default)]
+struct Encoded {
+    by_text: std::collections::HashMap<[u8; 32], (Vec<u32>, u64)>,
+    tokens: usize,
+    clock: u64,
+}
+
+const ENCODED_TOKENS: usize = 2_000_000;
+
+impl Encoded {
+    fn get(&mut self, key: &[u8; 32]) -> Option<Vec<u32>> {
+        self.clock += 1;
+        let clock = self.clock;
+        self.by_text.get_mut(key).map(|(tokens, at)| {
+            *at = clock;
+            tokens.clone()
+        })
+    }
+
+    fn put(&mut self, key: [u8; 32], tokens: Vec<u32>) {
+        self.clock += 1;
+        self.tokens += tokens.len();
+        if let Some((old, _)) = self.by_text.insert(key, (tokens, self.clock)) {
+            self.tokens -= old.len();
+        }
+        if self.tokens > ENCODED_TOKENS {
+            let mut ages: Vec<([u8; 32], u64, usize)> = self.by_text.iter().map(|(k, (t, at))| (*k, *at, t.len())).collect();
+            ages.sort_unstable_by_key(|&(_, at, _)| at);
+            for (k, _, n) in ages {
+                if self.tokens <= ENCODED_TOKENS / 2 {
+                    break;
+                }
+                self.by_text.remove(&k);
+                self.tokens -= n;
+            }
+        }
+    }
+}
+
+impl RemoteTokenizer {
+    pub fn new(fleet: std::sync::Arc<crate::fleet_manager::FleetManager>, model: String, export: linkf::TokenizerExportMsg) -> RemoteTokenizer {
+        RemoteTokenizer { fleet, model, export, encoded: Default::default() }
+    }
+
+    /// The node's tokenizer digest, which every node serving the model is held to.
+    pub fn digest(&self) -> u64 {
+        self.export.digest
+    }
+
+    fn encode_by(&self, text: linkf::TokenizeMsg) -> Option<Vec<u32>> {
+        use sha2::Digest;
+        let key: [u8; 32] = sha2::Sha256::digest(postcard::to_allocvec(&text).ok()?).into();
+        if let Some(tokens) = self.encoded.lock().expect("encoded").get(&key) {
+            return Some(tokens);
+        }
+        match self.fleet.tokenize(&self.model, &text) {
+            Ok(Some(tokens)) => {
+                self.encoded.lock().expect("encoded").put(key, tokens.clone());
+                Some(tokens)
+            }
+            Ok(tokens) => tokens,
+            Err(e) => {
+                tracing::warn!("fleet: no node serving {} could encode a request's text: {e}", self.model);
+                None
+            }
+        }
+    }
+}
+
+impl superfluid_engine::Tokenizer for RemoteTokenizer {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        self.encode_by(linkf::TokenizeMsg::Encode(text.to_string())).unwrap_or_default()
+    }
+
+    fn token_bytes(&self, token: u32) -> Vec<u8> {
+        self.export.vocab.get(token as usize).cloned().unwrap_or_default()
+    }
+
+    fn vocab_size(&self) -> u32 {
+        self.export.vocab.len() as u32
+    }
+
+    fn special_tokens(&self) -> Vec<(String, u32)> {
+        self.export.specials.clone()
+    }
+
+    fn bos_token(&self) -> Option<u32> {
+        self.export.bos
+    }
+
+    fn eos_token(&self) -> u32 {
+        self.export.eos
+    }
+
+    fn chat_template_jinja(&self) -> String {
+        self.export.chat_template.clone()
+    }
+
+    fn chat_template_named(&self, name: &str) -> Option<String> {
+        self.export.named_templates.iter().find(|(n, _)| n == name).map(|(_, t)| t.clone())
+    }
+
+    fn encode_plain(&self, text: &str) -> Option<Vec<u32>> {
+        self.export.plain.then(|| self.encode_by(linkf::TokenizeMsg::Plain(text.to_string()))).flatten()
+    }
+
+    fn encode_pieces(&self, pieces: &[(&str, bool)]) -> Option<Vec<u32>> {
+        let pieces = pieces.iter().map(|(p, s)| (p.to_string(), *s)).collect();
+        self.export.pieces.then(|| self.encode_by(linkf::TokenizeMsg::Pieces(pieces))).flatten()
+    }
+}
+
+/// A file a request names, sent to the node by its SHA-256 (in hex) before the request.
+#[derive(Debug, Clone)]
+pub struct Blob {
+    pub hash: String,
+    pub path: std::path::PathBuf,
+}
+
+/// What a generation asks beyond its sampling: its options, and the blobs they name.
+pub struct Ask<'a> {
+    pub opts: &'a linkf::GenerateOptsMsg,
+    pub blobs: &'a [Blob],
+}
+
+/// A blob crosses in pieces this size, under the frame limit.
+const BLOB_CHUNK: usize = 4 << 20;
+
 pub struct FleetHead {
     head: HeadSession,
     endpoint: Endpoint,
@@ -62,6 +219,10 @@ pub struct FleetHead {
     auth: Vec<u8>,
     on_status: Option<StatusHook>,
     liveness: Liveness,
+    /// The blobs this connection has sent, which the node keeps.
+    blobs_sent: std::collections::HashSet<String>,
+    /// The node's tokenizer digest (0: not known, as from a node on version 2).
+    tokenizer: u64,
 }
 
 /// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
@@ -135,7 +296,9 @@ fn is_transient(e: &DaemonError) -> bool {
 impl FleetHead {
     pub fn connect(addr: &str, auth: Vec<u8>) -> Result<FleetHead, DaemonError> {
         let (endpoint, node) = handshake(addr, auth.clone())?;
-        Ok(FleetHead::from_parts(endpoint, node, addr.to_string(), auth))
+        let mut head = FleetHead::from_parts(endpoint, node, addr.to_string(), auth);
+        head.read_tokenizer()?;
+        Ok(head)
     }
 
     /// A node that dialed in; the head still opens the handshake, encrypted when it has a token.
@@ -147,7 +310,9 @@ impl FleetHead {
             Endpoint::from_tcp_secure(sock, &auth, superfluid_linkf::Role::Initiator, HANDSHAKE_TIMEOUT)
         };
         let (endpoint, node) = hello(opened, &peer, auth.clone(), "its token differs from this head's")?;
-        Ok(FleetHead::from_parts(endpoint, node, String::new(), auth))
+        let mut head = FleetHead::from_parts(endpoint, node, String::new(), auth);
+        head.read_tokenizer()?;
+        Ok(head)
     }
 
     fn from_parts(mut endpoint: Endpoint, node: HelloAckF, addr: String, auth: Vec<u8>) -> FleetHead {
@@ -162,7 +327,61 @@ impl FleetHead {
             auth,
             on_status: None,
             liveness: Liveness::DEFAULT,
+            blobs_sent: std::collections::HashSet::new(),
+            tokenizer: 0,
         }
+    }
+
+    /// The node's tokenizer digest, 0 when it did not say.
+    pub fn tokenizer(&self) -> u64 {
+        self.tokenizer
+    }
+
+    /// Reads the tokenizer digest a node on version 3 sends just after the handshake.
+    fn read_tokenizer(&mut self) -> Result<(), DaemonError> {
+        if self.endpoint.version() < 3 {
+            return Ok(());
+        }
+        let by = std::time::Instant::now() + HANDSHAKE_TIMEOUT;
+        loop {
+            for frame in self.endpoint.pump()? {
+                if frame.msg_type == msg_type::TOKENIZER {
+                    self.tokenizer = postcard::from_bytes::<linkf::TokenizerMsg>(&frame.payload)?.digest;
+                    return Ok(());
+                }
+                self.absorb(frame)?;
+            }
+            if std::time::Instant::now() >= by {
+                return Err(superfluid_linkf::LinkFError::TimedOut.into());
+            }
+        }
+    }
+
+    /// Sends each of `blobs` this connection has not sent yet.
+    fn send_blobs(&mut self, blobs: &[Blob]) -> Result<(), DaemonError> {
+        for blob in blobs {
+            if self.blobs_sent.contains(&blob.hash) {
+                continue;
+            }
+            let bytes = std::fs::read(&blob.path).map_err(DaemonError::Io)?;
+            let mut content_hash = [0u8; 32];
+            for (i, b) in content_hash.iter_mut().enumerate() {
+                *b = u8::from_str_radix(blob.hash.get(i * 2..i * 2 + 2).unwrap_or("00"), 16).unwrap_or(0);
+            }
+            let transfer_id = self.next_generation;
+            self.next_generation += 1;
+            self.endpoint.send(
+                msg_type::XFER_BEGIN,
+                &linkf::XferBeginMsg { transfer_id, total_len: bytes.len() as u64, checksum: 0, content_type: 0, content_hash },
+            )?;
+            for (i, chunk) in bytes.chunks(BLOB_CHUNK).enumerate() {
+                let msg = linkf::XferChunkMsg { transfer_id, offset: (i * BLOB_CHUNK) as u64, data: chunk.to_vec() };
+                self.endpoint.send(msg_type::XFER_CHUNK, &msg)?;
+            }
+            self.endpoint.send(msg_type::XFER_END, &linkf::XferEndMsg { transfer_id })?;
+            self.blobs_sent.insert(blob.hash.clone());
+        }
+        Ok(())
     }
 
     /// How long the head waits on a peer that says nothing where its silence does not end the
@@ -219,6 +438,12 @@ impl FleetHead {
 
     /// Reads what the node sent while the connection sat idle, which also sends it a heartbeat
     /// when one is due; an error means it is gone.
+    /// Asks a node that dialed in for a connection for short calls ([`msg_type::CONTROL_ASK`]).
+    pub fn ask_control(&mut self) -> Result<(), DaemonError> {
+        self.endpoint.send(msg_type::CONTROL_ASK, &())?;
+        Ok(())
+    }
+
     pub fn drain_status(&mut self) -> Result<(), DaemonError> {
         for frame in self.endpoint.pump()? {
             self.absorb(frame)?;
@@ -270,6 +495,8 @@ impl FleetHead {
         endpoint.keep_alive(self.liveness);
         self.node = node;
         self.endpoint = endpoint;
+        self.blobs_sent.clear();
+        self.read_tokenizer()?;
         let rec = self.head.reconcile();
         self.endpoint.send(msg_type::RECONCILE, &rec)?;
 
@@ -480,10 +707,26 @@ impl FleetHead {
         max_new_tokens: u64,
         max_wall_ms: u64,
         cancel: &std::sync::atomic::AtomicBool,
+        on_tokens: impl FnMut(&[u32]),
+    ) -> Result<FleetGeneration, DaemonError> {
+        self.generate_streaming_with(session_id, max_new_tokens, max_wall_ms, cancel, None, &mut |_| {}, on_tokens)
+    }
+
+    /// As [`Self::generate_streaming`], with what the generation asks beyond its sampling, and
+    /// `on_logprobs` told the log-probabilities it asked for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_streaming_with(
+        &mut self,
+        session_id: u64,
+        max_new_tokens: u64,
+        max_wall_ms: u64,
+        cancel: &std::sync::atomic::AtomicBool,
+        opts: Option<&Ask<'_>>,
+        on_logprobs: &mut dyn FnMut(&[linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
         let mut delivered = false;
-        let first = self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, |t| {
+        let first = self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, opts, on_logprobs, |t| {
             delivered = true;
             on_tokens(t)
         });
@@ -492,20 +735,121 @@ impl FleetHead {
             // reached the caller, so the generation can start over on a fresh one.
             Err(e) if !delivered && is_transient(&e) => {
                 self.reconnect_self()?;
-                self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, on_tokens)
+                self.generate_streaming_once(session_id, max_new_tokens, max_wall_ms, cancel, opts, on_logprobs, on_tokens)
             }
             r => r,
         }
     }
 
+    /// Refuses what a node on version 2 cannot be asked.
+    fn needs_v3(&self, what: &str) -> Result<(), DaemonError> {
+        if self.endpoint.version() >= 3 {
+            return Ok(());
+        }
+        Err(DaemonError::Unsupported(crate::Refusal::new(
+            "unsupported_on_fleet",
+            None,
+            format!("node {} runs an older superfluid that cannot take {what}; update it", self.node.node_identity),
+        )))
+    }
+
+    /// The node's tokenizer, whole but for encoding, for a head with no copy of the model.
+    pub fn tokenizer_export(&mut self) -> Result<linkf::TokenizerExportMsg, DaemonError> {
+        self.needs_v3("sharing its tokenizer")?;
+        let request_id = self.next_generation;
+        self.next_generation += 1;
+        self.endpoint.send(msg_type::TOKENIZER_EXPORT_REQ, &linkf::TokenizerExportReqMsg { request_id })?;
+        loop {
+            for frame in self.endpoint.wait_frames()? {
+                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKENIZER_EXPORT) else {
+                    continue;
+                };
+                let m: linkf::TokenizerExportMsg = postcard::from_bytes(&frame.payload)?;
+                if m.request_id == request_id {
+                    return Ok(m);
+                }
+            }
+        }
+    }
+
+    /// Text the node's tokenizer encodes; none when it does not encode that way.
+    pub fn tokenize(&mut self, text: linkf::TokenizeMsg) -> Result<Option<Vec<u32>>, DaemonError> {
+        self.needs_v3("encoding text")?;
+        let request_id = self.next_generation;
+        self.next_generation += 1;
+        self.endpoint.send(msg_type::TOKENIZE_REQ, &linkf::TokenizeReqMsg { request_id, text })?;
+        loop {
+            for frame in self.endpoint.wait_frames()? {
+                let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKENIZE_RESP) else {
+                    continue;
+                };
+                let m: linkf::TokenizeRespMsg = postcard::from_bytes(&frame.payload)?;
+                if m.request_id == request_id {
+                    return Ok(m.tokens);
+                }
+            }
+        }
+    }
+
+    /// Runs one Link W state operation on the node's engine.
+    pub fn state_sync(
+        &mut self,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[Blob],
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.state_sync_streaming(req, blobs, &mut |_| {})
+    }
+
+    /// [`FleetHead::state_sync`], a streamed transcription's segments told to `on_segment` as
+    /// the node has them.
+    pub fn state_sync_streaming(
+        &mut self,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+        blobs: &[Blob],
+        on_segment: &mut dyn FnMut(superfluid_proto::linkw::TranscribeSegmentMsg),
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.needs_v3("this operation")?;
+        self.send_blobs(blobs)?;
+        let request_id = self.next_generation;
+        self.next_generation += 1;
+        self.endpoint.send(msg_type::STATE_SYNC_REQ, &linkf::StateSyncReqF { request_id, req })?;
+        loop {
+            for frame in self.endpoint.wait_frames()? {
+                let Some(frame) = self.absorb(frame)? else { continue };
+                if frame.msg_type == msg_type::STATE_SYNC_SEGMENT {
+                    let m: linkf::StateSyncSegmentF = postcard::from_bytes(&frame.payload)?;
+                    if m.request_id == request_id {
+                        on_segment(m.segment);
+                    }
+                    continue;
+                }
+                if frame.msg_type != msg_type::STATE_SYNC_RESP {
+                    continue;
+                }
+                let m: linkf::StateSyncRespF = postcard::from_bytes(&frame.payload)?;
+                if m.request_id == request_id {
+                    return m
+                        .result
+                        .map_err(|e| DaemonError::Generation(format!("node {}: {e}", self.node.node_identity)));
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn generate_streaming_once(
         &mut self,
         session_id: u64,
         max_new_tokens: u64,
         max_wall_ms: u64,
         cancel: &std::sync::atomic::AtomicBool,
+        opts: Option<&Ask<'_>>,
+        on_logprobs: &mut dyn FnMut(&[linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
+        if opts.is_some() {
+            self.needs_v3("these generation options")?;
+        }
         let generation_id = self.next_generation;
         self.next_generation += 1;
         let req = self
@@ -516,6 +860,11 @@ impl FleetHead {
                 GenerationBudgetsMsg { max_new_tokens, max_wall_ms },
             )
             .ok_or(DaemonError::Protocol("generate before assign"))?;
+        if let Some(ask) = opts {
+            self.send_blobs(ask.blobs)?;
+            let o = linkf::GenerateOptsMsg { session_id, generation_id, ..ask.opts.clone() };
+            self.endpoint.send(msg_type::GENERATE_OPTS, &o)?;
+        }
         self.endpoint.send(msg_type::GENERATE_REQ, &req)?;
 
         let mut tokens = Vec::new();
@@ -548,6 +897,7 @@ impl FleetHead {
                                 tokens.extend_from_slice(t);
                                 on_tokens(t);
                             }
+                            TokenEventPayload::Logprobs(items) => on_logprobs(items),
                             TokenEventPayload::Finish { reason } => {
                                 finish = *reason;
                                 done = true;
@@ -790,5 +1140,29 @@ impl PipelineFleet {
             ctx.push(tok);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Encoded, ENCODED_TOKENS};
+
+    #[test]
+    fn text_encoded_before_is_answered_and_the_least_used_goes_first() {
+        let mut enc = Encoded::default();
+        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        enc.put(a, vec![7; 10]);
+        assert_eq!(enc.get(&a), Some(vec![7; 10]));
+        assert_eq!(enc.get(&b), None);
+        enc.put(a, vec![8; 4]);
+        assert_eq!((enc.get(&a), enc.tokens), (Some(vec![8; 4]), 4), "the same text again replaces it");
+
+        enc.put(b, vec![0; ENCODED_TOKENS / 2]);
+        assert!(enc.get(&a).is_some(), "a is used after b");
+        enc.put(c, vec![0; ENCODED_TOKENS / 2]);
+        // Over the bound, the least recently used go until half of it is left.
+        assert_eq!((enc.get(&b), enc.get(&a)), (None, None));
+        assert!(enc.get(&c).is_some(), "the newest stays");
+        assert_eq!(enc.tokens, ENCODED_TOKENS / 2);
     }
 }

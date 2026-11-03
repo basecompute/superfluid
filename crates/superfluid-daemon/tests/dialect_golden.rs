@@ -354,3 +354,26 @@ fn chatml_append_stability_property() {
         }
     }
 }
+
+#[test]
+fn chatml_prompt_matches_the_template_with_thinking_off() {
+    let qwen38 = std::env::var("BASERT_TEST_QWEN38").ok().map(PathBuf::from);
+    for (name, path) in [("Qwen3.5", qwen35_path()), ("Qwen3.8", qwen38)] {
+        let Some(model) = path else {
+            eprintln!("SKIP {name}: no bundle (BASERT_TEST_QWEN35 / BASERT_TEST_QWEN38)");
+            continue;
+        };
+        let c = ChatMlCodec::load(&model).expect("codec load");
+        let t = superfluid_daemon::template_codec::TemplateCodec::load(&model).expect("template load");
+        let tx = marked(&c, &["<|im_start|>", "<|im_end|>", "<think>", "</think>"]);
+        let mut kw = serde_json::Map::new();
+        kw.insert("enable_thinking".to_string(), serde_json::Value::Bool(false));
+        for text in ["Hello", "\nHello\n", "  Hello  "] {
+            let msgs = [superfluid_daemon::codec::ChatMessage::new(role::USER, text.to_string())];
+            let ours = c.render_prompt_structured_with(&msgs, &[], &kw).unwrap();
+            let mut want = t.render_turns_structured_with(&msgs, &[], &kw).unwrap();
+            want.extend(c.generation_prefix_with(TurnState::AfterInput, Some(false)).unwrap());
+            assert_eq!(tx(&ours), tx(&want), "{name}: user {text:?}");
+        }
+    }
+}

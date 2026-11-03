@@ -25,7 +25,7 @@ trap cleanup EXIT INT TERM
 export SUPERFLUID_HOME="$tmp/home" SUPERFLUID_NO_UPDATE_CHECK=1
 
 # check <bin-dir> <manager> <release-dir>: the commands in <bin-dir> run the
-# release in <release-dir> and leave updates to <manager>.
+# release in <release-dir> and know <manager> as what updates it.
 check() {
   bin=$1 manager=$2 where=$3
   got=$("$bin/superfluid" --version)
@@ -44,10 +44,23 @@ for rid, path in shipped.items():
     assert os.path.realpath(path).startswith(where + os.sep), f"{rid} worker {path} is not in {where}"
 print("workers:", ", ".join(sorted(shipped)))
 ' "$where" || fail "the shipped workers were not found in $where"
-  # 0.1.4 is the last release that does not read installed-by.
+  # 0.1.4 is the last release that does not read installed-by. 0.1.5 named
+  # every manager's command and left the update to the user ("was installed
+  # by <manager>; `<command>` updates it", exit 1). From 0.1.6 on, `self
+  # update` runs the manager itself where it can — `--dry-run` then says what
+  # it would run and exits 0 — and otherwise names the command, as before:
+  # pip always (its environment may be a project's or the system's), and npm
+  # here, since a throwaway --prefix has no npm of its own to run. Either way
+  # the copy is the manager's, named, and a dry run changes nothing.
   if [ "$(printf '%s\n%s\n' "$version" 0.1.4 | sort -V | tail -n 1)" != 0.1.4 ]; then
-    if said=$("$bin/superfluid" self update --dry-run 2>&1); then fail "self update did not leave the copy to $manager: $said"; fi
-    echo "$said" | grep -q "was installed by $manager;" || fail "self update did not name $manager: $said"
+    if said=$("$bin/superfluid" self update --dry-run 2>&1); then rc=0; else rc=$?; fi
+    echo "$said" | grep -q "was installed by $manager[;:,]" || fail "self update did not name $manager: $said"
+    if [ "$rc" -eq 0 ]; then
+      echo "$said" | grep -q 'would run' || fail "self update --dry-run exited 0 without showing $manager's command: $said"
+    else
+      echo "$said" | grep -q 'updates it' || fail "self update did not name $manager's command: $said"
+    fi
+    [ "$("$bin/superfluid" --version)" = "superfluid $version" ] || fail "self update --dry-run changed the copy"
   fi
   echo "try-install ($kind): superfluid $version runs from $where"
 }

@@ -175,7 +175,8 @@ pub(crate) fn error_response(status: StatusCode, message: String) -> Response {
 }
 
 fn daemon_error(e: DaemonError) -> Response {
-    error_response(StatusCode::BAD_REQUEST, e.to_string())
+    let status = if matches!(e, DaemonError::NoNode(_)) { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::BAD_REQUEST };
+    error_response(status, e.to_string())
 }
 
 fn system_text(v: &serde_json::Value) -> String {
