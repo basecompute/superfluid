@@ -175,6 +175,10 @@ pub struct Plan {
     pub assets: Vec<Asset>,
     pub tested: bool,
     pub why: String,
+    /// Set when the plan was made without asking what the newest version is: the adapter asks the network for that
+    /// (basert, its release listing) and the ask failed, so this is the newest the adapter knows on its own, and the
+    /// text says what failed. `superfluid runtime update` then does not take it for the newest there is.
+    pub offline: Option<String>,
     pub extra: Value,
 }
 
@@ -183,7 +187,7 @@ impl Plan {
         json!({
             "id": self.id, "version": self.version, "backend": self.backend, "install": self.install,
             "assets": self.assets.iter().map(|a| json!({"name": a.name, "url": a.url, "sha256": a.sha256, "size": a.size})).collect::<Vec<_>>(),
-            "tested": self.tested, "why": self.why, "extra": self.extra,
+            "tested": self.tested, "why": self.why, "offline": self.offline, "extra": self.extra,
         })
     }
 
@@ -213,6 +217,7 @@ impl Plan {
             assets,
             tested: v["tested"].as_bool().unwrap_or(false),
             why: v["why"].as_str().unwrap_or_default().to_string(),
+            offline: v["offline"].as_str().map(str::to_string),
             extra: v["extra"].clone(),
         })
     }
@@ -654,10 +659,14 @@ mod tests {
             assets: vec![Asset { name: "a.tar.gz".into(), url: "https://x/a.tar.gz".into(), sha256: Some("ab".into()), size: Some(3) }],
             tested: true,
             why: "macOS arm64: Metal".into(),
+            offline: None,
             extra: json!({"index": "https://pypi.org/simple"}),
         };
         assert_eq!(Plan::from_json(&plan.to_json()).unwrap(), plan);
         assert_eq!(plan.size(), 3);
+        let offline = Plan { offline: Some("fetching the listing failed".into()), ..plan.clone() };
+        assert_eq!(Plan::from_json(&offline.to_json()).unwrap(), offline, "an offline plan says what it could not ask");
+        assert_eq!(plan.to_json()["offline"], Value::Null);
         let m = Manifest {
             id: "llamacpp".into(),
             install: "b11284-metal".into(),
@@ -704,6 +713,7 @@ mod tests {
             assets: vec![asset(&main), asset(&rt)],
             tested: true,
             why: String::new(),
+            offline: None,
             extra: Value::Null,
         };
         let stage = dir.join("stage");
@@ -769,6 +779,7 @@ mod tests {
                 assets: vec![a],
                 tested: true,
                 why: String::new(),
+                offline: None,
                 extra: Value::Null,
             };
             fetch_and_unpack(&plan, &stage.join("lib"), &stage).unwrap_err()

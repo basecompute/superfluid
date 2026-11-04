@@ -21,7 +21,7 @@ Every package carries the release tree unchanged, so superfluid finds its runtim
 | `npm/build_packages.py` | the four npm tarballs, with `npm pack`; `npm/launch.js` is the launcher |
 | `homebrew/formula.py` | `superfluid.rb`, from a template; only the version, checksums and minimum macOS change between releases |
 | `build.py` | all of the above for one release |
-| `try-install.sh` | installs one kind (pip into a venv, npm into a throwaway global prefix, brew from a throwaway local tap) and checks the commands run the release inside it |
+| `try-install.sh` | installs one kind (pip into a venv, npm into a throwaway global prefix, brew from a throwaway local tap, trusted for the run where Homebrew asks) and checks the commands run the release inside it |
 
 To build and try a release on this machine (nothing is uploaded; `brew` installs into your Homebrew and uninstalls again, and downloads the tarball from GitHub):
 
@@ -47,7 +47,7 @@ The tests (`python3 -m unittest discover -s tests/scripts`) build every kind fro
 
 1. **PyPI**: add a pending trusted publisher for the project `superfluid-cli` (PyPI, Publishing): owner `basecompute`, repository `superfluid`, workflow `publish.yml`, environment `pypi`.
 2. **npm**: create the `basecompute` organization on npmjs.com (baseRT's packages plan to use it too), and a granular access token that can publish to `@basecompute`. Store it as the secret `NPM_TOKEN` of the `npm` environment. Once the four packages exist, trusted publishing can replace the token.
-3. **Homebrew**: the tap is public, so `brew install basecompute/tap/superfluid` works for anyone. Create a fine-grained token (or an app) with Contents and Pull requests write on the tap only, stored as the secret `HOMEBREW_TAP_TOKEN` of the `homebrew` environment.
+3. **Homebrew**: the tap is public, so `brew install basecompute/tap/superfluid` works for anyone, after `brew trust basecompute/tap` on Homebrew 6 and later, which load a non-official tap only once it is trusted. Create a fine-grained token (or an app) with Contents and Pull requests write on the tap only, stored as the secret `HOMEBREW_TAP_TOKEN` of the `homebrew` environment.
 4. **Environments**: create `pypi`, `npm` and `homebrew` under Settings, Environments, each limited to tags `v*`; add required reviewers to any you want a person to approve.
 5. Set the repository variable `PUBLISH_ENABLED` to `true`.
 

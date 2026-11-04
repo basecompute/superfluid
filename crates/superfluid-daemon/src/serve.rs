@@ -1009,6 +1009,15 @@ pub fn run(args: &[String], embedding: &Embedding) {
     }
     // Each runtime's options are checked against what its worker declares before any model loads.
     superfluid_daemon::runtime_options::settle(&runtime_options, &runtime, &catalog).unwrap_or_else(|e| refuse(2, e));
+    // A drafter given by id is pulled as a model given by id is, by the runtime that drafts for it, before
+    // anything sizes or loads.
+    if let Some((kind, id)) = speculate.as_deref().and_then(superfluid_daemon::speculate_resolve::drafter_id) {
+        let path = superfluid_daemon::pulls::pull(&catalog, runtime.id, id, &pull_flags).unwrap_or_else(|e| {
+            eprintln!("superfluid: --speculate {kind}:{id}: {e}");
+            std::process::exit(1);
+        });
+        speculate = Some(format!("{kind}:{}", path.display()));
+    }
     eprintln!("superfluid: runtime {} serves {} ({})", runtime.id.name(), model.display(), describe_worker(&runtime));
     if let Some(on) = spec_bitexact {
         std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });
