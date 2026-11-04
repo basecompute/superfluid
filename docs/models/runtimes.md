@@ -60,7 +60,7 @@ The default install is the pinned one, else the best-ranked: a GPU backend (`met
 
 ### Per-runtime installs
 
-**llama.cpp.** The tested build is `b11284`; another version needs `--untested`. The backend is chosen from the machine:
+**llama.cpp.** The tested builds are the ones `superfluid runtime versions llamacpp` lists; another needs `--untested`, and the refusal says whether it lies between two tested builds, whose C API it very likely shares, or past the newest or oldest, where it may differ. The backend is chosen from the machine:
 
 | machine | build | falls back to |
 |---|---|---|
