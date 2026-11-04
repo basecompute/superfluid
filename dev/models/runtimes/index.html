@@ -2377,7 +2377,7 @@
 </tr>
 <tr>
 <td><code>update &lt;id&gt;</code></td>
-<td>install the newest tested build for the default install's backend beside it and make it the default</td>
+<td>install the newest tested build for the default install's backend beside it and make it the default. basert learns the newest from its release listing: when that cannot be fetched, the newest it installs on its own is a pinned release, and an install that is not older than it is left alone with exit 1 and the fetch's error, rather than reported up to date</td>
 </tr>
 <tr>
 <td><code>repair &lt;id&gt; [&lt;install&gt;]</code></td>
