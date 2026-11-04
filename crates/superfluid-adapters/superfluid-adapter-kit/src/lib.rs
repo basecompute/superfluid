@@ -815,6 +815,7 @@ mod tests {
                 tested: true,
                 why: "a test".into(),
                 version,
+                offline: None,
                 extra: serde_json::json!({"wheels_size": 3}),
             }]))
         }

@@ -309,6 +309,21 @@ fn verify(id: RuntimeId, plan: &Plan, staging: &Path) -> Result<Result<(String, 
     }
 }
 
+/// Why `runtime update` cannot say whether the default install `current` has an update: `plan`, the newest build the
+/// adapter installs, was made offline, from what the adapter knows on its own, and that is no update to `current` (it
+/// is installed already, or `current` is not older than it), so the newest release may be one the adapter never saw.
+pub fn update_unknown(current: &Manifest, plan: &Plan, installed: bool) -> Option<String> {
+    let listing = plan.offline.as_deref()?;
+    if current.version == "custom" || (!installed && version_key(&current.version) < version_key(&plan.version)) {
+        return None;
+    }
+    Some(format!(
+        "whether a newer release exists could not be told ({listing}); {} is the newest the adapter installs on its own, and {}",
+        plan.version,
+        if installed { "it is installed".to_string() } else { format!("it is not newer than {}", current.version) }
+    ))
+}
+
 pub fn not_an_update(current: &str, planned: &str) -> Option<String> {
     if current == "custom" {
         return Some("it is a build of your own, not one of the adapter's".to_string());
@@ -377,6 +392,7 @@ mod tests {
             assets: Vec::new(),
             tested: true,
             why: "a test".into(),
+            offline: None,
             extra: Value::Null,
         }
     }
@@ -480,6 +496,35 @@ cat "$dir/runtime.json"
         assert!(not_an_update("b12000", "b11284").unwrap().contains("newer than b11284"));
         assert!(not_an_update("custom", "b11284").unwrap().contains("a build of your own"));
         assert_eq!(not_an_update("b11284", "b11284"), None);
+    }
+
+    #[test]
+    fn an_update_planned_offline_is_not_taken_for_the_newest_there_is() {
+        let current = |version: &str| Manifest {
+            id: "basert".into(),
+            install: format!("{version}-metal"),
+            version: version.into(),
+            backend: "metal".into(),
+            link_w: vec![V],
+            platforms: Vec::new(),
+            worker: "bin/superfluid-worker-basert".into(),
+            sources: Vec::new(),
+            tested: true,
+            requires: None,
+        };
+        let mut plan = plan_for("basert", "0.4.0", "metal");
+        // The listing was fetched: the plan is the newest, and the version comparison decides.
+        for (installed, v) in [(false, "0.4.3"), (true, "0.4.0"), (false, "0.3.0"), (false, "custom")] {
+            assert_eq!(update_unknown(&current(v), &plan, installed), None, "{v}");
+        }
+        plan.offline = Some("fetching the listing failed: curl: (28) timed out".into());
+        let why = update_unknown(&current("0.4.3"), &plan, false).unwrap();
+        assert!(why.starts_with("whether a newer release exists could not be told (fetching the listing failed: curl: (28) timed out)"), "{why}");
+        assert!(why.ends_with("0.4.0 is the newest the adapter installs on its own, and it is not newer than 0.4.3"), "{why}");
+        assert!(update_unknown(&current("0.4.0"), &plan, true).unwrap().ends_with("and it is installed"));
+        assert!(update_unknown(&current("0.3.0"), &plan, true).unwrap().ends_with("and it is installed"), "the pin is installed beside an older default");
+        assert_eq!(update_unknown(&current("0.3.0"), &plan, false), None, "the pin is an update to an older install, listing or not");
+        assert_eq!(update_unknown(&current("custom"), &plan, false), None, "a build of one's own is never updated, so nothing is unknown");
     }
 
     #[test]
