@@ -92,6 +92,7 @@ pub fn plan(req: &Request, host: &Host, linked: &str) -> Result<Vec<Plan>, Strin
             entry.as_ref().and_then(|t| t["mlx_lm"].as_str()).map(|v| format!(" with mlx-lm {v}")).unwrap_or_default()
         ),
         version,
+        offline: None,
         extra: json!({"index": index, "requirements": requirements, "wheels_size": wheels_size}),
     }])
 }

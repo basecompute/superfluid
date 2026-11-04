@@ -86,16 +86,7 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
     let pins = pinned();
     // With no version named the newest release is wanted, which only the listing knows; offline the pins answer.
     if req.version.is_none() && req.from.is_none() {
-        return match fetch_json(recipe()["releases"].as_str().unwrap_or_default()) {
-            Ok(releases) => plan_with(req, host, &pins, &releases),
-            Err(listing) => {
-                let mut plans = plan_with(req, host, &pins, &Value::Null).map_err(|why| format!("{why} ({listing})"))?;
-                for p in &mut plans {
-                    p.why = format!("{} (the newest pinned: {listing})", p.why);
-                }
-                Ok(plans)
-            }
-        };
+        return plan_newest(req, host, &pins, fetch_json(recipe()["releases"].as_str().unwrap_or_default()));
     }
     plan_with(req, host, &pins, &Value::Null).or_else(|why| {
         if req.from.is_some() {
@@ -104,6 +95,22 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
         let releases = fetch_json(recipe()["releases"].as_str().unwrap_or_default())?;
         plan_with(req, host, &pins, &releases)
     })
+}
+
+/// The newest release this build drives, from the listing as fetched; when the fetch failed, the newest pin, and the plan
+/// says so (`offline`), so that an update is not judged against a pin an installed release is already past.
+pub fn plan_newest(req: &Request, host: &Host, pins: &[Pin], listing: Result<Value, String>) -> Result<Vec<Plan>, String> {
+    match listing {
+        Ok(releases) => plan_with(req, host, pins, &releases),
+        Err(listing) => {
+            let mut plans = plan_with(req, host, pins, &Value::Null).map_err(|why| format!("{why} ({listing})"))?;
+            for p in &mut plans {
+                p.why = format!("{} (the newest pinned: {listing})", p.why);
+                p.offline = Some(listing.clone());
+            }
+            Ok(plans)
+        }
+    }
 }
 
 /// What installs beyond the pins without `--untested`: any release this build drives, which `plan` finds in the release listing,
@@ -211,6 +218,7 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             why: format!("{from}, as named"),
             version,
             backend: backend.into(),
+            offline: None,
             extra: Value::Null,
         }]);
     }
@@ -292,6 +300,7 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
         assets: vec![asset],
         version,
         backend: backend.into(),
+        offline: None,
         extra: Value::Null,
     }])
 }
@@ -399,6 +408,21 @@ mod tests {
         pre["prerelease"] = json!(true);
         let p = &plan_with(&Request::default(), &mac(), &pins, &json!([pre, release("0.4.7", Some(same))])).unwrap()[0];
         assert_eq!(p.version, "0.4.7", "a pre-release is never the newest");
+    }
+
+    #[test]
+    fn with_no_listing_the_newest_pin_is_planned_and_the_plan_says_so() {
+        let same = abi();
+        let pins = [pin("0.3.9", None, "cd"), pin("0.4.5", Some(same), "ef")];
+        let listed = plan_newest(&Request::default(), &mac(), &pins, Ok(json!([release("0.4.6", Some(same))]))).unwrap().remove(0);
+        assert_eq!((listed.version.as_str(), listed.offline.as_deref()), ("0.4.6", None));
+        let failed = "fetching https://api.github.com/repos/basecompute/baseRT/releases failed: curl: (28) timed out";
+        let p = plan_newest(&Request::default(), &mac(), &pins, Err(failed.into())).unwrap().remove(0);
+        assert_eq!((p.version.as_str(), p.install.as_str(), p.tested), ("0.4.5", "0.4.5-metal", true), "offline, the newest pin");
+        assert_eq!(p.offline.as_deref(), Some(failed), "and the plan says it was made without the listing");
+        assert!(p.why.ends_with(&format!(" (the newest pinned: {failed})")), "{}", p.why);
+        let e = plan_newest(&Request::default(), &mac(), &[], Err(failed.into())).unwrap_err();
+        assert!(e.contains("publishes no engine this superfluid drives") && e.ends_with(&format!(" ({failed})")), "{e}");
     }
 
     #[test]
