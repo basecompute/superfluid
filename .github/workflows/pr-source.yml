@@ -5,9 +5,14 @@ name: PR source
 # opened by dependabot[bot]) are the one exception. This runs main's copy of
 # the file (pull_request_target), so a PR cannot edit the check it is judged
 # by. It never checks out or runs PR code, and needs no token permissions.
+#
+# It runs on a PR into any branch, and passes at once for one not into main:
+# a PR opened against main and moved to an rc-* branch is judged again on the
+# move (an `edited` event), and the pass replaces the failure. Listening for
+# main alone, the check would not see the move and the failure would stay on
+# the PR, with nothing to run it again.
 on:
   pull_request_target:
-    branches: [main]
     types: [opened, reopened, synchronize, edited]
 
 permissions: {}
@@ -20,11 +25,16 @@ jobs:
     steps:
       - name: Require an rc-* branch of this repository
         env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
+          if [ "$BASE_REF" != main ]; then
+            echo "This PR is into $BASE_REF, not main; any branch may go there."
+            exit 0
+          fi
           if [ "$HEAD_REPO" != "$BASE_REPO" ]; then
             echo "::error::PRs into main must come from a branch of $BASE_REPO, not a fork (${HEAD_REPO:-deleted}). Target the current rc-* branch instead."
             exit 1
