@@ -185,6 +185,7 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
             why: format!("{from}, as named"),
             version,
             backend,
+            offline: None,
             extra: Value::Null,
         }]);
     }
@@ -255,6 +256,7 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
                 assets,
                 tested: tested_versions.contains(&version.as_str()),
                 why,
+                offline: None,
                 extra: json!({}),
             })
         })

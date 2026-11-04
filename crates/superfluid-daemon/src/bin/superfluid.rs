@@ -178,13 +178,22 @@ fn runtime_cmd(args: &[String]) {
             let installer = installs::installer(&catalog, id).unwrap_or_else(|e| fail(e));
             let req = Request { backend: Some(family(&current.manifest.backend)), ..Request::default() };
             let plans = installs::plan(&installer, &req).unwrap_or_else(|e| fail(e));
-            if installs::list(&catalog, id).iter().any(|i| i.name == plans.plans[0].install) {
-                println!("{id} {} is installed; nothing newer is tested for {}", plans.plans[0].install, current.manifest.backend);
+            let newest = &plans.plans[0];
+            let installed = installs::list(&catalog, id).iter().any(|i| i.name == newest.install);
+            // Planned without the release listing, the newest the adapter knows is a pin an install may be past already.
+            if let Some(why) = installs::update_unknown(&current.manifest, newest, installed) {
+                fail(format!("{id} {}: {why}; try again, or `superfluid runtime install {id} --version <v>` installs a release by name", current.name));
+            }
+            if installed {
+                println!("{id} {} is installed; nothing newer is tested for {}", newest.install, current.manifest.backend);
                 return;
             }
-            if let Some(why) = installs::not_an_update(&current.manifest.version, &plans.plans[0].version) {
-                println!("{id} {}: {why}; nothing to update (`superfluid runtime install {id}` installs {} beside it)", current.name, plans.plans[0].install);
+            if let Some(why) = installs::not_an_update(&current.manifest.version, &newest.version) {
+                println!("{id} {}: {why}; nothing to update (`superfluid runtime install {id}` installs {} beside it)", current.name, newest.install);
                 return;
+            }
+            if let Some(listing) = &newest.offline {
+                eprintln!("superfluid: {id}: {} is the newest the adapter installs on its own; a newer release may exist ({listing})", newest.version);
             }
             let done = carry_out(&installer, &plans);
             if was_pinned {
