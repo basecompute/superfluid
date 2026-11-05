@@ -3,6 +3,7 @@
 and how to record one that passed.
 
     nightly_runtimes.py llamacpp pick [--requested bNNNN]
+    nightly_runtimes.py llamacpp walk-back --failed bNNNN --from bMMMM
     nightly_runtimes.py llamacpp append bNNNN
     nightly_runtimes.py mlx pick [--requested X.Y.Z]
     nightly_runtimes.py mlx append X.Y.Z --report <pip report.json>
@@ -15,6 +16,11 @@ also prints `mlx_lm=<v>`: a new mlx-lm on the newest mlx is tested as well
 (a requested mlx gets whichever mlx-lm pip resolves, `mlx_lm=`). A newest
 release whose PR was closed unmerged is not picked again: someone said no to
 it, and only a `--requested` one asks again.
+`walk-back` is for a newest llama.cpp build that failed: it prints the build
+to test next, the newest below `--failed` that the recipe does not list and
+nobody declined, within WALK_BACK builds below `--from`, the build the night
+started on; nothing when there is none. The workflow runs itself again on it,
+so one bad upstream build does not hold the recipe until the next night.
 `append` adds a release to the adapter's recipe as a tested one, newest
 first, so a human reviews a PR rather than typing digests. For llama.cpp
 that is the same asset names the previous tested build carries, with the
@@ -51,6 +57,10 @@ MLX_LM_PYPI = "https://pypi.org/pypi/mlx-lm/json"
 CLOSED_PRS = "https://api.github.com/repos/{repo}/pulls?state=closed&head={owner}:nightly/{runtime}&per_page=100"
 PYPI_RELEASE = "https://pypi.org/pypi/{name}/{version}/json"
 BUILD = re.compile(r"^b(\d+)$")
+# How far below the build a night started on the walk-back goes: an upstream
+# break fixed within a few builds is found, while an adapter that no new
+# build passes costs a night this many extra runs, not every build since.
+WALK_BACK = 5
 # A PyPI release as mlx and mlx-lm number theirs (PEP 440's public versions, short of epochs).
 PYPI_VERSION = re.compile(r"^\d+(\.\d+)*((a|b|rc)\d+)?(\.post\d+)?(\.dev\d+)?$")
 
@@ -80,13 +90,13 @@ def build_number(tag: str) -> int:
     return int(m.group(1)) if m else -1
 
 
-def newest_llamacpp_build() -> dict:
-    """The newest `b<N>` release that carries the macOS arm64 archive, which
-    every tested build has; llama.cpp also tags semver releases, which are
-    not builds of the library."""
+def llamacpp_builds() -> list[int]:
+    """The numbers of the newest `b<N>` releases that carry the macOS arm64
+    archive, which every tested build has, newest first; llama.cpp also tags
+    semver releases, which are not builds of the library."""
     releases = fetch_json(LLAMACPP_RELEASES)
     builds = [
-        r
+        build_number(r["tag_name"])
         for r in releases
         if build_number(r["tag_name"]) >= 0
         and not r.get("draft")
@@ -94,7 +104,33 @@ def newest_llamacpp_build() -> dict:
     ]
     if not builds:
         raise SystemExit("no llama.cpp build with a macOS arm64 archive in the newest 30 releases")
-    return max(builds, key=lambda r: build_number(r["tag_name"]))
+    return sorted(builds, reverse=True)
+
+
+def newest_llamacpp_build() -> str:
+    return f"b{llamacpp_builds()[0]}"
+
+
+def walk_back(failed: str, start: str) -> str:
+    """The build to test after `failed` did not pass, or '' (see the module's
+    doc). A `start` no longer among the newest releases ends the walk: the
+    builds below it are not listed to walk."""
+    builds = llamacpp_builds()
+    if build_number(start) not in builds:
+        print(f"note: {start} is not among the newest llama.cpp builds any more; not walking back", file=sys.stderr)
+        return ""
+    have = max((build_number(v) for v in tested_versions("llamacpp")), default=-1)
+    for n in [n for n in builds if n < build_number(start)][:WALK_BACK]:
+        if n >= build_number(failed):
+            continue
+        if n <= have:
+            break
+        version = f"b{n}"
+        if declined("llamacpp", version):
+            print(f"note: the PR titled {pr_title('llamacpp', version)!r} was closed unmerged; skipping it", file=sys.stderr)
+            continue
+        return version
+    return ""
 
 
 def pr_title(runtime: str, version: str, mlx_lm: str = "") -> str:
@@ -132,7 +168,7 @@ def pick(runtime: str, requested: str | None) -> dict[str, str]:
             out["version"] = requested
         return out
     if runtime == "llamacpp":
-        newest = newest_llamacpp_build()["tag_name"]
+        newest = newest_llamacpp_build()
         have = max((build_number(v) for v in tested_versions(runtime)), default=-1)
         if build_number(newest) <= have:
             return out
@@ -273,6 +309,9 @@ def main() -> int:
     sub = ap.add_subparsers(dest="action", required=True)
     p = sub.add_parser("pick", help="the newest upstream release the recipe does not list, as version=<v>")
     p.add_argument("--requested", default="", help="test this release instead of the newest")
+    w = sub.add_parser("walk-back", help="llamacpp: the build to test after the newest failed, if any")
+    w.add_argument("--failed", required=True, help="the build that did not pass")
+    w.add_argument("--from", dest="start", required=True, help="the build the night started on")
     a = sub.add_parser("append", help="record a release that passed as a tested one")
     a.add_argument("version")
     a.add_argument("--report", help="mlx: pip's install report (--dry-run --report) for the version on the runner")
@@ -280,6 +319,13 @@ def main() -> int:
     if args.action == "pick":
         for key, value in pick(args.runtime, args.requested.strip() or None).items():
             print(f"{key}={value}")
+        return 0
+    if args.action == "walk-back":
+        if args.runtime != "llamacpp":
+            raise SystemExit("walk-back is for llamacpp; MLX releases rarely and is tested as it comes")
+        failed = checked("llamacpp", args.failed, "the failed build")
+        start = checked("llamacpp", args.start, "the build walked back from")
+        print(walk_back(failed, start))
         return 0
     if args.runtime == "llamacpp":
         append_llamacpp(args.version)

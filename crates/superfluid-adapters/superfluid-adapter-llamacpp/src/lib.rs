@@ -114,13 +114,13 @@ impl Runtime for Llamacpp {
 
     fn pull_options(&self) -> Option<&'static [PullOption]> {
         Some(&[
-            PullOption { name: "file", value: true, about: "the GGUF file in the repository, instead of the quant the :tag names" },
+            PullOption { name: "file", value: true, about: "the GGUF file in the repository, instead of the quant or size the :tag names" },
             PullOption { name: "no-mmproj", value: false, about: "skip the multimodal projector a vision model carries" },
         ])
     }
 
     fn pull(&self, pull: &Pull, _args: &WorkerArgs) -> Result<std::path::PathBuf, String> {
-        pull.split()?;
+        let (id, tag) = pull.split()?;
         let lib = sys::load()?;
         let dir = lib.path.parent().map(Path::to_path_buf).unwrap_or_default();
         let tool = dir.join("llama");
@@ -131,13 +131,19 @@ impl Runtime for Llamacpp {
                 dir.display()
             ));
         }
+        let file = match pull.option("file").flatten() {
+            Some(file) => Some(file.to_string()),
+            None => sized::file(id, tag, pull.offline)?,
+        };
         let mut cmd = std::process::Command::new(&tool);
-        cmd.args(["download", "-hf", &pull.id]);
+        cmd.arg("download");
+        match &file {
+            // a file names what a tag would (llama.cpp reads a size tag as a quant and refuses it)
+            Some(file) => cmd.args(["-hf", id, "-hff", file]),
+            None => cmd.args(["-hf", &pull.id]),
+        };
         if pull.offline {
             cmd.arg("--offline");
-        }
-        if let Some(Some(file)) = pull.option("file") {
-            cmd.args(["-hff", file]);
         }
         if pull.option("no-mmproj").is_some() {
             cmd.arg("--no-mmproj");
@@ -172,6 +178,252 @@ impl Runtime for Llamacpp {
         })?;
         std::fs::copy(&found, lib.join(&name)).map_err(|e| format!("{}: {e}", found.display()))?;
         Ok(sources)
+    }
+}
+
+/// A release in sizes: a repository whose GGUFs are named by size, the BaseQuant repos'
+/// `-XS`/`-Small`/`-Medium`/`-Large`/`-XL`, and none by quant. Hugging Face's manifest, which
+/// `llama download` asks with no file named, reads no size: with the tag `latest` it hands
+/// back some file (the Large one, for `basecompute/Qwen3.8-27B-BaseQuant-V1`), and a size
+/// tag it refuses as not a quantization. So the file is picked here, from the repository's
+/// listing, and named to `llama download` as `-hff`: the size the tag spells, else the
+/// default size, else the sole file. The basert runtime's pull reads these releases by the
+/// same rule.
+pub mod sized {
+    /// The sizes, smallest first, and how a release spells each in a file name.
+    const SIZES: [(&str, &str); 5] = [("xs", "XS"), ("small", "Small"), ("medium", "Medium"), ("large", "Large"), ("xl", "XL")];
+    /// The size a pull takes when nothing names one.
+    pub const DEFAULT: &str = "medium";
+
+    /// The size `name` spells, case aside (`Medium` → `medium`).
+    pub fn name(name: &str) -> Option<&'static str> {
+        let n = name.to_ascii_lowercase();
+        SIZES.iter().find(|(s, _)| *s == n).map(|(s, _)| *s)
+    }
+
+    /// A file's name without `.gguf` and without the shard suffix llama.cpp splits a large
+    /// file into: `Foo-Medium.gguf`, `Foo-Medium-00001-of-00002.gguf` → `Foo-Medium`.
+    fn name_stem(name: &str) -> String {
+        let stem = name.strip_suffix(".gguf").or_else(|| name.strip_suffix(".GGUF")).unwrap_or(name);
+        match stem.rsplit_once("-of-") {
+            Some((head, total)) if total.chars().all(|c| c.is_ascii_digit()) && !total.is_empty() => match head.rsplit_once('-') {
+                Some((stem, index)) if index.chars().all(|c| c.is_ascii_digit()) && !index.is_empty() => stem.to_string(),
+                _ => stem.to_string(),
+            },
+            _ => stem.to_string(),
+        }
+    }
+
+    /// The model a file is of, by its whole path in the repository: `sub/Foo-Medium.gguf` and
+    /// `sub/Foo-Medium-00001-of-00002.gguf` are one model, `other/Foo-Medium.gguf` another.
+    fn model(path: &str) -> String {
+        match path.rsplit_once('/') {
+            Some((dir, name)) => format!("{dir}/{}", name_stem(name)),
+            None => name_stem(path),
+        }
+    }
+
+    /// The last `-` segment of a file's name (its directories aside), lowercased:
+    /// `Foo-Medium.gguf` → `medium`, `Foo-UD-Q4_K_M.gguf` → `q4_k_m`.
+    fn tag(path: &str) -> String {
+        let stem = name_stem(path.rsplit('/').next().unwrap_or(path));
+        stem.rsplit('-').next().unwrap_or(&stem).to_ascii_lowercase()
+    }
+
+    /// The models among `files` that `keep` admits, each with its first file in path order
+    /// (a sharded model's first shard, which llama.cpp follows to the rest).
+    fn models<'a>(files: &[&'a String], keep: impl Fn(&str) -> bool) -> Vec<(String, &'a String)> {
+        let mut sorted: Vec<&'a String> = files.to_vec();
+        sorted.sort();
+        let mut out: Vec<(String, &'a String)> = Vec::new();
+        for f in sorted.into_iter().filter(|f| keep(f)) {
+            let m = model(f);
+            if !out.iter().any(|(seen, _)| *seen == m) {
+                out.push((m, f));
+            }
+        }
+        out
+    }
+
+    /// The size a GGUF is named by, if any.
+    fn size_of(path: &str) -> Option<&'static str> {
+        name(&tag(path))
+    }
+
+    /// Whether a GGUF is named by quant, as llama.cpp's conversions and the common
+    /// publishers name theirs (`Q4_K_M`, `IQ2_S`, `UD-Q4_K_XL`, `BF16`, `TQ1_0`, `MXFP4`).
+    fn quant_named(path: &str) -> bool {
+        let t = tag(path);
+        if ["f16", "bf16", "f32", "f64", "mxfp4", "nvfp4"].contains(&t.as_str()) {
+            return true;
+        }
+        let t = t.strip_prefix('i').or_else(|| t.strip_prefix('t')).unwrap_or(&t);
+        t.strip_prefix('q').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    }
+
+    /// The multimodal projector a vision model carries beside its weights, not a model file.
+    fn is_mmproj(path: &str) -> bool {
+        path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase().starts_with("mmproj")
+    }
+
+    /// The GGUF a pull of `id` with `tag` takes from the files `files` lists, when the
+    /// repository is a release in sizes: the size the tag spells, else [`DEFAULT`], else
+    /// the sole file. None when it is not one (a GGUF named by quant, or none by size),
+    /// so llama.cpp picks as it does; a quant tag is llama.cpp's too. A size the release
+    /// does not come in names the ones it does.
+    pub fn pick(id: &str, files: &[String], tag: Option<&str>) -> Result<Option<String>, String> {
+        let size = match tag {
+            Some(t) => match name(t) {
+                Some(s) => Some(s),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let ggufs: Vec<&String> = files.iter().filter(|f| f.to_ascii_lowercase().ends_with(".gguf") && !is_mmproj(f)).collect();
+        if ggufs.iter().any(|f| quant_named(f)) || !ggufs.iter().any(|f| size_of(f).is_some()) {
+            return match size {
+                Some(s) => Err(format!(
+                    "{id} has no {s} GGUF: its files are not named by size ({}); name one with --pull-file",
+                    ggufs.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")
+                )),
+                None => Ok(None),
+            };
+        }
+        let offered: Vec<&str> = SIZES.iter().map(|(s, _)| *s).filter(|s| ggufs.iter().any(|f| size_of(f) == Some(s))).collect();
+        let want = size.unwrap_or(DEFAULT);
+        let hits = models(&ggufs, |f| size_of(f) == Some(want));
+        match (hits.as_slice(), size) {
+            ([(_, first)], _) => Ok(Some((*first).clone())),
+            ([], None) if models(&ggufs, |_| true).len() == 1 => Ok(Some(models(&ggufs, |_| true)[0].1.clone())),
+            ([], _) => Err(format!(
+                "{id} has no {want} GGUF; it comes in: {} (`{id}:<size>` names one, --pull-file a file)",
+                offered.join(", ")
+            )),
+            _ => Err(format!(
+                "{want} names several GGUFs of {id} ({}); name one with --pull-file",
+                hits.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
+    /// The file a pull of `id[:tag]` names to `llama download`, when the repository is a
+    /// release in sizes (see [`pick`]), read from its listing. Offline nothing is listed:
+    /// a size spells its file as the releases name them (`<repo>-Small.gguf`), and no tag
+    /// is left to llama.cpp's cache. A listing that fails leaves a plain pull to llama.cpp
+    /// with a warning, and fails a size, which only the listing can resolve.
+    pub fn file(id: &str, tag: Option<&str>, offline: bool) -> Result<Option<String>, String> {
+        let size = match tag {
+            Some(t) => match name(t) {
+                Some(s) => Some(s),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        if offline {
+            let repo = id.rsplit('/').next().unwrap_or(id);
+            return Ok(size.map(|s| format!("{repo}-{}.gguf", SIZES.iter().find(|(n, _)| *n == s).map_or(s, |(_, spelled)| spelled))));
+        }
+        let files = match superfluid_adapter_kit::install::hf_repo_files(id) {
+            Ok(files) => files,
+            Err(why) => match size {
+                Some(s) => return Err(format!("{id}:{s}: the repository could not be listed to find its {s} file ({why}); name it with --pull-file")),
+                None => {
+                    eprintln!("warning: {id} could not be listed ({why}); llama.cpp picks the file");
+                    return Ok(None);
+                }
+            },
+        };
+        let picked = pick(id, &files, tag)?;
+        if let (Some(file), None) = (&picked, size) {
+            eprintln!("llamacpp: {id} is a release in sizes; taking {file} (`{id}:<size>` or --pull-file takes another)");
+        }
+        Ok(picked)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn files(names: &[&str]) -> Vec<String> {
+            names.iter().map(|n| n.to_string()).collect()
+        }
+
+        #[test]
+        fn a_release_in_sizes_gives_its_medium_the_size_named_or_its_sole_file() {
+            let id = "org/m";
+            let release = files(&["README.md", "m-XS.gguf", "m-Small.gguf", "m-Medium.gguf", "m-Large.gguf", "m-XL.gguf", "m-Medium.base"]);
+            assert_eq!(pick(id, &release, None).unwrap().as_deref(), Some("m-Medium.gguf"));
+            assert_eq!(pick(id, &release, Some("small")).unwrap().as_deref(), Some("m-Small.gguf"));
+            assert_eq!(pick(id, &release, Some("XL")).unwrap().as_deref(), Some("m-XL.gguf"));
+            // a quant tag is llama.cpp's to read
+            assert_eq!(pick(id, &release, Some("Q4_K_M")).unwrap(), None);
+            // one file is taken whatever its size; a size the release lacks names the ones it has
+            assert_eq!(pick(id, &files(&["m-Small.gguf"]), None).unwrap().as_deref(), Some("m-Small.gguf"));
+            let e = pick(id, &files(&["m-Small.gguf", "m-Large.gguf"]), None).unwrap_err();
+            assert!(e.contains("has no medium GGUF; it comes in: small, large") && e.contains("`org/m:<size>`"), "{e}");
+            let e = pick(id, &files(&["m-Small.gguf"]), Some("large")).unwrap_err();
+            assert!(e.contains("it comes in: small"), "{e}");
+            // a sharded size is its first shard
+            let shards = files(&["m-Medium-00002-of-00002.gguf", "m-Medium-00001-of-00002.gguf", "m-Small.gguf"]);
+            assert_eq!(pick(id, &shards, None).unwrap().as_deref(), Some("m-Medium-00001-of-00002.gguf"));
+            // the projector beside a vision model is not a model
+            let vision = files(&["mmproj-F16.gguf", "v-Medium.gguf"]);
+            assert_eq!(pick(id, &vision, None).unwrap().as_deref(), Some("v-Medium.gguf"));
+        }
+
+        #[test]
+        fn a_repository_named_by_quant_is_left_to_llama_cpp() {
+            let id = "org/q";
+            for repo in [
+                files(&["q-Q4_K_M.gguf", "q-Q8_0.gguf"]),
+                files(&["q-UD-Q4_K_XL.gguf", "q-UD-IQ2_S.gguf", "q-BF16.gguf"]),
+                files(&["q-TQ1_0.gguf"]),
+                files(&["gpt-oss-20b-mxfp4.gguf"]),
+                files(&["q-Q4_K_M.gguf", "q-Medium.gguf"]),
+                files(&["model.gguf"]),
+                files(&["README.md", "config.json"]),
+            ] {
+                assert_eq!(pick(id, &repo, None).unwrap(), None, "{repo:?}");
+                assert_eq!(pick(id, &repo, Some("Q4_K_M")).unwrap(), None, "{repo:?}");
+                let e = pick(id, &repo, Some("medium")).unwrap_err();
+                assert!(e.contains("not named by size"), "{repo:?}: {e}");
+            }
+        }
+
+        #[test]
+        fn offline_a_size_spells_its_file_and_nothing_named_is_llama_cpps() {
+            assert_eq!(file("basecompute/Qwen3.8-27B-BaseQuant-V1", Some("small"), true).unwrap().as_deref(), Some("Qwen3.8-27B-BaseQuant-V1-Small.gguf"));
+            assert_eq!(file("org/m", Some("XL"), true).unwrap().as_deref(), Some("m-XL.gguf"));
+            assert_eq!(file("org/m", None, true).unwrap(), None);
+            assert_eq!(file("org/m", Some("Q4_K_M"), true).unwrap(), None);
+        }
+
+        /// Two models of one size in different directories are two, not one; and the sole
+        /// model of a repository is sole however many shards it is in.
+        #[test]
+        fn models_are_told_apart_by_their_whole_path_and_counted_over_their_shards() {
+            let id = "org/m";
+            let two = files(&["imatrix/m-Medium.gguf", "original/m-Medium.gguf"]);
+            let e = pick(id, &two, None).unwrap_err();
+            assert!(e.contains("medium names several GGUFs") && e.contains("--pull-file"), "{e}");
+            let e = pick(id, &two, Some("medium")).unwrap_err();
+            assert!(e.contains("medium names several GGUFs"), "{e}");
+            let sharded = files(&["m-XL-00002-of-00002.gguf", "m-XL-00001-of-00002.gguf", "README.md"]);
+            assert_eq!(pick(id, &sharded, None).unwrap().as_deref(), Some("m-XL-00001-of-00002.gguf"));
+            // a directory's name is not the file's tag
+            let dirs = files(&["q4-quants/m-Medium.gguf"]);
+            assert_eq!(pick(id, &dirs, None).unwrap().as_deref(), Some("q4-quants/m-Medium.gguf"));
+        }
+
+        /// The real repository, listed from the Hub: run with `--ignored` where the network is.
+        #[test]
+        #[ignore]
+        fn the_basequant_repository_gives_its_medium() {
+            let id = "basecompute/Qwen3.8-27B-BaseQuant-V1";
+            assert_eq!(file(id, None, false).unwrap().as_deref(), Some("Qwen3.8-27B-BaseQuant-V1-Medium.gguf"));
+            assert_eq!(file(id, Some("xs"), false).unwrap().as_deref(), Some("Qwen3.8-27B-BaseQuant-V1-XS.gguf"));
+            assert_eq!(file("Qwen/Qwen3-0.6B-GGUF", None, false).unwrap(), None);
+        }
     }
 }
 

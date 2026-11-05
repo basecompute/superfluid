@@ -154,6 +154,37 @@ fn choose(host: &Host, have: &[&Archive]) -> Vec<(String, String)> {
     out
 }
 
+/// How `version`, a build the recipe does not list, stands to the builds it
+/// does (`tested`, newest first), for the refusal that asks for `--untested`:
+/// one between two tested builds very likely has their C API, since llama.cpp
+/// changes it rarely and the builds on either side agree, where one past the
+/// newest or the oldest may not. Either installs with `--untested` and is
+/// checked at load for the functions and layouts the adapter drives.
+fn beside_tested(version: &str, tested: &[&str]) -> String {
+    const MAY_DIFFER: &str = "its C API may differ — pass --untested to install it anyway";
+    let key = version_key(version);
+    let (Some(newest), Some(oldest)) = (tested.first(), tested.last()) else {
+        return MAY_DIFFER.into();
+    };
+    if !version.starts_with('b') || key.is_empty() {
+        return MAY_DIFFER.into();
+    }
+    if key > version_key(newest) {
+        return format!("it is newer than {newest}, the newest that is, so {MAY_DIFFER}");
+    }
+    if key < version_key(oldest) {
+        return format!("it is older than {oldest}, the oldest that is, so {MAY_DIFFER}");
+    }
+    match tested.windows(2).find(|w| version_key(w[0]) > key && key > version_key(w[1])) {
+        Some(w) => format!(
+            "it lies between {} and {}, which are, so its C API is very likely theirs — pass --untested to install it, \
+             checked at load as every build is",
+            w[1], w[0]
+        ),
+        None => MAY_DIFFER.into(),
+    }
+}
+
 pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
     let r = recipe();
     let builds = tested();
@@ -163,9 +194,9 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
             return Ok(());
         }
         Err(format!(
-            "llama.cpp {version} is not a build this adapter was tested with (tested: {}); its C API may differ — \
-             pass --untested to install it anyway",
-            tested_versions.join(", ")
+            "llama.cpp {version} is not a build this adapter was tested with (tested: {}); {}",
+            tested_versions.join(", "),
+            beside_tested(version, &tested_versions)
         ))
     };
 
@@ -352,8 +383,20 @@ mod tests {
 
     #[test]
     fn an_untested_build_needs_the_operator_to_say_so() {
-        let e = plan(&Request { version: Some("b1".into()), ..Request::default() }, &host("macos", "arm64")).unwrap_err();
+        let refused = |v: &str| plan(&Request { version: Some(v.into()), ..Request::default() }, &host("macos", "arm64")).unwrap_err();
+        let builds = tested();
+        let (newest, oldest) = (&builds[0].0, &builds[builds.len() - 1].0);
+        let e = refused("b1");
         assert!(e.contains("not a build this adapter was tested with") && e.contains("--untested"), "{e}");
+        assert!(e.contains(&format!("older than {oldest}, the oldest that is")), "{e}");
+        let e = refused("b99999999");
+        assert!(e.contains(&format!("newer than {newest}, the newest that is")) && e.contains("--untested"), "{e}");
+        // A build between two tested ones, where the recipe leaves a gap (it lists what a nightly tested, not every build).
+        let gap = builds.windows(2).find(|w| version_key(&w[0].0)[0] > version_key(&w[1].0)[0] + 1).expect("two tested builds with a build between");
+        let (above, below) = (&gap[0].0, &gap[1].0);
+        let e = refused(&format!("b{}", version_key(below)[0] + 1));
+        assert!(e.contains(&format!("lies between {below} and {above}, which are")) && e.contains("--untested"), "{e}");
+        assert!(e.contains("checked at load"), "{e}");
     }
 
     #[test]

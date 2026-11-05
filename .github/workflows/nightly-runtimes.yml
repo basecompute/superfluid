@@ -6,6 +6,15 @@ name: Nightly runtimes
 # `workflow_dispatch` tests a named release. A schedule fires only from the
 # default branch, and a release the recipe already lists is a no-op.
 #
+# A newest llama.cpp build that fails is walked back from: the record job
+# runs this workflow again on the next-newest build the recipe does not list,
+# at most five below the one the night started on (WALK_BACK in the script),
+# and the first to pass is the one proposed, so an upstream build fixed a few
+# builds later does not hold the recipe until the next night. Each hop is a
+# run of its own, named for its build, with `walking_back_from` set; it skips
+# MLX, which the night's first run tested. A `workflow_dispatch` of a named
+# build tests that build alone.
+#
 # The PRs go to the release being cut: the newest rc-X.Y.Z branch, or, with
 # none open, main, as drafts. The adapter is tested, and the recipe read and
 # changed, as that branch has them, whichever branch this file ran from; an
@@ -35,6 +44,10 @@ on:
         default: ""
       mlx:
         description: "An MLX version to test instead of the newest (X.Y.Z)"
+        required: false
+        default: ""
+      walking_back_from:
+        description: "Set by the nightly itself: the build the walk-back this run is a hop of started on (bNNNN)"
         required: false
         default: ""
 
@@ -91,8 +104,10 @@ jobs:
         run: |
           set -o pipefail
           python3 scripts/nightly_runtimes.py llamacpp pick --requested "$REQUESTED" | tee -a "$GITHUB_OUTPUT"
+      # Not on a hop of the walk-back: the night's first run tested MLX.
       - name: MLX
         id: mlx
+        if: inputs.walking_back_from == ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REQUESTED: ${{ inputs.mlx }}
@@ -214,9 +229,14 @@ jobs:
     # NIGHTLY_APP_PRIVATE_KEY lives in this environment, which only main can
     # deploy to, so a workflow edited on another branch cannot read it.
     environment: nightly
-    # Writes go through the App's token; the job's own only reads the build's digests.
+    # Writes go through the App's token; the job's own reads the build's digests
+    # and, on a failure, picks the walk-back's next hop (pull-requests: to skip a
+    # build whose PR was closed unmerged) and starts it: a `workflow_dispatch` is
+    # the one event a run made with it does start a workflow from.
     permissions:
       contents: read
+      pull-requests: read
+      actions: write
     # Runs overlap, not their records: a run waits only to write a runtime's PR or
     # issue, so a macOS leg queued for a day (its runner offline) holds up no other
     # run, nor the MLX record.
@@ -228,6 +248,7 @@ jobs:
       RESULT: ${{ needs.llamacpp.result }}
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       BASE: ${{ needs.pick.outputs.base }}
+      FROM: ${{ inputs.walking_back_from }}
     steps:
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         id: app
@@ -288,6 +309,22 @@ jobs:
             gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body" $draft
           fi
 
+      # The walk-back found its build: the issue its failing builds are on says so,
+      # for whoever closes it or looks into the builds above.
+      - name: Passed a walk-back, so note it on the issue
+        if: needs.llamacpp.result == 'success' && inputs.walking_back_from != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          existing=$(gh issue list --search "\"breaks the adapter\" llama.cpp in:title" --state open --json number --jq '.[0].number // empty') || { echo "::error::cannot list this repository's issues (are issues enabled, and may the nightly's App write them?)"; exit 1; }
+          if [ -z "$existing" ]; then
+            echo "no open issue to note $BUILD on"
+            exit 0
+          fi
+          gh issue comment "$existing" --body "$BUILD, walked back to from $FROM, passes: $RUN. The recipe moves to it; the newer builds this issue names still fail."
+          echo "noted $BUILD on the open issue #$existing"
+
       # Only a failure says the build breaks the adapter. A cancelled run, or the macOS
       # leg expiring in the queue with its runner offline (GitHub cancels it after a
       # day), says nothing about it, and the next night tests the newest build again.
@@ -317,6 +354,25 @@ jobs:
           p2="The test logs are the run's artifacts. Until the adapter is fixed, or the build is found to be at fault, the recipe keeps its last tested build. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
           body="$p1"$'\n\n'"$p2"
           gh issue create --title "$title" --body "$body"
+
+      # A scheduled run, or a hop of its walk-back, tries the next-newest build in a
+      # run of its own; a `workflow_dispatch` of a named build does not. The hop runs
+      # from this run's ref, main, so it can deploy to the nightly environment.
+      - name: Failed, so try the next-newest build
+        if: needs.llamacpp.result == 'failure' && (inputs.llamacpp == '' || inputs.walking_back_from != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          from=${FROM:-$BUILD}
+          next=$(python3 scripts/nightly_runtimes.py llamacpp walk-back --failed "$BUILD" --from "$from")
+          if [ -z "$next" ]; then
+            echo "no untested build below $BUILD to walk back to, within reach of $from; the recipe keeps its last tested build"
+            exit 0
+          fi
+          gh workflow run nightly-runtimes.yml --ref "$GITHUB_REF_NAME" -f llamacpp="$next" -f walking_back_from="$from"
+          echo "started a run on $next, walking back from $from"
 
   mlx:
     name: MLX ${{ needs.pick.outputs.mlx }}
