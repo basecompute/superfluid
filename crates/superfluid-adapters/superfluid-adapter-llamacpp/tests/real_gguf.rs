@@ -34,8 +34,18 @@ fn runtime(path: &Path) -> LlamaRuntime {
 #[test]
 fn the_sequence_table_stops_at_llama_cpps_limit() {
     let Some(path) = gguf() else { return };
+    // On the CPU: the table's shape is a matter of ids, and a buffer per lane is
+    // chosen only when the device has room for every buffer, which beside the
+    // other tests' contexts a smaller GPU does not always have.
     let open = |max_batch: u32, streams: Option<bool>| {
-        LlamaRuntime::open(LlamaConfig { model_path: path.clone(), max_seq_len: 32, max_batch, streams, ..Default::default() })
+        LlamaRuntime::open(LlamaConfig {
+            model_path: path.clone(),
+            max_seq_len: 32,
+            max_batch,
+            streams,
+            n_gpu_layers: 0,
+            ..Default::default()
+        })
     };
     let rt = open(160, Some(false)).unwrap_or_else(|e| panic!("160 lanes fit a table of 256: {e}"));
     assert_eq!(rt.describe().max_seqs, 255, "the shared pool: every id but the scratch one");
