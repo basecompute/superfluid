@@ -2230,7 +2230,7 @@
 <tr>
 <td><code>llamacpp</code></td>
 <td><code>llama download -hf</code></td>
-<td>the quant (<code>Q4_K_M</code>)</td>
+<td>the quant (<code>Q4_K_M</code>), or a size (<code>medium</code>) of a release in sizes</td>
 <td><code>--pull-file &lt;name&gt;</code>, <code>--pull-no-mmproj</code></td>
 <td>Hugging Face cache</td>
 </tr>
@@ -2244,7 +2244,7 @@
 <tr>
 <td><code>basert</code></td>
 <td><code>basert pull</code>, then <code>basert list --json</code> for the path</td>
-<td>a variant</td>
+<td>a variant, or a size</td>
 <td><code>--pull-target &lt;scheme&gt;</code>, <code>--pull-profile &lt;json&gt;</code>, <code>--pull-revision &lt;rev&gt;</code>, <code>--pull-file &lt;name.base&gt;</code> (one of several in a repo; served from the install <code>basert list</code> records it in), <code>--pull-force</code></td>
 <td>the baseRT models cache (<code>BASERT_MODELS_DIR</code>)</td>
 </tr>
@@ -2252,6 +2252,7 @@
 </table>
 <ul>
 <li><code>--offline</code> only looks in the cache and fetches nothing.</li>
+<li>A <strong>release in sizes</strong> is a repository whose model files are named by size, the BaseQuant repositories' <code>-XS</code>, <code>-Small</code>, <code>-Medium</code>, <code>-Large</code> and <code>-XL</code>, and none by quant. With nothing naming a file, both runtimes pull its Medium: <code>superfluid serve basecompute/Qwen3.8-27B-BaseQuant-V1 --runtime basert</code> and <code>--runtime llamacpp</code> serve <code>Qwen3.8-27B-BaseQuant-V1-Medium.base</code> and <code>.gguf</code>. A size tag takes another (<code>basecompute/Qwen3.8-27B-BaseQuant-V1:small</code>), <code>--pull-file &lt;name&gt;</code> a file; a size the release does not come in names the ones it does, and a release of one file gives that file. The llamacpp runtime reads the repository's listing from the Hub for this (llama.cpp's own pick, with no file named, is some file of the repository, not the Medium, and it refuses a size tag as not a quantization); a listing that fails leaves a plain pull to llama.cpp with a warning, and <code>--offline</code> lists nothing, so there a size spells its file as the releases name them (<code>&lt;repo&gt;-Small.gguf</code>) and no tag is left to llama.cpp's cache. The basert runtime's <code>basert pull</code> reads these releases by the same rule from basert 0.4.5; a size with basert 0.4.2–0.4.4 is passed as <code>--file &lt;repo&gt;-&lt;Size&gt;.base</code>, and each file installs under a <code>file-…</code> variant that records it, which a size tag is served from.</li>
 <li>A baseRT variant is named as <code>basert list</code> names it (<code>default-q8</code>, <code>file-…</code>). One that is installed is served without a pull (unless <code>--pull-force</code>); one that is not is pulled as named with basert 0.4.2 or later (<code>basert pull org/model:&lt;variant&gt;</code>, without <code>--pull-file</code>, <code>--pull-profile</code> or <code>--pull-target</code>, which would name it twice), and with an older basert by the id alone, which fetches the quant its options pick.</li>
 <li>An undeclared <code>--pull-*</code> option, or <code>--pull-*</code> with no model given by id, is refused before anything is fetched.</li>
 <li>A gated or private model needs <code>HF_TOKEN</code>.</li>
