@@ -444,18 +444,48 @@ pub fn fetch_json_within(url: &str, deadline: Duration) -> Result<Value, String>
     let mut curl = Command::new("curl");
     curl.args(["-fsSL", "--proto", "=https", "--tlsv1.2", "--retry", "2", "-H", "Accept: application/json"]);
     curl.args(["--connect-timeout", &secs, "--max-time", &secs, "--retry-max-time", &secs]);
-    // GitHub's API allows sixty unauthenticated requests an hour per address, which hosted
-    // runners share; a token in the environment lifts that, for the API alone.
-    if url.starts_with("https://api.github.com/") {
-        if let Some(token) = std::env::var_os("GITHUB_TOKEN").filter(|t| !t.is_empty()) {
-            curl.arg("-H").arg(format!("Authorization: Bearer {}", token.to_string_lossy()));
-        }
+    if let Some(token) = token_for(url).and_then(std::env::var_os).filter(|t| !t.is_empty()) {
+        curl.arg("-H").arg(format!("Authorization: Bearer {}", token.to_string_lossy()));
     }
     let out = curl.arg(url).output().map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
         return Err(format!("fetching {url} failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("{url}: {e}"))
+}
+
+/// The environment variable whose token a fetch of `url` sends, if any. GitHub's API allows
+/// sixty unauthenticated requests an hour per address, which hosted runners share; a token
+/// lifts that, for the API alone. A gated or private Hugging Face repository is listed with
+/// `HF_TOKEN`, as `llama download` and `huggingface_hub` read it.
+fn token_for(url: &str) -> Option<&'static str> {
+    if url.starts_with("https://api.github.com/") {
+        return Some("GITHUB_TOKEN");
+    }
+    let hub = format!("{}/", hf_endpoint().trim_end_matches('/'));
+    (url.starts_with("https://huggingface.co/") || url.starts_with(&hub)).then_some("HF_TOKEN")
+}
+
+/// The Hugging Face Hub, or the mirror `HF_ENDPOINT` names, as `llama download` and
+/// `huggingface_hub` read it.
+pub fn hf_endpoint() -> String {
+    std::env::var("HF_ENDPOINT").ok().filter(|e| !e.trim().is_empty()).unwrap_or_else(|| "https://huggingface.co".into())
+}
+
+/// The files of the Hub repository `id` (paths within it), from its listing.
+pub fn hf_repo_files(id: &str) -> Result<Vec<String>, String> {
+    let url = format!("{}/api/models/{id}", hf_endpoint().trim_end_matches('/'));
+    let v = fetch_json(&url)?;
+    let files: Vec<String> = v["siblings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["rfilename"].as_str().map(str::to_string))
+        .collect();
+    if files.is_empty() {
+        return Err(format!("{url} lists no files for {id}"));
+    }
+    Ok(files)
 }
 
 pub fn unpack(archive: &Path, into: &Path) -> Result<(), String> {

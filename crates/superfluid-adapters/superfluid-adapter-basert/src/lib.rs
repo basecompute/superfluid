@@ -97,7 +97,7 @@ impl Runtime for Basert {
             PullOption { name: "target", value: true, about: "the quant scheme a model fetched from its source is converted to (base-q4, base-q8, ...)" },
             PullOption { name: "profile", value: true, about: "a quant profile JSON, instead of the auto-selected one" },
             PullOption { name: "revision", value: true, about: "the Hugging Face revision, branch or tag" },
-            PullOption { name: "file", value: true, about: "the .base file to take from a repo that holds several (e.g. Foo-Medium.base)" },
+            PullOption { name: "file", value: true, about: "the .base file to take from a repo that holds several (e.g. Foo-Medium.base); a release in sizes gives its Medium without one" },
             PullOption { name: "force", value: false, about: "fetch and convert again, even if installed" },
         ])
     }
@@ -161,12 +161,17 @@ fn needs_pull(list_json: &str, id: &str, variant: Option<&str>, force: bool) -> 
 /// What follows `basert pull` for `id[:variant]`. A basert whose `--version` printed `version`
 /// takes the variant with the id when [`takes_variant`] says so, with every option but `--file`,
 /// `--profile` and `--target`, which it refuses beside a variant as naming it twice; an older one
-/// takes the id alone, with every option.
+/// takes the id alone, with every option. A size (`small`) is a variant to basert 0.4.5 and later;
+/// a 0.4.2–0.4.4 is given the file the releases in sizes name it (`--file <repo>-Small.base`).
 fn pull_args(pull: &Pull, id: &str, variant: Option<&str>, version: &str) -> Vec<String> {
-    let variant = variant.filter(|_| takes_variant(version));
+    let by_file = variant.and_then(size_name).filter(|_| takes_variant(version) && !takes_size(version)).map(|s| size_file(id, s));
+    let variant = variant.filter(|_| takes_variant(version) && by_file.is_none());
     let mut args = vec![variant.map_or_else(|| id.to_string(), |v| format!("{id}:{v}"))];
+    if let Some(file) = &by_file {
+        args.extend(["--file".to_string(), file.clone()]);
+    }
     for (name, value) in &pull.options {
-        if variant.is_some() && ["file", "profile", "target"].contains(&name.as_str()) {
+        if (variant.is_some() || by_file.is_some()) && ["file", "profile", "target"].contains(&name.as_str()) {
             continue;
         }
         args.push(format!("--{name}"));
@@ -175,17 +180,55 @@ fn pull_args(pull: &Pull, id: &str, variant: Option<&str>, version: &str) -> Vec
     args
 }
 
+/// The sizes a release names its `.base` files by instead of a quant (the BaseQuant repos'
+/// `-XS`/`-Small`/`-Medium`/`-Large`/`-XL`), smallest first, and how each is spelled in a file
+/// name. `basert pull` reads these releases: a plain pull takes the Medium, a size names a
+/// variant, and each file installs under a `file-…` variant recording the file.
+const SIZES: [(&str, &str); 5] = [("xs", "XS"), ("small", "Small"), ("medium", "Medium"), ("large", "Large"), ("xl", "XL")];
+
+/// The size a pull takes when nothing names one.
+const DEFAULT_SIZE: &str = "medium";
+
+/// The size `name` spells, case aside.
+fn size_name(name: &str) -> Option<&'static str> {
+    let n = name.to_ascii_lowercase();
+    SIZES.iter().find(|(s, _)| *s == n).map(|(s, _)| *s)
+}
+
+/// The size a `.base` is named by (`Foo-Medium.base` → `medium`), if any.
+fn size_of_file(file: &str) -> Option<&'static str> {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    let stem = name.strip_suffix(".base").unwrap_or(name);
+    size_name(stem.rsplit(['-', '_']).next().unwrap_or(stem))
+}
+
+/// The file a release in sizes names its `size` of `id` (`org/Foo`, `small` → `Foo-Small.base`).
+fn size_file(id: &str, size: &str) -> String {
+    let repo = id.rsplit('/').next().unwrap_or(id);
+    format!("{repo}-{}.base", SIZES.iter().find(|(s, _)| *s == size).map_or(size, |(_, spelled)| spelled))
+}
+
 /// Whether the basert whose `--version` printed `version` (`basert 0.4.2`) takes `pull <id>:<variant>`,
-/// as 0.4.2 and later do. A pre-release of 0.4.2 may predate it, and output naming no version is
-/// taken as an older basert's.
+/// as 0.4.2 and later do.
 fn takes_variant(version: &str) -> bool {
+    at_least(version, (0, 4, 2))
+}
+
+/// Whether that basert takes a size as a variant (`pull <id>:small`), as 0.4.5 and later do.
+fn takes_size(version: &str) -> bool {
+    at_least(version, (0, 4, 5))
+}
+
+/// Whether `version` (`basert 0.4.2`) is `want` or later. A pre-release of `want` may predate
+/// what `want` brings, and output naming no version is taken as an older basert's.
+fn at_least(version: &str, want: (u64, u64, u64)) -> bool {
     let Some(v) = version.split_whitespace().find(|w| w.starts_with(|c: char| c.is_ascii_digit())) else {
         return false;
     };
     let v = v.split_once('+').map_or(v, |(v, _build)| v);
     let (core, pre) = v.split_once('-').map_or((v, false), |(core, _)| (core, true));
     let parts: Result<Vec<u64>, _> = core.split('.').map(str::parse).collect();
-    matches!(parts.as_deref(), Ok(&[major, minor, patch]) if (major, minor, patch, !pre) >= (0, 4, 2, true))
+    matches!(parts.as_deref(), Ok(&[major, minor, patch]) if (major, minor, patch, !pre) >= (want.0, want.1, want.2, true))
 }
 
 /// What `basert --version` prints, or nothing when it fails.
@@ -217,22 +260,29 @@ fn installed_file(list_json: &str, id: &str, file: &str) -> Result<std::path::Pa
         .ok_or_else(|| format!("basert lists no install of {id} pulled from {file} (a basert whose list reports `file` is needed)"))
 }
 
-/// The `.base` file `basert list --json` holds for `id`: the variant named with the id,
-/// else the one variant installed, else `default-q4` among several.
+/// The `.base` file `basert list --json` holds for `id`: the variant named with the id (a size
+/// names the `file-…` install of the file of that size), else the one variant installed, else
+/// `default-q4` among several, else the Medium of a release in sizes, else the first.
 fn installed_path(list_json: &str, id: &str, variant: Option<&str>) -> Result<std::path::PathBuf, String> {
     let entries: Vec<serde_json::Value> = serde_json::from_str(list_json).map_err(|e| format!("basert list --json: {e}"))?;
     let mine: Vec<&serde_json::Value> =
         entries.iter().filter(|m| m["id"] == id && m["installed"] == true && m["path"].is_string()).collect();
     let variants = || mine.iter().filter_map(|m| m["variant"].as_str()).collect::<Vec<_>>().join(", ");
+    let of_size = |size: &str| {
+        mine.iter().find(|m| {
+            m["variant"].as_str().is_some_and(|v| v.starts_with("file-")) && m["file"].as_str().and_then(size_of_file) == Some(size)
+        })
+    };
     let chosen = match variant {
         Some(v) => mine
             .iter()
             .find(|m| m["variant"] == v)
+            .or_else(|| size_name(v).and_then(of_size))
             .ok_or_else(|| format!("basert has no installed variant {v} of {id} (installed: {})", variants()))?,
         None => match mine.as_slice() {
             [] => return Err(format!("basert has no installed model {id}")),
             [one] => one,
-            many => many.iter().find(|m| m["variant"] == "default-q4").unwrap_or(&many[0]),
+            many => many.iter().find(|m| m["variant"] == "default-q4").or_else(|| of_size(DEFAULT_SIZE)).unwrap_or(&many[0]),
         },
     };
     Ok(std::path::PathBuf::from(chosen["path"].as_str().unwrap_or_default()))
@@ -383,7 +433,7 @@ mod tests {
 
 #[cfg(test)]
 mod pull_tests {
-    use super::{installed_file, installed_path, needs_pull, pull_args, takes_variant, Basert};
+    use super::{installed_file, installed_path, needs_pull, pull_args, takes_size, takes_variant, Basert};
     use superfluid_adapter_kit::{Pull, Runtime};
 
     #[test]
@@ -432,6 +482,45 @@ mod pull_tests {
         assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q4/model.base");
         let l = list(&[("org/a", "default-q8", true), ("org/a", "default-f16", true)]);
         assert_eq!(installed_path(&l, "org/a", None).unwrap().to_str().unwrap(), "/m/org/a/default-q8/model.base");
+    }
+
+    /// A release in sizes installs each file under a `file-…` variant that records it: a size
+    /// names that install, the bare id is its Medium among several, and an installed size is
+    /// not pulled again.
+    #[test]
+    fn a_size_is_the_install_of_the_file_of_that_size() {
+        let l = r#"[
+            {"id":"org/a","variant":"file-a-small-11111111","installed":true,"path":"/m/small.base","file":"a-Small.base"},
+            {"id":"org/a","variant":"file-a-medium-22222222","installed":true,"path":"/m/medium.base","file":"a-Medium.base"},
+            {"id":"org/a","variant":"file-a-xl-33333333","installed":false,"file":"a-XL.base"},
+            {"id":"org/b","variant":"file-b-small-44444444","installed":true,"path":"/m/b-small.base","file":"b-Small.base"},
+            {"id":"org/b","variant":"default-q4","installed":true,"path":"/m/b-q4.base"}]"#;
+        assert_eq!(installed_path(l, "org/a", Some("small")).unwrap().to_str(), Some("/m/small.base"));
+        assert_eq!(installed_path(l, "org/a", Some("Medium")).unwrap().to_str(), Some("/m/medium.base"));
+        assert_eq!(installed_path(l, "org/a", None).unwrap().to_str(), Some("/m/medium.base"));
+        let e = installed_path(l, "org/a", Some("xl")).unwrap_err();
+        assert!(e.contains("no installed variant xl of org/a"), "{e}");
+        assert!(installed_path(l, "org/a", Some("large")).is_err());
+        // a quant install still comes first for the bare id
+        assert_eq!(installed_path(l, "org/b", None).unwrap().to_str(), Some("/m/b-q4.base"));
+        assert!(!needs_pull(l, "org/a", Some("small"), false));
+        assert!(needs_pull(l, "org/a", Some("xl"), false));
+        assert!(needs_pull(l, "org/a", None, false), "a bare id pulls (the release's Medium may be newer)");
+    }
+
+    #[test]
+    fn a_size_is_pulled_as_a_variant_from_0_4_5_and_as_its_file_before() {
+        for v in ["basert 0.4.5\n", "basert 0.5.0", "basert 1.0.0"] {
+            assert!(takes_size(v), "{v:?}");
+        }
+        for v in ["basert 0.4.4\n", "basert 0.4.5-rc.1", "", "garbage"] {
+            assert!(!takes_size(v), "{v:?}");
+        }
+        assert_eq!(argv("org/Foo:small --revision v1 --force", "basert 0.4.5\n"), "org/Foo:small --revision v1 --force");
+        assert_eq!(argv("org/Foo:XL --revision v1", "basert 0.4.4\n"), "org/Foo --file Foo-XL.base --revision v1");
+        assert_eq!(argv("org/Foo:medium --target base-q8", "basert 0.4.2\n"), "org/Foo --file Foo-Medium.base", "--target would name it twice");
+        assert_eq!(argv("org/Foo:small --target base-q8", "basert 0.4.1\n"), "org/Foo --target base-q8", "an older basert takes the id alone");
+        assert_eq!(argv("org/Foo:default-q8", "basert 0.4.4\n"), "org/Foo:default-q8", "a variant that is no size is as before");
     }
 
     #[test]
