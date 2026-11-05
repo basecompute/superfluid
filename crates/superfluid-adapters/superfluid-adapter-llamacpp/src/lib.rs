@@ -201,11 +201,10 @@ pub mod sized {
         SIZES.iter().find(|(s, _)| *s == n).map(|(s, _)| *s)
     }
 
-    /// `Foo-Medium.gguf`, `sub/Foo-Medium-00001-of-00002.gguf` → `Foo-Medium`.
-    fn stem(path: &str) -> String {
-        let name = path.rsplit('/').next().unwrap_or(path);
+    /// A file's name without `.gguf` and without the shard suffix llama.cpp splits a large
+    /// file into: `Foo-Medium.gguf`, `Foo-Medium-00001-of-00002.gguf` → `Foo-Medium`.
+    fn name_stem(name: &str) -> String {
         let stem = name.strip_suffix(".gguf").or_else(|| name.strip_suffix(".GGUF")).unwrap_or(name);
-        // the shard suffix llama.cpp splits a large file into
         match stem.rsplit_once("-of-") {
             Some((head, total)) if total.chars().all(|c| c.is_ascii_digit()) && !total.is_empty() => match head.rsplit_once('-') {
                 Some((stem, index)) if index.chars().all(|c| c.is_ascii_digit()) && !index.is_empty() => stem.to_string(),
@@ -215,11 +214,35 @@ pub mod sized {
         }
     }
 
-    /// The last `-` segment of a file's stem, lowercased: `Foo-Medium.gguf` → `medium`,
-    /// `Foo-UD-Q4_K_M.gguf` → `q4_k_m`.
+    /// The model a file is of, by its whole path in the repository: `sub/Foo-Medium.gguf` and
+    /// `sub/Foo-Medium-00001-of-00002.gguf` are one model, `other/Foo-Medium.gguf` another.
+    fn model(path: &str) -> String {
+        match path.rsplit_once('/') {
+            Some((dir, name)) => format!("{dir}/{}", name_stem(name)),
+            None => name_stem(path),
+        }
+    }
+
+    /// The last `-` segment of a file's name (its directories aside), lowercased:
+    /// `Foo-Medium.gguf` → `medium`, `Foo-UD-Q4_K_M.gguf` → `q4_k_m`.
     fn tag(path: &str) -> String {
-        let stem = stem(path);
+        let stem = name_stem(path.rsplit('/').next().unwrap_or(path));
         stem.rsplit('-').next().unwrap_or(&stem).to_ascii_lowercase()
+    }
+
+    /// The models among `files` that `keep` admits, each with its first file in path order
+    /// (a sharded model's first shard, which llama.cpp follows to the rest).
+    fn models<'a>(files: &[&'a String], keep: impl Fn(&str) -> bool) -> Vec<(String, &'a String)> {
+        let mut sorted: Vec<&'a String> = files.to_vec();
+        sorted.sort();
+        let mut out: Vec<(String, &'a String)> = Vec::new();
+        for f in sorted.into_iter().filter(|f| keep(f)) {
+            let m = model(f);
+            if !out.iter().any(|(seen, _)| *seen == m) {
+                out.push((m, f));
+            }
+        }
+        out
     }
 
     /// The size a GGUF is named by, if any.
@@ -268,21 +291,17 @@ pub mod sized {
         }
         let offered: Vec<&str> = SIZES.iter().map(|(s, _)| *s).filter(|s| ggufs.iter().any(|f| size_of(f) == Some(s))).collect();
         let want = size.unwrap_or(DEFAULT);
-        // a sharded file is its first shard, which llama.cpp follows to the rest
-        let mut hits: Vec<&String> = ggufs.iter().copied().filter(|f| size_of(f) == Some(want)).collect();
-        hits.sort();
-        let mut stems: Vec<String> = hits.iter().map(|f| stem(f)).collect();
-        stems.dedup();
-        match (stems.len(), size) {
-            (1, _) => Ok(Some(hits[0].clone())),
-            (0, None) if ggufs.len() == 1 => Ok(Some(ggufs[0].clone())),
-            (0, _) => Err(format!(
+        let hits = models(&ggufs, |f| size_of(f) == Some(want));
+        match (hits.as_slice(), size) {
+            ([(_, first)], _) => Ok(Some((*first).clone())),
+            ([], None) if models(&ggufs, |_| true).len() == 1 => Ok(Some(models(&ggufs, |_| true)[0].1.clone())),
+            ([], _) => Err(format!(
                 "{id} has no {want} GGUF; it comes in: {} (`{id}:<size>` names one, --pull-file a file)",
                 offered.join(", ")
             )),
             _ => Err(format!(
                 "{want} names several GGUFs of {id} ({}); name one with --pull-file",
-                hits.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")
+                hits.iter().map(|(_, f)| f.as_str()).collect::<Vec<_>>().join(", ")
             )),
         }
     }
@@ -377,6 +396,23 @@ pub mod sized {
             assert_eq!(file("org/m", Some("XL"), true).unwrap().as_deref(), Some("m-XL.gguf"));
             assert_eq!(file("org/m", None, true).unwrap(), None);
             assert_eq!(file("org/m", Some("Q4_K_M"), true).unwrap(), None);
+        }
+
+        /// Two models of one size in different directories are two, not one; and the sole
+        /// model of a repository is sole however many shards it is in.
+        #[test]
+        fn models_are_told_apart_by_their_whole_path_and_counted_over_their_shards() {
+            let id = "org/m";
+            let two = files(&["imatrix/m-Medium.gguf", "original/m-Medium.gguf"]);
+            let e = pick(id, &two, None).unwrap_err();
+            assert!(e.contains("medium names several GGUFs") && e.contains("--pull-file"), "{e}");
+            let e = pick(id, &two, Some("medium")).unwrap_err();
+            assert!(e.contains("medium names several GGUFs"), "{e}");
+            let sharded = files(&["m-XL-00002-of-00002.gguf", "m-XL-00001-of-00002.gguf", "README.md"]);
+            assert_eq!(pick(id, &sharded, None).unwrap().as_deref(), Some("m-XL-00001-of-00002.gguf"));
+            // a directory's name is not the file's tag
+            let dirs = files(&["q4-quants/m-Medium.gguf"]);
+            assert_eq!(pick(id, &dirs, None).unwrap().as_deref(), Some("q4-quants/m-Medium.gguf"));
         }
 
         /// The real repository, listed from the Hub: run with `--ignored` where the network is.
