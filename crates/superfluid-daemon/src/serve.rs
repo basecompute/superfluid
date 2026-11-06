@@ -1022,14 +1022,21 @@ pub fn run(args: &[String], embedding: &Embedding) {
     if let Some(on) = spec_bitexact {
         std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });
     }
-    let (speculate_primary, speculate_fallbacks): (Option<String>, Vec<String>) = match speculation_for(
-        speculate.as_deref(),
-        &runtime.static_capabilities(),
-        &model,
-        runtime.id.name(),
-    )
-    .map(|d| superfluid_daemon::speculate_resolve::resolve_all(d, &model))
-    {
+    let directive = speculation_for(speculate.as_deref(), &runtime.static_capabilities(), &model, runtime.id.name());
+    // `auto` on a target the hub catalog pairs with a drafter (`speculator_auto`): the drafter is pulled
+    // when no copy is installed, as one given by id is. A pull that fails is said, and `auto` settles
+    // among what is here.
+    if directive.map(str::trim) == Some("auto") && !pull_flags.offline {
+        if let Some(id) = superfluid_daemon::speculate_resolve::auto_drafter_to_pull(&model) {
+            eprintln!("superfluid: speculation: auto: the hub catalog pairs {} with {id}, which is not installed", model.display());
+            let flags = superfluid_daemon::pulls::PullFlags::default();
+            if let Err(e) = superfluid_daemon::pulls::pull(&catalog, runtime.id, &id, &flags) {
+                eprintln!("superfluid: speculation: auto: {id}: {e} — choosing among what is installed");
+            }
+        }
+    }
+    let (speculate_primary, speculate_fallbacks): (Option<String>, Vec<String>) =
+        match directive.map(|d| superfluid_daemon::speculate_resolve::resolve_all(d, &model)) {
         None => (None, Vec::new()),
         Some(Ok(mut ranked)) => {
             if let Some(r) = ranked.first() {
