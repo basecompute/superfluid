@@ -1023,20 +1023,12 @@ pub fn run(args: &[String], embedding: &Embedding) {
         std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });
     }
     let directive = speculation_for(speculate.as_deref(), &runtime.static_capabilities(), &model, runtime.id.name());
-    // `auto` on a target the hub catalog pairs with a drafter (`speculator_auto`): the drafter is pulled
-    // when no copy is installed, as one given by id is. A pull that fails is said, and `auto` settles
-    // among what is here.
-    if directive.map(str::trim) == Some("auto") && !pull_flags.offline {
-        if let Some(id) = superfluid_daemon::speculate_resolve::auto_drafter_to_pull(&model) {
-            eprintln!("superfluid: speculation: auto: the hub catalog pairs {} with {id}, which is not installed", model.display());
-            let flags = superfluid_daemon::pulls::PullFlags::default();
-            if let Err(e) = superfluid_daemon::pulls::pull(&catalog, runtime.id, &id, &flags) {
-                eprintln!("superfluid: speculation: auto: {id}: {e} — choosing among what is installed");
-            }
-        }
-    }
-    let (speculate_primary, speculate_fallbacks): (Option<String>, Vec<String>) =
-        match directive.map(|d| superfluid_daemon::speculate_resolve::resolve_all(d, &model)) {
+    let resolved = directive.map(|d| {
+        let pull = auto_drafter_pull(&catalog, runtime.id, &model);
+        let pull = (!pull_flags.offline).then_some(&pull as &dyn Fn(&str));
+        superfluid_daemon::speculate_resolve::resolve_all(d, &model, pull)
+    });
+    let (speculate_primary, speculate_fallbacks): (Option<String>, Vec<String>) = match resolved {
         None => (None, Vec::new()),
         Some(Ok(mut ranked)) => {
             if let Some(r) = ranked.first() {
@@ -1364,7 +1356,16 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 if *m == model {
                     speculate_primary.iter().chain(speculate_fallbacks.iter()).cloned().collect()
                 } else {
-                    speculate.as_deref().and_then(|d| resolve_all(d, m).ok()).unwrap_or_default()
+                    // Another model given at startup: its marked drafter is pulled before the sizing
+                    // counts it, by the runtime that serves it, where that runtime drafts under `auto`.
+                    let serves = runtime_pick
+                        .resolve(m, &catalog)
+                        .and_then(|rt| catalog.require(rt))
+                        .ok()
+                        .filter(|rt| rt.static_capabilities().declines_auto_speculation().is_none());
+                    let pull = serves.map(|rt| auto_drafter_pull(&catalog, rt.id, m));
+                    let pull = pull.as_ref().filter(|_| !pull_flags.offline).map(|f| f as &dyn Fn(&str));
+                    speculate.as_deref().and_then(|d| resolve_all(d, m, pull).ok()).unwrap_or_default()
                 }
             })
             .collect();
@@ -1720,6 +1721,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             pressure_low_pct: if pressure_low > 0 { pressure_low } else { 70 },
             pin_budget_pct,
             speculate: speculate.clone(),
+            offline: pull_flags.offline,
             speculation: speculation.clone(),
             completion_deadline_ms,
             completion_bucket,
@@ -1992,6 +1994,8 @@ struct ModelBuildCfg {
     pressure_low_pct: u8,
     pin_budget_pct: u8,
     speculate: Option<String>,
+    /// `--offline`: `auto` pulls no drafter for a model loaded later either.
+    offline: bool,
     speculation: superfluid_daemon::SpeculationOptions,
     completion_deadline_ms: u64,
     completion_bucket: superfluid_daemon::completion_bucket::BucketConfig,
@@ -2166,6 +2170,22 @@ fn codec_for_dialect(
     })
 }
 
+/// `--speculate auto`'s pull (speculate_resolve::resolve_all) of the drafter the hub catalog marks
+/// for `target` when no copy is installed, by `runtime`, the one that serves the target, as a drafter
+/// given by id is pulled. A pull that fails is said, and `auto` settles among what is installed.
+fn auto_drafter_pull<'a>(
+    catalog: &'a superfluid_daemon::runtimes::Catalog,
+    runtime: RuntimeId,
+    target: &'a std::path::Path,
+) -> impl Fn(&str) + 'a {
+    move |id: &str| {
+        eprintln!("superfluid: speculation: auto: the hub catalog pairs {} with {id}, which is not installed", target.display());
+        if let Err(e) = superfluid_daemon::pulls::pull(catalog, runtime, id, &superfluid_daemon::pulls::PullFlags::default()) {
+            eprintln!("superfluid: speculation: auto: {id}: {e} — choosing among what is installed");
+        }
+    }
+}
+
 fn speculation_for<'a>(
     directive: Option<&'a str>,
     caps: &superfluid_daemon::capabilities::Capabilities,
@@ -2263,8 +2283,12 @@ fn build_loaded_daemon(
     let (codec, host) = engine_on(cfg, &runtime, model_path)?;
     let park_dir = cfg.park.then(|| mdir.join("park"));
     let caps = host.capabilities().read().expect("capability record").clone();
+    // A model loaded after startup (another --model, --model-dir, /v1/models/load) pulls its marked
+    // drafter here, as the first model does before it starts.
+    let pull = auto_drafter_pull(&cfg.catalog, runtime.id, model_path);
+    let pull = (!cfg.offline).then_some(&pull as &dyn Fn(&str));
     let mut speculate_ranked = match speculation_for(cfg.speculate.as_deref(), &caps, model_path, runtime.id.name()) {
-        Some(d) => superfluid_daemon::speculate_resolve::resolve_all(d, model_path).map_err(DaemonError::Generation)?,
+        Some(d) => superfluid_daemon::speculate_resolve::resolve_all(d, model_path, pull).map_err(DaemonError::Generation)?,
         None => Vec::new(),
     };
     let speculate_first = (!speculate_ranked.is_empty()).then(|| speculate_ranked.remove(0));

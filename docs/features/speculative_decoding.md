@@ -33,7 +33,7 @@ With several models, the directive is resolved per model.
 
 ## How `auto` picks a drafter
 
-1. The drafter the hub catalog marks for the target (`speculator_auto` on the drafter's row: Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters), on macOS, where those pairings were measured faster than the bundle's own head. When no copy is installed it is pulled with the target's runtime first (its `default-q4` file), unless `--offline`; a pull that fails is said and `auto` goes on with what is installed. Gemma 4's embedded head is never displaced.
+1. The drafter the hub catalog marks for the target (`speculator_auto` on the drafter's row: Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters), on macOS, where those pairings were measured faster than the bundle's own head. When no copy is installed it is pulled with the target's runtime first (its `default-q4` file), for each model served, whether given at startup or loaded later, unless `--offline`; a pull that fails is said and `auto` goes on with what is installed. Gemma 4's embedded head is never displaced.
 2. The target bundle's own head, if it has one.
 3. Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a `drafters/` directory beside it or one level up, and the baseRT models cache. Nothing else is downloaded. A plain draft model is never picked.
 4. Among fitting drafters: one the hub catalog pairs with the target, then one whose name contains the target's, then DSpark, DFlash, EAGLE-3, then the target's quantization, then the newest.
