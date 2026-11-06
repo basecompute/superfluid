@@ -474,18 +474,132 @@ pub fn hf_endpoint() -> String {
 
 /// The files of the Hub repository `id` (paths within it), from its listing.
 pub fn hf_repo_files(id: &str) -> Result<Vec<String>, String> {
-    let url = format!("{}/api/models/{id}", hf_endpoint().trim_end_matches('/'));
+    Ok(hf_repo_listing(id, None)?.files.into_iter().map(|f| f.path).collect())
+}
+
+/// A file of a Hub repository, as its listing gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfFile {
+    /// Its path within the repository.
+    pub path: String,
+    pub size: u64,
+    /// The name its bytes take in the Hub cache's `blobs`: the LFS SHA-256 of a large file,
+    /// the git blob id of a small one, as huggingface_hub and llama.cpp both name them.
+    pub blob: String,
+}
+
+/// A Hub repository's listing at one revision, with each file's size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfListing {
+    pub id: String,
+    /// The commit the revision names.
+    pub sha: String,
+    pub files: Vec<HfFile>,
+}
+
+impl HfListing {
+    /// Whether the Hub cache already holds `file`'s bytes.
+    pub fn cached(&self, file: &HfFile) -> bool {
+        hf_repo_cache(&self.id).join("blobs").join(&file.blob).is_file()
+    }
+
+    /// The bytes a pull of the files `keep` admits fetches: those not in the cache yet.
+    pub fn to_fetch(&self, keep: impl Fn(&str) -> bool) -> u64 {
+        self.files.iter().filter(|f| keep(&f.path) && !self.cached(f)).map(|f| f.size).sum()
+    }
+}
+
+/// The listing of the Hub repository `id` at `revision` (`main` when none), with sizes.
+pub fn hf_repo_listing(id: &str, revision: Option<&str>) -> Result<HfListing, String> {
+    let endpoint = hf_endpoint();
+    let url = match revision {
+        Some(rev) => format!("{}/api/models/{id}/revision/{}?blobs=true", endpoint.trim_end_matches('/'), rev.replace('/', "%2F")),
+        None => format!("{}/api/models/{id}?blobs=true", endpoint.trim_end_matches('/')),
+    };
     let v = fetch_json(&url)?;
-    let files: Vec<String> = v["siblings"]
+    let listing = hf_listing_from(id, &v);
+    if listing.files.is_empty() {
+        return Err(format!("{url} lists no files for {id}"));
+    }
+    Ok(listing)
+}
+
+/// [`hf_repo_listing`]'s reading of what the Hub answered.
+pub fn hf_listing_from(id: &str, v: &Value) -> HfListing {
+    let files = v["siblings"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|s| s["rfilename"].as_str().map(str::to_string))
+        .filter_map(|s| {
+            let path = s["rfilename"].as_str()?.to_string();
+            let size = s["lfs"]["size"].as_u64().or_else(|| s["size"].as_u64()).unwrap_or(0);
+            let blob = s["lfs"]["sha256"].as_str().or_else(|| s["blobId"].as_str()).unwrap_or_default().to_string();
+            Some(HfFile { path, size, blob })
+        })
         .collect();
-    if files.is_empty() {
-        return Err(format!("{url} lists no files for {id}"));
+    HfListing { id: id.to_string(), sha: v["sha"].as_str().unwrap_or_default().to_string(), files }
+}
+
+/// The Hub cache, as huggingface_hub and llama.cpp find it: `HF_HUB_CACHE`, else `hub` under
+/// `HF_HOME`, else `huggingface/hub` under `XDG_CACHE_HOME`, else `~/.cache/huggingface/hub`.
+pub fn hf_hub_cache() -> PathBuf {
+    let set = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    set("HF_HUB_CACHE")
+        .or_else(|| set("HF_HOME").map(|h| h.join("hub")))
+        .or_else(|| set("XDG_CACHE_HOME").map(|c| c.join("huggingface").join("hub")))
+        .unwrap_or_else(|| home_dir().join(".cache").join("huggingface").join("hub"))
+}
+
+/// Where the Hub cache keeps the repository `id`: `models--org--name`.
+pub fn hf_repo_cache(id: &str) -> PathBuf {
+    hf_hub_cache().join(format!("models--{}", id.replace('/', "--")))
+}
+
+/// Where a pull of the repository `id` lands its bytes: the repository's directory in the Hub
+/// cache, and the store huggingface_hub (from 2.0) keeps large files in, `blobs/<xx>/<hash>`
+/// under the cache itself, which the repository's `blobs` only link to.
+pub fn hf_cache_roots(id: &str) -> Vec<PathBuf> {
+    vec![hf_repo_cache(id), hf_hub_cache().join("blobs")]
+}
+
+/// Where this platform keeps caches: `~/Library/Caches` on macOS, else `XDG_CACHE_HOME` or
+/// `~/.cache`, as llama.cpp and basert place theirs.
+pub fn platform_cache_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        return home_dir().join("Library").join("Caches");
     }
-    Ok(files)
+    std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| home_dir().join(".cache"))
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Whether `path` matches the shell pattern `pattern`, where `*` stands for any run of
+/// characters (directories included, as huggingface_hub's `allow_patterns` reads it).
+pub fn glob_matches(pattern: &str, path: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let Some(first) = parts.next() else {
+        return path.is_empty();
+    };
+    if !pattern.contains('*') {
+        return path == first;
+    }
+    let Some(mut rest) = path.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    for (i, part) in parts.iter().enumerate() {
+        let last = i + 1 == parts.len();
+        if last {
+            return rest.ends_with(part);
+        }
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    true
 }
 
 pub fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
@@ -639,6 +753,45 @@ pub fn own_install() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hub_listing_gives_each_file_its_size_and_the_blob_its_bytes_take() {
+        let v = json!({"sha": "f9c2", "siblings": [
+            {"rfilename": ".gitattributes", "blobId": "6956", "size": 1700},
+            {"rfilename": "m-Q4_K_M.gguf", "blobId": "8e4e", "size": 806058240, "lfs": {"sha256": "8ccc", "size": 806058240}},
+        ]});
+        let l = hf_listing_from("org/m", &v);
+        assert_eq!(l.sha, "f9c2");
+        assert_eq!(l.files[0], HfFile { path: ".gitattributes".into(), size: 1700, blob: "6956".into() });
+        assert_eq!(l.files[1], HfFile { path: "m-Q4_K_M.gguf".into(), size: 806058240, blob: "8ccc".into() });
+        assert_eq!(l.to_fetch(|p| p.ends_with(".gguf")), 806058240, "nothing of it is cached here");
+    }
+
+    #[test]
+    fn shell_patterns_match_as_huggingface_hub_reads_them() {
+        assert!(glob_matches("*.json", "config.json"));
+        assert!(glob_matches("*.json", "sub/dir/config.json"));
+        assert!(!glob_matches("*.json", "config.jsonl"));
+        assert!(glob_matches("model*.safetensors", "model-00001-of-00002.safetensors"));
+        assert!(glob_matches("model*.safetensors", "model.safetensors"));
+        assert!(!glob_matches("model*.safetensors", "adapter_model.safetensors"));
+        assert!(glob_matches("tokenizer.model", "tokenizer.model"));
+        assert!(!glob_matches("tokenizer.model", "tokenizer.model.v2"));
+        assert!(glob_matches("*", "anything/at/all"));
+        assert!(glob_matches("a*b*c", "a-b-c"));
+        assert!(!glob_matches("a*b*c", "a-c-b"));
+    }
+
+    #[test]
+    fn the_hub_cache_is_where_huggingface_hub_and_llama_cpp_look() {
+        // the environment is shared with the other tests: read, never set
+        let cache = hf_hub_cache();
+        assert!(cache.ends_with("hub") || std::env::var_os("HF_HUB_CACHE").is_some(), "{}", cache.display());
+        assert!(hf_repo_cache("org/name").ends_with("models--org--name"));
+        let roots = hf_cache_roots("org/name");
+        assert_eq!(roots.len(), 2);
+        assert!(roots[1].ends_with("blobs") && roots[1].parent() == hf_repo_cache("org/name").parent());
+    }
 
     #[test]
     fn a_json_lookup_that_stalls_gives_up_by_its_deadline() {

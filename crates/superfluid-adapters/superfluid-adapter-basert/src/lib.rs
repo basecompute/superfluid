@@ -112,7 +112,13 @@ impl Runtime for Basert {
                 let args = pull_args(pull, id, variant, &version);
                 let mut cmd = std::process::Command::new(&tool);
                 cmd.arg("pull").args(&args);
-                superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {}", args[0]))?;
+                let watch = superfluid_adapter_kit::progress::Watch {
+                    roots: vec![models_dir().join(".src")],
+                    total: expected_bytes(&tool, id, variant, pull.option("file").flatten(), pull.option("revision").flatten()),
+                };
+                superfluid_adapter_kit::progress::watched(Some(watch), || {
+                    superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {}", args[0]))
+                })?;
             }
         }
         let list = installed_list(&tool)?;
@@ -148,6 +154,55 @@ fn installed_list(tool: &std::path::Path) -> Result<String, String> {
         return Err(format!("basert list --json failed ({}): {}", list.status, String::from_utf8_lossy(&list.stderr).trim()));
     }
     Ok(String::from_utf8_lossy(&list.stdout).into_owned())
+}
+
+/// Where basert keeps its models, sources it downloads under `.src`: `BASERT_MODELS_DIR`, else
+/// `baseRT/models` under the platform's cache directory.
+fn models_dir() -> std::path::PathBuf {
+    std::env::var_os("BASERT_MODELS_DIR")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| superfluid_adapter_kit::install::platform_cache_dir().join("baseRT").join("models"))
+}
+
+/// What a pull of `id` fetches, in bytes, for its progress bar: a catalog model's `.base` as
+/// `basert list --remote` sizes it, or a raw Hub repository's weights as the Hub lists them.
+/// Best effort: a listing that fails leaves the bar without a total.
+fn expected_bytes(tool: &std::path::Path, id: &str, variant: Option<&str>, file: Option<&str>, revision: Option<&str>) -> Option<u64> {
+    let remote = std::process::Command::new(tool).args(["list", "--remote", "--json"]).output().ok().filter(|o| o.status.success());
+    if let Some(bytes) = remote.and_then(|o| catalog_size(&String::from_utf8_lossy(&o.stdout), id, variant, file)) {
+        return Some(bytes);
+    }
+    let listing = superfluid_adapter_kit::install::hf_repo_listing(id, revision).ok()?;
+    let base = listing.files.iter().any(|f| f.path.ends_with(".base"));
+    let safetensors = listing.files.iter().any(|f| f.path.ends_with(".safetensors"));
+    match (file, base, safetensors) {
+        (Some(file), _, _) => Some(listing.to_fetch(|p| p == file || p.rsplit('/').next() == Some(file))),
+        (None, true, _) => None, // which of its `.base` files basert takes is basert's call
+        (None, false, true) => Some(listing.to_fetch(|p| p.ends_with(".safetensors") || p.ends_with(".json"))),
+        (None, false, false) => None,
+    }
+}
+
+/// The size `basert list --remote --json` gives the catalog's `id[:variant]` (or its `file`):
+/// the variant named (a size names the file of that size), else `default-q4`, else the Medium
+/// of a release in sizes, else the sole entry.
+fn catalog_size(remote_json: &str, id: &str, variant: Option<&str>, file: Option<&str>) -> Option<u64> {
+    let entries: Vec<serde_json::Value> = serde_json::from_str(remote_json).ok()?;
+    let mine: Vec<&serde_json::Value> = entries.iter().filter(|m| m["id"] == id && m["size_bytes"].is_u64()).collect();
+    let bare = |s: &str| s.strip_suffix(".base").unwrap_or(s).to_string();
+    let of_file = |file: &str| mine.iter().find(|m| m["file"].as_str().is_some_and(|f| bare(f.rsplit('/').next().unwrap_or(f)) == bare(file)));
+    let of_size = |size: &str| mine.iter().find(|m| m["file"].as_str().and_then(size_of_file) == Some(size));
+    let chosen = match (file, variant) {
+        (Some(file), _) => of_file(file)?,
+        (None, Some(v)) => mine.iter().find(|m| m["variant"] == v).or_else(|| size_name(v).and_then(of_size))?,
+        (None, None) => match mine.as_slice() {
+            [] => return None,
+            [one] => one,
+            many => many.iter().find(|m| m["variant"] == "default-q4").or_else(|| of_size(DEFAULT_SIZE))?,
+        },
+    };
+    chosen["size_bytes"].as_u64()
 }
 
 /// Whether `basert pull` has to run for `id[:variant]`. A named variant that is installed already is
@@ -433,7 +488,7 @@ mod tests {
 
 #[cfg(test)]
 mod pull_tests {
-    use super::{installed_file, installed_path, needs_pull, pull_args, takes_size, takes_variant, Basert};
+    use super::{catalog_size, installed_file, installed_path, needs_pull, pull_args, takes_size, takes_variant, Basert};
     use superfluid_adapter_kit::{Pull, Runtime};
 
     #[test]
@@ -521,6 +576,28 @@ mod pull_tests {
         assert_eq!(argv("org/Foo:medium --target base-q8", "basert 0.4.2\n"), "org/Foo --file Foo-Medium.base", "--target would name it twice");
         assert_eq!(argv("org/Foo:small --target base-q8", "basert 0.4.1\n"), "org/Foo --target base-q8", "an older basert takes the id alone");
         assert_eq!(argv("org/Foo:default-q8", "basert 0.4.4\n"), "org/Foo:default-q8", "a variant that is no size is as before");
+    }
+
+    #[test]
+    fn a_catalog_models_size_is_read_as_its_variant_is_picked() {
+        let remote = r#"[
+            {"id": "org/a", "variant": "default-q4", "size_bytes": 400, "installed": false, "file": "a-Q4.base"},
+            {"id": "org/a", "variant": "default-q8", "size_bytes": 800, "installed": false, "file": "a-Q8.base"},
+            {"id": "org/s", "variant": "file-s-small-1", "size_bytes": 10, "installed": false, "file": "s-Small.base"},
+            {"id": "org/s", "variant": "file-s-medium-2", "size_bytes": 20, "installed": false, "file": "s-Medium.base"},
+            {"id": "org/one", "variant": "cuda-q4", "size_bytes": 7, "installed": false},
+            {"id": "org/x", "variant": "default-q4", "installed": false}
+        ]"#;
+        assert_eq!(catalog_size(remote, "org/a", None, None), Some(400), "a bare id is its default-q4");
+        assert_eq!(catalog_size(remote, "org/a", Some("default-q8"), None), Some(800));
+        assert_eq!(catalog_size(remote, "org/a", None, Some("a-Q8")), Some(800), "a file, its extension aside");
+        assert_eq!(catalog_size(remote, "org/s", None, None), Some(20), "a release in sizes gives its Medium");
+        assert_eq!(catalog_size(remote, "org/s", Some("small"), None), Some(10));
+        assert_eq!(catalog_size(remote, "org/one", None, None), Some(7), "the sole entry whatever its variant");
+        assert_eq!(catalog_size(remote, "org/a", Some("nope"), None), None);
+        assert_eq!(catalog_size(remote, "org/x", None, None), None, "an entry without a size gives none");
+        assert_eq!(catalog_size(remote, "org/raw", None, None), None, "a raw Hub repository is not in the catalog");
+        assert_eq!(catalog_size("not json", "org/a", None, None), None);
     }
 
     #[test]
