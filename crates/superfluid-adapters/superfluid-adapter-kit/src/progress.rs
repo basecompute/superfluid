@@ -48,15 +48,23 @@ pub fn watched<T>(watch: Option<Watch>, run: impl FnOnce() -> T) -> T {
     let Some(watch) = watch.filter(|w| !w.roots.is_empty()) else {
         return run();
     };
+    watched_and_landed(watch, run).0
+}
+
+/// [`watched`], with what the watch counted by the end.
+fn watched_and_landed<T>(watch: Watch, run: impl FnOnce() -> T) -> (T, Landed) {
+    // The baseline is taken before the pull starts, on this thread: what the tool writes
+    // first is the pull's, however long a populated cache takes to read.
+    let seen = Seen::begin(&watch.roots, &watch.follow);
     let stop = Arc::new(AtomicBool::new(false));
     let drawer = {
         let stop = stop.clone();
-        std::thread::spawn(move || draw_until(watch, &stop))
+        std::thread::spawn(move || draw_until(watch, seen, &stop))
     };
     let out = run();
     stop.store(true, Ordering::SeqCst);
-    let _ = drawer.join();
-    out
+    let landed = drawer.join().unwrap_or_default();
+    (out, landed)
 }
 
 /// Writes `output` from the tool to stderr, clearing a bar drawn there first so the two do not
@@ -79,10 +87,10 @@ struct Line {
 
 static LINE: Mutex<Line> = Mutex::new(Line { drawn: false });
 
-fn draw_until(watch: Watch, stop: &AtomicBool) {
+/// Draws the pull until `stop`, from `seen` as the watch began, and says what landed.
+fn draw_until(watch: Watch, mut seen: Seen, stop: &AtomicBool) -> Landed {
     let tty = std::io::stderr().is_terminal();
     let began = Instant::now();
-    let mut seen = Seen::begin(&watch.roots, &watch.follow);
     let mut gauge = Gauge::new(watch.total, began);
     let mut last_line = began;
     let mut shown = false;
@@ -112,6 +120,7 @@ fn draw_until(watch: Watch, stop: &AtomicBool) {
     if shown {
         write_through(format!("pull: {}\n", gauge.summary()).as_bytes());
     }
+    Landed { present: gauge.present, fetched: gauge.fetched }
 }
 
 /// What a watch has seen land: the files under its roots that the pull wrote to.
@@ -599,6 +608,28 @@ mod tests {
             "done"
         });
         assert_eq!(got, "done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_a_pull_writes_first_is_its_own_however_full_the_cache() {
+        let dir = std::env::temp_dir().join(format!("superfluid-progress-dense-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cached")).unwrap();
+        for i in 0..3000 {
+            std::fs::write(dir.join("cached").join(format!("{i}")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("partial"), vec![0u8; 4096]).unwrap();
+        let watch = Watch { roots: vec![dir.clone()], follow: vec![dir.join("cached")], total: Some(8192 + 4096) };
+        let (got, landed) = watched_and_landed(watch, || {
+            // the tool's first write, before a drawer reading the cache could have begun
+            std::fs::OpenOptions::new().append(true).open(dir.join("partial")).unwrap().write_all(&[0u8; 4096]).unwrap();
+            std::fs::write(dir.join("new"), vec![0u8; 8192]).unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            "done"
+        });
+        assert_eq!(got, "done");
+        assert_eq!(landed, Landed { present: 8192 + 8192, fetched: 8192 + 4096 }, "the partial's growth and the new file, not the cache");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
