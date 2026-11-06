@@ -1166,6 +1166,30 @@ fn spawn_scripted_stack_with(
     script: Vec<u32>,
     codec: Box<dyn superfluid_daemon::codec::TextCodec + Send + Sync>,
 ) -> std::net::SocketAddr {
+    let stack = scripted_stack(script, codec);
+    let addr = stack.addr;
+    std::mem::forget(stack);
+    addr
+}
+
+/// A scripted stack whose engine is shut down when it goes out of scope. Each engine holds its
+/// rings' descriptors, so a test that starts one stack per case must let each go, or this
+/// binary outgrows a CI runner's open-file limit (a few thousand on macOS).
+struct ScriptedStack {
+    addr: std::net::SocketAddr,
+    daemon: Arc<Daemon>,
+}
+
+impl Drop for ScriptedStack {
+    fn drop(&mut self) {
+        self.daemon.shutdown();
+    }
+}
+
+fn scripted_stack(
+    script: Vec<u32>,
+    codec: Box<dyn superfluid_daemon::codec::TextCodec + Send + Sync>,
+) -> ScriptedStack {
     let dir = std::env::temp_dir().join(format!(
         "superfluid-openai-script-{}-{}",
         std::process::id(),
@@ -1181,10 +1205,11 @@ fn spawn_scripted_stack_with(
     let daemon = Arc::new(Daemon::new(store, host, codec, 8));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let served = Arc::clone(&daemon);
     std::thread::spawn(move || {
-        let _ = openai::serve_blocking(listener, daemon, "mock-model".into());
+        let _ = openai::serve_blocking(listener, served, "mock-model".into());
     });
-    addr
+    ScriptedStack { addr, daemon }
 }
 
 #[test]
@@ -1644,10 +1669,10 @@ impl superfluid_engine::Tokenizer for QwenTok {
     }
 }
 
-fn spawn_scripted_qwen_stack(script: &str) -> std::net::SocketAddr {
+fn spawn_scripted_qwen_stack(script: &str) -> ScriptedStack {
     use superfluid_engine::Tokenizer;
     let codec = superfluid_daemon::codec::chatml_codec_from_tokenizer(Arc::new(QwenTok)).expect("the curated Qwen codec");
-    spawn_scripted_stack_with(QwenTok.encode(script), Box::new(codec))
+    scripted_stack(QwenTok.encode(script), Box::new(codec))
 }
 
 const XML_CALL_TOOLS: &str = r#""tools":[
@@ -1671,87 +1696,107 @@ fn streamed_calls(raw: &str) -> Vec<(String, String)> {
     calls
 }
 
+/// How many times a boundary test repeats its pattern in one generation, each time behind one
+/// more byte of padding, so the boundary falls at a different place in a tick every time. One
+/// stack per test keeps this binary within a CI runner's open-file limit.
+const REPEATS: usize = 16;
+
+fn chat_body(tools: &str) -> String {
+    format!(
+        r#"{{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,{tools},
+            "chat_template_kwargs":{{"enable_thinking":false}},"messages":[{{"role":"user","content":"go"}}]}}"#
+    )
+}
+
+fn responses_data(raw: &str) -> Vec<serde_json::Value> {
+    raw.lines().filter_map(|l| l.strip_prefix("data: ")).filter_map(|d| serde_json::from_str(d).ok()).collect()
+}
+
+fn json_of(s: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(s).ok()
+}
+
 #[test]
 fn adjacent_xml_calls_keep_their_own_arguments() {
-    // Two calls back to back, at every alignment against the tick: the partial emits of a tick
-    // all come before its commits, so the second call's text arrives while the first is open.
-    let calls = "<tool_call><function=f>\n<parameter=a>\n1\n</parameter>\n</function></tool_call>\
-                 <tool_call><function=g>\n<parameter=b>\n2\n</parameter>\n</function></tool_call><|im_end|>";
-    let body = format!(
-        r#"{{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,{XML_CALL_TOOLS},
-            "chat_template_kwargs":{{"enable_thinking":false}},"messages":[{{"role":"user","content":"go"}}]}}"#
-    );
-    for pad in 0..33 {
-        let addr = spawn_scripted_qwen_stack(&format!("{}{calls}", "x".repeat(pad)));
-        let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", &body);
-        assert_eq!(status, 200, "{raw}");
-        let got = streamed_calls(&raw);
-        assert_eq!(got.len(), 2, "pad {pad}: {raw}");
-        assert_eq!(got[0].0, "f", "pad {pad}: {raw}");
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[0].1).ok(), Some(serde_json::json!({"a": 1})), "pad {pad}: {raw}");
-        assert_eq!(got[1].0, "g", "pad {pad}: {raw}");
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[1].1).ok(), Some(serde_json::json!({"b": 2})), "pad {pad}: {raw}");
-        let (events, _) = stream_events(&raw);
-        assert_eq!(stream_finish(&events), "tool_calls", "pad {pad}");
+    // Calls back to back: the partial emits of a tick all come before its commits, so the
+    // second call's text arrives while the first is open.
+    let script: String = (0..REPEATS)
+        .map(|k| {
+            format!(
+                "{}<tool_call><function=f>\n<parameter=a>\n{k}\n</parameter>\n</function></tool_call>\
+                 <tool_call><function=g>\n<parameter=b>\n{k}\n</parameter>\n</function></tool_call>",
+                "x".repeat(k)
+            )
+        })
+        .collect::<String>()
+        + "<|im_end|>";
+    let stack = spawn_scripted_qwen_stack(&script);
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", &chat_body(XML_CALL_TOOLS));
+    assert_eq!(status, 200, "{raw}");
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), 2 * REPEATS, "{raw}");
+    for k in 0..REPEATS {
+        assert_eq!(got[2 * k].0, "f", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k].1), Some(serde_json::json!({"a": k})), "repeat {k}: {raw}");
+        assert_eq!(got[2 * k + 1].0, "g", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k + 1].1), Some(serde_json::json!({"b": k})), "repeat {k}: {raw}");
     }
+    let (events, _) = stream_events(&raw);
+    assert_eq!(stream_finish(&events), "tool_calls");
 }
 
 #[test]
 fn an_xml_call_is_finished_before_the_text_after_it() {
-    let calls = "<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>Done.<|im_end|>";
-    for pad in 0..33 {
-        let script = format!("{}{calls}", "x".repeat(pad));
+    let script: String = (0..REPEATS)
+        .map(|k| {
+            format!(
+                "{}<tool_call>\n<function=f>\n<parameter=a>\n{k}\n</parameter>\n</function>\n</tool_call>Done{k}.",
+                "x".repeat(k)
+            )
+        })
+        .collect::<String>()
+        + "<|im_end|>";
 
-        // Chat completions: every fragment of the call precedes the text written after it.
-        let addr = spawn_scripted_qwen_stack(&script);
-        let body = format!(
-            r#"{{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,{XML_CALL_TOOLS},
-                "chat_template_kwargs":{{"enable_thinking":false}},"messages":[{{"role":"user","content":"go"}}]}}"#
-        );
-        let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", &body);
-        assert_eq!(status, 200, "{raw}");
-        let (events, _) = stream_events(&raw);
-        let is_call = |e: &serde_json::Value| e["choices"][0]["delta"]["tool_calls"].is_array();
-        let text_of = |e: &serde_json::Value| e["choices"][0]["delta"]["content"].as_str().unwrap_or("").to_string();
-        let first_call = events.iter().position(is_call).expect("a call");
-        let last_call = events.iter().rposition(is_call).unwrap();
-        let text_after = events
-            .iter()
-            .enumerate()
-            .skip(first_call)
-            .find(|(_, e)| !text_of(e).is_empty())
-            .map(|(i, _)| i)
-            .expect("the text after the call");
-        assert!(last_call < text_after, "pad {pad}: the call's last fragment came after the text: {raw}");
-        let after: String = events[text_after..].iter().map(text_of).collect();
-        assert_eq!(after, "Done.", "pad {pad}: {raw}");
-        let got = streamed_calls(&raw);
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[0].1).ok(), Some(serde_json::json!({"a": 1})), "pad {pad}: {raw}");
+    // Chat completions: every fragment of a call precedes the text written after it.
+    let stack = spawn_scripted_qwen_stack(&script);
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", &chat_body(XML_CALL_TOOLS));
+    assert_eq!(status, 200, "{raw}");
+    let (events, _) = stream_events(&raw);
+    let mut text = String::new();
+    for e in &events {
+        if let Some(entries) = e["choices"][0]["delta"]["tool_calls"].as_array() {
+            for entry in entries {
+                let k = entry["index"].as_u64().unwrap();
+                assert!(!text.contains(&format!("Done{k}.")), "call {k} streamed after its text: {raw}");
+            }
+        }
+        text.push_str(e["choices"][0]["delta"]["content"].as_str().unwrap_or(""));
+    }
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), REPEATS, "{raw}");
+    for (k, (name, args)) in got.iter().enumerate() {
+        assert_eq!(name, "f", "call {k}: {raw}");
+        assert_eq!(json_of(args), Some(serde_json::json!({"a": k})), "call {k}: {raw}");
+    }
 
-        // Responses: text closes the open call item, so a late fragment would be lost.
-        let addr = spawn_scripted_qwen_stack(&script);
-        let body = r#"{"model":"mock-model","input":"go","stream":true,"reasoning":{"effort":"none"},
-            "tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"a":{"type":"integer"}}}}]}"#;
-        let (status, _h, raw) = http(addr, "POST", "/v1/responses", body);
-        assert_eq!(status, 200, "{raw}");
-        let data: Vec<serde_json::Value> = raw
-            .lines()
-            .filter_map(|l| l.strip_prefix("data: "))
-            .filter_map(|d| serde_json::from_str(d).ok())
-            .collect();
-        let done = data
-            .iter()
-            .find(|d| d["type"] == "response.function_call_arguments.done")
-            .unwrap_or_else(|| panic!("pad {pad}: no arguments done: {raw}"));
-        assert_eq!(done["arguments"], "{\"a\":1}", "pad {pad}: {raw}");
-        let completed = data.iter().find(|d| d["type"] == "response.completed").expect("completed");
-        let call = completed["response"]["output"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|i| i["type"] == "function_call")
-            .expect("the call in the stored output");
-        assert_eq!(call["arguments"], "{\"a\":1}", "pad {pad}: {raw}");
+    // Responses: text closes the open call item, so a late fragment would be lost.
+    let stack = spawn_scripted_qwen_stack(&script);
+    let body = r#"{"model":"mock-model","input":"go","stream":true,"reasoning":{"effort":"none"},"max_output_tokens":8000,
+        "tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"a":{"type":"integer"}}}}]}"#;
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/responses", body);
+    assert_eq!(status, 200, "{raw}");
+    let data = responses_data(&raw);
+    let done: Vec<&serde_json::Value> = data.iter().filter(|d| d["type"] == "response.function_call_arguments.done").collect();
+    assert_eq!(done.len(), REPEATS, "{raw}");
+    for (k, d) in done.iter().enumerate() {
+        assert_eq!(d["arguments"], format!("{{\"a\":{k}}}"), "call {k}: {raw}");
+    }
+    let terminal = data.iter().find(|d| d["type"] == "response.completed").expect("completed");
+    let stored: Vec<&serde_json::Value> =
+        terminal["response"]["output"].as_array().unwrap().iter().filter(|i| i["type"] == "function_call").collect();
+    assert_eq!(stored.len(), REPEATS);
+    for (k, call) in stored.iter().enumerate() {
+        assert_eq!(call["arguments"], format!("{{\"a\":{k}}}"), "stored call {k}: {raw}");
     }
 }
 
@@ -1759,32 +1804,33 @@ fn an_xml_call_is_finished_before_the_text_after_it() {
 fn adjacent_json_calls_stream_each_under_its_own_name() {
     // The second call's arguments hold a "name" of their own; neither call may take it.
     use superfluid_daemon::codec::{MockCodec, TextCodec};
-    let mut script = MockCodec.encode(" ");
-    script.extend(tool_envelope(r#"{"name":"f","arguments":{}}"#));
-    script.extend(tool_envelope(r#"{"name":"g","arguments":{"name":"data","arguments":{"x":2}}}"#));
-    let body = r#"{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,
+    let mut script = Vec::new();
+    for k in 0..REPEATS {
+        script.extend(MockCodec.encode(&"x".repeat(k)));
+        script.extend(tool_envelope(r#"{"name":"f","arguments":{}}"#));
+        script.extend(tool_envelope(&format!(r#"{{"name":"g","arguments":{{"name":"data","arguments":{{"x":{k}}}}}}}"#)));
+    }
+    let body = r#"{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,
         "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
         "messages":[{"role":"user","content":"go"}]}"#;
-    for pad in 0..33 {
-        let mut s = MockCodec.encode(&"x".repeat(pad));
-        s.extend(script.iter().copied());
-        let addr = spawn_scripted_stack(s);
-        let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", body);
-        assert_eq!(status, 200, "{raw}");
-        let got = streamed_calls(&raw);
-        assert_eq!(got.len(), 2, "pad {pad}: {raw}");
-        assert_eq!(got[0].0, "f", "pad {pad}: {raw}");
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[0].1).ok(), Some(serde_json::json!({})), "pad {pad}: {raw}");
-        assert_eq!(got[1].0, "g", "pad {pad}: {raw}");
+    let stack = scripted_stack(script, Box::new(MockChatCodec));
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), 2 * REPEATS, "{raw}");
+    for k in 0..REPEATS {
+        assert_eq!(got[2 * k].0, "f", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k].1), Some(serde_json::json!({})), "repeat {k}: {raw}");
+        assert_eq!(got[2 * k + 1].0, "g", "repeat {k}: {raw}");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&got[1].1).ok(),
-            Some(serde_json::json!({"name": "data", "arguments": {"x": 2}})),
-            "pad {pad}: {raw}"
+            json_of(&got[2 * k + 1].1),
+            Some(serde_json::json!({"name": "data", "arguments": {"x": k}})),
+            "repeat {k}: {raw}"
         );
     }
 }
 
-/// Each index's entries, in stream order: the index of the call, whether the entry carries an id.
+/// Each tool_calls entry in stream order: the index of its call, whether it carries an id.
 fn call_entry_order(raw: &str) -> Vec<(u64, bool)> {
     let (_, entries) = stream_events(raw);
     entries.iter().map(|e| (e["index"].as_u64().unwrap(), e["id"].is_string())).collect()
@@ -1793,32 +1839,39 @@ fn call_entry_order(raw: &str) -> Vec<(u64, bool)> {
 #[test]
 fn a_call_sent_whole_keeps_its_place_and_its_index() {
     // `prefix {...}` does not open as a streamed call, but the parser recovers it: it is sent
-    // whole at its close, before the call after it opens, under its own index.
+    // whole at its close, before the call after it opens, under its own index. The call after
+    // it alternates between short and longer than a tick.
     use superfluid_daemon::codec::{MockCodec, TextCodec};
-    let body = r#"{"model":"mock-model","max_tokens":1024,"temperature":0,"stream":true,
+    let g_args = |k: usize| serde_json::json!({"b": k, "name": "x".repeat(if k % 2 == 1 { 80 } else { 1 })});
+    let mut script = Vec::new();
+    for k in 0..REPEATS {
+        script.extend(MockCodec.encode(&"y".repeat(k)));
+        script.extend(tool_envelope(&format!(r#"prefix {{"name":"f","arguments":{{"k":{k}}}}}"#)));
+        script.extend(tool_envelope(&format!(r#"{{"name":"g","arguments":{}}}"#, g_args(k))));
+    }
+    let body = r#"{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,
         "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
         "messages":[{"role":"user","content":"go"}]}"#;
-    for long in [false, true] {
-        let g_args = serde_json::json!({"b": 2, "name": "x".repeat(if long { 350 } else { 1 })});
-        let g = format!(r#"{{"name":"g","arguments":{g_args}}}"#);
-        for pad in 0..33 {
-            let mut script = MockCodec.encode(&"y".repeat(pad));
-            script.extend(tool_envelope(r#"prefix {"name":"f","arguments":{}}"#));
-            script.extend(tool_envelope(&g));
-            let addr = spawn_scripted_stack(script);
-            let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", body);
-            assert_eq!(status, 200, "{raw}");
-            let got = streamed_calls(&raw);
-            assert_eq!(got.len(), 2, "long {long} pad {pad}: {raw}");
-            assert_eq!(got[0].0, "f", "long {long} pad {pad}: {raw}");
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&got[0].1).ok(), Some(serde_json::json!({})), "long {long} pad {pad}: {raw}");
-            assert_eq!(got[1].0, "g", "long {long} pad {pad}: {raw}");
-            assert_eq!(serde_json::from_str::<serde_json::Value>(&got[1].1).ok(), Some(g_args.clone()), "long {long} pad {pad}: {raw}");
-            let order = call_entry_order(&raw);
-            let first_g = order.iter().position(|(i, _)| *i == 1).unwrap();
-            assert!(order[..first_g].iter().all(|(i, _)| *i == 0), "long {long} pad {pad}: f after g opened: {raw}");
-            assert!(order[0].1 && order[first_g].1, "long {long} pad {pad}: each call opens with its id: {raw}");
+    let stack = scripted_stack(script, Box::new(MockChatCodec));
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), 2 * REPEATS, "{raw}");
+    for k in 0..REPEATS {
+        assert_eq!(got[2 * k].0, "f", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k].1), Some(serde_json::json!({"k": k})), "repeat {k}: {raw}");
+        assert_eq!(got[2 * k + 1].0, "g", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k + 1].1), Some(g_args(k)), "repeat {k}: {raw}");
+    }
+    // Calls never interleave, and each opens with its id.
+    let order = call_entry_order(&raw);
+    let mut seen = 0u64;
+    for (i, &(index, has_id)) in order.iter().enumerate() {
+        assert!(index == seen || index == seen + 1, "entry {i}: call {index} after call {seen}: {raw}");
+        if index == seen + 1 || (i == 0 && index == 0) {
+            assert!(has_id, "entry {i}: call {index} opens without its id: {raw}");
         }
+        seen = index;
     }
 }
 
@@ -1827,51 +1880,53 @@ fn a_failed_call_does_not_close_the_call_after_it() {
     // A call that opens and then fails to parse becomes text: sent at its close, before the next
     // call opens, so on /v1/responses it cannot close that call's item mid-arguments.
     use superfluid_daemon::codec::{MockCodec, TextCodec};
-    let g_args = serde_json::json!({"b": 2, "s": "x".repeat(350)});
-    let g = format!(r#"{{"name":"g","arguments":{g_args}}}"#);
-    for pad in 0..33 {
-        let mut script = MockCodec.encode(&"y".repeat(pad));
+    let g_args = |k: usize| serde_json::json!({"b": k, "s": "x".repeat(80)});
+    let mut script = Vec::new();
+    for k in 0..REPEATS {
+        script.extend(MockCodec.encode(&"y".repeat(k)));
         script.extend(tool_envelope(r#"{"name":"f","arguments":{not json}}"#));
-        script.extend(tool_envelope(&g));
+        script.extend(tool_envelope(&format!(r#"{{"name":"g","arguments":{}}}"#, g_args(k))));
+    }
 
-        let addr = spawn_scripted_stack(script.clone());
-        let body = r#"{"model":"mock-model","max_tokens":1024,"temperature":0,"stream":true,
-            "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
-            "messages":[{"role":"user","content":"go"}]}"#;
-        let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", body);
-        assert_eq!(status, 200, "{raw}");
-        let got = streamed_calls(&raw);
-        let g_call = got.iter().find(|(n, _)| n == "g").unwrap_or_else(|| panic!("pad {pad}: no g: {raw}"));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&g_call.1).ok(), Some(g_args.clone()), "pad {pad}: {raw}");
+    let stack = scripted_stack(script.clone(), Box::new(MockChatCodec));
+    let body = r#"{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,
+        "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
+        "messages":[{"role":"user","content":"go"}]}"#;
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let gs: Vec<String> = streamed_calls(&raw).into_iter().filter(|(n, _)| n == "g").map(|(_, a)| a).collect();
+    assert_eq!(gs.len(), REPEATS, "{raw}");
+    for (k, args) in gs.iter().enumerate() {
+        assert_eq!(json_of(args), Some(g_args(k)), "g {k}: {raw}");
+    }
 
-        let addr = spawn_scripted_stack(script);
-        let body = r#"{"model":"mock-model","input":"go","stream":true,
-            "tools":[{"type":"function","name":"f","parameters":{}},{"type":"function","name":"g","parameters":{}}]}"#;
-        let (status, _h, raw) = http(addr, "POST", "/v1/responses", body);
-        assert_eq!(status, 200, "{raw}");
-        let data: Vec<serde_json::Value> = raw
-            .lines()
-            .filter_map(|l| l.strip_prefix("data: "))
-            .filter_map(|d| serde_json::from_str(d).ok())
-            .collect();
-        let done = data
-            .iter()
-            .find(|d| d["type"] == "response.function_call_arguments.done" && d["name"] == "g")
-            .unwrap_or_else(|| panic!("pad {pad}: no arguments done for g: {raw}"));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(done["arguments"].as_str().unwrap()).ok(), Some(g_args.clone()), "pad {pad}");
-        // An announced call that failed leaves the reply incomplete; the stored output still
-        // holds `g` whole.
-        let terminal = data
-            .iter()
-            .find(|d| d["type"] == "response.completed" || d["type"] == "response.incomplete")
-            .unwrap_or_else(|| panic!("pad {pad}: no terminal response: {raw}"));
-        let call = terminal["response"]["output"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|i| i["type"] == "function_call" && i["name"] == "g")
-            .unwrap_or_else(|| panic!("pad {pad}: g not in the stored output: {raw}"));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(call["arguments"].as_str().unwrap()).ok(), Some(g_args.clone()), "pad {pad}");
+    let stack = scripted_stack(script, Box::new(MockChatCodec));
+    let body = r#"{"model":"mock-model","input":"go","stream":true,"max_output_tokens":8000,
+        "tools":[{"type":"function","name":"f","parameters":{}},{"type":"function","name":"g","parameters":{}}]}"#;
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/responses", body);
+    assert_eq!(status, 200, "{raw}");
+    let data = responses_data(&raw);
+    let done: Vec<&serde_json::Value> =
+        data.iter().filter(|d| d["type"] == "response.function_call_arguments.done" && d["name"] == "g").collect();
+    assert_eq!(done.len(), REPEATS, "{raw}");
+    for (k, d) in done.iter().enumerate() {
+        assert_eq!(json_of(d["arguments"].as_str().unwrap()), Some(g_args(k)), "g {k}");
+    }
+    // An announced call that failed leaves the reply incomplete; the stored output still holds
+    // every `g` whole.
+    let terminal = data
+        .iter()
+        .find(|d| d["type"] == "response.completed" || d["type"] == "response.incomplete")
+        .unwrap_or_else(|| panic!("no terminal response: {raw}"));
+    let stored: Vec<&serde_json::Value> = terminal["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["type"] == "function_call" && i["name"] == "g")
+        .collect();
+    assert_eq!(stored.len(), REPEATS);
+    for (k, call) in stored.iter().enumerate() {
+        assert_eq!(json_of(call["arguments"].as_str().unwrap()), Some(g_args(k)), "stored g {k}");
     }
 }
 
