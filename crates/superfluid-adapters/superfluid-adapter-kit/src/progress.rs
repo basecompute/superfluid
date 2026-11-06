@@ -23,9 +23,11 @@ pub struct Watch {
     /// Directories whose files, written to since the watch began, are the pull's bytes.
     pub roots: Vec<PathBuf>,
     /// Directories a tool moves a finished file into, where it is followed: a file there
-    /// counts when it was seen under `roots` first (it is the same inode), and the last bytes
-    /// the tool wrote before moving it are read there. Nothing else there is counted, so a
-    /// store shared between pulls (huggingface_hub's, basert's install tree) is safe to name.
+    /// counts when it was seen under `roots` first, as the same inode or through a link from
+    /// there (huggingface_hub links a repository's `blobs/<sha>` to the store entry it moved
+    /// the download to), and the last bytes the tool wrote before moving it are read there.
+    /// Nothing else there is counted, so a store shared between pulls (huggingface_hub's,
+    /// basert's install tree) is safe to name.
     pub follow: Vec<PathBuf>,
     /// The bytes the pull means to fetch, when known: the bar's 100%.
     pub total: Option<u64>,
@@ -80,7 +82,7 @@ static LINE: Mutex<Line> = Mutex::new(Line { drawn: false });
 fn draw_until(watch: Watch, stop: &AtomicBool) {
     let tty = std::io::stderr().is_terminal();
     let began = Instant::now();
-    let mut seen = Seen::begin(&watch.roots);
+    let mut seen = Seen::begin(&watch.roots, &watch.follow);
     let mut gauge = Gauge::new(watch.total, began);
     let mut last_line = began;
     let mut shown = false;
@@ -126,8 +128,11 @@ pub struct Landed {
 /// counts once however its tool renames or moves it (huggingface_hub fetches into
 /// `<blob>.<id>.incomplete`, renames it to `<blob>`, then moves it into the store it shares
 /// between repositories; llama.cpp renames its `.downloadInProgress` away), and what leaves
-/// the roots stays counted. What each file held when the watch began is not the pull's: an
-/// unrelated download that finished a moment before, or the part a resumed pull found.
+/// the roots stays counted. A link under the roots stands for the file it points to, so a
+/// download moved into the store between two looks is found through the link left behind.
+/// What each file held when the watch began is not the pull's: an unrelated download that
+/// finished a moment before, the part a resumed pull found, or a store entry another
+/// repository fetched that this one links to instead of fetching.
 pub struct Seen {
     before: HashMap<FileId, u64>,
     /// The most bytes seen in each file since.
@@ -137,9 +142,14 @@ pub struct Seen {
 type FileId = (u64, u64);
 
 impl Seen {
-    /// Notes what is under `roots` now, as not the pull's.
-    pub fn begin(roots: &[PathBuf]) -> Seen {
-        Seen { before: files_under(roots), most: HashMap::new() }
+    /// Notes what is under `roots` and `follow` now, as not the pull's.
+    pub fn begin(roots: &[PathBuf], follow: &[PathBuf]) -> Seen {
+        let mut before = files_under(roots);
+        for (id, bytes) in files_under(follow) {
+            let held = before.entry(id).or_default();
+            *held = (*held).max(bytes);
+        }
+        Seen { before, most: HashMap::new() }
     }
 
     /// Reads what is under `roots` now, and under `follow` what came from there, and says
@@ -182,14 +192,26 @@ fn walk(dir: &Path, files: &mut HashMap<FileId, u64>) {
         return;
     };
     for entry in entries.flatten() {
-        // symlink_metadata: a cache links a snapshot to its blob, and the blob is counted once
-        let Ok(meta) = entry.path().symlink_metadata() else {
+        let path = entry.path();
+        let Ok(meta) = path.symlink_metadata() else {
             continue;
         };
         if meta.is_dir() {
-            walk(&entry.path(), files);
-        } else if meta.is_file() {
-            let bytes = files.entry(identity(&entry.path(), &meta)).or_default();
+            walk(&path, files);
+            continue;
+        }
+        // a link stands for the file it points to, under the same identity: a cache links a
+        // snapshot to its blob, and the blob to the store, and the file is counted once
+        let meta = if meta.is_symlink() {
+            match path.metadata() {
+                Ok(target) if target.is_file() => target,
+                _ => continue, // dangling, or a link to a directory: not walked through
+            }
+        } else {
+            meta
+        };
+        if meta.is_file() {
+            let bytes = files.entry(identity(&path, &meta)).or_default();
             *bytes = (*bytes).max(held(&meta));
         }
     }
@@ -206,7 +228,7 @@ fn identity(_path: &Path, meta: &std::fs::Metadata) -> FileId {
 fn identity(path: &Path, _meta: &std::fs::Metadata) -> FileId {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut h);
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()).hash(&mut h);
     (0, h.finish())
 }
 
@@ -504,7 +526,7 @@ mod tests {
         let roots = vec![dir.join("blobs"), dir.join("snapshots")];
         let store = vec![dir.join("store")];
         std::fs::write(dir.join("store/other"), vec![0u8; 4096]).unwrap();
-        let mut seen = Seen::begin(&roots);
+        let mut seen = Seen::begin(&roots, &store);
         assert_eq!(seen.look(&roots, &store), Landed::default(), "what was there before is not the pull's");
         // a download finished by someone else a moment ago, rewritten in place: not grown, not counted
         std::fs::write(dir.join("blobs/old"), vec![1u8; 100]).unwrap();
@@ -524,7 +546,15 @@ mod tests {
         std::fs::write(dir.join("store/theirs"), vec![0u8; 8192]).unwrap();
         assert_eq!(seen.look(&roots, &store), Landed { present: 16384, fetched: 12288 });
         assert_eq!(seen.look(&roots, &[]), Landed { present: 16384, fetched: 12288 }, "what left the roots stays counted");
-        assert_eq!(seen.look(&[dir.join("nowhere"), dir.join("blobs")], &store), Landed { present: 16384, fetched: 12288 }, "a root not there counts nothing");
+        // fetched and moved into the store between two looks: found through the link left behind
+        std::fs::write(dir.join("store/fast"), vec![0u8; 2048]).unwrap();
+        std::os::unix::fs::symlink(dir.join("store/fast"), dir.join("blobs/fast")).unwrap();
+        std::os::unix::fs::symlink(dir.join("blobs/fast"), dir.join("snapshots/abc/fast.json")).unwrap();
+        assert_eq!(seen.look(&roots, &store), Landed { present: 18432, fetched: 14336 });
+        // a store entry another repository fetched, linked to instead of fetched: not the pull's
+        std::os::unix::fs::symlink(dir.join("store/other"), dir.join("blobs/other")).unwrap();
+        assert_eq!(seen.look(&roots, &store), Landed { present: 18432, fetched: 14336 });
+        assert_eq!(seen.look(&[dir.join("nowhere"), dir.join("blobs")], &store), Landed { present: 18432, fetched: 14336 }, "a root not there counts nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -534,7 +564,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let roots = vec![dir.clone()];
-        let mut seen = Seen::begin(&roots);
+        let mut seen = Seen::begin(&roots, &[]);
         // sized as a model is: APFS fills a hole in a file of 16 MB or less whole on its first write
         const SIZE: u64 = 64 << 20;
         let f = std::fs::File::create(dir.join("model.partial")).unwrap();

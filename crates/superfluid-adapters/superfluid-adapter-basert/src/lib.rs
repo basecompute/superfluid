@@ -114,8 +114,8 @@ impl Runtime for Basert {
                 cmd.arg("pull").args(&args);
                 // the catalog or the Hub sizes the bar; not under HF_HUB_OFFLINE, which keeps off the network
                 let watch = superfluid_adapter_kit::progress::Watch {
-                    // a finished download is moved from .src into the install tree: followed there
-                    roots: vec![models_dir().join(".src")],
+                    // a finished download is moved from the repository's staging into the install tree: followed there
+                    roots: vec![staging_dir(id)],
                     follow: vec![models_dir()],
                     total: if superfluid_adapter_kit::install::hf_offline() {
                         None
@@ -170,6 +170,14 @@ fn models_dir() -> std::path::PathBuf {
         .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| superfluid_adapter_kit::install::platform_cache_dir().join("baseRT").join("models"))
+}
+
+/// Where basert stages what it fetches for the repository `id` (a catalog model's or a raw
+/// one's), before converting or moving it into place: `.src/hf/models--org--name` under its
+/// models directory, as the Hub cache names a repository. Another pull's staging is beside
+/// it, not under it.
+fn staging_dir(id: &str) -> std::path::PathBuf {
+    models_dir().join(".src").join("hf").join(format!("models--{}", id.replace('/', "--")))
 }
 
 /// What a pull of `id` fetches, in bytes, for its progress bar: a catalog model's `.base` as

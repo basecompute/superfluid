@@ -148,9 +148,11 @@ impl Runtime for Llamacpp {
         if pull.option("no-mmproj").is_some() {
             cmd.arg("--no-mmproj");
         }
-        // the Hub's listing sizes the bar; not under HF_HUB_OFFLINE, which keeps off the Hub
+        // `llama download -hf` lands in the Hub cache's directory for the repository; its own
+        // cache (LLAMA_CACHE) takes direct URLs and docker models, which a pull never names.
+        // The Hub's listing sizes the bar; not under HF_HUB_OFFLINE, which keeps off the Hub.
         let watch = (!pull.offline).then(|| superfluid_adapter_kit::progress::Watch {
-            roots: vec![superfluid_adapter_kit::install::hf_repo_cache(id), llama_cache_dir()],
+            roots: vec![superfluid_adapter_kit::install::hf_repo_cache(id)],
             follow: vec![],
             total: if superfluid_adapter_kit::install::hf_offline() { None } else { expected::bytes(id, tag, file.as_deref(), pull.option("no-mmproj").is_some()) },
         });
@@ -185,15 +187,6 @@ impl Runtime for Llamacpp {
         std::fs::copy(&found, lib.join(&name)).map_err(|e| format!("{}: {e}", found.display()))?;
         Ok(sources)
     }
-}
-
-/// Where llama.cpp keeps what it downloads outside the Hub cache: `LLAMA_CACHE`, else
-/// `llama.cpp` under the platform's cache directory, as `fs_get_cache_directory` finds it.
-fn llama_cache_dir() -> std::path::PathBuf {
-    std::env::var_os("LLAMA_CACHE")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| superfluid_adapter_kit::install::platform_cache_dir().join("llama.cpp"))
 }
 
 /// What a pull fetches, in bytes, for its progress bar: the GGUF `llama download` takes (every
