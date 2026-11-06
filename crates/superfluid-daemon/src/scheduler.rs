@@ -293,8 +293,13 @@ impl LaneOutput {
                 continue;
             }
             let channel = run.channel;
-            if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
+            let text_like = channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING;
+            if text_like {
                 bus.publish_provisional(session, channel, &text);
+            }
+            // The lane's own stream also gets tool-call text, so a call fragments at token
+            // cadence instead of once per tick; the session bus keeps to text and reasoning.
+            if text_like || channel == crate::wal::channel::TOOL_CALL {
                 let _ = events.send(LaneEvent::Provisional { channel, text, produced });
             }
         }
@@ -306,8 +311,11 @@ impl LaneOutput {
             return;
         }
         let channel = self.disp_seg.current_channel();
-        if channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING {
+        let text_like = channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING;
+        if text_like {
             bus.publish_provisional(session, channel, &text);
+        }
+        if text_like || channel == crate::wal::channel::TOOL_CALL {
             let produced = self.disp_tokens;
             let _ = events.send(LaneEvent::Provisional { channel, text, produced });
         }

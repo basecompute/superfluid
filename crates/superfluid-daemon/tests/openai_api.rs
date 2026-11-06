@@ -1417,6 +1417,31 @@ fn chat_streams_tool_call_deltas() {
     assert!(raw.contains("data: [DONE]"), "{raw}");
 }
 
+#[test]
+fn a_call_shorter_than_a_tick_still_fragments_at_token_cadence() {
+    // 29 tokens, inside the first tick's grant: nothing of this call is committed before it
+    // closes, so every fragment comes from the lane's partial emits. Fed once per commit, the
+    // name and the whole of the arguments would land in one opening entry.
+    let addr = spawn_scripted_stack(tool_envelope(r#"{"name":"f","arguments":{}}"#));
+    let body = r#"{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,
+        "tools":[{"type":"function","function":{"name":"f","parameters":{}}}],
+        "messages":[{"role":"user","content":"go"}]}"#;
+    let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let (events, entries) = stream_events(&raw);
+    assert!(entries.len() >= 3, "opening, then argument fragments: {raw}");
+    assert_eq!(entries[0]["function"]["name"], "f", "{raw}");
+    assert!(entries[0]["id"].as_str().is_some_and(|s| s.starts_with("call_")), "{raw}");
+    assert_eq!(
+        entries[0]["function"]["arguments"],
+        "",
+        "the opening entry is sent as soon as the name is known, before any argument byte: {raw}"
+    );
+    let args: String = entries.iter().filter_map(|e| e["function"]["arguments"].as_str()).collect();
+    assert_eq!(args, "{}", "{raw}");
+    assert_eq!(stream_finish(&events), "tool_calls", "{raw}");
+}
+
 fn stream_events(raw: &str) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let events: Vec<serde_json::Value> = raw
         .lines()

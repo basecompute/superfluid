@@ -61,7 +61,7 @@ For wires that write values raw (XML, GLM), each argument is typed from the tool
 
 ## Streaming
 
-A streamed call opens with an entry carrying `index`, `id` and `function.name` once the name is known, then `function.arguments` fragments on the same index, then `finish_reason: "tool_calls"`. JSON wires stream raw argument bytes; delimited wires stream one closed argument at a time; Gemma and ATEM calls arrive whole. Fragments concatenate to the non-streaming `arguments`.
+A streamed call opens with an entry carrying `index`, `id` and `function.name` once the name is known, then `function.arguments` fragments on the same index at token cadence, then `finish_reason: "tool_calls"`. JSON wires stream raw argument bytes; delimited wires stream one closed argument at a time; Harmony, GLM, Gemma and ATEM calls arrive whole once they close. Fragments concatenate to the non-streaming `arguments`.
 
 ## Malformed calls
 

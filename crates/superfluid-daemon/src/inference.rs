@@ -1916,6 +1916,14 @@ pub(crate) fn next_id() -> String {
     format!("chatcmpl-superfluid-{}", N.fetch_add(1, Ordering::Relaxed))
 }
 
+/// Numbers a streamed generation, so a call its fragmenter opens before any of its text is
+/// committed (and so before it has an event id) still gets an id unique to this process.
+pub(crate) fn next_call_gen() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(1);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
 pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2678,8 +2686,6 @@ async fn chat_stream(
                 },
                 None,
             ))?;
-            let mut tool_index = 0usize;
-            let mut orphaned_calls = 0usize;
             let mut extras = extras_of(
                 req.presence_penalty,
                 req.frequency_penalty,
@@ -2694,14 +2700,14 @@ async fn chat_stream(
             }
             let tool_schemas = crate::codec::ToolSchemas::of_values(&req.tools);
             extras.tool_schemas = tool_schemas.clone();
-            let mut frag =
+            let frag =
                 crate::tool_fragment::ToolCallStream::new(if choice == ToolChoice::None {
                     crate::tool_fragment::ToolFragmentMode::None
                 } else {
                     daemon.tool_fragment_mode()
                 })
                 .with_schemas(tool_schemas.clone());
-            let mut open_call_id = String::new();
+            let gen_no = next_call_gen();
             let handles = RequestHandles::new(
                 &daemon,
                 grammar_handle_for(&daemon, &req, &choice)?,
@@ -2733,6 +2739,10 @@ async fn chat_stream(
                 content_sent: usize,
                 stopped: bool,
                 dead: bool,
+                frag: crate::tool_fragment::ToolCallStream,
+                tool_index: usize,
+                open_call_id: String,
+                orphaned_calls: usize,
             }
             let st = std::rc::Rc::new(std::cell::RefCell::new(StreamText {
                 usage_now: None,
@@ -2742,7 +2752,30 @@ async fn chat_stream(
                 content_sent: 0,
                 stopped: false,
                 dead: false,
+                frag,
+                tool_index: 0,
+                open_call_id: String::new(),
+                orphaned_calls: 0,
             }));
+            // Tool-call text reaches the fragmenter from the lane's partial emits while deltas
+            // are on, and from each commit otherwise. A call opened by a commit is named after
+            // the committing event; one opened before any commit is numbered within this
+            // generation.
+            let tool_text = |s: &mut StreamText,
+                             text: &str,
+                             event_id: Option<u64>|
+             -> Result<(), DaemonError> {
+                for d in s.frag.feed(text) {
+                    if d.opening {
+                        s.open_call_id = match event_id {
+                            Some(id) => format!("call_{id}"),
+                            None => format!("call_{gen_no}_{}", s.tool_index),
+                        };
+                    }
+                    send(Frame::chat(Message::tool(&d, s.tool_index, &s.open_call_id), None))?;
+                }
+                Ok(())
+            };
             let push_text =
                 |s: &mut StreamText, text: &str, lp: Option<Logprobs>| -> Result<(), DaemonError> {
                     if s.stopped {
@@ -2797,7 +2830,9 @@ async fn chat_stream(
                     return;
                 }
                 s.decode.stamp(produced as u64);
-                let r = if ch == channel::REASONING {
+                let r = if ch == channel::TOOL_CALL {
+                    tool_text(&mut s, text, None)
+                } else if ch == channel::REASONING {
                     let mut ck = Frame::chat(Message::reasoning(text), None);
                     if let Some(n) = s.usage_now {
                         ck.usage = Some(Usage::partial(n));
@@ -2822,7 +2857,9 @@ async fn chat_stream(
                     } => {
                         let mut s = st_ev.borrow_mut();
                         let covered_by_delta = delta_mode
-                            && (*ch == channel::TEXT || *ch == channel::REASONING)
+                            && (*ch == channel::TEXT
+                                || *ch == channel::REASONING
+                                || *ch == channel::TOOL_CALL)
                             && !text.is_empty();
                         s.committed += span.len() as u32;
                         let committed = s.committed as u64;
@@ -2839,12 +2876,8 @@ async fn chat_stream(
                             Vec::new()
                         };
                         if *ch == channel::TOOL_CALL {
-                            for d in frag.feed(text) {
-                                if d.opening {
-                                    open_call_id = format!("call_{}", ev.event_id);
-                                }
-                                let json = Message::tool(&d, tool_index, &open_call_id);
-                                send(Frame::chat(json, None))?;
+                            if !delta_mode {
+                                tool_text(&mut s, text, Some(ev.event_id))?;
                             }
                             return Ok(());
                         }
@@ -2865,31 +2898,33 @@ async fn chat_stream(
                         push_text(&mut s, text, lp)
                     }
                     EventBody::ToolParseFailure { raw } => {
-                        if choice != ToolChoice::None && !frag.opened() {
+                        let mut s = st_ev.borrow_mut();
+                        if choice != ToolChoice::None && !s.frag.opened() {
                             if let Some((name, arguments)) = daemon.named_tool_call(raw) {
                                 let delta = Message::complete_tool(
-                                    tool_index,
+                                    s.tool_index,
                                     format!("call_{}", ev.event_id),
                                     name,
                                     arguments,
                                 );
-                                tool_index += 1;
-                                orphaned_calls += 1;
+                                s.tool_index += 1;
+                                s.orphaned_calls += 1;
                                 return send(Frame::chat(delta, None));
                             }
                         }
-                        if frag.opened() {
-                            orphaned_calls += 1;
-                            tool_index += 1;
+                        if s.frag.opened() {
+                            s.orphaned_calls += 1;
+                            s.tool_index += 1;
                         }
-                        frag.reset();
+                        s.frag.reset();
                         let mut ck = Frame::chat(Message::content(raw), None);
                         if continuous_usage {
-                            ck.usage = Some(Usage::partial(st_ev.borrow().committed));
+                            ck.usage = Some(Usage::partial(s.committed));
                         }
                         send(ck)
                     }
                     EventBody::ToolUse { name, arguments } => {
+                        let mut s = st_ev.borrow_mut();
                         if choice == ToolChoice::None {
                             let raw = format!(
                                 "{{\"name\":{},\"arguments\":{}}}",
@@ -2898,28 +2933,28 @@ async fn chat_stream(
                             );
                             let mut ck = Frame::chat(Message::content(raw), None);
                             if continuous_usage {
-                                ck.usage = Some(Usage::partial(st_ev.borrow().committed));
+                                ck.usage = Some(Usage::partial(s.committed));
                             }
                             return send(ck);
                         }
-                        if frag.opened() {
-                            for d in frag.finish(arguments) {
+                        if s.frag.opened() {
+                            for d in s.frag.finish(arguments) {
                                 send(Frame::chat(
-                                    Message::tool(&d, tool_index, &open_call_id),
+                                    Message::tool(&d, s.tool_index, &s.open_call_id),
                                     None,
                                 ))?;
                             }
-                            frag.reset();
-                            tool_index += 1;
+                            s.frag.reset();
+                            s.tool_index += 1;
                             return Ok(());
                         }
                         let delta = Message::complete_tool(
-                            tool_index,
+                            s.tool_index,
                             format!("call_{}", ev.event_id),
                             name.clone(),
                             arguments.clone(),
                         );
-                        tool_index += 1;
+                        s.tool_index += 1;
                         send(Frame::chat(delta, None))
                     }
                     _ => Ok(()),
@@ -2952,6 +2987,7 @@ async fn chat_stream(
             decode.finish();
             decode.add_measured(out.decode);
             let (content_acc, content_sent) = (st.content_acc.clone(), st.content_sent);
+            let (tool_index, orphaned_calls) = (st.tool_index, st.orphaned_calls);
             drop(st);
             let mut c = collect(&out.events);
             if !stopped && !choice.forces_call() && content_sent < content_acc.len() {
