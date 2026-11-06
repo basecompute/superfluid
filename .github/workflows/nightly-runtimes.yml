@@ -122,8 +122,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The macOS leg runs on a self-hosted Apple silicon runner. The hosted
-        # macos-14 runner's virtualized GPU takes llama.cpp's fallback Metal
+        # The macOS leg runs on a self-hosted Apple silicon runner. A hosted
+        # macOS runner's virtualized GPU takes llama.cpp's fallback Metal
         # kernels, which fail the adapter's numeric tests whatever the build,
         # and its memory leaves the pool shared where the tests expect a
         # buffer per lane. So does a self-hosted Mac with too little memory:
@@ -378,7 +378,7 @@ jobs:
     name: MLX ${{ needs.pick.outputs.mlx }}
     needs: pick
     if: needs.pick.outputs.mlx != ''
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.pick.outputs.mlx }}
@@ -517,7 +517,7 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "$title"
           git push -f origin "$branch"
-          p1="The nightly job installed MLX $VERSION with mlx-lm $mlx_lm untested on macos-14 and ran the adapter's tests on it, as $BASE has them: $RUN"
+          p1="The nightly job installed MLX $VERSION with mlx-lm $mlx_lm untested on macos-15 and ran the adapter's tests on it, as $BASE has them: $RUN"
           p2="This adds the version to the adapter's recipe as a tested one, or replaces its entry for the newer mlx-lm: the environment pip resolved for it on the runner, every wheel with the size and SHA-256 PyPI lists for it, so the next release installs it on its own. The Python the adapter ships is unchanged."
           body="$p1"$'\n\n'"$p2"
           draft=
@@ -558,7 +558,7 @@ jobs:
             echo "noted $what on the open issue #$number"
             exit 0
           fi
-          p1="The nightly job installed $what untested on macos-14 and the adapter's tests did not pass on it: $RUN"
+          p1="The nightly job installed $what untested on macos-15 and the adapter's tests did not pass on it: $RUN"
           p2="The test log is the run's artifact. Until the adapter is fixed, or the version is found to be at fault, the recipe keeps its last tested version. A version that needs a newer Python than the adapter ships fails here too: that is a change to the worker's build, not a pin."
           body="$p1"$'\n\n'"$p2"
           gh issue create --title "$title" --body "$body"
