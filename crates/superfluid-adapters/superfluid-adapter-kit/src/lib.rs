@@ -18,6 +18,7 @@ pub use superfluid_worker::{ring_specs_for, WorkerArgs};
 
 pub mod conformance;
 pub mod install;
+pub mod progress;
 
 use install::{Candidate, Host, Manifest, Plan, Request, Unlisted};
 
@@ -298,16 +299,13 @@ pub fn run_tool(cmd: &mut std::process::Command, what: &str) -> Result<String, S
 const KEPT_STDERR: usize = 16 * 1024;
 
 fn show_and_keep(mut from: impl std::io::Read) -> String {
-    use std::io::Write;
     let mut kept: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         match from.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let mut err = std::io::stderr().lock();
-                let _ = err.write_all(&buf[..n]);
-                let _ = err.flush();
+                progress::write_through(&buf[..n]);
                 kept.extend_from_slice(&buf[..n]);
                 if kept.len() > 2 * KEPT_STDERR {
                     kept.drain(..kept.len() - KEPT_STDERR);

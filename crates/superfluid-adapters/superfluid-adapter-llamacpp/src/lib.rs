@@ -148,7 +148,15 @@ impl Runtime for Llamacpp {
         if pull.option("no-mmproj").is_some() {
             cmd.arg("--no-mmproj");
         }
-        superfluid_adapter_kit::run_pull_tool(&mut cmd, &format!("llama download {}", pull.id)).map_err(|why| {
+        // `llama download -hf` lands in the Hub cache's directory for the repository; its own
+        // cache (LLAMA_CACHE) takes direct URLs and docker models, which a pull never names.
+        // The Hub's listing sizes the bar; not under HF_HUB_OFFLINE, which keeps off the Hub.
+        let watch = (!pull.offline).then(|| superfluid_adapter_kit::progress::Watch {
+            roots: vec![superfluid_adapter_kit::install::hf_repo_cache(id)],
+            follow: vec![],
+            total: if superfluid_adapter_kit::install::hf_offline() { None } else { expected::bytes(id, tag, file.as_deref(), pull.option("no-mmproj").is_some()) },
+        });
+        superfluid_adapter_kit::progress::watched(watch, || superfluid_adapter_kit::run_pull_tool(&mut cmd, &format!("llama download {}", pull.id))).map_err(|why| {
             if pull.offline {
                 format!("{why} (offline: only the Hugging Face cache was looked at)")
             } else {
@@ -178,6 +186,115 @@ impl Runtime for Llamacpp {
         })?;
         std::fs::copy(&found, lib.join(&name)).map_err(|e| format!("{}: {e}", found.display()))?;
         Ok(sources)
+    }
+}
+
+/// What a pull fetches, in bytes, for its progress bar: the GGUF `llama download` takes (every
+/// shard of it) and the projector it takes beside a vision model, less what the Hub cache holds.
+/// Best effort: a listing or manifest that fails leaves the bar without a total.
+mod expected {
+    use superfluid_adapter_kit::install::{fetch_json, hf_endpoint, hf_repo_listing, HfListing};
+
+    pub fn bytes(id: &str, tag: Option<&str>, file: Option<&str>, no_mmproj: bool) -> Option<u64> {
+        let listing = hf_repo_listing(id, None).ok()?;
+        let (model, mmproj) = match file {
+            Some(f) => (f.to_string(), None),
+            None => {
+                let (model, mmproj) = manifest(id, tag.unwrap_or("latest"))?;
+                (path_of(&listing, &model)?, mmproj.and_then(|m| path_of(&listing, &m)))
+            }
+        };
+        Some(of(&listing, &model, mmproj.as_deref(), no_mmproj))
+    }
+
+    /// The file the Hub's manifest for `id:tag` names, and the projector beside it: what
+    /// `llama download` asks when no file is named, so the same file. Each is the SHA-256 of
+    /// its bytes (the manifest's layers name files so; it names them by path only to llama.cpp's
+    /// user agent), which the listing knows the path of.
+    fn manifest(id: &str, tag: &str) -> Option<(String, Option<String>)> {
+        let url = format!("{}/v2/{id}/manifests/{tag}", hf_endpoint().trim_end_matches('/'));
+        let v = fetch_json(&url).ok()?;
+        let layer = |kind: &str| {
+            v["layers"]
+                .as_array()?
+                .iter()
+                .find(|l| l["mediaType"].as_str().is_some_and(|m| m.ends_with(kind)))
+                .and_then(|l| l["digest"].as_str())
+                .map(|d| d.strip_prefix("sha256:").unwrap_or(d).to_string())
+        };
+        Some((layer(".model")?, layer(".projector")))
+    }
+
+    /// The path in `listing` of the file `key` names, by path or by the SHA-256 of its bytes.
+    fn path_of(listing: &HfListing, key: &str) -> Option<String> {
+        listing.files.iter().find(|f| f.path == key || f.blob == key).map(|f| f.path.clone())
+    }
+
+    /// The bytes of `model` (its shards with it) and of the projector: `mmproj` when the
+    /// manifest named one, else the sole projector in the repository, which llama.cpp takes
+    /// beside a file named to it.
+    pub fn of(listing: &HfListing, model: &str, mmproj: Option<&str>, no_mmproj: bool) -> u64 {
+        let stem = super::sized::model(model);
+        let projectors: Vec<&str> = listing.files.iter().map(|f| f.path.as_str()).filter(|p| super::sized::is_mmproj(p)).collect();
+        let projector = match (no_mmproj, mmproj) {
+            (true, _) => None,
+            (false, Some(named)) => Some(named.to_string()),
+            (false, None) => match projectors.as_slice() {
+                [one] => Some(one.to_string()),
+                _ => None,
+            },
+        };
+        listing.to_fetch(|p| {
+            let gguf = p.to_ascii_lowercase().ends_with(".gguf");
+            (gguf && !super::sized::is_mmproj(p) && super::sized::model(p) == stem) || projector.as_deref() == Some(p)
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use superfluid_adapter_kit::install::HfFile;
+
+        fn listing(files: &[(&str, u64)]) -> HfListing {
+            HfListing {
+                id: "org/m".into(),
+                sha: "abc".into(),
+                files: files.iter().map(|(p, n)| HfFile { path: p.to_string(), size: *n, blob: format!("blob-{p}") }).collect(),
+            }
+        }
+
+        /// The real repository, asked of the Hub: run with `--ignored` where the network is.
+        #[test]
+        #[ignore]
+        fn the_hub_names_the_file_a_tag_takes_and_sizes_it() {
+            let id = "ggml-org/gemma-3-1b-it-GGUF";
+            let listing = hf_repo_listing(id, None).expect("the listing");
+            let (model, mmproj) = manifest(id, "latest").expect("the manifest");
+            assert_eq!((path_of(&listing, &model).as_deref(), mmproj), (Some("gemma-3-1b-it-Q4_K_M.gguf"), None));
+            assert_eq!(path_of(&listing, &manifest(id, "Q8_0").unwrap().0).as_deref(), Some("gemma-3-1b-it-Q8_0.gguf"));
+            assert_eq!(manifest(id, "nope"), None, "a tag the repository has no file for");
+            let q8 = listing.files.iter().find(|f| f.path == "gemma-3-1b-it-Q8_0.gguf").unwrap();
+            assert_eq!(q8.size, 1_069_306_368);
+            let (model, projector) = manifest("ggml-org/gemma-3-4b-it-GGUF", "latest").expect("a vision model's manifest");
+            let vision = hf_repo_listing("ggml-org/gemma-3-4b-it-GGUF", None).unwrap();
+            assert_eq!(path_of(&vision, &model).as_deref(), Some("gemma-3-4b-it-Q4_K_M.gguf"));
+            assert_eq!(projector.and_then(|p| path_of(&vision, &p)).as_deref(), Some("mmproj-model-f16.gguf"));
+            println!("expected bytes, latest: {:?}; Q8_0: {:?}", bytes(id, None, None, false), bytes(id, Some("Q8_0"), None, false));
+        }
+
+        #[test]
+        fn a_pull_is_the_file_named_its_shards_and_the_projector_it_takes() {
+            let l = listing(&[("README.md", 10), ("m-Q4_K_M.gguf", 800), ("m-Q8_0.gguf", 1000), ("mmproj-F16.gguf", 300)]);
+            assert_eq!(of(&l, "m-Q4_K_M.gguf", None, false), 1100, "the sole projector comes along");
+            assert_eq!(of(&l, "m-Q4_K_M.gguf", None, true), 800, "--no-mmproj leaves it");
+            assert_eq!(of(&l, "m-Q8_0.gguf", Some("mmproj-F16.gguf"), false), 1300);
+            let two = listing(&[("m-Q4_K_M.gguf", 800), ("mmproj-F16.gguf", 300), ("mmproj-Q8.gguf", 200)]);
+            assert_eq!(of(&two, "m-Q4_K_M.gguf", None, false), 800, "which of two projectors is llama.cpp's call");
+            assert_eq!(of(&two, "m-Q4_K_M.gguf", Some("mmproj-Q8.gguf"), false), 1000);
+            let shards = listing(&[("m-XL-00001-of-00002.gguf", 500), ("m-XL-00002-of-00002.gguf", 400), ("m-Small.gguf", 100)]);
+            assert_eq!(of(&shards, "m-XL-00001-of-00002.gguf", None, false), 900);
+            assert_eq!(of(&shards, "m-Small.gguf", None, false), 100);
+        }
     }
 }
 
@@ -216,7 +333,7 @@ pub mod sized {
 
     /// The model a file is of, by its whole path in the repository: `sub/Foo-Medium.gguf` and
     /// `sub/Foo-Medium-00001-of-00002.gguf` are one model, `other/Foo-Medium.gguf` another.
-    fn model(path: &str) -> String {
+    pub(crate) fn model(path: &str) -> String {
         match path.rsplit_once('/') {
             Some((dir, name)) => format!("{dir}/{}", name_stem(name)),
             None => name_stem(path),
@@ -262,7 +379,7 @@ pub mod sized {
     }
 
     /// The multimodal projector a vision model carries beside its weights, not a model file.
-    fn is_mmproj(path: &str) -> bool {
+    pub(crate) fn is_mmproj(path: &str) -> bool {
         path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase().starts_with("mmproj")
     }
 
