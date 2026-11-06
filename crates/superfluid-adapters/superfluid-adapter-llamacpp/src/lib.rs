@@ -148,9 +148,11 @@ impl Runtime for Llamacpp {
         if pull.option("no-mmproj").is_some() {
             cmd.arg("--no-mmproj");
         }
+        // the Hub's listing sizes the bar; not under HF_HUB_OFFLINE, which keeps off the Hub
         let watch = (!pull.offline).then(|| superfluid_adapter_kit::progress::Watch {
-            roots: [superfluid_adapter_kit::install::hf_cache_roots(id), vec![llama_cache_dir()]].concat(),
-            total: expected::bytes(id, tag, file.as_deref(), pull.option("no-mmproj").is_some()),
+            roots: vec![superfluid_adapter_kit::install::hf_repo_cache(id), llama_cache_dir()],
+            follow: vec![],
+            total: if superfluid_adapter_kit::install::hf_offline() { None } else { expected::bytes(id, tag, file.as_deref(), pull.option("no-mmproj").is_some()) },
         });
         superfluid_adapter_kit::progress::watched(watch, || superfluid_adapter_kit::run_pull_tool(&mut cmd, &format!("llama download {}", pull.id))).map_err(|why| {
             if pull.offline {

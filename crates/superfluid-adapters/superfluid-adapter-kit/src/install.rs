@@ -540,26 +540,34 @@ pub fn hf_listing_from(id: &str, v: &Value) -> HfListing {
     HfListing { id: id.to_string(), sha: v["sha"].as_str().unwrap_or_default().to_string(), files }
 }
 
-/// The Hub cache, as huggingface_hub and llama.cpp find it: `HF_HUB_CACHE`, else `hub` under
+/// The Hub cache, as huggingface_hub and llama.cpp find it: `HF_HUB_CACHE` (or its older name
+/// `HUGGINGFACE_HUB_CACHE`), else `hub` under
 /// `HF_HOME`, else `huggingface/hub` under `XDG_CACHE_HOME`, else `~/.cache/huggingface/hub`.
 pub fn hf_hub_cache() -> PathBuf {
     let set = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     set("HF_HUB_CACHE")
+        .or_else(|| set("HUGGINGFACE_HUB_CACHE"))
         .or_else(|| set("HF_HOME").map(|h| h.join("hub")))
         .or_else(|| set("XDG_CACHE_HOME").map(|c| c.join("huggingface").join("hub")))
         .unwrap_or_else(|| home_dir().join(".cache").join("huggingface").join("hub"))
 }
 
-/// Where the Hub cache keeps the repository `id`: `models--org--name`.
+/// Where the Hub cache keeps the repository `id`: `models--org--name`, and where a pull of it
+/// lands its bytes. huggingface_hub (from 2.0) then moves a large file into the store it shares
+/// between repositories, `blobs/<xx>/<hash>` under the cache itself, and links to it from
+/// here; a watch follows the file there by its inode, and nothing another pull lands in that
+/// store is counted as this one's.
 pub fn hf_repo_cache(id: &str) -> PathBuf {
     hf_hub_cache().join(format!("models--{}", id.replace('/', "--")))
 }
 
-/// Where a pull of the repository `id` lands its bytes: the repository's directory in the Hub
-/// cache, and the store huggingface_hub (from 2.0) keeps large files in, `blobs/<xx>/<hash>`
-/// under the cache itself, which the repository's `blobs` only link to.
-pub fn hf_cache_roots(id: &str) -> Vec<PathBuf> {
-    vec![hf_repo_cache(id), hf_hub_cache().join("blobs")]
+/// Whether the Hub is not to be reached, as huggingface_hub reads it: `HF_HUB_OFFLINE` (or
+/// the older `TRANSFORMERS_OFFLINE`) set to `1`, `ON`, `YES` or `TRUE`, in any case. A pull
+/// under it looks nothing up on the Hub, as `snapshot_download` fetches nothing.
+pub fn hf_offline() -> bool {
+    ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"].iter().any(|name| {
+        std::env::var(name).is_ok_and(|v| ["1", "ON", "YES", "TRUE"].contains(&v.trim().to_ascii_uppercase().as_str()))
+    })
 }
 
 /// Where this platform keeps caches: `~/Library/Caches` on macOS, else `XDG_CACHE_HOME` or
@@ -788,9 +796,10 @@ mod tests {
         let cache = hf_hub_cache();
         assert!(cache.ends_with("hub") || std::env::var_os("HF_HUB_CACHE").is_some(), "{}", cache.display());
         assert!(hf_repo_cache("org/name").ends_with("models--org--name"));
-        let roots = hf_cache_roots("org/name");
-        assert_eq!(roots.len(), 2);
-        assert!(roots[1].ends_with("blobs") && roots[1].parent() == hf_repo_cache("org/name").parent());
+        assert_eq!(hf_repo_cache("org/name").parent(), Some(cache.as_path()));
+        if std::env::var_os("HF_HUB_OFFLINE").is_none() && std::env::var_os("TRANSFORMERS_OFFLINE").is_none() {
+            assert!(!hf_offline());
+        }
     }
 
     #[test]

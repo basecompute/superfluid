@@ -112,9 +112,16 @@ impl Runtime for Basert {
                 let args = pull_args(pull, id, variant, &version);
                 let mut cmd = std::process::Command::new(&tool);
                 cmd.arg("pull").args(&args);
+                // the catalog or the Hub sizes the bar; not under HF_HUB_OFFLINE, which keeps off the network
                 let watch = superfluid_adapter_kit::progress::Watch {
+                    // a finished download is moved from .src into the install tree: followed there
                     roots: vec![models_dir().join(".src")],
-                    total: expected_bytes(&tool, id, variant, pull.option("file").flatten(), pull.option("revision").flatten()),
+                    follow: vec![models_dir()],
+                    total: if superfluid_adapter_kit::install::hf_offline() {
+                        None
+                    } else {
+                        expected_bytes(&tool, id, variant, pull.option("file").flatten(), pull.option("revision").flatten())
+                    },
                 };
                 superfluid_adapter_kit::progress::watched(Some(watch), || {
                     superfluid_adapter_kit::run_tool(&mut cmd, &format!("basert pull {}", args[0]))

@@ -454,9 +454,12 @@ fn own_model_code(dir: &Path) -> Option<String> {
 
 pub fn pull(venv: Option<&Path>, repo: &str, revision: Option<&str>, offline: bool) -> Result<PathBuf, String> {
     // The bar is drawn here from what lands in the Hub cache, so huggingface_hub's own (one a
-    // file, on stderr whether or not it is a terminal) are off.
+    // file, on stderr whether or not it is a terminal) are off. Offline, by the flag or by
+    // HF_HUB_OFFLINE as snapshot_download reads it, nothing is fetched and nothing looked up.
+    let offline = offline || superfluid_adapter_kit::install::hf_offline();
     let watch = (!offline).then(|| superfluid_adapter_kit::progress::Watch {
-        roots: superfluid_adapter_kit::install::hf_cache_roots(repo),
+        roots: vec![superfluid_adapter_kit::install::hf_repo_cache(repo)],
+        follow: vec![superfluid_adapter_kit::install::hf_hub_cache().join("blobs")],
         total: superfluid_adapter_kit::install::hf_repo_listing(repo, revision)
             .ok()
             .map(|l| l.to_fetch(|p| PULL_PATTERNS.iter().any(|pat| superfluid_adapter_kit::install::glob_matches(pat, p)))),
