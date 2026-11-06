@@ -1579,8 +1579,15 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 eprintln!("superfluid: {why}");
                 std::process::exit(2);
             }
-            eprintln!("superfluid: tool-call envelope overridden to '{}'", env.name());
-            Box::new(superfluid_daemon::codec::WithToolEnvelope::new(codec, env))
+            if env == codec.tool_envelope() {
+                // Nothing to override, and wrapping would drop what the envelope does not
+                // carry: an XML wire reports the JSON envelope but is parsed and streamed as XML.
+                eprintln!("superfluid: --tool-call-parser {} is this model's own tool wire", env.name());
+                codec
+            } else {
+                eprintln!("superfluid: tool-call envelope overridden to '{}'", env.name());
+                Box::new(superfluid_daemon::codec::WithToolEnvelope::new(codec, env))
+            }
         }
         None => codec,
     };

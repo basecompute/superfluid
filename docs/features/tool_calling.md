@@ -49,7 +49,7 @@ The format is learned at load by rendering one synthetic call through the model'
 | wire | example | families |
 |---|---|---|
 | `json` | `<tool_call>{"name": ..., "arguments": {...}}</tool_call>` | Qwen3, many ChatML models |
-| delimited XML | `<function=f><parameter=k>v</parameter></function>` | Qwen3.5, Qwen3.6, Nemotron 3 Nano |
+| delimited XML | `<function=f><parameter=k>v</parameter></function>` | Qwen3.5, Qwen3.6, Qwen3.8, Nemotron 3 Nano |
 | `glm` | `f<arg_key>k</arg_key><arg_value>v</arg_value>` | GLM-5.x |
 | `harmony` | a Harmony message addressed `to=functions.f` | gpt-oss |
 | `gemma` | `call:fn{k:v}` | Gemma 4 |
