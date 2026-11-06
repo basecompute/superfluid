@@ -3826,6 +3826,15 @@ impl TextCodec for ChatMlCodec {
         }
     }
 
+    // The envelope alone does not say how to stream: a template's XML wire (Qwen3.5 and later)
+    // reports the JSON envelope, and the JSON fragmenter never finds a call in XML text.
+    fn tool_fragment_mode(&self) -> crate::tool_fragment::ToolFragmentMode {
+        match self.tool_source() {
+            Some(t) => t.tool_fragment_mode(),
+            None => crate::tool_fragment::ToolFragmentMode::Json,
+        }
+    }
+
     fn tool_call_delimiters(&self) -> Option<(String, String)> {
         match self.tool_source() {
             Some(t) => t.tool_call_delimiters(),

@@ -88,7 +88,7 @@ fn provisional_deltas_stream_at_token_cadence() {
                 Ok(())
             },
             |_| {},
-            |channel, text, _produced| {
+            |channel, text, _produced, _closes| {
                 let mut t = trace.borrow_mut();
                 if !t.committed.is_empty() && t.deltas.is_empty() {
                     t.commit_before_delta = true;

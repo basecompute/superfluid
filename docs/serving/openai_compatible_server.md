@@ -110,7 +110,7 @@ curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/jso
 ### Streaming
 
 - The first chunk's delta is `{"role":"assistant"}`; content and `reasoning_content` deltas follow at token cadence.
-- Tool calls stream as OpenAI partial deltas: an opening entry with `id` and `function.name`, then `arguments` fragments on the same `index`.
+- Tool calls stream as OpenAI partial deltas: an opening entry with `id` and `function.name`, then `arguments` fragments on the same `index`, at the same token cadence as content.
 - The terminal chunk carries `finish_reason`, `usage` and `superfluid.warm` (cached prefix tokens).
 - Lines starting with `:` are keep-alives.
 - A client that disconnects cancels the generation at the next tick.

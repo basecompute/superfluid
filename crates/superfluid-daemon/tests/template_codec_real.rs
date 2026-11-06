@@ -989,6 +989,70 @@ fn quoted_markers_in_replayed_call_arguments_stay_text_on_a_raw_value_wire() {
 }
 
 #[test]
+fn the_curated_codec_streams_an_xml_call_under_its_own_name() {
+    use superfluid_daemon::codec::chatml_codec;
+    use superfluid_daemon::tool_fragment::{ToolCallStream, ToolFragmentMode};
+    let m = match std::env::var("BASERT_TEST_MODEL_XMLWIRE") {
+        Ok(p) => std::path::PathBuf::from(p),
+        Err(_) => {
+            let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let p = root.join("models/Qwen3.8-27B-dense-q4mix-cuda.base");
+            if !p.exists() {
+                eprintln!("::warning::SKIP the_curated_codec_streams_an_xml_call_under_its_own_name — no XML-wire fixture");
+                return;
+            }
+            p
+        }
+    };
+    if TemplateCodec::load(&m).expect("template codec").tool_body_is_json() {
+        eprintln!("::warning::SKIP — fixture's tool wire is JSON, not XML");
+        return;
+    }
+    // Auto-detection serves Qwen3.5 and later through the curated codec, whose envelope reads
+    // JSON for the XML wire; streaming has to follow the wire, not the envelope.
+    let c = chatml_codec(&m).expect("curated codec loads");
+    let mode = c.tool_fragment_mode();
+    assert!(matches!(mode, ToolFragmentMode::Delimited(_)), "the XML wire streams as delimited");
+
+    // A file whose content opens with a JSON "name": the call is still `write`. The route types
+    // raw XML values from the request's schemas, so `content` stays the string it was declared.
+    let schemas = superfluid_daemon::codec::ToolSchemas::of_values(&[serde_json::json!({
+        "type": "function",
+        "function": {"name": "write", "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "content": {"type": "string"}}}}
+    })]);
+    let mut s = ToolCallStream::new(mode).with_schemas(schemas.clone());
+    let mut names = Vec::new();
+    let mut args = String::new();
+    for chunk in [
+        "\n<function=wr",
+        "ite>\n<parameter=path>\npackage.json\n</parameter>\n<parameter=content>\n{\"name\": \"demo\",",
+        " \"version\": \"1.0.0\"}\n</parameter>\n</function>\n",
+    ] {
+        for d in s.feed(chunk) {
+            if d.opening {
+                names.push(d.name.clone());
+            }
+            args.push_str(&d.arguments);
+        }
+    }
+    let parsed = c
+        .parse_tool_call_with(
+            "<function=write>\n<parameter=path>\npackage.json\n</parameter>\n<parameter=content>\n{\"name\": \"demo\", \"version\": \"1.0.0\"}\n</parameter>\n</function>",
+            schemas.as_deref(),
+        )
+        .expect("the codec parses its own wire");
+    assert_eq!(parsed.0, "write");
+    for d in s.finish(&parsed.1) {
+        args.push_str(&d.arguments);
+    }
+    assert_eq!(names, vec!["write"], "streamed under the call's own name");
+    let v: serde_json::Value = serde_json::from_str(&args).expect("fragments reassemble to JSON");
+    assert_eq!(v["path"], "package.json");
+    assert_eq!(v["content"], "{\"name\": \"demo\", \"version\": \"1.0.0\"}");
+}
+
+#[test]
 fn template_generation_prompt_is_the_turn_opener() {
     use superfluid_daemon::codec::{trailing_open_channel, ChatMessage};
     use superfluid_daemon::wal::{channel, role};
