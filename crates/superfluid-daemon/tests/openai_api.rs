@@ -1166,6 +1166,30 @@ fn spawn_scripted_stack_with(
     script: Vec<u32>,
     codec: Box<dyn superfluid_daemon::codec::TextCodec + Send + Sync>,
 ) -> std::net::SocketAddr {
+    let stack = scripted_stack(script, codec);
+    let addr = stack.addr;
+    std::mem::forget(stack);
+    addr
+}
+
+/// A scripted stack whose engine is shut down when it goes out of scope. Each engine holds its
+/// rings' descriptors, so a test that starts one stack per case must let each go, or this
+/// binary outgrows a CI runner's open-file limit (a few thousand on macOS).
+struct ScriptedStack {
+    addr: std::net::SocketAddr,
+    daemon: Arc<Daemon>,
+}
+
+impl Drop for ScriptedStack {
+    fn drop(&mut self) {
+        self.daemon.shutdown();
+    }
+}
+
+fn scripted_stack(
+    script: Vec<u32>,
+    codec: Box<dyn superfluid_daemon::codec::TextCodec + Send + Sync>,
+) -> ScriptedStack {
     let dir = std::env::temp_dir().join(format!(
         "superfluid-openai-script-{}-{}",
         std::process::id(),
@@ -1181,10 +1205,11 @@ fn spawn_scripted_stack_with(
     let daemon = Arc::new(Daemon::new(store, host, codec, 8));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
+    let served = Arc::clone(&daemon);
     std::thread::spawn(move || {
-        let _ = openai::serve_blocking(listener, daemon, "mock-model".into());
+        let _ = openai::serve_blocking(listener, served, "mock-model".into());
     });
-    addr
+    ScriptedStack { addr, daemon }
 }
 
 #[test]
@@ -1417,6 +1442,31 @@ fn chat_streams_tool_call_deltas() {
     assert!(raw.contains("data: [DONE]"), "{raw}");
 }
 
+#[test]
+fn a_call_shorter_than_a_tick_still_fragments_at_token_cadence() {
+    // 29 tokens, inside the first tick's grant: nothing of this call is committed before it
+    // closes, so every fragment comes from the lane's partial emits. Fed once per commit, the
+    // name and the whole of the arguments would land in one opening entry.
+    let addr = spawn_scripted_stack(tool_envelope(r#"{"name":"f","arguments":{}}"#));
+    let body = r#"{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,
+        "tools":[{"type":"function","function":{"name":"f","parameters":{}}}],
+        "messages":[{"role":"user","content":"go"}]}"#;
+    let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let (events, entries) = stream_events(&raw);
+    assert!(entries.len() >= 3, "opening, then argument fragments: {raw}");
+    assert_eq!(entries[0]["function"]["name"], "f", "{raw}");
+    assert!(entries[0]["id"].as_str().is_some_and(|s| s.starts_with("call_")), "{raw}");
+    assert_eq!(
+        entries[0]["function"]["arguments"],
+        "",
+        "the opening entry is sent as soon as the name is known, before any argument byte: {raw}"
+    );
+    let args: String = entries.iter().filter_map(|e| e["function"]["arguments"].as_str()).collect();
+    assert_eq!(args, "{}", "{raw}");
+    assert_eq!(stream_finish(&events), "tool_calls", "{raw}");
+}
+
 fn stream_events(raw: &str) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
     let events: Vec<serde_json::Value> = raw
         .lines()
@@ -1559,6 +1609,325 @@ fn spawn_scripted_harmony_stack(script: &str) -> std::net::SocketAddr {
         let _ = openai::serve_blocking(listener, daemon, "mock-model".into());
     });
     addr
+}
+
+/// Byte tokens plus Qwen's control markers, under the repository's Qwen3.6 template: the XML
+/// tool wire, served through the curated codec auto-detection picks for it.
+struct QwenTok;
+
+const QWEN_MARKERS: [&str; 9] = [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|endoftext|>",
+    "<think>",
+    "</think>",
+    "<tool_call>",
+    "</tool_call>",
+    "<tool_response>",
+    "</tool_response>",
+];
+
+impl superfluid_engine::Tokenizer for QwenTok {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            match QWEN_MARKERS.iter().position(|m| rest.starts_with(m)) {
+                Some(i) => {
+                    out.push(300 + i as u32);
+                    rest = &rest[QWEN_MARKERS[i].len()..];
+                }
+                None => {
+                    out.push(u32::from(rest.as_bytes()[0]));
+                    rest = &rest[1..];
+                }
+            }
+        }
+        out
+    }
+    fn token_bytes(&self, token: u32) -> Vec<u8> {
+        if token < 256 {
+            vec![token as u8]
+        } else {
+            Vec::new()
+        }
+    }
+    fn vocab_size(&self) -> u32 {
+        400
+    }
+    fn special_tokens(&self) -> Vec<(String, u32)> {
+        QWEN_MARKERS.iter().enumerate().map(|(i, m)| (m.to_string(), 300 + i as u32)).collect()
+    }
+    fn bos_token(&self) -> Option<u32> {
+        None
+    }
+    fn eos_token(&self) -> u32 {
+        301
+    }
+    fn chat_template_jinja(&self) -> String {
+        include_str!("../../../tests/fixtures/chat_templates/qwen3_6.jinja").to_string()
+    }
+}
+
+fn spawn_scripted_qwen_stack(script: &str) -> ScriptedStack {
+    use superfluid_engine::Tokenizer;
+    let codec = superfluid_daemon::codec::chatml_codec_from_tokenizer(Arc::new(QwenTok)).expect("the curated Qwen codec");
+    scripted_stack(QwenTok.encode(script), Box::new(codec))
+}
+
+const XML_CALL_TOOLS: &str = r#""tools":[
+    {"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"a":{"type":"integer"}}}}},
+    {"type":"function","function":{"name":"g","parameters":{"type":"object","properties":{"b":{"type":"integer"}}}}}]"#;
+
+/// The streamed calls of a chat completion by index: (name, concatenated arguments).
+fn streamed_calls(raw: &str) -> Vec<(String, String)> {
+    let (_, entries) = stream_events(raw);
+    let mut calls: Vec<(String, String)> = Vec::new();
+    for e in entries {
+        let i = e["index"].as_u64().expect("an index") as usize;
+        if calls.len() <= i {
+            calls.resize(i + 1, (String::new(), String::new()));
+        }
+        if let Some(n) = e["function"]["name"].as_str() {
+            calls[i].0.push_str(n);
+        }
+        calls[i].1.push_str(e["function"]["arguments"].as_str().unwrap_or(""));
+    }
+    calls
+}
+
+/// How many times a boundary test repeats its pattern in one generation, each time behind one
+/// more byte of padding, so the boundary falls at a different place in a tick every time. One
+/// stack per test keeps this binary within a CI runner's open-file limit.
+const REPEATS: usize = 16;
+
+fn chat_body(tools: &str) -> String {
+    format!(
+        r#"{{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,{tools},
+            "chat_template_kwargs":{{"enable_thinking":false}},"messages":[{{"role":"user","content":"go"}}]}}"#
+    )
+}
+
+fn responses_data(raw: &str) -> Vec<serde_json::Value> {
+    raw.lines().filter_map(|l| l.strip_prefix("data: ")).filter_map(|d| serde_json::from_str(d).ok()).collect()
+}
+
+fn json_of(s: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(s).ok()
+}
+
+#[test]
+fn adjacent_xml_calls_keep_their_own_arguments() {
+    // Calls back to back: the partial emits of a tick all come before its commits, so the
+    // second call's text arrives while the first is open.
+    let script: String = (0..REPEATS)
+        .map(|k| {
+            format!(
+                "{}<tool_call><function=f>\n<parameter=a>\n{k}\n</parameter>\n</function></tool_call>\
+                 <tool_call><function=g>\n<parameter=b>\n{k}\n</parameter>\n</function></tool_call>",
+                "x".repeat(k)
+            )
+        })
+        .collect::<String>()
+        + "<|im_end|>";
+    let stack = spawn_scripted_qwen_stack(&script);
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", &chat_body(XML_CALL_TOOLS));
+    assert_eq!(status, 200, "{raw}");
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), 2 * REPEATS, "{raw}");
+    for k in 0..REPEATS {
+        assert_eq!(got[2 * k].0, "f", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k].1), Some(serde_json::json!({"a": k})), "repeat {k}: {raw}");
+        assert_eq!(got[2 * k + 1].0, "g", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k + 1].1), Some(serde_json::json!({"b": k})), "repeat {k}: {raw}");
+    }
+    let (events, _) = stream_events(&raw);
+    assert_eq!(stream_finish(&events), "tool_calls");
+}
+
+#[test]
+fn an_xml_call_is_finished_before_the_text_after_it() {
+    let script: String = (0..REPEATS)
+        .map(|k| {
+            format!(
+                "{}<tool_call>\n<function=f>\n<parameter=a>\n{k}\n</parameter>\n</function>\n</tool_call>Done{k}.",
+                "x".repeat(k)
+            )
+        })
+        .collect::<String>()
+        + "<|im_end|>";
+
+    // Chat completions: every fragment of a call precedes the text written after it.
+    let stack = spawn_scripted_qwen_stack(&script);
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", &chat_body(XML_CALL_TOOLS));
+    assert_eq!(status, 200, "{raw}");
+    let (events, _) = stream_events(&raw);
+    let mut text = String::new();
+    for e in &events {
+        if let Some(entries) = e["choices"][0]["delta"]["tool_calls"].as_array() {
+            for entry in entries {
+                let k = entry["index"].as_u64().unwrap();
+                assert!(!text.contains(&format!("Done{k}.")), "call {k} streamed after its text: {raw}");
+            }
+        }
+        text.push_str(e["choices"][0]["delta"]["content"].as_str().unwrap_or(""));
+    }
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), REPEATS, "{raw}");
+    for (k, (name, args)) in got.iter().enumerate() {
+        assert_eq!(name, "f", "call {k}: {raw}");
+        assert_eq!(json_of(args), Some(serde_json::json!({"a": k})), "call {k}: {raw}");
+    }
+
+    // Responses: text closes the open call item, so a late fragment would be lost.
+    let stack = spawn_scripted_qwen_stack(&script);
+    let body = r#"{"model":"mock-model","input":"go","stream":true,"reasoning":{"effort":"none"},"max_output_tokens":8000,
+        "tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"a":{"type":"integer"}}}}]}"#;
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/responses", body);
+    assert_eq!(status, 200, "{raw}");
+    let data = responses_data(&raw);
+    let done: Vec<&serde_json::Value> = data.iter().filter(|d| d["type"] == "response.function_call_arguments.done").collect();
+    assert_eq!(done.len(), REPEATS, "{raw}");
+    for (k, d) in done.iter().enumerate() {
+        assert_eq!(d["arguments"], format!("{{\"a\":{k}}}"), "call {k}: {raw}");
+    }
+    let terminal = data.iter().find(|d| d["type"] == "response.completed").expect("completed");
+    let stored: Vec<&serde_json::Value> =
+        terminal["response"]["output"].as_array().unwrap().iter().filter(|i| i["type"] == "function_call").collect();
+    assert_eq!(stored.len(), REPEATS);
+    for (k, call) in stored.iter().enumerate() {
+        assert_eq!(call["arguments"], format!("{{\"a\":{k}}}"), "stored call {k}: {raw}");
+    }
+}
+
+#[test]
+fn adjacent_json_calls_stream_each_under_its_own_name() {
+    // The second call's arguments hold a "name" of their own; neither call may take it.
+    use superfluid_daemon::codec::{MockCodec, TextCodec};
+    let mut script = Vec::new();
+    for k in 0..REPEATS {
+        script.extend(MockCodec.encode(&"x".repeat(k)));
+        script.extend(tool_envelope(r#"{"name":"f","arguments":{}}"#));
+        script.extend(tool_envelope(&format!(r#"{{"name":"g","arguments":{{"name":"data","arguments":{{"x":{k}}}}}}}"#)));
+    }
+    let body = r#"{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,
+        "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
+        "messages":[{"role":"user","content":"go"}]}"#;
+    let stack = scripted_stack(script, Box::new(MockChatCodec));
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), 2 * REPEATS, "{raw}");
+    for k in 0..REPEATS {
+        assert_eq!(got[2 * k].0, "f", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k].1), Some(serde_json::json!({})), "repeat {k}: {raw}");
+        assert_eq!(got[2 * k + 1].0, "g", "repeat {k}: {raw}");
+        assert_eq!(
+            json_of(&got[2 * k + 1].1),
+            Some(serde_json::json!({"name": "data", "arguments": {"x": k}})),
+            "repeat {k}: {raw}"
+        );
+    }
+}
+
+/// Each tool_calls entry in stream order: the index of its call, whether it carries an id.
+fn call_entry_order(raw: &str) -> Vec<(u64, bool)> {
+    let (_, entries) = stream_events(raw);
+    entries.iter().map(|e| (e["index"].as_u64().unwrap(), e["id"].is_string())).collect()
+}
+
+#[test]
+fn a_call_sent_whole_keeps_its_place_and_its_index() {
+    // `prefix {...}` does not open as a streamed call, but the parser recovers it: it is sent
+    // whole at its close, before the call after it opens, under its own index. The call after
+    // it alternates between short and longer than a tick.
+    use superfluid_daemon::codec::{MockCodec, TextCodec};
+    let g_args = |k: usize| serde_json::json!({"b": k, "name": "x".repeat(if k % 2 == 1 { 80 } else { 1 })});
+    let mut script = Vec::new();
+    for k in 0..REPEATS {
+        script.extend(MockCodec.encode(&"y".repeat(k)));
+        script.extend(tool_envelope(&format!(r#"prefix {{"name":"f","arguments":{{"k":{k}}}}}"#)));
+        script.extend(tool_envelope(&format!(r#"{{"name":"g","arguments":{}}}"#, g_args(k))));
+    }
+    let body = r#"{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,
+        "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
+        "messages":[{"role":"user","content":"go"}]}"#;
+    let stack = scripted_stack(script, Box::new(MockChatCodec));
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let got = streamed_calls(&raw);
+    assert_eq!(got.len(), 2 * REPEATS, "{raw}");
+    for k in 0..REPEATS {
+        assert_eq!(got[2 * k].0, "f", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k].1), Some(serde_json::json!({"k": k})), "repeat {k}: {raw}");
+        assert_eq!(got[2 * k + 1].0, "g", "repeat {k}: {raw}");
+        assert_eq!(json_of(&got[2 * k + 1].1), Some(g_args(k)), "repeat {k}: {raw}");
+    }
+    // Calls never interleave, and each opens with its id.
+    let order = call_entry_order(&raw);
+    let mut seen = 0u64;
+    for (i, &(index, has_id)) in order.iter().enumerate() {
+        assert!(index == seen || index == seen + 1, "entry {i}: call {index} after call {seen}: {raw}");
+        if index == seen + 1 || (i == 0 && index == 0) {
+            assert!(has_id, "entry {i}: call {index} opens without its id: {raw}");
+        }
+        seen = index;
+    }
+}
+
+#[test]
+fn a_failed_call_does_not_close_the_call_after_it() {
+    // A call that opens and then fails to parse becomes text: sent at its close, before the next
+    // call opens, so on /v1/responses it cannot close that call's item mid-arguments.
+    use superfluid_daemon::codec::{MockCodec, TextCodec};
+    let g_args = |k: usize| serde_json::json!({"b": k, "s": "x".repeat(80)});
+    let mut script = Vec::new();
+    for k in 0..REPEATS {
+        script.extend(MockCodec.encode(&"y".repeat(k)));
+        script.extend(tool_envelope(r#"{"name":"f","arguments":{not json}}"#));
+        script.extend(tool_envelope(&format!(r#"{{"name":"g","arguments":{}}}"#, g_args(k))));
+    }
+
+    let stack = scripted_stack(script.clone(), Box::new(MockChatCodec));
+    let body = r#"{"model":"mock-model","max_tokens":8000,"temperature":0,"stream":true,
+        "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
+        "messages":[{"role":"user","content":"go"}]}"#;
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{raw}");
+    let gs: Vec<String> = streamed_calls(&raw).into_iter().filter(|(n, _)| n == "g").map(|(_, a)| a).collect();
+    assert_eq!(gs.len(), REPEATS, "{raw}");
+    for (k, args) in gs.iter().enumerate() {
+        assert_eq!(json_of(args), Some(g_args(k)), "g {k}: {raw}");
+    }
+
+    let stack = scripted_stack(script, Box::new(MockChatCodec));
+    let body = r#"{"model":"mock-model","input":"go","stream":true,"max_output_tokens":8000,
+        "tools":[{"type":"function","name":"f","parameters":{}},{"type":"function","name":"g","parameters":{}}]}"#;
+    let (status, _h, raw) = http(stack.addr, "POST", "/v1/responses", body);
+    assert_eq!(status, 200, "{raw}");
+    let data = responses_data(&raw);
+    let done: Vec<&serde_json::Value> =
+        data.iter().filter(|d| d["type"] == "response.function_call_arguments.done" && d["name"] == "g").collect();
+    assert_eq!(done.len(), REPEATS, "{raw}");
+    for (k, d) in done.iter().enumerate() {
+        assert_eq!(json_of(d["arguments"].as_str().unwrap()), Some(g_args(k)), "g {k}");
+    }
+    // An announced call that failed leaves the reply incomplete; the stored output still holds
+    // every `g` whole.
+    let terminal = data
+        .iter()
+        .find(|d| d["type"] == "response.completed" || d["type"] == "response.incomplete")
+        .unwrap_or_else(|| panic!("no terminal response: {raw}"));
+    let stored: Vec<&serde_json::Value> = terminal["response"]["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["type"] == "function_call" && i["name"] == "g")
+        .collect();
+    assert_eq!(stored.len(), REPEATS);
+    for (k, call) in stored.iter().enumerate() {
+        assert_eq!(json_of(call["arguments"].as_str().unwrap()), Some(g_args(k)), "stored g {k}");
+    }
 }
 
 const WRITE_TOOL_CHAT: &str = r#"{"model":"mock-model","max_tokens":512,"temperature":0,"stream":STREAM,TOOL_CHOICE

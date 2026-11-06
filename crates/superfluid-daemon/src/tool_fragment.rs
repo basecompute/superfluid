@@ -60,6 +60,11 @@ impl ToolCallStream {
         self.opened
     }
 
+    /// The call's text fed since the last reset.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
     pub fn reset(&mut self) {
         let mode = self.mode.clone();
         let schemas = self.schemas.take();
@@ -117,6 +122,16 @@ impl ToolCallStream {
 
     fn step_json(&mut self, out: &mut Vec<ToolDelta>) {
         if !self.opened {
+            match json_call_start(&self.body) {
+                None => return,
+                // Not a JSON call: a `"name"` further in belongs to some value (a file's content
+                // in an XML call), not to the call. The route sends the call whole once parsed.
+                Some(false) => {
+                    self.complete = true;
+                    return;
+                }
+                Some(true) => {}
+            }
             match json_member_string(&self.body, "name") {
                 Some(name) if !name.is_empty() => self.open(out, name),
                 _ => return,
@@ -283,6 +298,28 @@ fn json_member_value_start(body: &str, key: &str) -> Option<usize> {
     body[colon + 1..]
         .find(|c: char| !c.is_whitespace())
         .map(|off| colon + 1 + off)
+}
+
+/// Whether `body` is a JSON call so far: `Some(true)` once its first value opens with `{`, after
+/// whitespace and at most a markdown fence; `Some(false)` once it cannot be; `None` while too
+/// little has arrived to tell.
+fn json_call_start(body: &str) -> Option<bool> {
+    let t = body.trim_start();
+    let t = match t.strip_prefix("```") {
+        Some(rest) => {
+            let lang_ok = |s: &str| s.trim().chars().all(|c| c.is_ascii_alphanumeric());
+            let Some(nl) = rest.find('\n') else {
+                return if lang_ok(rest) { None } else { Some(false) };
+            };
+            if !lang_ok(&rest[..nl]) {
+                return Some(false);
+            }
+            rest[nl + 1..].trim_start()
+        }
+        None if "```".starts_with(t) => return None,
+        None => t,
+    };
+    t.chars().next().map(|c| c == '{')
 }
 
 fn json_member_string(body: &str, key: &str) -> Option<String> {
@@ -512,6 +549,45 @@ mod tests {
         let mut s = ToolCallStream::new(ToolFragmentMode::Json);
         let d = s.feed(r#"{"note":"name","alias":"wrong","name":"right","arguments":{}}"#);
         assert_eq!(d[0].name, "right");
+    }
+
+    #[test]
+    fn json_never_opens_a_call_on_a_name_inside_xml_text() {
+        // An XML call writing a package.json: its content's "name" is not the call's.
+        let mut s = ToolCallStream::new(ToolFragmentMode::Json);
+        for chunk in [
+            "<function=write>\n<parameter=path>\npackage.json\n</parameter>\n",
+            "<parameter=content>\n{\"name\": \"demo\", ",
+            "\"arguments\": {}}\n</parameter>\n</function>",
+        ] {
+            assert!(s.feed(chunk).is_empty(), "opened on {chunk:?}");
+        }
+        assert!(!s.opened(), "the route sends the call whole, under its parsed name");
+        assert!(s.finish("{\"path\":\"package.json\",\"content\":\"...\"}").is_empty());
+    }
+
+    #[test]
+    fn json_opens_after_leading_whitespace_and_a_fence() {
+        let (names, args) = drive(
+            ToolFragmentMode::Json,
+            &["\n", "`", "``js", "on\n", "{\"name\": \"f\", \"arguments\": {\"x\": 1}}\n```"],
+            "{\"x\":1}",
+        );
+        assert_eq!(names, vec!["f"]);
+        assert_eq!(args, "{\"x\": 1}");
+    }
+
+    #[test]
+    fn json_call_start_waits_until_it_can_tell() {
+        for undecided in ["", "  \n", "`", "``", "```", "```json", "```json\n", "```\n  "] {
+            assert_eq!(json_call_start(undecided), None, "{undecided:?}");
+        }
+        for json in ["{", " \n{\"name\"", "```\n{", "```json\n  {"] {
+            assert_eq!(json_call_start(json), Some(true), "{json:?}");
+        }
+        for not in ["<function=f>", "call:f{", "[{\"name\"", "`x", "```js on\n{", "I'll call {"] {
+            assert_eq!(json_call_start(not), Some(false), "{not:?}");
+        }
     }
 
     #[test]

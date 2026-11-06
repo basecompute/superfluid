@@ -69,8 +69,8 @@ Most real-model tests look for a default under `models/` at the repository root;
 
 | job | runners | steps |
 |---|---|---|
-| `core` | `macos-14`, `ubuntu-24.04`, `ubuntu-24.04-arm` | clippy, build, test (mock engine plus skips) |
-| `adapters` | `macos-14` | basert adapter tests; clippy on the llama.cpp adapter and feature builds; installs llama.cpp's release build (cached) and runs the adapter's tests against it; `scripts/build_runtime_adapters.sh` |
+| `core` | `macos-15`, `ubuntu-24.04`, `ubuntu-24.04-arm` | clippy, build, test (mock engine plus skips) |
+| `adapters` | `macos-15` | basert adapter tests; clippy on the llama.cpp adapter and feature builds; installs llama.cpp's release build (cached) and runs the adapter's tests against it; `scripts/build_runtime_adapters.sh` |
 
 ## API compliance client
 
