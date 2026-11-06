@@ -442,6 +442,11 @@ impl FleetManager {
     pub fn adopt(&self, head: FleetHead, peer: std::net::IpAddr) -> Result<(usize, bool, usize), String> {
         let identity = head.node().node_identity.clone();
         let lanes = (head.node().capacity.max_lanes as usize).max(1);
+        // A new node is listed with its first slot already held here, and let go only once this
+        // connection is in it: a call that reaches the node meanwhile (a probe, a placement)
+        // waits for the connection rather than find the slot empty and take the node for gone.
+        let fresh: Arc<NodeConn>;
+        let mut first = None;
         let (i, new) = {
             let mut sh = self.shared.lock().expect("shared");
             match sh.meta.iter().position(|m| m.identity == identity) {
@@ -458,8 +463,7 @@ impl FleetManager {
                     (i, false)
                 }
                 None => {
-                    let mut nodes = self.nodes.write().expect("nodes");
-                    nodes.push(Arc::new(NodeConn {
+                    fresh = Arc::new(NodeConn {
                         spec: NodeSpec { addr: format!("{JOINED}{identity}"), auth: Vec::new() },
                         conns: (0..lanes).map(|_| Mutex::new(None)).collect(),
                         control: Mutex::new(None),
@@ -467,7 +471,10 @@ impl FleetManager {
                         cursor: std::sync::atomic::AtomicUsize::new(0),
                         decoded: std::sync::atomic::AtomicU64::new(0),
                         live: Mutex::new(NodeLoad::default()),
-                    }));
+                    });
+                    first = Some(fresh.conns[0].lock().expect("node conn"));
+                    let mut nodes = self.nodes.write().expect("nodes");
+                    nodes.push(Arc::clone(&fresh));
                     // Listed as down until its connection is in place, so no request lands
                     // on an empty slot meanwhile.
                     let mut meta = NodeMeta::new();
@@ -485,18 +492,24 @@ impl FleetManager {
         let mut head = head;
         head.keep_alive(self.liveness);
         watch(&node, &mut head);
-        let slot = node.conns.iter().position(|c| !in_use(c));
-        let has_control = node.control.lock().expect("node conn").is_some();
-        match slot {
-            Some(slot) => {
-                if !has_control {
-                    let _ = head.ask_control();
+        if let Some(mut first) = first {
+            // A new node has no connection for short calls yet.
+            let _ = head.ask_control();
+            *first = Some(head);
+        } else {
+            let slot = node.conns.iter().position(|c| !in_use(c));
+            let has_control = node.control.lock().expect("node conn").is_some();
+            match slot {
+                Some(slot) => {
+                    if !has_control {
+                        let _ = head.ask_control();
+                    }
+                    *node.checkout_at(slot) = Some(head);
                 }
-                *node.checkout_at(slot) = Some(head);
+                // One past its lanes is the connection it dialed when asked.
+                None if !has_control => *node.control.lock().expect("node conn") = Some(head),
+                None => *node.checkout_at(0) = Some(head),
             }
-            // One past its lanes is the connection it dialed when asked.
-            None if !has_control => *node.control.lock().expect("node conn") = Some(head),
-            None => *node.checkout_at(0) = Some(head),
         }
         let open = node.conns.iter().filter(|c| in_use(c)).count();
         node.open.store(open.max(1), std::sync::atomic::Ordering::Relaxed);
