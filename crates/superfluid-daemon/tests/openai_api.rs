@@ -1586,6 +1586,204 @@ fn spawn_scripted_harmony_stack(script: &str) -> std::net::SocketAddr {
     addr
 }
 
+/// Byte tokens plus Qwen's control markers, under the repository's Qwen3.6 template: the XML
+/// tool wire, served through the curated codec auto-detection picks for it.
+struct QwenTok;
+
+const QWEN_MARKERS: [&str; 9] = [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|endoftext|>",
+    "<think>",
+    "</think>",
+    "<tool_call>",
+    "</tool_call>",
+    "<tool_response>",
+    "</tool_response>",
+];
+
+impl superfluid_engine::Tokenizer for QwenTok {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while !rest.is_empty() {
+            match QWEN_MARKERS.iter().position(|m| rest.starts_with(m)) {
+                Some(i) => {
+                    out.push(300 + i as u32);
+                    rest = &rest[QWEN_MARKERS[i].len()..];
+                }
+                None => {
+                    out.push(u32::from(rest.as_bytes()[0]));
+                    rest = &rest[1..];
+                }
+            }
+        }
+        out
+    }
+    fn token_bytes(&self, token: u32) -> Vec<u8> {
+        if token < 256 {
+            vec![token as u8]
+        } else {
+            Vec::new()
+        }
+    }
+    fn vocab_size(&self) -> u32 {
+        400
+    }
+    fn special_tokens(&self) -> Vec<(String, u32)> {
+        QWEN_MARKERS.iter().enumerate().map(|(i, m)| (m.to_string(), 300 + i as u32)).collect()
+    }
+    fn bos_token(&self) -> Option<u32> {
+        None
+    }
+    fn eos_token(&self) -> u32 {
+        301
+    }
+    fn chat_template_jinja(&self) -> String {
+        include_str!("../../../tests/fixtures/chat_templates/qwen3_6.jinja").to_string()
+    }
+}
+
+fn spawn_scripted_qwen_stack(script: &str) -> std::net::SocketAddr {
+    use superfluid_engine::Tokenizer;
+    let codec = superfluid_daemon::codec::chatml_codec_from_tokenizer(Arc::new(QwenTok)).expect("the curated Qwen codec");
+    spawn_scripted_stack_with(QwenTok.encode(script), Box::new(codec))
+}
+
+const XML_CALL_TOOLS: &str = r#""tools":[
+    {"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"a":{"type":"integer"}}}}},
+    {"type":"function","function":{"name":"g","parameters":{"type":"object","properties":{"b":{"type":"integer"}}}}}]"#;
+
+/// The streamed calls of a chat completion by index: (name, concatenated arguments).
+fn streamed_calls(raw: &str) -> Vec<(String, String)> {
+    let (_, entries) = stream_events(raw);
+    let mut calls: Vec<(String, String)> = Vec::new();
+    for e in entries {
+        let i = e["index"].as_u64().expect("an index") as usize;
+        if calls.len() <= i {
+            calls.resize(i + 1, (String::new(), String::new()));
+        }
+        if let Some(n) = e["function"]["name"].as_str() {
+            calls[i].0.push_str(n);
+        }
+        calls[i].1.push_str(e["function"]["arguments"].as_str().unwrap_or(""));
+    }
+    calls
+}
+
+#[test]
+fn adjacent_xml_calls_keep_their_own_arguments() {
+    // Two calls back to back, at every alignment against the tick: the partial emits of a tick
+    // all come before its commits, so the second call's text arrives while the first is open.
+    let calls = "<tool_call><function=f>\n<parameter=a>\n1\n</parameter>\n</function></tool_call>\
+                 <tool_call><function=g>\n<parameter=b>\n2\n</parameter>\n</function></tool_call><|im_end|>";
+    let body = format!(
+        r#"{{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,{XML_CALL_TOOLS},
+            "chat_template_kwargs":{{"enable_thinking":false}},"messages":[{{"role":"user","content":"go"}}]}}"#
+    );
+    for pad in 0..33 {
+        let addr = spawn_scripted_qwen_stack(&format!("{}{calls}", "x".repeat(pad)));
+        let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{raw}");
+        let got = streamed_calls(&raw);
+        assert_eq!(got.len(), 2, "pad {pad}: {raw}");
+        assert_eq!(got[0].0, "f", "pad {pad}: {raw}");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[0].1).ok(), Some(serde_json::json!({"a": 1})), "pad {pad}: {raw}");
+        assert_eq!(got[1].0, "g", "pad {pad}: {raw}");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[1].1).ok(), Some(serde_json::json!({"b": 2})), "pad {pad}: {raw}");
+        let (events, _) = stream_events(&raw);
+        assert_eq!(stream_finish(&events), "tool_calls", "pad {pad}");
+    }
+}
+
+#[test]
+fn an_xml_call_is_finished_before_the_text_after_it() {
+    let calls = "<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>\n</tool_call>Done.<|im_end|>";
+    for pad in 0..33 {
+        let script = format!("{}{calls}", "x".repeat(pad));
+
+        // Chat completions: every fragment of the call precedes the text written after it.
+        let addr = spawn_scripted_qwen_stack(&script);
+        let body = format!(
+            r#"{{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,{XML_CALL_TOOLS},
+                "chat_template_kwargs":{{"enable_thinking":false}},"messages":[{{"role":"user","content":"go"}}]}}"#
+        );
+        let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{raw}");
+        let (events, _) = stream_events(&raw);
+        let is_call = |e: &serde_json::Value| e["choices"][0]["delta"]["tool_calls"].is_array();
+        let text_of = |e: &serde_json::Value| e["choices"][0]["delta"]["content"].as_str().unwrap_or("").to_string();
+        let first_call = events.iter().position(is_call).expect("a call");
+        let last_call = events.iter().rposition(is_call).unwrap();
+        let text_after = events
+            .iter()
+            .enumerate()
+            .skip(first_call)
+            .find(|(_, e)| !text_of(e).is_empty())
+            .map(|(i, _)| i)
+            .expect("the text after the call");
+        assert!(last_call < text_after, "pad {pad}: the call's last fragment came after the text: {raw}");
+        let after: String = events[text_after..].iter().map(text_of).collect();
+        assert_eq!(after, "Done.", "pad {pad}: {raw}");
+        let got = streamed_calls(&raw);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[0].1).ok(), Some(serde_json::json!({"a": 1})), "pad {pad}: {raw}");
+
+        // Responses: text closes the open call item, so a late fragment would be lost.
+        let addr = spawn_scripted_qwen_stack(&script);
+        let body = r#"{"model":"mock-model","input":"go","stream":true,"reasoning":{"effort":"none"},
+            "tools":[{"type":"function","name":"f","parameters":{"type":"object","properties":{"a":{"type":"integer"}}}}]}"#;
+        let (status, _h, raw) = http(addr, "POST", "/v1/responses", body);
+        assert_eq!(status, 200, "{raw}");
+        let data: Vec<serde_json::Value> = raw
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter_map(|d| serde_json::from_str(d).ok())
+            .collect();
+        let done = data
+            .iter()
+            .find(|d| d["type"] == "response.function_call_arguments.done")
+            .unwrap_or_else(|| panic!("pad {pad}: no arguments done: {raw}"));
+        assert_eq!(done["arguments"], "{\"a\":1}", "pad {pad}: {raw}");
+        let completed = data.iter().find(|d| d["type"] == "response.completed").expect("completed");
+        let call = completed["response"]["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["type"] == "function_call")
+            .expect("the call in the stored output");
+        assert_eq!(call["arguments"], "{\"a\":1}", "pad {pad}: {raw}");
+    }
+}
+
+#[test]
+fn adjacent_json_calls_stream_each_under_its_own_name() {
+    // The second call's arguments hold a "name" of their own; neither call may take it.
+    use superfluid_daemon::codec::{MockCodec, TextCodec};
+    let mut script = MockCodec.encode(" ");
+    script.extend(tool_envelope(r#"{"name":"f","arguments":{}}"#));
+    script.extend(tool_envelope(r#"{"name":"g","arguments":{"name":"data","arguments":{"x":2}}}"#));
+    let body = r#"{"model":"mock-model","max_tokens":512,"temperature":0,"stream":true,
+        "tools":[{"type":"function","function":{"name":"f","parameters":{}}},{"type":"function","function":{"name":"g","parameters":{}}}],
+        "messages":[{"role":"user","content":"go"}]}"#;
+    for pad in 0..33 {
+        let mut s = MockCodec.encode(&"x".repeat(pad));
+        s.extend(script.iter().copied());
+        let addr = spawn_scripted_stack(s);
+        let (status, _h, raw) = http(addr, "POST", "/v1/chat/completions", body);
+        assert_eq!(status, 200, "{raw}");
+        let got = streamed_calls(&raw);
+        assert_eq!(got.len(), 2, "pad {pad}: {raw}");
+        assert_eq!(got[0].0, "f", "pad {pad}: {raw}");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&got[0].1).ok(), Some(serde_json::json!({})), "pad {pad}: {raw}");
+        assert_eq!(got[1].0, "g", "pad {pad}: {raw}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&got[1].1).ok(),
+            Some(serde_json::json!({"name": "data", "arguments": {"x": 2}})),
+            "pad {pad}: {raw}"
+        );
+    }
+}
+
 const WRITE_TOOL_CHAT: &str = r#"{"model":"mock-model","max_tokens":512,"temperature":0,"stream":STREAM,TOOL_CHOICE
     "tools":[{"type":"function","function":{"name":"write","parameters":{"type":"object",
       "properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}}],

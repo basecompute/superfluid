@@ -3109,7 +3109,7 @@ impl Daemon {
         on_event: impl FnMut(&CommittedEvent) -> Result<(), DaemonError>,
         on_logprobs: impl FnMut(&[scheduler::TokenLogprob]),
     ) -> Result<GenerateOutcome, DaemonError> {
-        self.generate_streaming_inner(session, max_tokens, extras, on_event, on_logprobs, |_, _, _| {})
+        self.generate_streaming_inner(session, max_tokens, extras, on_event, on_logprobs, |_, _, _, _| {})
     }
 
     pub fn generate_streaming_delta(
@@ -3119,7 +3119,7 @@ impl Daemon {
         mut extras: scheduler::GenExtras,
         on_event: impl FnMut(&CommittedEvent) -> Result<(), DaemonError>,
         on_logprobs: impl FnMut(&[scheduler::TokenLogprob]),
-        on_delta: impl FnMut(u32, &str, u32),
+        on_delta: impl FnMut(u32, &str, u32, bool),
     ) -> Result<GenerateOutcome, DaemonError> {
         extras.wants_deltas = true;
         self.generate_streaming_inner(session, max_tokens, extras, on_event, on_logprobs, on_delta)
@@ -3193,7 +3193,7 @@ impl Daemon {
         extras: scheduler::GenExtras,
         on_event: impl FnMut(&CommittedEvent) -> Result<(), DaemonError>,
         on_logprobs: impl FnMut(&[scheduler::TokenLogprob]),
-        on_delta: impl FnMut(u32, &str, u32),
+        on_delta: impl FnMut(u32, &str, u32, bool),
     ) -> Result<GenerateOutcome, DaemonError> {
         self.ensure_serving()?;
         let _span = tracing::info_span!(

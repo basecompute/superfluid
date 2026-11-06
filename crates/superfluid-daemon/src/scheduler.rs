@@ -209,7 +209,9 @@ pub struct TokenLogprob {
 
 pub enum LaneEvent {
     Committed(CommittedEvent),
-    Provisional { channel: u32, text: String, produced: u32 },
+    /// Text decoded ahead of its commit. `closes` marks the end of a tool call (its text may
+    /// then be empty): every provisional event before it belongs to that call, none after.
+    Provisional { channel: u32, text: String, produced: u32, closes: bool },
     TokenLogprobs(Vec<TokenLogprob>),
     CompletionTokens(Vec<u32>),
     Expired,
@@ -289,18 +291,22 @@ impl LaneOutput {
             for &t in &run.text {
                 text.push_str(&self.disp_utf8.push(&codec.token_bytes(t)));
             }
-            if text.is_empty() {
+            let channel = run.channel;
+            let tool = channel == crate::wal::channel::TOOL_CALL;
+            // A tool-call run that only closes still says so: the stream finishes that call
+            // there, before anything after it, and starts the next one afresh.
+            let closes = tool && run.closes;
+            if text.is_empty() && !closes {
                 continue;
             }
-            let channel = run.channel;
             let text_like = channel == crate::wal::channel::TEXT || channel == crate::wal::channel::REASONING;
             if text_like {
                 bus.publish_provisional(session, channel, &text);
             }
             // The lane's own stream also gets tool-call text, so a call fragments at token
             // cadence instead of once per tick; the session bus keeps to text and reasoning.
-            if text_like || channel == crate::wal::channel::TOOL_CALL {
-                let _ = events.send(LaneEvent::Provisional { channel, text, produced });
+            if text_like || tool {
+                let _ = events.send(LaneEvent::Provisional { channel, text, produced, closes });
             }
         }
     }
@@ -317,7 +323,7 @@ impl LaneOutput {
         }
         if text_like || channel == crate::wal::channel::TOOL_CALL {
             let produced = self.disp_tokens;
-            let _ = events.send(LaneEvent::Provisional { channel, text, produced });
+            let _ = events.send(LaneEvent::Provisional { channel, text, produced, closes: false });
         }
     }
 
@@ -4424,7 +4430,7 @@ pub fn run_job(
     cancels: &Arc<crate::CancelSet>,
     mut on_event: impl FnMut(&CommittedEvent) -> Result<(), DaemonError>,
     mut on_logprobs: impl FnMut(&[TokenLogprob]),
-    mut on_delta: impl FnMut(u32, &str, u32),
+    mut on_delta: impl FnMut(u32, &str, u32, bool),
 ) -> Result<RunJobResult, DaemonError> {
     let (etx, erx) = std::sync::mpsc::channel();
     let grammar_handle = extras.grammar_handle;
@@ -4458,9 +4464,9 @@ pub fn run_job(
     let mut delivery_err: Option<DaemonError> = None;
     loop {
         match erx.recv() {
-            Ok(LaneEvent::Provisional { channel, text, produced }) => {
+            Ok(LaneEvent::Provisional { channel, text, produced, closes }) => {
                 if delivery_err.is_none() {
-                    on_delta(channel, &text, produced);
+                    on_delta(channel, &text, produced, closes);
                 }
             }
             Ok(LaneEvent::TokenLogprobs(items)) => {

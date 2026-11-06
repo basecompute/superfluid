@@ -2743,6 +2743,18 @@ async fn chat_stream(
                 tool_index: usize,
                 open_call_id: String,
                 orphaned_calls: usize,
+                // How each call whose close the partial emits showed was settled there, oldest
+                // first; its committed event, which comes later, takes the front entry.
+                closed_ahead: std::collections::VecDeque<ClosedAhead>,
+            }
+            enum ClosedAhead {
+                /// Streamed and finished at its close: its commit adds nothing.
+                Delivered,
+                /// Opened, then unparseable at its close: its index is spent, and its commit
+                /// sends the raw text as content.
+                Unparsed,
+                /// Never opened (a wire that is not streamed): its commit sends it whole.
+                Whole,
             }
             let st = std::rc::Rc::new(std::cell::RefCell::new(StreamText {
                 usage_now: None,
@@ -2756,6 +2768,7 @@ async fn chat_stream(
                 tool_index: 0,
                 open_call_id: String::new(),
                 orphaned_calls: 0,
+                closed_ahead: std::collections::VecDeque::new(),
             }));
             // Tool-call text reaches the fragmenter from the lane's partial emits while deltas
             // are on, and from each commit otherwise. A call opened by a commit is named after
@@ -2774,6 +2787,34 @@ async fn chat_stream(
                     }
                     send(Frame::chat(Message::tool(&d, s.tool_index, &s.open_call_id), None))?;
                 }
+                Ok(())
+            };
+            // A call's close seen in the partial emits: finish the call there, with the arguments
+            // the commit will parse from the same text, before anything written after it goes
+            // out, and leave the fragmenter clean for the next call. A tick's partial emits all
+            // precede its commits, so waiting for the commit would let the next call's text, or
+            // the content after the call, overtake its last fragment.
+            let close_call = |s: &mut StreamText| -> Result<(), DaemonError> {
+                let closed = if !s.frag.opened() {
+                    ClosedAhead::Whole
+                } else {
+                    match daemon.parse_tool_call_with(s.frag.body(), tool_schemas.as_deref()) {
+                        Some((_, arguments)) => {
+                            for d in s.frag.finish(&arguments) {
+                                send(Frame::chat(Message::tool(&d, s.tool_index, &s.open_call_id), None))?;
+                            }
+                            s.tool_index += 1;
+                            ClosedAhead::Delivered
+                        }
+                        None => {
+                            s.tool_index += 1;
+                            s.orphaned_calls += 1;
+                            ClosedAhead::Unparsed
+                        }
+                    }
+                };
+                s.frag.reset();
+                s.closed_ahead.push_back(closed);
                 Ok(())
             };
             let push_text =
@@ -2818,8 +2859,8 @@ async fn chat_stream(
                     Ok(())
                 };
             let st_delta = std::rc::Rc::clone(&st);
-            let on_delta = |ch: u32, text: &str, produced: u32| {
-                if !delta_mode || text.is_empty() {
+            let on_delta = |ch: u32, text: &str, produced: u32, closes: bool| {
+                if !delta_mode || (text.is_empty() && !closes) {
                     return;
                 }
                 let mut s = st_delta.borrow_mut();
@@ -2832,6 +2873,7 @@ async fn chat_stream(
                 s.decode.stamp(produced as u64);
                 let r = if ch == channel::TOOL_CALL {
                     tool_text(&mut s, text, None)
+                        .and_then(|()| if closes { close_call(&mut s) } else { Ok(()) })
                 } else if ch == channel::REASONING {
                     let mut ck = Frame::chat(Message::reasoning(text), None);
                     if let Some(n) = s.usage_now {
@@ -2899,7 +2941,23 @@ async fn chat_stream(
                     }
                     EventBody::ToolParseFailure { raw } => {
                         let mut s = st_ev.borrow_mut();
-                        if choice != ToolChoice::None && !s.frag.opened() {
+                        // A call the partial emits closed was settled there, and the fragmenter
+                        // may by now hold the next call: only a call no close was seen for (no
+                        // deltas, or cut off unclosed) still lives in it.
+                        let ahead = s.closed_ahead.pop_front();
+                        let in_frag = ahead.is_none() && s.frag.opened();
+                        match ahead {
+                            Some(ClosedAhead::Delivered) => return Ok(()),
+                            Some(ClosedAhead::Unparsed) => {
+                                let mut ck = Frame::chat(Message::content(raw), None);
+                                if continuous_usage {
+                                    ck.usage = Some(Usage::partial(s.committed));
+                                }
+                                return send(ck);
+                            }
+                            Some(ClosedAhead::Whole) | None => {}
+                        }
+                        if choice != ToolChoice::None && !in_frag {
                             if let Some((name, arguments)) = daemon.named_tool_call(raw) {
                                 let delta = Message::complete_tool(
                                     s.tool_index,
@@ -2912,11 +2970,13 @@ async fn chat_stream(
                                 return send(Frame::chat(delta, None));
                             }
                         }
-                        if s.frag.opened() {
+                        if in_frag {
                             s.orphaned_calls += 1;
                             s.tool_index += 1;
                         }
-                        s.frag.reset();
+                        if ahead.is_none() {
+                            s.frag.reset();
+                        }
                         let mut ck = Frame::chat(Message::content(raw), None);
                         if continuous_usage {
                             ck.usage = Some(Usage::partial(s.committed));
@@ -2925,6 +2985,10 @@ async fn chat_stream(
                     }
                     EventBody::ToolUse { name, arguments } => {
                         let mut s = st_ev.borrow_mut();
+                        let ahead = s.closed_ahead.pop_front();
+                        if matches!(ahead, Some(ClosedAhead::Delivered)) {
+                            return Ok(());
+                        }
                         if choice == ToolChoice::None {
                             let raw = format!(
                                 "{{\"name\":{},\"arguments\":{}}}",
@@ -2937,7 +3001,7 @@ async fn chat_stream(
                             }
                             return send(ck);
                         }
-                        if s.frag.opened() {
+                        if ahead.is_none() && s.frag.opened() {
                             for d in s.frag.finish(arguments) {
                                 send(Frame::chat(
                                     Message::tool(&d, s.tool_index, &s.open_call_id),

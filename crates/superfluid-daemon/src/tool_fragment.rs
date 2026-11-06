@@ -60,6 +60,11 @@ impl ToolCallStream {
         self.opened
     }
 
+    /// The call's text fed since the last reset.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
     pub fn reset(&mut self) {
         let mode = self.mode.clone();
         let schemas = self.schemas.take();
