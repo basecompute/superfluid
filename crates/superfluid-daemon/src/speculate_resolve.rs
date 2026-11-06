@@ -38,6 +38,8 @@ struct CatalogRow {
     #[serde(default)]
     speculator_rank: Option<u32>,
     #[serde(default)]
+    speculator_auto: Option<bool>,
+    #[serde(default)]
     quant: String,
     #[serde(default)]
     size: Option<u64>,
@@ -115,6 +117,22 @@ impl Pairings {
         }
         Some(rows().find_map(|r| r.speculator_rank).unwrap_or(u32::MAX))
     }
+
+    /// The drafter the catalog has `auto` serve `target_id` with ahead of the target's own head
+    /// (`speculator_auto` on a sidecar row): lowest rank first, its default-q4 file before another.
+    fn auto_row(&self, target_id: &str) -> Option<&CatalogRow> {
+        self.rows
+            .iter()
+            .filter(|r| r.speculator_auto == Some(true) && r.speculator_for.as_deref() == Some(target_id))
+            .min_by_key(|r| (r.speculator_rank.unwrap_or(u32::MAX), r.quant != "default-q4"))
+    }
+}
+
+/// Whether the catalog's `speculator_auto` pairings are followed on this machine. The ones marked so
+/// far (Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters) were measured against the
+/// in-bundle head on Metal only, so elsewhere `auto` keeps the head first until measured.
+fn follows_auto_pairings() -> bool {
+    cfg!(target_os = "macos")
 }
 
 /// The hub catalog kept at `own`, refreshed from `CATALOG_URL` once a day when `fetch` allows.
@@ -287,7 +305,7 @@ pub fn resolve(directive: &str, target: &Path) -> Result<Option<String>, String>
         }
     }
     if d == "auto" {
-        return resolve_all(d, target).map(|ranked| ranked.into_iter().next());
+        return resolve_all(d, target, None).map(|ranked| ranked.into_iter().next());
     }
     let d = expand_tilde(d);
     let d = d.as_str();
@@ -313,25 +331,86 @@ pub fn drafter_id(directive: &str) -> Option<(&str, &str)> {
     (PATH_STRATEGIES.contains(&kind) && crate::pulls::looks_like_id(rest)).then_some((kind, rest))
 }
 
-pub fn resolve_all(directive: &str, target: &Path) -> Result<Vec<String>, String> {
+/// Every strategy `directive` stands for on `target`, best first: the one a named strategy is, or
+/// what `auto` tries (auto_ranked). For `auto`, `pull` fetches the drafter the hub catalog marks for
+/// `target` (`speculator_auto`) when no copy is installed, given it as `<id>:<variant>`, before
+/// anything is ranked; it says its own failure, and `auto` then settles among what is here. `None`
+/// fetches nothing (`--offline`). Each served model passes its own pull: the first, the others
+/// given at startup, and the ones loaded later (`--model-dir`, `/v1/models/load`).
+pub fn resolve_all(directive: &str, target: &Path, pull: Option<&dyn Fn(&str)>) -> Result<Vec<String>, String> {
     let d = directive.trim();
     if d != "auto" {
         return resolve(d, target).map(|r| r.into_iter().collect());
     }
     let h = read_base_header(target)
         .ok_or_else(|| format!("--speculate auto: cannot read the bundle header of {}", target.display()))?;
-    let head = header_speculator_kind(&h);
+    let pairings = Pairings::load(hub_roots().first().map(PathBuf::as_path));
+    Ok(auto_resolve(target, &h, &auto_search_dirs(target), &pairings, follows_auto_pairings(), pull))
+}
+
+/// `auto` on `target`: the marked drafter pulled first when it is missing and `pull` is given, then
+/// the candidates ranked over what is installed.
+fn auto_resolve(
+    target: &Path,
+    h: &serde_json::Value,
+    dirs: &[(PathBuf, usize)],
+    pairings: &Pairings,
+    paired_first: bool,
+    pull: Option<&dyn Fn(&str)>,
+) -> Vec<String> {
+    if let Some(pull) = pull.filter(|_| paired_first) {
+        if let Some(id) = missing_auto_drafter(target, h, dirs, pairings) {
+            pull(&id);
+        }
+    }
+    auto_ranked(target, h, dirs, pairings, paired_first)
+}
+
+/// What `auto` tries for `target`, in order: the installed drafter the catalog marks for it
+/// (`speculator_auto`, when `paired_first`), the bundle's own MTP head, then every other fitting
+/// drafter as `find_drafters` ranks them. Gemma 4's embedded head (`gemma4-mtp`) stays first.
+fn auto_ranked(
+    target: &Path,
+    h: &serde_json::Value,
+    dirs: &[(PathBuf, usize)],
+    pairings: &Pairings,
+    paired_first: bool,
+) -> Vec<String> {
+    let head = header_speculator_kind(h);
+    let mut found = find_drafters(target, h, dirs, pairings);
     let mut ranked = Vec::new();
+    if paired_first && head != Some("gemma4-mtp") {
+        let marked = pairings.id_of(target).and_then(|t| pairings.auto_row(&t)).map(|r| r.id.clone());
+        let at = marked.and_then(|id| found.iter().position(|(_, p)| pairings.id_of(p).as_deref() == Some(id.as_str())));
+        if let Some(at) = at {
+            let (kind, p) = found.remove(at);
+            ranked.push(format!("{kind}:{}", p.display()));
+        }
+    }
     if is_mtp_head_kind(head) {
         ranked.push("mtp-head".to_string());
     }
-    let pairings = Pairings::load(hub_roots().first().map(PathBuf::as_path));
-    ranked.extend(
-        find_drafters(target, &h, &auto_search_dirs(target), &pairings)
-            .into_iter()
-            .map(|(kind, p)| format!("{kind}:{}", p.display())),
-    );
-    Ok(ranked)
+    ranked.extend(found.into_iter().map(|(kind, p)| format!("{kind}:{}", p.display())));
+    ranked
+}
+
+/// The drafter `--speculate auto` pulls before it settles, as `<id>:<variant>`: the one the hub
+/// catalog marks for `target` (`speculator_auto`), when no copy of it is installed where `auto`
+/// looks. `None` when nothing is marked or a copy is here.
+fn missing_auto_drafter(
+    target: &Path,
+    h: &serde_json::Value,
+    dirs: &[(PathBuf, usize)],
+    pairings: &Pairings,
+) -> Option<String> {
+    if header_speculator_kind(h) == Some("gemma4-mtp") {
+        return None;
+    }
+    let row = pairings.auto_row(&pairings.id_of(target)?)?;
+    let here = find_drafters(target, h, dirs, pairings)
+        .iter()
+        .any(|(_, p)| pairings.id_of(p).as_deref() == Some(row.id.as_str()));
+    (!here).then(|| if row.quant.is_empty() { row.id.clone() } else { format!("{}:{}", row.id, row.quant) })
 }
 
 fn catalog_refusal(path: &Path) -> Option<String> {
@@ -797,7 +876,7 @@ mod tests {
                                "tensors": tensors("layers.2.eh_proj.weight")}),
         );
         assert_eq!(resolve("mtp-head", &with).unwrap().as_deref(), Some("mtp-head"));
-        assert_eq!(resolve_all("auto", &with).unwrap().first().map(String::as_str), Some("mtp-head"));
+        assert_eq!(resolve_all("auto", &with, None).unwrap().first().map(String::as_str), Some("mtp-head"));
         let without = bundle(
             &dir,
             "glm-plain.base",
@@ -822,6 +901,137 @@ mod tests {
         let t = bundle(&root, "qwen3-4b/Qwen3-4B-Q4.base", h);
         bundle(&root, "drafters/Qwen3-4B-DFlash.base", drafter("dflash", "Qwen3-4B-DFlash", "base_q4", 1));
         assert_eq!(resolve("auto", &t).unwrap().as_deref(), Some("mtp-head"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The drafter the catalog marks `speculator_auto` goes ahead of the target's own head, and is
+    /// named for a pull while no copy is installed; Gemma 4's head, an unmarked pairing and a
+    /// machine that does not follow the pairings keep the head first.
+    #[test]
+    fn auto_takes_the_drafter_the_catalog_marks_ahead_of_the_head() {
+        let root = scratch("marked");
+        let mut h = target("Qwen3.8-27B", "base_q4");
+        h["speculator"] = serde_json::json!({"config": {"kind": "mtp"}});
+        let t = bundle(&root, "m/Qwen3.8-27B-Q4.base", h.clone());
+        let dirs = auto_search_dirs(&t)[..3].to_vec();
+        let catalog = |auto: bool| {
+            let mark = if auto { r#","speculator_auto":true"# } else { "" };
+            Pairings::from_json(&format!(
+                r#"{{"models":[
+                    {{"id":"basecompute/Qwen3.8-27B","file":"Qwen3.8-27B-Q4.base","quant":"default-q4"}},
+                    {{"id":"basecompute/Qwen3.8-27B-DFlash2","file":"Qwen3.8-27B-DFlash2-F16.base","quant":"default-f16",
+                      "speculator_for":"basecompute/Qwen3.8-27B","speculator_rank":1{mark}}},
+                    {{"id":"basecompute/Qwen3.8-27B-DFlash2","file":"Qwen3.8-27B-DFlash2-Q4.base","quant":"default-q4",
+                      "speculator_for":"basecompute/Qwen3.8-27B","speculator_rank":1{mark}}},
+                    {{"id":"basecompute/Qwen3.8-27B-DSpark","file":"Qwen3.8-27B-DSpark-Q4.base","quant":"default-q4",
+                      "speculator_for":"basecompute/Qwen3.8-27B","speculator_rank":2}}
+                ]}}"#
+            ))
+        };
+        let marked = catalog(true);
+        let names = |ranked: Vec<String>| -> Vec<String> {
+            ranked.iter().map(|r| r.rsplit('/').next().unwrap_or(r).to_string()).collect()
+        };
+
+        // Not installed: the head first, and the drafter's default-q4 file is the one to pull.
+        assert_eq!(names(auto_ranked(&t, &h, &dirs, &marked, true)), ["mtp-head"]);
+        assert_eq!(
+            missing_auto_drafter(&t, &h, &dirs, &marked).as_deref(),
+            Some("basecompute/Qwen3.8-27B-DFlash2:default-q4")
+        );
+        assert_eq!(missing_auto_drafter(&t, &h, &dirs, &catalog(false)), None, "nothing marked");
+
+        // Installed beside another paired drafter: the marked one, the head, then the rest.
+        bundle(&root, "m/Qwen3.8-27B-DSpark-Q4.base", drafter("dspark", "Qwen3.8-27B-DSpark", "base_q4", 1));
+        bundle(&root, "m/Qwen3.8-27B-DFlash2-Q4.base", drafter("dflash", "Qwen3.8-27B-DFlash2", "base_q4", 1));
+        assert_eq!(
+            names(auto_ranked(&t, &h, &dirs, &marked, true)),
+            ["Qwen3.8-27B-DFlash2-Q4.base", "mtp-head", "Qwen3.8-27B-DSpark-Q4.base"]
+        );
+        assert_eq!(missing_auto_drafter(&t, &h, &dirs, &marked), None, "a copy is installed");
+        // Unmarked, or on a machine that does not follow the pairings: the head stays first.
+        assert_eq!(names(auto_ranked(&t, &h, &dirs, &catalog(false), true))[0], "mtp-head");
+        assert_eq!(names(auto_ranked(&t, &h, &dirs, &marked, false))[0], "mtp-head");
+
+        // Gemma 4's embedded head is never displaced, and nothing is pulled for it.
+        let mut g = h.clone();
+        g["speculator"] = serde_json::json!({"arch": "gemma4-mtp", "config": {"kind": "gemma4-mtp"}});
+        assert_eq!(names(auto_ranked(&t, &g, &dirs, &marked, true))[0], "mtp-head");
+        assert_eq!(missing_auto_drafter(&t, &g, &dirs, &marked), None);
+
+        // A target without a head: the marked drafter is still first.
+        let bare = target("Qwen3.8-27B", "base_q4");
+        assert_eq!(
+            names(auto_ranked(&t, &bare, &dirs, &marked, true)),
+            ["Qwen3.8-27B-DFlash2-Q4.base", "Qwen3.8-27B-DSpark-Q4.base"]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `auto` pulls the drafter the catalog marks for each target it resolves, not for the first
+    /// one only: two marked targets served together (one given first, the other given after it or
+    /// loaded later) each get their own drafter pulled once and ranked first, in either order.
+    /// With no pull (`--offline`) nothing is fetched and the head stays first; a pull that installs
+    /// nothing (a failed download) leaves the head first; a copy already here is not pulled again.
+    #[test]
+    fn auto_pulls_the_marked_drafter_for_each_target() {
+        let catalog = Pairings::from_json(
+            r#"{"models":[
+                {"id":"basecompute/Qwen3.8-27B","file":"Qwen3.8-27B-Q4.base","quant":"default-q4"},
+                {"id":"basecompute/Qwen3.6-35B-A3B","file":"Qwen3.6-35B-A3B-Q4.base","quant":"default-q4"},
+                {"id":"basecompute/Qwen3.8-27B-DFlash2","file":"Qwen3.8-27B-DFlash2-Q4.base","quant":"default-q4",
+                  "speculator_for":"basecompute/Qwen3.8-27B","speculator_rank":1,"speculator_auto":true},
+                {"id":"basecompute/Qwen3.6-35B-A3B-DFlash2","file":"Qwen3.6-35B-A3B-DFlash2-Q4.base","quant":"default-q4",
+                  "speculator_for":"basecompute/Qwen3.6-35B-A3B","speculator_rank":1,"speculator_auto":true}
+            ]}"#,
+        );
+        let headed = |name: &str| {
+            let mut h = target(name, "base_q4");
+            h["speculator"] = serde_json::json!({"config": {"kind": "mtp"}});
+            h
+        };
+        let first = |ranked: Vec<String>| ranked.first().map(|r| r.rsplit('/').next().unwrap_or(r).to_string());
+        for (tag, order) in [("ab", ["Qwen3.8-27B", "Qwen3.6-35B-A3B"]), ("ba", ["Qwen3.6-35B-A3B", "Qwen3.8-27B"])] {
+            let root = scratch(&format!("each-{tag}"));
+            let targets: Vec<PathBuf> = order.iter().map(|n| bundle(&root, &format!("m/{n}-Q4.base"), headed(n))).collect();
+            let dirs = auto_search_dirs(&targets[0])[..3].to_vec();
+            let pulled = std::cell::RefCell::new(Vec::<String>::new());
+            // A pull that installs the drafter's default-q4 file where `auto` looks.
+            let install = |id: &str| {
+                pulled.borrow_mut().push(id.to_string());
+                let name = id.trim_start_matches("basecompute/").trim_end_matches(":default-q4");
+                bundle(&root, &format!("m/{name}-Q4.base"), drafter("dflash", name, "base_q4", 1));
+            };
+            for t in &targets {
+                let h = read_base_header(t).unwrap();
+                let ranked = auto_resolve(t, &h, &dirs, &catalog, true, Some(&install));
+                let name = t.file_name().unwrap().to_string_lossy().replace("-Q4.base", "");
+                assert_eq!(first(ranked), Some(format!("{name}-DFlash2-Q4.base")), "{tag}: {name}");
+            }
+            let want: Vec<String> = order.iter().map(|n| format!("basecompute/{n}-DFlash2:default-q4")).collect();
+            assert_eq!(*pulled.borrow(), want, "{tag}: each target's drafter, once");
+            // Installed now: resolving again pulls nothing.
+            for t in &targets {
+                let h = read_base_header(t).unwrap();
+                auto_resolve(t, &h, &dirs, &catalog, true, Some(&install));
+            }
+            assert_eq!(pulled.borrow().len(), 2, "{tag}: nothing pulled twice");
+            std::fs::remove_dir_all(&root).ok();
+        }
+
+        // Offline, or a download that fails: nothing installed, the head first.
+        let root = scratch("each-none");
+        let t = bundle(&root, "m/Qwen3.8-27B-Q4.base", headed("Qwen3.8-27B"));
+        let h = read_base_header(&t).unwrap();
+        let dirs = auto_search_dirs(&t)[..3].to_vec();
+        assert_eq!(first(auto_resolve(&t, &h, &dirs, &catalog, true, None)).as_deref(), Some("mtp-head"));
+        let tried = std::cell::Cell::new(0);
+        let fails = |_: &str| tried.set(tried.get() + 1);
+        assert_eq!(first(auto_resolve(&t, &h, &dirs, &catalog, true, Some(&fails))).as_deref(), Some("mtp-head"));
+        assert_eq!(tried.get(), 1);
+        // Where the pairings are not followed, nothing is pulled.
+        assert_eq!(first(auto_resolve(&t, &h, &dirs, &catalog, false, Some(&fails))).as_deref(), Some("mtp-head"));
+        assert_eq!(tried.get(), 1);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -867,8 +1077,8 @@ mod tests {
             ["dspark:dspark_qwen3_4b_block7.base", "dflash:Qwen3-4B-DFlash-b16.base", "eagle3:Qwen3-4B_eagle3.base"]
         );
         assert_eq!(pick(&t, &dirs).as_deref(), Some(ranked[0].as_str()));
-        assert_eq!(resolve_all("prompt-lookup", &t).unwrap(), ["prompt-lookup"]);
-        assert!(resolve_all("off", &t).unwrap().is_empty());
+        assert_eq!(resolve_all("prompt-lookup", &t, None).unwrap(), ["prompt-lookup"]);
+        assert!(resolve_all("off", &t, None).unwrap().is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
 

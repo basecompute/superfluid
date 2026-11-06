@@ -15,7 +15,7 @@ The startup log names the strategy it registered (`superfluid: speculation: mtp-
 | directive | drafter | needs |
 |---|---|---|
 | `off` (default) | none | |
-| `auto` | the bundle's own MTP head, else the best installed drafter that fits, else plain decoding | |
+| `auto` | the drafter the hub catalog marks for the target (pulled when missing), else the bundle's own MTP head, else the best installed drafter that fits, else plain decoding | |
 | `mtp-head` | the multi-token-prediction head in the target bundle (Qwen3.5/3.6/3.8's own, or Gemma 4's `-assistant` head embedded by `basert add-speculator`) | a bundle converted with the head |
 | `prompt-lookup` | n-gram drafting from the lane's own context | nothing; drafts only where text repeats |
 | `dflash:<path>` | a DFlash block drafter | a `.base` drafter |
@@ -33,9 +33,10 @@ With several models, the directive is resolved per model.
 
 ## How `auto` picks a drafter
 
-1. The target bundle's own head, if it has one.
-2. Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a `drafters/` directory beside it or one level up, and the baseRT models cache. Nothing is downloaded. A plain draft model is never picked.
-3. Among fitting drafters: one the hub catalog pairs with the target, then one whose name contains the target's, then DSpark, DFlash, EAGLE-3, then the target's quantization, then the newest.
+1. The drafter the hub catalog marks for the target (`speculator_auto` on the drafter's row: Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters), on macOS, where those pairings were measured faster than the bundle's own head. When no copy is installed it is pulled with the target's runtime first (its `default-q4` file), for each model served, whether given at startup or loaded later, unless `--offline`; a pull that fails is said and `auto` goes on with what is installed. Gemma 4's embedded head is never displaced.
+2. The target bundle's own head, if it has one.
+3. Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a `drafters/` directory beside it or one level up, and the baseRT models cache. Nothing else is downloaded. A plain draft model is never picked.
+4. Among fitting drafters: one the hub catalog pairs with the target, then one whose name contains the target's, then DSpark, DFlash, EAGLE-3, then the target's quantization, then the newest.
 
 If the engine refuses the first pick, `auto` tries the next and finally decodes plainly. An explicit directive has no fallback: a refusal is a startup error.
 
