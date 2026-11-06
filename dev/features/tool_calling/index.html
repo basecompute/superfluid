@@ -2152,7 +2152,7 @@
 <tr>
 <td>delimited XML</td>
 <td><code>&lt;function=f&gt;&lt;parameter=k&gt;v&lt;/parameter&gt;&lt;/function&gt;</code></td>
-<td>Qwen3.5, Qwen3.6, Nemotron 3 Nano</td>
+<td>Qwen3.5, Qwen3.6, Qwen3.8, Nemotron 3 Nano</td>
 </tr>
 <tr>
 <td><code>glm</code></td>
@@ -2179,7 +2179,7 @@
 <p><code>--tool-call-parser auto|json|atem|gemma|harmony|glm</code> overrides the learned format; it is accepted only when it agrees with the model's template.</p>
 <p>For wires that write values raw (XML, GLM), each argument is typed from the tool's JSON Schema: a <code>string</code> property stays a string even when it reads <code>8080</code>.</p>
 <h2 id="streaming">Streaming<a class="headerlink" href="#streaming" title="Permanent link">&para;</a></h2>
-<p>A streamed call opens with an entry carrying <code>index</code>, <code>id</code> and <code>function.name</code> once the name is known, then <code>function.arguments</code> fragments on the same index, then <code>finish_reason: "tool_calls"</code>. JSON wires stream raw argument bytes; delimited wires stream one closed argument at a time; Gemma and ATEM calls arrive whole. Fragments concatenate to the non-streaming <code>arguments</code>.</p>
+<p>A streamed call opens with an entry carrying <code>index</code>, <code>id</code> and <code>function.name</code> once the name is known, then <code>function.arguments</code> fragments on the same index at token cadence, then <code>finish_reason: "tool_calls"</code>. JSON wires stream raw argument bytes; delimited wires stream one closed argument at a time; Harmony, GLM, Gemma and ATEM calls arrive whole once they close. Fragments concatenate to the non-streaming <code>arguments</code>.</p>
 <h2 id="malformed-calls">Malformed calls<a class="headerlink" href="#malformed-calls" title="Permanent link">&para;</a></h2>
 <ul>
 <li>The JSON parser repairs common faults (a markdown fence, surrounding prose, trailing commas, an unterminated tail) but never invents a call.</li>

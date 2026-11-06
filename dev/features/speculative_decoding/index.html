@@ -2096,7 +2096,7 @@
 </tr>
 <tr>
 <td><code>auto</code></td>
-<td>the bundle's own MTP head, else the best installed drafter that fits, else plain decoding</td>
+<td>the drafter the hub catalog marks for the target (pulled when missing), else the bundle's own MTP head, else the best installed drafter that fits, else plain decoding</td>
 <td></td>
 </tr>
 <tr>
@@ -2144,8 +2144,9 @@
 <p>With several models, the directive is resolved per model.</p>
 <h2 id="how-auto-picks-a-drafter">How <code>auto</code> picks a drafter<a class="headerlink" href="#how-auto-picks-a-drafter" title="Permanent link">&para;</a></h2>
 <ol>
+<li>The drafter the hub catalog marks for the target (<code>speculator_auto</code> on the drafter's row: Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters), on macOS, where those pairings were measured faster than the bundle's own head. When no copy is installed it is pulled with the target's runtime first (its <code>default-q4</code> file), for each model served, whether given at startup or loaded later, unless <code>--offline</code>; a pull that fails is said and <code>auto</code> goes on with what is installed. Gemma 4's embedded head is never displaced.</li>
 <li>The target bundle's own head, if it has one.</li>
-<li>Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a <code>drafters/</code> directory beside it or one level up, and the baseRT models cache. Nothing is downloaded. A plain draft model is never picked.</li>
+<li>Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a <code>drafters/</code> directory beside it or one level up, and the baseRT models cache. Nothing else is downloaded. A plain draft model is never picked.</li>
 <li>Among fitting drafters: one the hub catalog pairs with the target, then one whose name contains the target's, then DSpark, DFlash, EAGLE-3, then the target's quantization, then the newest.</li>
 </ol>
 <p>If the engine refuses the first pick, <code>auto</code> tries the next and finally decodes plainly. An explicit directive has no fallback: a refusal is a startup error.</p>

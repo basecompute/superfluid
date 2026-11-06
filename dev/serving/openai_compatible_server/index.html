@@ -2568,7 +2568,7 @@
 <h3 id="streaming">Streaming<a class="headerlink" href="#streaming" title="Permanent link">&para;</a></h3>
 <ul>
 <li>The first chunk's delta is <code>{"role":"assistant"}</code>; content and <code>reasoning_content</code> deltas follow at token cadence.</li>
-<li>Tool calls stream as OpenAI partial deltas: an opening entry with <code>id</code> and <code>function.name</code>, then <code>arguments</code> fragments on the same <code>index</code>.</li>
+<li>Tool calls stream as OpenAI partial deltas: an opening entry with <code>id</code> and <code>function.name</code>, then <code>arguments</code> fragments on the same <code>index</code>, at the same token cadence as content.</li>
 <li>The terminal chunk carries <code>finish_reason</code>, <code>usage</code> and <code>superfluid.warm</code> (cached prefix tokens).</li>
 <li>Lines starting with <code>:</code> are keep-alives.</li>
 <li>A client that disconnects cancels the generation at the next tick.</li>
