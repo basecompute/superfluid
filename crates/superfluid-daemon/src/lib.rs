@@ -12,6 +12,7 @@ pub mod codec;
 mod exec;
 pub mod completion_bucket;
 pub mod files;
+pub mod fit;
 pub mod harmony;
 pub mod keypolicy;
 pub mod launch;
