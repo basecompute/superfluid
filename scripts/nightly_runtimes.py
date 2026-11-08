@@ -24,7 +24,9 @@ so one bad upstream build does not hold the recipe until the next night.
 `append` adds a release to the adapter's recipe as a tested one, newest
 first, so a human reviews a PR rather than typing digests. For llama.cpp
 that is the same asset names the previous tested build carries, with the
-size and SHA-256 GitHub lists for each. For MLX it is the whole environment
+size and SHA-256 GitHub lists for each; where upstream moved a backend's
+minor version (cuda-13.4 to cuda-13.5), the archive that took the old one's
+place. For MLX it is the whole environment
 pip resolved for the version on the runner, read from pip's install report
 (`pip install --dry-run --report`): every distribution's wheel, with the
 size and SHA-256 PyPI lists for it, which must agree with the digest pip
@@ -57,6 +59,9 @@ MLX_LM_PYPI = "https://pypi.org/pypi/mlx-lm/json"
 CLOSED_PRS = "https://api.github.com/repos/{repo}/pulls?state=closed&head={owner}:nightly/{runtime}&per_page=100"
 PYPI_RELEASE = "https://pypi.org/pypi/{name}/{version}/json"
 BUILD = re.compile(r"^b(\d+)$")
+# A backend's own version in a llama.cpp archive name, as the 13.4 of
+# `-cuda-13.4-x64`; group 2 is its major.
+BACKEND_VERSION = re.compile(r"-((\d+)(?:\.\d+)+)-")
 # How far below the build a night started on the walk-back goes: an upstream
 # break fixed within a few builds is found, while an adapter that no new
 # build passes costs a night this many extra runs, not every build since.
@@ -187,6 +192,50 @@ def pick(runtime: str, requested: str | None) -> dict[str, str]:
     return out
 
 
+def slot(name: str, version: str) -> str:
+    """What an archive of build `version` holds, short of the build and the
+    minor version of its backend: `llama-b1-bin-ubuntu-cuda-13.4-x64.tar.gz`
+    and `llama-b2-bin-ubuntu-cuda-13.5-x64.tar.gz` fill one slot, the CUDA 13
+    build for linux-x64, where `cuda-12.8` fills another."""
+    return BACKEND_VERSION.sub(lambda m: f"-{m.group(2)}.*-", name.replace(version, "{version}", 1))
+
+
+def backend_version(name: str) -> tuple[int, ...]:
+    m = BACKEND_VERSION.search(name)
+    return tuple(int(p) for p in m.group(1).split(".")) if m else ()
+
+
+def carried_assets(previous: dict, version: str, published: list[dict]) -> tuple[list[dict], list[str], list[str]]:
+    """The recipe's assets for `version`: those of `previous`, the newest
+    tested build, under the new build's names, with the size and SHA-256 the
+    release lists. An archive whose backend moved its minor version upstream
+    (llama.cpp's CUDA 13 build went from cuda-13.4 to cuda-13.5 at b12184) is
+    followed to the newest archive in its slot rather than left out. Returns
+    the assets, the names not found (or listed with no SHA-256), and one
+    "old is now new" line per archive followed."""
+    by_name = {a["name"]: a for a in published}
+    by_slot: dict[str, list[dict]] = {}
+    for a in published:
+        by_slot.setdefault(slot(a["name"], version), []).append(a)
+    assets, missing, moved, taken = [], [], [], set()
+    for old in previous["assets"]:
+        name = old["name"].replace(previous["version"], version)
+        a = by_name.get(name)
+        if a is None:
+            a = max(by_slot.get(slot(old["name"], previous["version"]), []), key=lambda a: backend_version(a["name"]), default=None)
+            if a is not None and a["name"] not in taken:
+                moved.append(f"{name} is now {a['name']}")
+        if a is not None and a["name"] in taken:
+            continue
+        digest = (a or {}).get("digest") or ""
+        if not a or not digest.startswith("sha256:"):
+            missing.append(name)
+            continue
+        taken.add(a["name"])
+        assets.append({"name": a["name"], "size": a["size"], "sha256": digest[len("sha256:") :]})
+    return assets, missing, moved
+
+
 def append_llamacpp(version: str) -> None:
     path = RECIPES["llamacpp"]
     r = recipe("llamacpp")
@@ -198,16 +247,9 @@ def append_llamacpp(version: str) -> None:
         raise SystemExit("the recipe lists no tested build to take the asset names from")
     previous = tested[0]
     release = fetch_json(LLAMACPP_RELEASE.format(version=version))
-    by_name = {a["name"]: a for a in release.get("assets", [])}
-    assets, missing = [], []
-    for old in previous["assets"]:
-        name = old["name"].replace(previous["version"], version)
-        a = by_name.get(name)
-        digest = (a or {}).get("digest") or ""
-        if not a or not digest.startswith("sha256:"):
-            missing.append(name)
-            continue
-        assets.append({"name": name, "size": a["size"], "sha256": digest[len("sha256:") :]})
+    assets, missing, moved = carried_assets(previous, version, release.get("assets", []))
+    if moved:
+        print(f"note: {version} moved {', '.join(moved)}", file=sys.stderr)
     if missing:
         # The archives the tests ran on must be there; a CUDA runtime archive
         # dropped upstream is reported and left out.

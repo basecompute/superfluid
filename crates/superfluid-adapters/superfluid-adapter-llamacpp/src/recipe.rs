@@ -306,6 +306,20 @@ mod tests {
         plans.iter().map(|p| p.backend.as_str()).collect()
     }
 
+    /// The newest tested build's linux-x64 backend that starts with `prefix`,
+    /// as cuda-13.5 for "cuda-13.": llama.cpp moves the minor versions in its
+    /// archive names between builds (cuda-13.4 became cuda-13.5 at b12184), and
+    /// the recipe follows them. The recipe must keep a build of each.
+    fn linux_x64(prefix: &str) -> String {
+        let (version, archives) = &tested()[0];
+        archives
+            .iter()
+            .filter(|a| a.platform == "linux-x64" && !a.cudart && a.backend.starts_with(prefix))
+            .map(|a| a.backend.clone())
+            .max_by_key(|b| cuda_version(b))
+            .unwrap_or_else(|| panic!("the recipe's newest build, {version}, has no {prefix}* build for linux-x64"))
+    }
+
     #[test]
     fn archive_names_say_version_platform_and_backend() {
         let a = parse_name("llama-b11284-bin-ubuntu-cuda-13.4-arm64.tar.gz").unwrap();
@@ -344,41 +358,43 @@ mod tests {
 
     #[test]
     fn linux_picks_the_newest_cuda_its_driver_runs_then_falls_back() {
+        let (cuda13, cuda12) = (linux_x64("cuda-13."), linux_x64("cuda-12."));
         let mut h = host("linux", "x64");
         h.nvidia_driver = Some("580.95.05".into());
         h.vulkan = true;
         let plans = plan(&Request::default(), &h).unwrap();
-        assert_eq!(backends(&plans), ["cuda-13.4", "vulkan", "cpu"]);
+        assert_eq!(backends(&plans), [cuda13.as_str(), "vulkan", "cpu"]);
         assert_eq!(plans[0].assets.len(), 2, "no CUDA runtime on the system: its archive comes too");
         assert!(plans[0].assets[1].name.starts_with("cudart-"));
         h.cuda_runtime = Some(13);
         assert_eq!(plan(&Request::default(), &h).unwrap()[0].assets.len(), 1, "the system's CUDA 13 runtime serves");
         h.nvidia_driver = Some("535.10".into());
-        assert_eq!(backends(&plan(&Request::default(), &h).unwrap())[0], "cuda-12.8", "a 12.x driver runs CUDA 12 only");
+        assert_eq!(backends(&plan(&Request::default(), &h).unwrap())[0], cuda12, "a 12.x driver runs CUDA 12 only");
         let mut arm = host("linux", "arm64");
         arm.nvidia_driver = Some("535.10".into());
         assert_eq!(backends(&plan(&Request::default(), &arm).unwrap()), ["cpu"], "no CUDA 12 build for arm64");
         let mut amd = host("linux", "x64");
         amd.rocm = true;
-        assert_eq!(backends(&plan(&Request::default(), &amd).unwrap()), ["rocm-10.0", "cpu"]);
+        assert_eq!(backends(&plan(&Request::default(), &amd).unwrap()), [linux_x64("rocm-").as_str(), "cpu"]);
     }
 
     #[test]
     fn a_named_backend_is_the_only_one_and_must_exist() {
+        let (cuda13, cuda12) = (linux_x64("cuda-13."), linux_x64("cuda-12."));
         let mut h = host("linux", "x64");
         h.nvidia_driver = Some("580.1".into());
         let named = |b: &str| plan(&Request { backend: Some(b.into()), ..Request::default() }, &h);
         assert_eq!(backends(&named("vulkan").unwrap()), ["vulkan"]);
-        assert_eq!(backends(&named("cuda").unwrap()), ["cuda-13.4"], "a family names its newest");
-        assert_eq!(backends(&named("cuda-12.8").unwrap()), ["cuda-12.8"]);
+        assert_eq!(backends(&named("cuda").unwrap()), [cuda13.as_str()], "a family names its newest");
+        assert_eq!(backends(&named(&cuda12).unwrap()), [cuda12.as_str()]);
         assert!(named("metal").unwrap_err().contains("has no metal build for linux-x64"));
         h.nvidia_driver = Some("535.10".into());
         let named = |b: &str| plan(&Request { backend: Some(b.into()), ..Request::default() }, &h);
-        assert_eq!(backends(&named("cuda").unwrap()), ["cuda-12.8"]);
-        assert_eq!(backends(&named("cuda-13.4").unwrap()), ["cuda-13.4"], "a build named in full is the one asked for");
+        assert_eq!(backends(&named("cuda").unwrap()), [cuda12.as_str()]);
+        assert_eq!(backends(&named(&cuda13).unwrap()), [cuda13.as_str()], "a build named in full is the one asked for");
         h.nvidia_driver = None;
         let named = |b: &str| plan(&Request { backend: Some(b.into()), ..Request::default() }, &h);
-        assert_eq!(backends(&named("cuda").unwrap()), ["cuda-13.4"]);
+        assert_eq!(backends(&named("cuda").unwrap()), [cuda13.as_str()]);
     }
 
     #[test]
