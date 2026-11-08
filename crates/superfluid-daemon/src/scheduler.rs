@@ -94,7 +94,15 @@ const OPEN_PREFILL_TICK_SECS_YIELDING: f64 = 2.0;
 /// to prefill a whole engine-sized chunk (Qwen3.8-27B on an M5 Pro: 512-token open
 /// ticks ran its prefill at ~490 tok/s against ~600 for the engine's own chunks).
 const OPEN_PREFILL_TICK_SECS_LONE: f64 = 4.0;
-const OPEN_PREFILL_TICK_MAX_LONE: u32 = 2048;
+/// A lone lane's cap once the engine has taught its rate: the engine's largest chunk
+/// (4096 rows on an M5), the target above bounding the tick. Qwen3.6-35B-A3B on an
+/// M5 Pro prefills ~3000 tok/s, so 2048-token ticks cut an 8k prompt into chunks
+/// half the engine's (3050 tok/s served against 3640 for its 4096-row chunks).
+const OPEN_PREFILL_TICK_MAX_LONE: u32 = 4096;
+/// A lone lane's tick on an engine that never teaches the rate (one that fuses a
+/// lone prompt into its decode rounds reports no prefill phase): about the target
+/// for a large dense model (Qwen3.8-27B on an M5 Pro, ~600 tok/s).
+const OPEN_PREFILL_TICK_LONE_UNTAUGHT: u32 = 2048;
 
 /// How long after the last chat or inline completion the engine keeps its
 /// prefill steps short.
@@ -953,9 +961,10 @@ mod prefill_order_tests {
             "an engine that yields mid-tick: a 27B's open tick is a whole chunk"
         );
         use super::{open_prefill_tick_cap_within as within, OPEN_PREFILL_TICK_MAX_LONE, OPEN_PREFILL_TICK_SECS_LONE};
-        assert_eq!(within(1.0 / 600.0, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 2048, "a lone 27B lane: a whole 2048-token chunk");
+        assert_eq!(within(1.0 / 600.0, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 2048, "a lone 27B lane: 2400 tokens, a 2048-token chunk");
         assert_eq!(within(1.0 / 300.0, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 1024, "1200 tokens round down to two chunks");
-        assert_eq!(within(1e-6, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 2048, "never above the lone cap");
+        assert_eq!(within(1.0 / 3000.0, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 4096, "a lone 35B-A3B lane: a whole 4096-row chunk");
+        assert_eq!(within(1e-6, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 4096, "never above the lone cap");
         use super::open_prefill_tick_target as target;
         assert_eq!(target(true, false), super::OPEN_PREFILL_TICK_SECS_YIELDING, "agents alone, on an engine that yields");
         assert_eq!(target(true, true), super::OPEN_PREFILL_TICK_SECS, "a chat around: its next tokens wait out each tick");
@@ -3585,7 +3594,7 @@ impl Scheduler {
                 // A lone lane on an engine that has not taught the rate (one that
                 // fuses a lone prompt into its decode rounds reports no prefill
                 // phase, so it never does): a whole lone-sized chunk.
-                None if lone => OPEN_PREFILL_TICK_MAX_LONE,
+                None if lone => OPEN_PREFILL_TICK_LONE_UNTAUGHT,
                 Some(spt) => {
                     let yields = matches!(
                         self.host.capabilities().read().expect("capability record").get("serving", "tick_yield"),
