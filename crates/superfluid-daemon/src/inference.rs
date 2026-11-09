@@ -2403,46 +2403,69 @@ async fn completion_stream(
         > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::new()));
         let lp_fill = std::rc::Rc::clone(&lp_q);
         let mut offset: usize = 0;
+        // Without logprobs the text streams from the lane's partial emits as each token lands
+        // (as a chat's does), not from the commits at the end of each engine tick, which hold a
+        // prompt's first token behind the tick's decode rounds. The partial emits' text is a
+        // prefix of the committed text and is flushed whole before the generation ends, so the
+        // commits then carry nothing to send. Logprobs pair with the committed spans.
+        let delta_mode = !want_logprobs;
+        let cancels = daemon.cancel_registry();
+        let dead = std::cell::Cell::new(false);
         let run = || -> Result<(), DaemonError> {
             if req.echo {
                 offset = req.prompt.len();
                 send(Frame::text(&req.prompt, None, None))?;
             }
-            let out = daemon.generate_streaming_ex_lp(
-                session,
-                max_tokens,
-                extras,
-                |ev| {
-                    if let EventBody::Generated {
-                        text,
-                        channel: ch,
-                        span,
-                        ..
-                    } = &ev.body
-                    {
-                        let these: Vec<crate::scheduler::TokenLogprob> = if want_logprobs {
-                            let mut q = lp_q.borrow_mut();
-                            (0..span.len()).filter_map(|_| q.pop_front()).collect()
+            let mut on_delta = |ch: u32, text: &str, _produced: u32, _closes: bool| {
+                if text.is_empty() || ch == channel::TOOL_CALL || dead.get() {
+                    return;
+                }
+                if send(Frame::text(text, None, None)).is_err() {
+                    cancels.cancel(session);
+                    dead.set(true);
+                }
+            };
+            let mut on_event = |ev: &crate::CommittedEvent| {
+                if delta_mode {
+                    return Ok(());
+                }
+                if let EventBody::Generated {
+                    text,
+                    channel: ch,
+                    span,
+                    ..
+                } = &ev.body
+                {
+                    let these: Vec<crate::scheduler::TokenLogprob> = if want_logprobs {
+                        let mut q = lp_q.borrow_mut();
+                        (0..span.len()).filter_map(|_| q.pop_front()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if !text.is_empty() && *ch != channel::TOOL_CALL {
+                        let lp = if want_logprobs {
+                            let v = Some(decode_logprobs(&daemon, &these, offset));
+                            offset += text.len();
+                            v
                         } else {
-                            Vec::new()
+                            None
                         };
-                        if !text.is_empty() && *ch != channel::TOOL_CALL {
-                            let lp = if want_logprobs {
-                                let v = Some(decode_logprobs(&daemon, &these, offset));
-                                offset += text.len();
-                                v
-                            } else {
-                                None
-                            };
-                            return send(Frame::text(text, lp, None));
-                        }
+                        return send(Frame::text(text, lp, None));
                     }
-                    Ok(())
-                },
-                |items| {
-                    lp_fill.borrow_mut().extend(items.iter().cloned());
-                },
-            )?;
+                }
+                Ok(())
+            };
+            let on_logprobs = |items: &[crate::scheduler::TokenLogprob]| {
+                lp_fill.borrow_mut().extend(items.iter().cloned());
+            };
+            let out = if delta_mode {
+                daemon.generate_streaming_delta(session, max_tokens, extras, &mut on_event, on_logprobs, &mut on_delta)?
+            } else {
+                daemon.generate_streaming_ex_lp(session, max_tokens, extras, &mut on_event, on_logprobs)?
+            };
+            if dead.get() {
+                return Err(DaemonError::Protocol("generation consumer gone"));
+            }
             let fin = finish_reason(out.finish, out.tokens_generated, max_tokens, false);
             let mut terminal = Frame::text("", None, Some(fin));
             terminal.usage = Some(usage(

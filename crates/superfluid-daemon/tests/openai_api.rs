@@ -5058,3 +5058,32 @@ fn batches_beyond_the_worker_cap_wait_in_validating_and_cancel_cleanly() {
         assert_eq!(last, "cancelled", "{id}");
     }
 }
+
+/// A /v1/completions text, non-streamed or as the concatenation of its stream, and its finish.
+fn completion_text(addr: std::net::SocketAddr, extra: &str, stream: bool) -> (String, String) {
+    let body = format!(
+        r#"{{"model":"mock-model","prompt":"hi","max_tokens":12,"temperature":0,"stream":{stream}{extra}}}"#
+    );
+    let (status, _, raw) = http(addr, "POST", "/v1/completions", &body);
+    assert_eq!(status, 200, "{raw}");
+    if stream {
+        let (events, _) = stream_events(&raw);
+        let text: String = events.iter().filter_map(|e| e["choices"][0]["text"].as_str()).collect();
+        (text, stream_finish(&events))
+    } else {
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let c = &v["choices"][0];
+        (c["text"].as_str().unwrap().to_string(), c["finish_reason"].as_str().unwrap().to_string())
+    }
+}
+
+#[test]
+fn completion_stream_text_is_the_completion() {
+    let addr = spawn_stack();
+    for extra in ["", r#","logprobs":1"#] {
+        let (whole, wf) = completion_text(addr, extra, false);
+        let (streamed, sf) = completion_text(addr, extra, true);
+        assert_eq!(streamed, whole, "the stream's text is the completion's ({extra})");
+        assert_eq!(sf, wf, "{extra}");
+    }
+}
