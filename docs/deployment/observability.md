@@ -1,6 +1,6 @@
 # Observability
 
-superfluid exposes an access log, structured logs, Prometheus metrics, OTLP traces and metrics, and two terminal monitors. All of them are content-free: ids, counts, lengths, timings and codes, never prompt or completion text.
+Superfluid exposes an access log, structured logs, Prometheus metrics, OTLP traces and metrics, and two terminal monitors. All of them are content-free: ids, counts, lengths, timings and codes, never prompt or completion text.
 
 ## Access log
 

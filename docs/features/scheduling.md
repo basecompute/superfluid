@@ -61,7 +61,7 @@ When an `interactive` or `completion` job is queued and every lane is busy, the 
 - A tick in which an `interactive` or `completion` prompt finishes prefills nothing of a lower class beside it.
 - While a newcomer could be admitted at the end of the tick, one tick's prefill is capped at about 0.5 s of work (whole 512-token chunks, or 128-token steps on a model too slow for one chunk in that time). A short chat arriving while eight agents prefill 7.5k-token prompts reaches its first token in about 0.7 s (Qwen3-4B, llama.cpp, M4 Max).
 - One tick's prefill is otherwise capped at 8 s of work.
-- A running tick ends at the engine's next step (a prefill micro-batch or a decode round) when a lane is cancelled or an `interactive` or `completion` request is queued; prefill it did not reach is planned again. Engines run by superfluid's own workers (`llamacpp`, `mlx`) do this; a native engine finishes its tick.
+- A running tick ends at the engine's next step (a prefill micro-batch or a decode round) when a lane is cancelled or an `interactive` or `completion` request is queued; prefill it did not reach is planned again. Engines run by Superfluid's own workers (`llamacpp`, `mlx`) do this; a native engine finishes its tick.
 - The pinned 4096 default favors prompt throughput; choose `0` when decode continuity on a slow model matters more.
 
 The live budget and grant are `superfluid_prefill_budget_tokens` and `superfluid_decode_grant_tokens` on `/metrics`.

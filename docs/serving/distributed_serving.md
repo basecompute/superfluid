@@ -1,6 +1,6 @@
 # Distributed serving (fleet mode)
 
-Fleet mode runs one superfluid as a **head** that owns the HTTP API and the chat template, and one or more **node agents** (`superfluid-noded`) that each own a model and sample its tokens. Each request is placed as a whole session on one node; only sampled tokens cross the network.
+Fleet mode runs one Superfluid as a **head** that owns the HTTP API and the chat template, and one or more **node agents** (`superfluid-noded`) that each own a model and sample its tokens. Each request is placed as a whole session on one node; only sampled tokens cross the network.
 
 > [!WARNING]
 > Fleet mode is early. The head keeps no durable session log and serves two routes.

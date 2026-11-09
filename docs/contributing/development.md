@@ -72,6 +72,16 @@ Most real-model tests look for a default under `models/` at the repository root;
 | `core` | `macos-15`, `ubuntu-24.04`, `ubuntu-24.04-arm` | clippy, build, test (mock engine plus skips) |
 | `adapters` | `macos-15` | basert adapter tests; clippy on the llama.cpp adapter and feature builds; installs llama.cpp's release build (cached) and runs the adapter's tests against it; `scripts/build_runtime_adapters.sh` |
 
+## Docs
+
+The pages in `docs/` are the site at [superfluid.sh](https://superfluid.sh), built by the Next.js app in `docs-site/`. Its sidebar is `docs-site/src/docs-manifest.mjs`: a new page goes there too, or the build fails.
+
+```sh
+cd docs-site && npm ci && npm run dev   # http://localhost:3000
+```
+
+`npm run build` is what the `Docs` workflow runs on a pull request; it fails on a broken relative link or a page missing from the manifest. `.github/workflows/pages.yml` publishes a push to `main` as `/dev/` and a tag `v*` as its major.minor and `/latest/`.
+
 ## API compliance client
 
 `scripts/api_compliance.py` checks a running server's responses against the published shape of every API it serves: required fields, value types, enum values and the order of streamed events.
@@ -92,7 +102,7 @@ python3 scripts/api_compliance.py --url http://127.0.0.1:8453 --model <embedding
 | `embed` | `/v1/embeddings`, `/api/embed`, `/api/embeddings`; skipped on a model that serves no embeddings |
 | `all` (default) | `openai`, `anthropic`, `ollama` and `server` |
 
-`--model` defaults to the first model `/v1/models` lists; `--key` sends an API key. It prints one line per check, then `PASS n FAIL m SKIP k`, and exits 1 on any failure. A field the published API has and superfluid documents it does not serve (Ollama's model metadata and phase timings) is noted, not failed.
+`--model` defaults to the first model `/v1/models` lists; `--key` sends an API key. It prints one line per check, then `PASS n FAIL m SKIP k`, and exits 1 on any failure. A field the published API has and Superfluid documents it does not serve (Ollama's model metadata and phase timings) is noted, not failed.
 
 The Ollama surface has its own tests (`cargo test -p superfluid --test ollama_api`) and opt-in client smoke scripts in `crates/superfluid-daemon/tests/` (`ollama_clients.py`, `ollama_clients.mjs`, `ollama_live.py`).
 

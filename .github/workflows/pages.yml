@@ -2,13 +2,21 @@ name: Pages
 
 # A push to main publishes the site as "dev", and a tag v* as its major.minor
 # and "latest", to the gh-pages branch that https://superfluid.sh serves,
-# with scripts/install.sh at the root.
+# with scripts/install.sh at the root. Each version is a static export of
+# docs-site/ built under its own directory. Run it by hand with "latest"
+# ticked to publish this ref's docs as /latest/ between releases.
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths: ["docs/**", "mkdocs.yml", "scripts/install.sh", ".github/workflows/pages.yml"]
+    paths: ["docs/**", "docs-site/**", "scripts/install.sh", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+    inputs:
+      latest:
+        description: Also publish this ref as /latest/
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -22,35 +30,46 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          fetch-depth: 0
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: "3.12"
-      - run: pip install -r docs/requirements-docs.txt
-      - run: mkdocs build --strict
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - run: npm ci
+        working-directory: docs-site
       - run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Publish the version
+          git fetch origin gh-pages
+          git worktree add -B gh-pages ../pages origin/gh-pages
+      - name: Build the versions
+        env:
+          LATEST: ${{ inputs.latest }}
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             v="${GITHUB_REF_NAME#v}"
-            mike deploy --push --update-aliases "${v%.*}" latest
-            mike set-default --push latest
+            dirs=("${v%.*}" latest)
           else
-            mike deploy --push dev
-            mike list | grep -q '\[latest\]' || mike set-default --push dev
+            dirs=(dev)
+            [[ "${LATEST:-false}" == true ]] && dirs+=(latest)
           fi
+          for d in "${dirs[@]}"; do
+            (cd docs-site && NEXT_PUBLIC_BASE_PATH="/$d" npm run build)
+            rm -rf "../pages/$d"
+            cp -R docs-site/out "../pages/$d"
+          done
       - name: Root files
         run: |
           set -euo pipefail
-          git worktree add ../pages gh-pages
-          cp scripts/install.sh ../pages/install.sh
-          echo superfluid.sh > ../pages/CNAME
-          touch ../pages/.nojekyll
           cd ../pages
-          git add install.sh CNAME .nojekyll
-          git diff --cached --quiet || git commit -m "Root files: install.sh, CNAME"
+          cp "$GITHUB_WORKSPACE/scripts/install.sh" install.sh
+          echo superfluid.sh > CNAME
+          touch .nojekyll
+          home=dev
+          [[ -d latest ]] && home=latest
+          printf '<!doctype html><meta charset="utf-8"><title>superfluid</title><link rel="canonical" href="%s/"><meta http-equiv="refresh" content="0; url=%s/"><script>location.replace("%s/"+location.hash)</script>\n' "$home" "$home" "$home" > index.html
+          cp "$home/404.html" 404.html
+          git add -A
+          git diff --cached --quiet || git commit -m "Publish docs: ${GITHUB_REF_NAME}"
           git push origin gh-pages
