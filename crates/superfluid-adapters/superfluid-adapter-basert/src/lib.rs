@@ -7,10 +7,19 @@ use std::sync::Arc;
 
 use superfluid_adapter_kit::install::{Candidate, Host, Plan, Request, Unlisted};
 use superfluid_adapter_kit::{Pull, PullOption};
+use superfluid_adapter_kit::{option, OptionKind, ServeOption};
 use superfluid_adapter_kit::{ring_specs_for, Device, Format, Loaded, Probe, Runtime, RuntimeInfo, Tokenizer, TokenizerSource, WorkerArgs};
 use superfluid_engine_ffi::{libbasert, FfiEngineConfig, NativeEngine, TokenizerHandle};
 
 pub struct Basert;
+
+/// The options `superfluid serve` takes for this runtime, as `--basert-<name> <value>`.
+const OPTIONS: &[ServeOption] = &[ServeOption {
+    name: "neural-engine",
+    kind: OptionKind::OnOff,
+    default: "on",
+    about: "Run part of each prefill on the Neural Engine where that is faster (Apple silicon); off runs it on the GPU alone.",
+}];
 
 impl Runtime for Basert {
     fn compat(&self) -> serde_json::Value {
@@ -36,6 +45,10 @@ impl Runtime for Basert {
 
     fn flags(&self) -> &'static [&'static str] {
         &["--kv-bits", "--basert-lib"]
+    }
+
+    fn options(&self) -> &'static [ServeOption] {
+        OPTIONS
     }
 
     fn prepare(&self, args: &WorkerArgs) {
@@ -73,6 +86,12 @@ impl Runtime for Basert {
     fn open(&self, args: &WorkerArgs) -> Result<Loaded, String> {
         let model = superfluid_adapter_kit::model(args)?.to_path_buf();
         superfluid_engine_ffi::set_kv_bits(args.kv_bits);
+        if option(args, "neural-engine") == Some("off") && !libbasert::set_neural_engine(false) {
+            return Err(format!(
+                "--basert-neural-engine off: the libbaseRT at {} has no Neural Engine switch (an older engine; it predates the option)",
+                libbasert::load()?.path.display()
+            ));
+        }
         let engine = NativeEngine::load(FfiEngineConfig {
             model_path: model,
             max_context: args.max_context,
