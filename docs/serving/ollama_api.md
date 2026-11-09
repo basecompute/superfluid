@@ -1,6 +1,6 @@
 # Ollama-compatible API
 
-superfluid serves a subset of Ollama's API (inference, discovery and embeddings) on its HTTP listener, for any runtime. It does not read Ollama's model store, pull models or interpret Modelfiles.
+Superfluid serves a subset of Ollama's API (inference, discovery and embeddings) on its HTTP listener, for any runtime. It does not read Ollama's model store, pull models or interpret Modelfiles.
 
 Point an Ollama client at the server root:
 
@@ -23,7 +23,7 @@ for part in client.chat(model=model, messages=[{"role": "user", "content": "Hell
 
 `superfluid launch ollama` runs the `ollama` command line against the server; see [Ollama CLI](../integrations/ollama_cli.md).
 
-Model names are superfluid's model ids; `id:latest` is accepted. Load models at startup or through [`POST /v1/models/load`](multiple_models.md#load-and-unload); arbitrary paths and remote names are refused.
+Model names are Superfluid's model ids; `id:latest` is accepted. Load models at startup or through [`POST /v1/models/load`](multiple_models.md#load-and-unload); arbitrary paths and remote names are refused.
 
 ## Routes
 

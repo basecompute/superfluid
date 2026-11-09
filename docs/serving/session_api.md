@@ -1,6 +1,6 @@
 # Session API
 
-The session API is superfluid's own protocol. The [OpenAI](openai_compatible_server.md), [Anthropic](anthropic_api.md) and [Ollama](ollama_api.md) routes run each request as a fresh session; the session API keeps sessions in the daemon by id, so a client appends to one, generates on it, forks it and reads it back, across restarts. [Sessions and prefix caching](../features/sessions.md) describes what a session holds.
+The session API is Superfluid's own protocol. The [OpenAI](openai_compatible_server.md), [Anthropic](anthropic_api.md) and [Ollama](ollama_api.md) routes run each request as a fresh session; the session API keeps sessions in the daemon by id, so a client appends to one, generates on it, forks it and reads it back, across restarts. [Sessions and prefix caching](../features/sessions.md) describes what a session holds.
 
 | transport | flag | encoding | credential |
 |---|---|---|---|

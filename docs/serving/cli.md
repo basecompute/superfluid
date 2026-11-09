@@ -12,7 +12,7 @@
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
 | `superfluid compat` | what this build was built for: the runtime contracts it checks at load |
-| `superfluid self <subcommand>` | update superfluid itself, or switch between the versions installed here |
+| `superfluid self <subcommand>` | update Superfluid itself, or switch between the versions installed here |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
 | `superfluid media <subcommand>` | store media in, or sweep, a running server's media pool |
 | `superfluid top [<host:port>...]` | live monitor over one or more servers, or a fleet |
@@ -34,7 +34,7 @@ Flags take their value as `--flag value` or `--flag=value`. The last occurrence 
 | 1 | run-time failure: a port or socket that cannot be bound, a sessions directory another server holds, a damaged session log, a worker that did not start, a model that did not load, a failed install or pull, a shipped adapter that did not answer `compat` |
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
-| 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts superfluid can tell this from a flag it got wrong (2), and from an install superfluid tried that failed (1) |
+| 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts Superfluid can tell this from a flag it got wrong (2), and from an install Superfluid tried that failed (1) |
 
 ## `superfluid serve`
 
@@ -219,7 +219,7 @@ superfluid launch                                   # list the agents and whethe
 superfluid launch <agent> [--model <m>] [--http <addr:port>] [--api-key <key>] [--print] [-- <agent args>...]
 ```
 
-Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. `--print` shows what would run; arguments after `--` go to the agent. See [superfluid launch](../integrations/index.md).
+Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](../integrations/index.md).
 
 ## `superfluid stop`
 
@@ -231,9 +231,9 @@ Sends the server `launch` started SIGTERM and waits for it to drain. A server st
 superfluid runtimes [<model>] [--json]
 ```
 
-Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. `INSTALLABLE` is a version the adapter lists, or an installed one newer than all of them that the adapter installs without `--untested` all the same: for basert, a release that states this build's engine ABI, which `superfluid runtime install basert` takes with no version from the release listing (`superfluid runtimes` itself asks the network nothing). The device column gives its memory budget, what the runtime plans a model and its KV cache against there, by the same rule for every runtime: a share of the device's working set, 85% on Apple silicon. The worker column names an install by its name in the runtimes directory (`installed: mlx/0.32.4-metal`) and a worker of superfluid's own by where it came from (`built in`, `shipped with superfluid`, `beside superfluid`); the release's directory and the runtimes directory are printed once below the table, and your home directory as `~`. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
+Without a model: one row per runtime and install, with state (`ready`, `not installed`, `broken`, `missing`), version, the newest version its adapter installs on its own here (`INSTALLABLE`, marked `(installed)` when an install of it exists; `superfluid runtime versions <id>` lists them all), formats, device and worker location, then each problem with its fix. `INSTALLABLE` is a version the adapter lists, or an installed one newer than all of them that the adapter installs without `--untested` all the same: for basert, a release that states this build's engine ABI, which `superfluid runtime install basert` takes with no version from the release listing (`superfluid runtimes` itself asks the network nothing). The device column gives its memory budget, what the runtime plans a model and its KV cache against there, by the same rule for every runtime: a share of the device's working set, 85% on Apple silicon. The worker column names an install by its name in the runtimes directory (`installed: mlx/0.32.4-metal`) and a worker of Superfluid's own by where it came from (`built in`, `shipped with superfluid`, `beside superfluid`); the release's directory and the runtimes directory are printed once below the table, and your home directory as `~`. With a model: which runtime reads it and what that runtime serves and refuses; exits 1 when none here serves it.
 
-With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; `worker.path`, the worker's whole path; and per device `memory`, the device's memory as the runtime reads it (llama.cpp's device total, MLX's recommended working set, baseRT's own budget), beside `budget`, the figure the table shows (0 where the runtime plans nothing, such as llama.cpp's CPU); a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `least` and `most` when the value is bounded, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting superfluid in another product](hosts.md).
+With `--json`, a runtime's row carries `installable`, the versions its adapter installs on its own here, newest first; `worker.path`, the worker's whole path; and per device `memory`, the device's memory as the runtime reads it (llama.cpp's device total, MLX's recommended working set, baseRT's own budget), beside `budget`, the figure the table shows (0 where the runtime plans nothing, such as llama.cpp's CPU); a ready runtime's row carries `abi` when the runtime states a contract number (baseRT's engine ABI) and `options` when the runtime takes knobs of its own on `serve` (each with `name`, `kind`, `choices`, `least` and `most` when the value is bounded, `default` and `about`), and the `basert` row carries `requires`, what this build was built for, whether or not an engine was found. See [Hosting Superfluid in another product](hosts.md).
 
 ## `superfluid runtime`
 
@@ -259,7 +259,7 @@ See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the kno
 superfluid compat [--json]
 ```
 
-What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part; one that fails or does not answer within a minute is reported under its runtime as `error`, with the last lines it wrote to stderr, and `superfluid compat` then exits 1 after printing the rest. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting superfluid in another product](hosts.md). For one runtime on this machine, `superfluid runtime versions <id>` says which of those versions install here.
+What this build was built and tested for, per runtime: for `basert`, the baseRT header version it carries, the engine ABI number it checks at load, the line accepted without one and the engines it installs on its own; for `llamacpp` and `mlx`, the upstream versions the shipped adapter installs on its own. Each shipped adapter answers `superfluid-worker-<id> compat --json` for its part; one that fails or does not answer within a minute is reported under its runtime as `error`, with the last lines it wrote to stderr, and `superfluid compat` then exits 1 after printing the rest. A release carries the same JSON beside its tarball as `compat.json`. See [Hosting Superfluid in another product](hosts.md). For one runtime on this machine, `superfluid runtime versions <id>` says which of those versions install here.
 
 ## `superfluid self`
 
@@ -271,7 +271,7 @@ superfluid self use <v>
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating Superfluid](updating.md).
 
 ## `superfluid session`
 

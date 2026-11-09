@@ -18,7 +18,7 @@
 superfluid puts one scheduler, one durable session log and one set of APIs in front of llama.cpp, MLX and baseRT. Several agents share one machine without getting in each other's way, a session outlives a crashed worker or a restarted server, and OpenAI, Anthropic and Ollama clients work unchanged.
 
 ```sh
-curl -fsSL https://superfluid.sh/install.sh | sh
+curl -fsSL https://basecompute.co/sf/install.sh | sh
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
 ```
 
