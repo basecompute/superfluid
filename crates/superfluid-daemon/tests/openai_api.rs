@@ -5087,3 +5087,27 @@ fn completion_stream_text_is_the_completion() {
         assert_eq!(sf, wf, "{extra}");
     }
 }
+
+#[test]
+fn completion_stop_truncates_text() {
+    let addr = spawn_stack();
+    let (full, _) = completion_text(addr, "", false);
+    if full.len() < 4 {
+        return;
+    }
+    let stop = &full[2..4];
+    let esc = stop.replace('\\', "\\\\").replace('"', "\\\"");
+    for stream in [false, true] {
+        for extra in [format!(r#","stop":"{esc}""#), format!(r#","stop":["{esc}"],"logprobs":1"#)] {
+            let (out, finish) = completion_text(addr, &extra, stream);
+            assert!(!out.contains(stop), "stop string must be excluded (stream {stream}, {extra}): {out:?}");
+            assert_eq!(out, full[..full.find(stop).unwrap()], "the text up to the stop (stream {stream}, {extra})");
+            assert_eq!(finish, "stop", "stream {stream}, {extra}");
+        }
+    }
+    // A stop string that never appears changes nothing.
+    for stream in [false, true] {
+        let (out, _) = completion_text(addr, r#","stop":"\u0001never""#, stream);
+        assert_eq!(out, full, "stream {stream}");
+    }
+}
