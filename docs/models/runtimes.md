@@ -179,9 +179,15 @@ The worker drives mlx-lm's model classes with an executor of its own, so its kno
 
 mlx-lm's own `--max-kv-size`, `--kv-bits` and `--adapter-path` are not options: a rotating or quantized cache changes the executor's cache, and a LoRA adapter is a load-time change the worker does not make yet.
 
-### basert
+### basert options
 
-The engine takes no option of its own on `serve`; its knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
+| option | value | default | meaning |
+|---|---|---|---|
+| `--basert-neural-engine` | on, off | on | Run part of each prefill on the Neural Engine where that is faster (Apple silicon); off runs every prefill on the GPU alone. It needs an engine that has the switch: with one that has none (BaseRT 0.4.6 and earlier, which prefill on the GPU alone), `off` fails the load. |
+
+Its other knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
+
+An engine that can compile a model's Neural Engine programs ahead has them compiled after a pull, by the worker that will load the model, since macOS keeps the compiled programs for each executable: once per Mac, macOS version and Superfluid build. A load that finds them uncompiled compiles them in the background while the GPU runs the prefill alone. Nothing is compiled with `--basert-neural-engine off`.
 
 ## How an upstream release becomes a tested one
 
