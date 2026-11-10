@@ -142,8 +142,9 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
 
 /// The work the runtime's worker does for a pulled model ahead of its first load, in the worker executable that will
 /// load it: basert compiles the model's Neural Engine programs (tens of seconds, once per Mac, macOS and superfluid
-/// build), which the ANE service keeps per executable. Only a worker built in, which takes `ahead`; best effort, as the
-/// first load does the work otherwise (in the background, on the GPU alone until it is done).
+/// build), which the ANE service keeps per executable. No `--max-context`: no serve has picked a window yet, so the
+/// worker prepares for each a serve can pick. Only a worker built in, which takes `ahead`; best effort, as the first
+/// load does the work otherwise (in the background, on the GPU alone until it is done).
 fn ahead(rt: &crate::runtimes::Runtime, model: &Path) {
     if rt.worker.source != Source::BuiltIn || !rt.worker.bin.is_file() {
         return;

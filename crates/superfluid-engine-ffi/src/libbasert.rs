@@ -361,16 +361,18 @@ pub fn set_neural_engine(enable: bool) -> bool {
     }
 }
 
-/// Compiles the Neural Engine programs the prefill of `model` serves with on this Mac, ahead of its first load. The
+/// Compiles the Neural Engine programs the prefill of `model` serves with on this Mac when loaded at `max_context`
+/// (as `baseRT_load_model` takes it; 0: the window a load given 0 picks), ahead of its first load. The engine builds
+/// the programs for the prefill chunk, which it sizes by the window, so a load at another window can need others. The
 /// ANE service keeps a compilation per executable, so the process that will load the model calls this. `Ok(Some(n))`:
 /// `n` compiled (0: compiled already); `Ok(None)`: nothing to compile here (the library predates the call, or its
 /// split takes nothing of this model on this machine); `Err`: a compile failed (the first load compiles them then).
-pub fn prepare_neural_engine(model: &Path) -> Result<Option<u32>, String> {
+pub fn prepare_neural_engine(model: &Path, max_context: i32) -> Result<Option<u32>, String> {
     load()?;
     let Some(prepare) = loaded().prepare_neural_engine else { return Ok(None) };
     let path = std::ffi::CString::new(model.as_os_str().as_encoded_bytes()).map_err(|_| format!("{} has a NUL byte", model.display()))?;
-    // SAFETY: a NUL-terminated path the call only reads; 0 asks for the model's trained context.
-    match unsafe { prepare(path.as_ptr(), 0) } {
+    // SAFETY: a NUL-terminated path the call only reads, and a plain integer.
+    match unsafe { prepare(path.as_ptr(), max_context.max(0)) } {
         n if n >= 0 => Ok(Some(n as u32)),
         -1 => Ok(None),
         _ => Err(crate::engine::last_error()),
