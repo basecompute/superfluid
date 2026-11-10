@@ -14,5 +14,5 @@ empty. A retry for an existing release only replaces its assets, preserving
 any edits made to its notes on GitHub. A manual run for an older tag that has
 no note file can still upload assets to an existing release.
 
-MkDocs excludes this entire directory from the built site, including search
-and the sitemap, for both development and tagged documentation.
+The docs site (`docs-site/`) renders no page from this directory, for both
+development and tagged documentation.

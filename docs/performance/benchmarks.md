@@ -1,6 +1,6 @@
 # Benchmarks
 
-A serving layer should cost nothing over the runtime it serves. These numbers compare superfluid against each runtime's own server on the same machine, model and runtime build.
+A serving layer should cost nothing over the runtime it serves. These numbers compare Superfluid against each runtime's own server on the same machine, model and runtime build.
 
 ## Setup
 
@@ -9,7 +9,7 @@ A serving layer should cost nothing over the runtime it serves. These numbers co
 | machine | Apple M1 Max (64 GB), macOS |
 | model | Qwen3-4B, 4-bit: Q4_K_M GGUF for llama.cpp, `mlx-community/Qwen3-4B-4bit` for MLX |
 | runtime builds | llama.cpp b11284; mlx-lm 0.31.3 (mlx 0.32.2), on both sides |
-| superfluid | `superfluid serve --max-batch 8 --max-context 4096` |
+| Superfluid | `superfluid serve --max-batch 8 --max-context 4096` |
 | baselines | `llama-server -np 8 -c 32768`, `mlx_lm.server` |
 | date | 2026-10-06 |
 
@@ -21,33 +21,33 @@ Greedy (temperature 0):
 
 | | 1 | 2 | 4 | 8 |
 |---|---|---|---|---|
-| superfluid, llama.cpp | 76.7 | 87.6 | 126.5 | 150.8 |
+| Superfluid, llama.cpp | 76.7 | 87.6 | 126.5 | 150.8 |
 | llama-server | 76.8 | 86.2 | 125.4 | 145.1 |
-| superfluid, MLX | 100.2 | 117.5 | 127.8 | 130.2 |
+| Superfluid, MLX | 100.2 | 117.5 | 127.8 | 130.2 |
 | mlx_lm.server | 96.6 | 96.8 | 96.8 | 96.8 |
 
 Sampled (temperature 0.7, top-p 0.8, top-k 20):
 
 | | 1 | 2 | 4 | 8 |
 |---|---|---|---|---|
-| superfluid, llama.cpp | 76.3 | 87.2 | 125.3 | 148.8 |
+| Superfluid, llama.cpp | 76.3 | 87.2 | 125.3 | 148.8 |
 | llama-server | 77.7 | 86.3 | 125.9 | 145.3 |
-| superfluid, MLX | 97.0 | 114.7 | 125.4 | 128.3 |
+| Superfluid, MLX | 97.0 | 114.7 | 125.4 | 128.3 |
 | mlx_lm.server | 90.0 | 90.1 | 90.2 | 90.2 |
 
 `mlx_lm.server` serves one request at a time, so its total does not grow with concurrency.
 
 ## Chat streams
 
-At eight concurrent chat streams the first token arrives in 0.70 s through superfluid on MLX against 9.42 s from `mlx_lm.server`, which queues requests; on llama.cpp it is 0.57 s against llama-server's 0.58 s.
+At eight concurrent chat streams the first token arrives in 0.70 s through Superfluid on MLX against 9.42 s from `mlx_lm.server`, which queues requests; on llama.cpp it is 0.57 s against llama-server's 0.58 s.
 
 ## Serving semantics
 
 Throughput does not show what happens when a worker is killed, the KV pool is oversubscribed, or a chat arrives behind eight agents. `tools/suite` runs eight such scenarios, each with a stated pass condition (see [its README](https://github.com/basecompute/superfluid/blob/main/tools/suite/README.md)); ✓ met it, ✗ did not, n/a has no way to run the scenario.
 
-These ran on a different machine from the throughput numbers above: Apple M5 Pro (64 GB), Qwen3-4B 4-bit, llama.cpp b11284, mlx-lm 0.31.3, Ollama v0.35.1. The superfluid columns are from 2026-10-07 at commit `f634f9f`; llama-server, mlx_lm.server and Ollama ran on 2026-10-06 with the same builds. Each cell is one run of the scenario.
+These ran on a different machine from the throughput numbers above: Apple M5 Pro (64 GB), Qwen3-4B 4-bit, llama.cpp b11284, mlx-lm 0.31.3, Ollama v0.35.1. The Superfluid columns are from 2026-10-07 at commit `f634f9f`; llama-server, mlx_lm.server and Ollama ran on 2026-10-06 with the same builds. Each cell is one run of the scenario.
 
-| scenario | superfluid (llama.cpp) | superfluid (MLX) | llama-server | mlx_lm.server | Ollama |
+| scenario | Superfluid (llama.cpp) | Superfluid (MLX) | llama-server | mlx_lm.server | Ollama |
 |---|---|---|---|---|---|
 | worker kill | ✓ | ✓ | n/a | n/a | ✗ |
 | daemon restart | ✓ | ✓ | ✓ | ✗ | ✓ |
@@ -62,7 +62,7 @@ These ran on a different machine from the throughput numbers above: Apple M5 Pro
 
 - **Agents + interactive chat:** eight agents send ~6k-token prompts, and a short chat in the `interactive` class arrives two seconds later; it passes if the chat's first token comes within 1.0 s and every agent finishes. The scenario measures the chat twice: 0.79 s and 0.55 s on llama.cpp, 0.31 s and 0.57 s on MLX. Measured once on the others: 67 s on llama-server, 64 s on Ollama, 120 s on mlx_lm.server.
 - **Shared-prefix burst:** 32 requests at once share one 4,986-token prompt, differing only in a short question. It passes if the shared part is prefilled at most twice over the burst, counted from the cached tokens each server reports. Superfluid prefilled it about once; llama-server and Ollama about eight times. Median first token was 6.7 s on llama.cpp against llama-server's 30.3 s. Judged on first-token time alone (shared median at most half the median of 32 distinct prompts), llama-server and Ollama would pass: 30.3 s against 65.8 s, and 29.3 s against 64.2 s.
-- **KV exhaustion:** 32 concurrent ~3.9k-token requests against 8 × 4,096 tokens of KV. All 32 completed on superfluid, llama-server and Ollama. The burst took 148 s on llama.cpp against llama-server's 165 s, and 224 s on MLX against mlx_lm.server's 435 s; mlx_lm.server reset three of the connections.
+- **KV exhaustion:** 32 concurrent ~3.9k-token requests against 8 × 4,096 tokens of KV. All 32 completed on Superfluid, llama-server and Ollama. The burst took 148 s on llama.cpp against llama-server's 165 s, and 224 s on MLX against mlx_lm.server's 435 s; mlx_lm.server reset three of the connections.
 
 ## Agreement
 

@@ -851,6 +851,11 @@ impl LlamaRuntime {
                         fill!(cp);
                         sys::llama_init_from_model_v2(model, cp)
                     }
+                    sys::ContextLayout::V3 => {
+                        let mut cp = sys::llama_context_default_params_v3();
+                        fill!(cp);
+                        sys::llama_init_from_model_v3(model, cp)
+                    }
                 }
             };
             if ctx.is_null() {

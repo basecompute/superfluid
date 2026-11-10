@@ -1,6 +1,6 @@
 # Architecture
 
-superfluid is split into processes: the daemon, which owns sessions, policy and every API; one engine worker per loaded model, which owns the GPU state; and, in fleet mode, node agents on other hosts. Everything above the engine is Rust. The engines (libbaseRT, llama.cpp, MLX) are loaded at run time by their adapter and never linked into the daemon.
+Superfluid is split into processes: the daemon, which owns sessions, policy and every API; one engine worker per loaded model, which owns the GPU state; and, in fleet mode, node agents on other hosts. Everything above the engine is Rust. The engines (libbaseRT, llama.cpp, MLX) are loaded at run time by their adapter and never linked into the daemon.
 
 ## Processes
 
@@ -11,7 +11,7 @@ superfluid is split into processes: the daemon, which owns sessions, policy and 
 | node agent | `superfluid-noded` | a worker on a fleet node, plus sampling; nothing durable |
 
 <!-- source: docs/assets/diagrams/architecture.excalidraw; edit it in excalidraw.com and export the SVG over architecture.svg -->
-![superfluid processes: clients reach the daemon over the native socket or HTTP; the daemon drives one engine worker per model over Link W, and fleet nodes over Link F](../assets/diagrams/architecture.svg)
+![Superfluid processes: clients reach the daemon over the native socket or HTTP; the daemon drives one engine worker per model over Link W, and fleet nodes over Link F](../assets/diagrams/architecture.svg)
 
 ## Links
 

@@ -1,6 +1,6 @@
 # Installation
 
-superfluid is one daemon binary plus a worker per runtime. The runtimes themselves (llama.cpp, MLX, baseRT) are not bundled: superfluid installs each one from its own project's releases, on first use or with `superfluid runtime install`.
+Superfluid is one daemon binary plus a worker per runtime. The runtimes themselves (llama.cpp, MLX, baseRT) are not bundled: Superfluid installs each one from its own project's releases, on first use or with `superfluid runtime install`.
 
 ## Platforms
 
@@ -14,7 +14,7 @@ superfluid is one daemon binary plus a worker per runtime. The runtimes themselv
 ## Install a release
 
 ```sh
-curl -fsSL https://superfluid.sh/install.sh | sh
+curl -fsSL https://basecompute.co/sf/install.sh | sh
 ```
 
 Prebuilt tarballs exist for macOS arm64 and Linux x86-64 and arm64 (glibc 2.28 or newer: Ubuntu 20.04, Debian 11, RHEL 8 and later); other platforms build from source. The script checks the tarball's SHA-256, installs `superfluid` into `~/.local/bin` and the runtime workers into `~/.local/libexec/superfluid/`, and touches nothing outside that prefix.
@@ -26,19 +26,20 @@ Prebuilt tarballs exist for macOS arm64 and Linux x86-64 and arm64 (glibc 2.28 o
 
 Add `~/.local/bin` to your `PATH` if the script says it is missing.
 
-## Homebrew or npm
+## Homebrew, npm or PyPI
 
 The same prebuilt release, through a package manager:
 
 ```sh
 brew trust basecompute/tap && brew install basecompute/tap/superfluid
 npm install --global @basecompute/superfluid
+pipx install superfluid-cli    # or: uv tool install superfluid-cli, pip install superfluid-cli
 ```
 
-Homebrew 6 and later install a formula from a tap outside Homebrew's own only once the tap is trusted, hence `brew trust basecompute/tap` first (`brew trust --formula basecompute/tap/superfluid` trusts the one formula); an older Homebrew has no `trust` command and needs none. Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on npm, hence `@basecompute/superfluid`. Update with the package manager (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way superfluid came.
+Homebrew 6 and later install a formula from a tap outside Homebrew's own only once the tap is trusted, hence `brew trust basecompute/tap` first (`brew trust --formula basecompute/tap/superfluid` trusts the one formula); an older Homebrew has no `trust` command and needs none. Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on npm and on PyPI, hence `@basecompute/superfluid` and `superfluid-cli`; the PyPI package has no Python API and needs nothing from your Python beyond running the command. Update with the package manager (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`, `pipx upgrade superfluid-cli`, `uv tool upgrade superfluid-cli`, `pip install --upgrade superfluid-cli`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way Superfluid came.
 
 > [!NOTE]
-> These packages are published from 0.1.5 on.
+> The Homebrew and npm packages are published from 0.1.5 on, the PyPI package from 0.1.10 on.
 
 ## cargo install
 

@@ -1316,6 +1316,9 @@ pub(crate) struct CompletionRequest {
     pub(crate) logprobs: Option<u32>,
     pub(crate) suffix: Option<String>,
     pub(crate) fim_mode: Option<String>,
+    /// Up to the first occurrence of any of these the text is returned, and generation stops there.
+    #[serde(default)]
+    pub(crate) stop: StopField,
 }
 
 pub(crate) const DEFAULT_TOP_K: u32 = 40;
@@ -2298,11 +2301,15 @@ pub(crate) async fn completions(
 
     let daemon_lp = Arc::clone(&daemon);
     let model_log = model_name.clone();
+    let stops = req.stop.list();
     let out = blocking(qos, hold, move || {
         let mut hooks = hooks;
         let t0 = std::time::Instant::now();
         let mut decode = DecodeSpan::default();
         let mut produced = 0u64;
+        let cancels = daemon.cancel_registry();
+        let mut acc = String::new();
+        let mut stopped = false;
         let session = daemon.create(None, params)?;
         qos.apply(&daemon, session)?;
         daemon.append(session, Some(req.prompt.clone()), Vec::new())?;
@@ -2313,10 +2320,18 @@ pub(crate) async fn completions(
         hooks.check()?;
         let out = daemon.generate_streaming_ex(session, max_tokens, extras, |ev| {
             hooks.cancel_if_gone();
-            if let EventBody::Generated { span, .. } = &ev.body {
+            if let EventBody::Generated { text, span, .. } = &ev.body {
                 if !span.is_empty() {
                     produced += span.len() as u64;
                     decode.stamp(produced);
+                }
+                // Stop generating once a stop string has been produced; the text is cut below.
+                if !stops.is_empty() && !stopped {
+                    acc.push_str(text);
+                    if stops.iter().any(|s| acc.contains(s.as_str())) {
+                        cancels.cancel(session);
+                        stopped = true;
+                    }
                 }
             }
             Ok(())
@@ -2326,6 +2341,16 @@ pub(crate) async fn completions(
         decode.add_measured(out.decode);
         let c = collect(&out.events);
         let usage = usage(&daemon, session, out.tokens_generated, out.warm_prefix);
+        let mut generated = String::new();
+        generated.push_str(&c.content);
+        generated.push_str(&c.reasoning);
+        generated.push_str(&c.unparsed_tool);
+        let (generated, hit_stop) = truncate_at_stop(&generated, &stops);
+        let finish = if hit_stop {
+            "stop"
+        } else {
+            finish_reason(out.finish, out.tokens_generated, max_tokens, false)
+        };
         access_log(
             "POST /v1/completions",
             &model_log,
@@ -2337,30 +2362,19 @@ pub(crate) async fn completions(
                 first: first_tok,
                 decode,
             },
-            finish_reason(out.finish, out.tokens_generated, max_tokens, false),
+            finish,
         );
         let mut text = String::new();
         if req.echo {
             text.push_str(&req.prompt);
         }
-        text.push_str(&c.content);
-        text.push_str(&c.reasoning);
-        text.push_str(&c.unparsed_tool);
-        Ok::<_, DaemonError>((out, text, usage))
+        text.push_str(&generated);
+        Ok::<_, DaemonError>((out, text, usage, finish))
     })
     .await;
-    let (out, text, usage) = out?;
+    let (out, text, usage, finish) = out?;
     let logprobs = want_logprobs.then(|| decode_logprobs(&daemon_lp, &out.logprobs, echo_offset));
-    let mut frame = Frame::text(
-        text,
-        logprobs,
-        Some(finish_reason(
-            out.finish,
-            out.tokens_generated,
-            max_tokens,
-            false,
-        )),
-    );
+    let mut frame = Frame::text(text, logprobs, Some(finish));
     frame.usage = Some(usage);
     Ok(Generation {
         kind: Kind::Completion,
@@ -2403,47 +2417,123 @@ async fn completion_stream(
         > = std::rc::Rc::new(std::cell::RefCell::new(std::collections::VecDeque::new()));
         let lp_fill = std::rc::Rc::clone(&lp_q);
         let mut offset: usize = 0;
+        // Without logprobs the text streams from the lane's partial emits as each token lands
+        // (as a chat's does), not from the commits at the end of each engine tick, which hold a
+        // prompt's first token behind the tick's decode rounds. The partial emits' text is a
+        // prefix of the committed text and is flushed whole before the generation ends, so the
+        // commits then carry nothing to send. Logprobs pair with the committed spans.
+        let delta_mode = !want_logprobs;
+        let cancels = daemon.cancel_registry();
+        let dead = std::cell::Cell::new(false);
+        // Stop strings: text goes out up to the first one (generation then stops), holding back
+        // a tail that could be the start of one until the next text settles it.
+        let stops = req.stop.list();
+        struct StopText {
+            acc: String,
+            sent: usize,
+            stopped: bool,
+        }
+        let stop_text = std::cell::RefCell::new(StopText { acc: String::new(), sent: 0, stopped: false });
+        let push = |text: &str, lp: Option<Logprobs>| -> Result<(), DaemonError> {
+            if stops.is_empty() {
+                return send(Frame::text(text, lp, None));
+            }
+            let mut s = stop_text.borrow_mut();
+            if s.stopped {
+                return Ok(());
+            }
+            let start = s.sent;
+            s.acc.push_str(text);
+            let tail = &s.acc[start..];
+            let mut cut: Option<usize> = None;
+            for stop in &stops {
+                if let Some(i) = tail.find(stop.as_str()) {
+                    cut = Some(cut.map_or(i, |c| c.min(i)));
+                }
+            }
+            let end = match cut {
+                Some(i) => start + i,
+                None => start + tail.len() - stop_prefix_holdback(tail, &stops),
+            };
+            let piece = s.acc[start..end].to_string();
+            s.sent = s.sent.max(end);
+            if cut.is_some() {
+                s.stopped = true;
+                cancels.cancel(session);
+            }
+            drop(s);
+            if piece.is_empty() && lp.is_none() {
+                return Ok(());
+            }
+            send(Frame::text(piece, lp, None))
+        };
         let run = || -> Result<(), DaemonError> {
             if req.echo {
                 offset = req.prompt.len();
                 send(Frame::text(&req.prompt, None, None))?;
             }
-            let out = daemon.generate_streaming_ex_lp(
-                session,
-                max_tokens,
-                extras,
-                |ev| {
-                    if let EventBody::Generated {
-                        text,
-                        channel: ch,
-                        span,
-                        ..
-                    } = &ev.body
-                    {
-                        let these: Vec<crate::scheduler::TokenLogprob> = if want_logprobs {
-                            let mut q = lp_q.borrow_mut();
-                            (0..span.len()).filter_map(|_| q.pop_front()).collect()
+            let mut on_delta = |ch: u32, text: &str, _produced: u32, _closes: bool| {
+                if text.is_empty() || ch == channel::TOOL_CALL || dead.get() {
+                    return;
+                }
+                if push(text, None).is_err() {
+                    cancels.cancel(session);
+                    dead.set(true);
+                }
+            };
+            let mut on_event = |ev: &crate::CommittedEvent| {
+                if delta_mode {
+                    return Ok(());
+                }
+                if let EventBody::Generated {
+                    text,
+                    channel: ch,
+                    span,
+                    ..
+                } = &ev.body
+                {
+                    let these: Vec<crate::scheduler::TokenLogprob> = if want_logprobs {
+                        let mut q = lp_q.borrow_mut();
+                        (0..span.len()).filter_map(|_| q.pop_front()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if !text.is_empty() && *ch != channel::TOOL_CALL {
+                        let lp = if want_logprobs {
+                            let v = Some(decode_logprobs(&daemon, &these, offset));
+                            offset += text.len();
+                            v
                         } else {
-                            Vec::new()
+                            None
                         };
-                        if !text.is_empty() && *ch != channel::TOOL_CALL {
-                            let lp = if want_logprobs {
-                                let v = Some(decode_logprobs(&daemon, &these, offset));
-                                offset += text.len();
-                                v
-                            } else {
-                                None
-                            };
-                            return send(Frame::text(text, lp, None));
-                        }
+                        return push(text, lp);
                     }
-                    Ok(())
-                },
-                |items| {
-                    lp_fill.borrow_mut().extend(items.iter().cloned());
-                },
-            )?;
-            let fin = finish_reason(out.finish, out.tokens_generated, max_tokens, false);
+                }
+                Ok(())
+            };
+            let on_logprobs = |items: &[crate::scheduler::TokenLogprob]| {
+                lp_fill.borrow_mut().extend(items.iter().cloned());
+            };
+            let out = if delta_mode {
+                daemon.generate_streaming_delta(session, max_tokens, extras, &mut on_event, on_logprobs, &mut on_delta)?
+            } else {
+                daemon.generate_streaming_ex_lp(session, max_tokens, extras, &mut on_event, on_logprobs)?
+            };
+            if dead.get() {
+                return Err(DaemonError::Protocol("generation consumer gone"));
+            }
+            let st = stop_text.borrow();
+            let stopped = st.stopped;
+            // A held-back tail no stop string completed.
+            if !stopped && st.sent < st.acc.len() {
+                send(Frame::text(&st.acc[st.sent..], None, None))?;
+            }
+            drop(st);
+            let fin = if stopped {
+                "stop"
+            } else {
+                finish_reason(out.finish, out.tokens_generated, max_tokens, false)
+            };
             let mut terminal = Frame::text("", None, Some(fin));
             terminal.usage = Some(usage(
                 &daemon,

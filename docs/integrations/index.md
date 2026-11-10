@@ -1,4 +1,4 @@
-# superfluid launch
+# `superfluid launch`
 
 `superfluid launch <agent>` runs a coding agent already pointed at a local server, starting one when none answers:
 

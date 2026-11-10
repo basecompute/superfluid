@@ -1,6 +1,6 @@
 # Runtimes
 
-A runtime runs a model's forward pass: llama.cpp, MLX, the baseRT engine, or the built-in mock. superfluid ships an adapter per runtime and installs the runtime itself from its own project's releases. Each model runs in its own worker process, so a runtime crash restarts that worker, not the daemon.
+A runtime runs a model's forward pass: llama.cpp, MLX, the baseRT engine, or the built-in mock. Superfluid ships an adapter per runtime and installs the runtime itself from its own project's releases. Each model runs in its own worker process, so a runtime crash restarts that worker, not the daemon.
 
 | id | aliases | serves | comes from |
 |---|---|---|---|
@@ -9,7 +9,7 @@ A runtime runs a model's forward pass: llama.cpp, MLX, the baseRT engine, or the
 | `basert` | `native` | `.base` bundles | the baseRT engine library, loaded at run time |
 | `mock` | | nothing real | built in; used by the test suite |
 
-`llamacpp` and `mlx` are *primitive runtimes*: superfluid's generic executor implements batching, the prefix cache, sampling, grammars and park/resume on top of them. `basert` is a *full engine* that implements all of that itself.
+`llamacpp` and `mlx` are *primitive runtimes*: Superfluid's generic executor implements batching, the prefix cache, sampling, grammars and park/resume on top of them. `basert` is a *full engine* that implements all of that itself.
 
 ## Managing installs
 
@@ -136,7 +136,7 @@ A knob of one runtime is given to `serve` as `--<runtime>-<name> <value>`, for e
 
 ### llamacpp options
 
-The knobs of llama.cpp's model and context parameters that keep their meaning under superfluid, named as llama.cpp's own tools name them. The window, the sequence count, the KV layout and sampling are superfluid's.
+The knobs of llama.cpp's model and context parameters that keep their meaning under Superfluid, named as llama.cpp's own tools name them. The window, the sequence count, the KV layout and sampling are Superfluid's.
 
 | option | value | default | meaning |
 |---|---|---|---|
@@ -179,9 +179,15 @@ The worker drives mlx-lm's model classes with an executor of its own, so its kno
 
 mlx-lm's own `--max-kv-size`, `--kv-bits` and `--adapter-path` are not options: a rotating or quantized cache changes the executor's cache, and a LoRA adapter is a load-time change the worker does not make yet.
 
-### basert
+### basert options
 
-The engine takes no option of its own on `serve`; its knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
+| option | value | default | meaning |
+|---|---|---|---|
+| `--basert-neural-engine` | on, off | on | Run part of each prefill on the Neural Engine where that is faster (Apple silicon); off runs every prefill on the GPU alone. It needs an engine that has the switch: with one that has none (BaseRT 0.4.6 and earlier, which prefill on the GPU alone), `off` fails the load. |
+
+Its other knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
+
+An engine that can compile a model's Neural Engine programs ahead has them compiled after a pull, by the worker that will load the model, since macOS keeps the compiled programs for each executable: once per Mac, macOS version and Superfluid build. A load that finds them uncompiled compiles them in the background while the GPU runs the prefill alone. Nothing is compiled with `--basert-neural-engine off`.
 
 ## How an upstream release becomes a tested one
 

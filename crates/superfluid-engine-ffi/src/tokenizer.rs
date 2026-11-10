@@ -88,6 +88,14 @@ impl TokenizerHandle {
         out
     }
 
+    /// The window the model was trained for, from the bundle's header (`baseRT_get_config` holds on a tokenizer-only
+    /// handle).
+    pub fn trained_context(&self) -> u32 {
+        // SAFETY: a live handle, from a loaded libbaseRT.
+        let cfg = unsafe { crate::libbasert::config_of(self.handle) };
+        cfg.max_seq_len
+    }
+
     pub fn chat_template_jinja(&self) -> String {
         // SAFETY: returns a thread-local C string valid until the next
         // call on this thread; copied immediately.

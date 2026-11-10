@@ -118,7 +118,7 @@ curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/jso
 
 ## Completions and fill-in-the-middle
 
-`POST /v1/completions` tokenizes `prompt` directly (a string; arrays and token ids are not accepted). It reads `prompt`, `suffix`, `fim_mode`, `stream`, `echo`, `max_tokens`, `logprobs` (0-20) and the sampling fields; it does not read `stop`, `n`, `logit_bias`, `response_format` or `tools`.
+`POST /v1/completions` tokenizes `prompt` directly (a string; arrays and token ids are not accepted). It reads `prompt`, `suffix`, `fim_mode`, `stream`, `echo`, `max_tokens`, `logprobs` (0-20), `stop` (a string or an array, as chat takes it: the text ends where the first stop string starts, with `finish_reason` `stop`) and the sampling fields; it does not read `n`, `logit_bias`, `response_format` or `tools`.
 
 A request with `suffix` is fill-in-the-middle: `prompt` is the prefix, `suffix` the text after the cursor, the reply the middle.
 

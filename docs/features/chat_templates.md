@@ -1,6 +1,6 @@
 # Chat templates and reasoning
 
-superfluid renders conversations with the model's own chat template and splits the output into text, reasoning and tool-call channels on the model's special tokens. The daemon tokenizes in its own process; workers only see token ids.
+Superfluid renders conversations with the model's own chat template and splits the output into text, reasoning and tool-call channels on the model's special tokens. The daemon tokenizes in its own process; workers only see token ids.
 
 ## Where the template comes from
 
