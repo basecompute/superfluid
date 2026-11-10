@@ -8,7 +8,8 @@ fn usage(name: &str, why: &str) -> ! {
     eprintln!(
         "usage: {name} --frames-fd N --fd-channel-fd M --engine mock|native|llamacpp|mlx \
          [--model <path>] [--max-context N] [--max-batch N] [--kv-bits N] [--venv <env>] [--basert-lib <path>] [--<option> <value>]...\n       \
-         {name} check --engine native|llamacpp|mlx [--basert-lib <path>] [--model <path>]"
+         {name} check --engine native|llamacpp|mlx [--basert-lib <path>] [--model <path>]\n       \
+         {name} ahead --engine native|llamacpp|mlx [--basert-lib <path>] --model <path>"
     );
     std::process::exit(2);
 }
@@ -27,12 +28,12 @@ fn runtime(name: &str, args: &WorkerArgs, default: Option<&str>) -> &'static dyn
     }
 }
 
-/// Whether `argv` starts a linked runtime's worker: `--engine <id> ...` or
-/// `check --engine <id> ...`.
+/// Whether `argv` starts a linked runtime's worker: `--engine <id> ...`,
+/// `check --engine <id> ...` or `ahead --engine <id> ...`.
 pub fn is_invocation(argv: &[String]) -> bool {
     match argv.first().map(String::as_str) {
         Some("--engine") => true,
-        Some("check") => argv.get(1).map(String::as_str) == Some("--engine"),
+        Some("check" | "ahead") => argv.get(1).map(String::as_str) == Some("--engine"),
         _ => false,
     }
 }
@@ -42,12 +43,26 @@ pub fn is_invocation(argv: &[String]) -> bool {
 pub fn main(argv: Vec<String>, name: &str) -> ! {
     line_buffer_stdout();
     let checking = argv.first().map(String::as_str) == Some("check");
-    let args = WorkerArgs::parse(if checking { &argv[1..] } else { &argv[..] }).unwrap_or_else(|e| usage(name, &e));
-    let runtime = runtime(name, &args, if checking { None } else { Some("mock") });
+    // `ahead`: the work a runtime does for a model ahead of its first load, in this executable, the one that loads it.
+    let ahead = argv.first().map(String::as_str) == Some("ahead");
+    let args = WorkerArgs::parse(if checking || ahead { &argv[1..] } else { &argv[..] }).unwrap_or_else(|e| usage(name, &e));
+    let runtime = runtime(name, &args, if checking || ahead { None } else { Some("mock") });
     let reads: Vec<String> = std::iter::once("--engine".to_string()).chain(superfluid_adapter_kit::worker_flags(runtime)).collect();
     args.refuse_unread(&reads.iter().map(String::as_str).collect::<Vec<_>>()).unwrap_or_else(|e| usage(name, &e));
     superfluid_adapter_kit::refuse_bad_options(runtime, &args).unwrap_or_else(|e| usage(name, &e));
     runtime.prepare(&args);
+    if ahead {
+        let model = args.model.as_deref().map(|m| m.display().to_string()).unwrap_or_default();
+        match runtime.ahead(&args) {
+            Ok(Some(done)) => eprintln!("superfluid: {model}: {done}"),
+            Ok(None) => {}
+            Err(why) => {
+                eprintln!("{name}: {model}: {why}");
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
+    }
     if checking {
         superfluid_adapter_kit::check(runtime, &args).finish();
     }
@@ -82,7 +97,8 @@ mod tests {
     fn a_workers_command_line_is_told_apart_from_its_hosts() {
         assert!(is_invocation(&line(&["--engine", "basert", "--model", "m.base", "--frames-fd", "3", "--fd-channel-fd", "4"])));
         assert!(is_invocation(&line(&["check", "--engine", "basert", "--model", "m.base"])));
-        for host in [&["m.base", "--port", "8453"][..], &["--model", "m.base"], &["check"], &["check", "--model", "m.base"], &[]] {
+        assert!(is_invocation(&line(&["ahead", "--engine", "basert", "--model", "m.base"])));
+        for host in [&["m.base", "--port", "8453"][..], &["--model", "m.base"], &["check"], &["check", "--model", "m.base"], &["ahead", "--model", "m.base"], &[]] {
             assert!(!is_invocation(&line(host)), "{host:?}");
         }
     }

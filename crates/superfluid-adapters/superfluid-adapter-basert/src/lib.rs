@@ -57,6 +57,17 @@ impl Runtime for Basert {
         }
     }
 
+    fn ahead(&self, args: &WorkerArgs) -> Result<Option<String>, String> {
+        if option(args, "neural-engine") == Some("off") {
+            return Ok(None);
+        }
+        let model = superfluid_adapter_kit::model(args)?;
+        Ok(match libbasert::prepare_neural_engine(model)? {
+            Some(n) if n > 0 => Some(format!("compiled {n} Neural Engine program{} for its prefill", if n == 1 { "" } else { "s" })),
+            _ => None,
+        })
+    }
+
     fn named(&self, args: &WorkerArgs) -> Option<String> {
         if args.extra("--basert-lib").is_some() {
             return Some("--basert-lib".into());

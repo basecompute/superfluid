@@ -136,7 +136,32 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
         return Err(format!("pulling {id} gave {}, which is not there", path.display()));
     }
     eprintln!("superfluid: {id} is {}", path.display());
+    ahead(&rt, &path);
     Ok(path)
+}
+
+/// The work the runtime's worker does for a pulled model ahead of its first load, in the worker executable that will
+/// load it: basert compiles the model's Neural Engine programs (tens of seconds, once per Mac, macOS and superfluid
+/// build), which the ANE service keeps per executable. Only a worker built in, which takes `ahead`; best effort, as the
+/// first load does the work otherwise (in the background, on the GPU alone until it is done).
+fn ahead(rt: &crate::runtimes::Runtime, model: &Path) {
+    if rt.worker.source != Source::BuiltIn || !rt.worker.bin.is_file() {
+        return;
+    }
+    let mut cmd = std::process::Command::new(&rt.worker.bin);
+    crate::exec::without_secrets(&mut cmd)
+        .arg("ahead")
+        .args(&rt.worker.prefix)
+        .arg("--model")
+        .arg(model)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit());
+    match cmd.status() {
+        Ok(s) if s.success() => {}
+        Ok(_) => eprintln!("superfluid: its first load prepares {} instead (the reason is above)", model.display()),
+        Err(e) => eprintln!("superfluid: {} could not start ({e}); the first load prepares {}", rt.worker.bin.display(), model.display()),
+    }
 }
 
 fn never_installed(catalog: &Catalog, runtime: RuntimeId) -> bool {
