@@ -387,6 +387,15 @@ pub trait Runtime: Send + Sync {
 
     fn prepare(&self, _args: &WorkerArgs) {}
 
+    /// Work for `args.model` ahead of its first load, done in the worker that will load it (`superfluid-workerd ahead`,
+    /// after a pull): basert compiles the model's Neural Engine programs, which the ANE service keeps per executable.
+    /// `args.max_context` is the window it will be served at, or 0 when no serve has picked one yet (after a pull),
+    /// for the work to cover each window a serve can pick. A line to print, or none; an error leaves the work to the
+    /// first load.
+    fn ahead(&self, _args: &WorkerArgs) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
     fn probe(&self, args: &WorkerArgs) -> Result<Probe, String>;
 
     fn named(&self, _args: &WorkerArgs) -> Option<String> {

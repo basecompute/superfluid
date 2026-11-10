@@ -57,6 +57,22 @@ impl Runtime for Basert {
         }
     }
 
+    fn ahead(&self, args: &WorkerArgs) -> Result<Option<String>, String> {
+        if option(args, "neural-engine") == Some("off") {
+            return Ok(None);
+        }
+        let model = superfluid_adapter_kit::model(args)?;
+        let trained = || {
+            TokenizerHandle::load(model)
+                .map(|t| i32::try_from(t.trained_context()).unwrap_or(i32::MAX))
+                .map_err(|e| format!("reading its trained window: {e}"))
+        };
+        Ok(match prepare_ahead(args.max_context, |window| libbasert::prepare_neural_engine(model, window), trained)? {
+            Some(n) if n > 0 => Some(format!("compiled {n} Neural Engine program{} for its prefill", if n == 1 { "" } else { "s" })),
+            _ => None,
+        })
+    }
+
     fn named(&self, args: &WorkerArgs) -> Option<String> {
         if args.extra("--basert-lib").is_some() {
             return Some("--basert-lib".into());
@@ -168,6 +184,26 @@ impl Runtime for Basert {
     fn unlisted(&self) -> Option<Unlisted> {
         Some(recipe::unlisted())
     }
+}
+
+/// Prepares, through `prepare`, the Neural Engine programs of the window the model will be served at, `given` (as
+/// `--max-context` gives it to the load). With none given (0: a pull's `ahead`, before any serve picks one), those of
+/// both ends of the windows a serve can pick: the one a load given 0 picks (a few thousand tokens) and the model's
+/// trained one, from `trained`. The engine builds the programs for the prefill chunk, which it sizes by the window
+/// and widens only for a long one (a Qwen3.5/3.6 MoE on an M5 with 40 GiB or more to plan with: 16384 rows from a
+/// 16384-token window, 4096 below it), so the two ends' programs serve every window between; where both ends size
+/// one chunk, the second call finds them compiled. The programs compiled, or none where the split takes nothing of
+/// the model (and then the trained window is not read).
+fn prepare_ahead(
+    given: i32,
+    mut prepare: impl FnMut(i32) -> Result<Option<u32>, String>,
+    trained: impl FnOnce() -> Result<i32, String>,
+) -> Result<Option<u32>, String> {
+    if given > 0 {
+        return prepare(given);
+    }
+    let Some(short) = prepare(0)? else { return Ok(None) };
+    Ok(Some(short + prepare(trained()?)?.unwrap_or(0)))
 }
 
 /// What `basert list --json` prints.
@@ -502,6 +538,38 @@ mod tests {
         let base = &Basert.info().formats[0];
         assert!(base.matches(&bundle) && !base.matches(&gguf));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `prepare_ahead` with an engine that compiles `per_window` programs at each window, recording the windows it
+    /// was asked for and whether the trained window was read.
+    fn ahead_at(given: i32, splits: bool, trained: i32) -> (Result<Option<u32>, String>, Vec<i32>, bool) {
+        let mut asked = Vec::new();
+        let mut read = false;
+        let compiled = prepare_ahead(
+            given,
+            |w| {
+                asked.push(w);
+                Ok(splits.then_some(if w >= 16384 { 7 } else { 4 }))
+            },
+            || {
+                read = true;
+                Ok(trained)
+            },
+        );
+        (compiled, asked, read)
+    }
+
+    #[test]
+    fn the_programs_prepared_ahead_are_those_of_the_window_served_at() {
+        // A serving window reaches the engine as the load takes it, short or long, and only it.
+        assert_eq!(ahead_at(4096, true, 262144), (Ok(Some(4)), vec![4096], false));
+        assert_eq!(ahead_at(32768, true, 262144), (Ok(Some(7)), vec![32768], false));
+        // None yet (a pull): the window a load given 0 picks and the trained one, whose chunk can be wider.
+        assert_eq!(ahead_at(0, true, 262144), (Ok(Some(11)), vec![0, 262144], true));
+        // A split that takes nothing of the model asks nothing more.
+        assert_eq!(ahead_at(0, false, 262144), (Ok(None), vec![0], false));
+        let failed = prepare_ahead(0, |w| if w == 0 { Ok(Some(4)) } else { Err("compile failed".into()) }, || Ok(40960));
+        assert_eq!(failed, Err("compile failed".into()));
     }
 
     #[test]
