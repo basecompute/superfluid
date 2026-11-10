@@ -89,6 +89,21 @@ const OPEN_PREFILL_TICK_MAX: u32 = 1024;
 /// preempting request arrives.
 const OPEN_PREFILL_TICK_SECS_YIELDING: f64 = 2.0;
 
+/// The open tick of a lone lane, with nothing queued: no request waits on it yet,
+/// and one that arrives waits out at most this tick. Long enough for a large model
+/// to prefill a whole engine-sized chunk (Qwen3.8-27B on an M5 Pro: 512-token open
+/// ticks ran its prefill at ~490 tok/s against ~600 for the engine's own chunks).
+const OPEN_PREFILL_TICK_SECS_LONE: f64 = 4.0;
+/// A lone lane's cap once the engine has taught its rate: the engine's largest chunk
+/// (4096 rows on an M5), the target above bounding the tick. Qwen3.6-35B-A3B on an
+/// M5 Pro prefills ~3000 tok/s, so 2048-token ticks cut an 8k prompt into chunks
+/// half the engine's (3050 tok/s served against 3640 for its 4096-row chunks).
+const OPEN_PREFILL_TICK_MAX_LONE: u32 = 4096;
+/// A lone lane's tick on an engine that never teaches the rate (one that fuses a
+/// lone prompt into its decode rounds reports no prefill phase): about the target
+/// for a large dense model (Qwen3.8-27B on an M5 Pro, ~600 tok/s).
+const OPEN_PREFILL_TICK_LONE_UNTAUGHT: u32 = 2048;
+
 /// How long after the last chat or inline completion the engine keeps its
 /// prefill steps short.
 const LATENCY_HOLD: std::time::Duration = std::time::Duration::from_secs(300);
@@ -792,7 +807,11 @@ fn open_prefill_tick_target(yields: bool, latency: bool) -> f64 {
 }
 
 fn open_prefill_tick_cap(secs_per_token: f64, target_secs: f64) -> u32 {
-    let tokens = (target_secs / secs_per_token).clamp(128.0, OPEN_PREFILL_TICK_MAX as f64) as u32;
+    open_prefill_tick_cap_within(secs_per_token, target_secs, OPEN_PREFILL_TICK_MAX)
+}
+
+fn open_prefill_tick_cap_within(secs_per_token: f64, target_secs: f64, max_tokens: u32) -> u32 {
+    let tokens = (target_secs / secs_per_token).clamp(128.0, max_tokens as f64) as u32;
     let step = if tokens < 512 { 128 } else { 512 };
     tokens / step * step
 }
@@ -941,6 +960,11 @@ mod prefill_order_tests {
             512,
             "an engine that yields mid-tick: a 27B's open tick is a whole chunk"
         );
+        use super::{open_prefill_tick_cap_within as within, OPEN_PREFILL_TICK_MAX_LONE, OPEN_PREFILL_TICK_SECS_LONE};
+        assert_eq!(within(1.0 / 600.0, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 2048, "a lone 27B lane: 2400 tokens, a 2048-token chunk");
+        assert_eq!(within(1.0 / 300.0, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 1024, "1200 tokens round down to two chunks");
+        assert_eq!(within(1.0 / 3000.0, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 4096, "a lone 35B-A3B lane: a whole 4096-row chunk");
+        assert_eq!(within(1e-6, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE), 4096, "never above the lone cap");
         use super::open_prefill_tick_target as target;
         assert_eq!(target(true, false), super::OPEN_PREFILL_TICK_SECS_YIELDING, "agents alone, on an engine that yields");
         assert_eq!(target(true, true), super::OPEN_PREFILL_TICK_SECS, "a chat around: its next tokens wait out each tick");
@@ -3562,7 +3586,15 @@ impl Scheduler {
                 (Some(a), Some(b)) => Some(a.max(b)),
                 (a, b) => a.or(b),
             };
+            let lone = self.live_lanes() == 1 && self.queued() == 0;
             let cap = match spt.filter(|&t| t > 0.0 && self.prefill_rate_samples >= 2) {
+                Some(spt) if lone => {
+                    open_prefill_tick_cap_within(spt, OPEN_PREFILL_TICK_SECS_LONE, OPEN_PREFILL_TICK_MAX_LONE)
+                }
+                // A lone lane on an engine that has not taught the rate (one that
+                // fuses a lone prompt into its decode rounds reports no prefill
+                // phase, so it never does): a whole lone-sized chunk.
+                None if lone => OPEN_PREFILL_TICK_LONE_UNTAUGHT,
                 Some(spt) => {
                     let yields = matches!(
                         self.host.capabilities().read().expect("capability record").get("serving", "tick_yield"),
