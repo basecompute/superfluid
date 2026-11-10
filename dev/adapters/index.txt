@@ -1,0 +1,189 @@
+1:"$Sreact.fragment"
+2:I[39756,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js"],"DocsShell"]
+6:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/dev/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","adapters",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","adapters","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/dev/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/1n_3z02nf3ipn.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/dev/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"acMdTJ3DYsZTo1XUw19Jl"}
+f:[]
+9:"$Wf"
+10:I[73435,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js","/dev/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T2f98,# Writing a runtime adapter
+
+A runtime adapter is one crate under `crates/superfluid-adapters/`, built on `superfluid-adapter-kit`. It tells the daemon what the runtime is, whether it runs here, how to install it, how to pull its models, and how to load one. The kit supplies the worker executable, the `check` report, serving over Link W, installing and conformance checks.
+
+| crate | what it is |
+|---|---|
+| `superfluid-adapter-kit` | the `Runtime` trait, `Loaded`, `worker_main`, `install`, `Pull`, `conformance` |
+| `superfluid-adapter-mock` | the smallest adapter; a template |
+| `superfluid-adapter-basert` | a full engine over libbaseRT |
+| `superfluid-adapter-llamacpp` | primitives over llama.cpp's C API; `tokenizer/` is the GGUF tokenizer library the daemon loads |
+| `superfluid-adapter-mlx` | primitives over mlx-lm in an embedded CPython |
+
+A runtime plugs in as a **full engine** (implements `superfluid_engine::Engine`) or as a **primitive runtime** (implements `superfluid_executor::RuntimePrimitives`; the generic executor provides the tick contract, prefix cache, sampling, grammars and park/resume). Most new runtimes should be primitive runtimes.
+
+## Steps
+
+1. Create `crates/superfluid-adapters/superfluid-adapter-<id>/` depending on `superfluid-adapter-kit`, and add it to the workspace `members`. The id is lowercase letters, digits, `.`, `-` and `_`.
+2. Implement `superfluid_adapter_kit::Runtime` for a unit struct.
+3. Add the worker binary `src/bin/superfluid-worker-<id>.rs` with a `[[bin]]` entry:
+
+   ```rust
+   fn main() {
+       superfluid_adapter_kit::worker_main(&superfluid_adapter_<id>::<Runtime>)
+   }
+   ```
+
+4. Add `tests/kit_conformance.rs` running `conformance::runtime` and `conformance::worker`, and run the tick-contract harness (`superfluid_engine::testing::tick_contract`) on the engine.
+5. To pull models by id: `pull_options()` and `pull()`.
+6. To make it installable: a `recipe.json` of tested builds (each asset's size and SHA-256) and `plan()`; override `install()` if unpacking archives into `lib/` is not enough.
+7. To ship it: build and verify its worker in `scripts/build_runtime_adapters.sh`.
+8. Optionally, to link it into a source build: a cargo feature on `superfluid`, a line in `linked::runtimes()`, and its id in `linked::FEATURES`.
+
+The daemon holds no list of runtimes; it finds `superfluid-worker-<id>` on disk (see [Runtimes](/runtimes#how-a-worker-is-found)).
+
+## The `Runtime` trait
+
+```rust
+pub trait Runtime: Send + Sync {
+    fn info(&self) -> RuntimeInfo;                                        // required
+    fn probe(&self, args: &WorkerArgs) -> Result<Probe, String>;          // required
+    fn open(&self, args: &WorkerArgs) -> Result<Loaded, String>;          // required
+
+    fn flags(&self) -> &'static [&'static str] { &[] }
+    fn options(&self) -> &'static [ServeOption] { &[] }        // knobs of this runtime, --<id>-<name> <value> on serve
+    fn needs_model(&self) -> bool { true }
+    fn prepare(&self, _args: &WorkerArgs) {}
+    fn named(&self, _args: &WorkerArgs) -> Option<String> { None }
+    fn static_capabilities(&self) -> String { String::new() }
+    fn compat(&self) -> serde_json::Value { json!({}) }           // what the adapter was built and tested for: `tested` versions, by convention (basert: `pinned_engines`, with their ABI)
+    fn reads(&self, path: &Path) -> Result<(), String> { /* by info().formats */ }
+    fn model_facts(&self, _path: &Path) -> Option<Result<String, String>> { None }
+    fn tokenizer(&self, _model: &Path) -> Option<Result<Arc<dyn Tokenizer>, String>> { None }
+    fn plan(&self, _req: &Request, _host: &Host) -> Option<Result<Vec<Plan>, String>> { None }
+    fn versions(&self, host: &Host) -> Vec<Candidate> { /* each `tested` version of compat(), planned here */ }
+    fn unlisted(&self) -> Option<Unlisted> { None }              // which versions left out of versions() install without --untested, and what that asks of one
+    fn pull_options(&self) -> Option<&'static [PullOption]> { None }
+    fn pull(&self, _pull: &Pull, _args: &WorkerArgs) -> Result<PathBuf, String> { /* refuses */ }
+    fn install(&self, plan: &Plan, dir: &Path) -> Result<Vec<(String, String)>, String> { /* fetch into dir/lib */ }
+}
+```
+
+| method | answers |
+|---|---|
+| `info()` | id, aliases, formats it reads (`Format::file` by extension or magic, `Format::directory` by contents), and the tokenizer source (`HuggingFace`, `Library(stem)` or `Engine`) |
+| `probe()` | whether it runs here: version and devices, or why not. A `Device` carries `memory`, as the runtime reads it, and `budget`, what the adapter plans a model and its cache against there (0 where it plans nothing), which `superfluid runtimes` shows for every runtime alike |
+| `open()` | load the model: `Loaded::primitives(runtime, superfluid_adapter_kit::context(args))` or `Loaded::engine(engine, rings)` |
+| `flags()` | extra worker flags it reads (`--name`); anything else is refused |
+| `options()` | the knobs it takes on `serve` as `--<id>-<name> <value>`, each with a kind (`Int`, `IntFrom(least)`, `IntIn(least, most)`, `Float`, `FloatFrom(least)`, `OnOff`, `Choice`, `Text`; bound a number the runtime would clamp, wrap or fail on), a default for the help and a description; the daemon checks a value against the kind before the worker starts and forwards it as `--<name> <value>`, the worker refuses a bad one at start, and the adapter reads it with `superfluid_adapter_kit::option(args, name)`. A knob every runtime could take is a flag of `serve` instead |
+| `prepare()` | process-wide setup in the worker (an interpreter home, a library path) |
+| `named()` | the library the operator named, if any; the daemon then installs nothing |
+| `static_capabilities()` | the capability record any model on this runtime has; for primitives, `superfluid_executor::capabilities::static_descriptor` |
+| `reads()` | a stricter format check than `info().formats`, loading no weights |
+| `model_facts()` | architecture and published sampling defaults, without loading |
+| `tokenizer()` | an in-process tokenizer, for a daemon that links the adapter |
+| `plan()`, `install()` | what installing fetches, and how |
+| `versions()`, `unlisted()` | the versions it installs on its own, and, when some it does not list install without `--untested` too (basert: any release that states this build's ABI), a clause saying which, and what the rule asks of a version (basert: `engine ABI <n>`), which an install of an unlisted version keeps in its `runtime.json` as `requires`; `superfluid runtime versions` prints the clause, and counts an install newer than every listed version that installs here as one the adapter installs when its `requires` is what this build's rule asks |
+| `pull_options()`, `pull()` | `--pull-<name>` options, and fetching a model by id with the runtime's own tool |
+
+## The worker executable
+
+`worker_main` gives every runtime the same command line:
+
+```text
+superfluid-worker-<id> version
+superfluid-worker-<id> check [--model <path>]
+superfluid-worker-<id> plan [--version V] [--backend B] [--from <url|path>] [--sha256 H] [--untested]
+superfluid-worker-<id> install --into <dir> --plan <json>
+superfluid-worker-<id> compat
+superfluid-worker-<id> versions
+superfluid-worker-<id> pull <org/model[:tag]> [--offline] [--<option> [value]]...
+superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-context N] [--max-batch N]
+```
+
+| command | exit codes |
+|---|---|
+| `version`, `check` | 0 when the runtime runs here (and reads `--model`); 1 otherwise. Neither loads weights |
+| `plan`, `install`, `pull` | 0, or 1 with the reason |
+| `compat`, `versions` | 0, JSON on stdout: what the adapter was built and tested for; the versions it installs on its own, each planned for this host, with `unlisted` (`superfluid runtime versions`), answered from the recipe alone. 1 with the reason on stderr, which the daemon quotes; an adapter from before them exits 2 at the unknown command |
+| serving | 0 on clean close; 2 on a bad command line; 3 when the model does not load; 1 when serving fails |
+
+`check` prints the JSON report the daemon reads: runtime id, version, aliases, Link W versions (8), `available`, formats, tokenizer, devices, static capabilities, pull options, and with `--model` whether it reads the model and its facts.
+
+## Primitive runtime semantics
+
+`RuntimePrimitives` is synchronous, one loaded model on one thread. The executor owns time, lanes and policy.
+
+| primitive | contract |
+|---|---|
+| `describe()` | a `RuntimeDescriptor` once at open: batch and sequence limits, window, vocabulary size, page size, KV bytes per token, whether truncation is partial or head-only, export encodings, whether it samples on the device, and how much of the prefix cache it affords in its pool (`cache_resident_cells`, 0 for no bound) and as lossless exports out of it (`cache_exported_cells`, 0 for none) |
+| `seq_create`, `seq_free`, `seq_copy`, `seq_truncate`, `seq_boundary` | sequence handles; truncation to 0 must always succeed |
+| `seq_export`, `seq_import` | opaque state payloads; the executor wraps them in a versioned, checksummed envelope |
+| `step(feeds)` | one packed forward pass; logits rows back for feeds that ask |
+| `step_sampled(feeds, specs)` | optional device sampling; `Ok(None)` means "not honoured" and the executor samples on the host |
+| `shed`, `vocabulary`, `mem_counters`, `is_eos` | optional: cache release, token bytes for grammars, memory counters, stop set |
+
+Errors are typed (`PrimError`): `Unsupported`, `UnknownSeq`, `OutOfBoundary`, `Capacity`, `Fault(code)` (stops the step's lanes, the tick continues), `Fatal` (the worker exits and the daemon starts a fresh one).
+
+A runtime that samples on the device must draw by the host sampler's rules at the position the executor names, so continuations stay exact.
+
+## Conformance
+
+| suite | checks |
+|---|---|
+| `conformance::runtime(&MyRuntime)` | ids, aliases, flags, formats and the `check` report parse as the daemon expects; `reads` agrees with the formats; no model loaded |
+| `conformance::worker(path, "<id>")` | the built worker's `check`, `version`, unknown-flag and missing-stream exits |
+| `superfluid_engine::testing::tick_contract` | the tick contract as engine-independent cases (admit/prefill/decode, determinism per seed, rejections, faults, seeded readmission, ...) |
+
+Real-model tests compare shapes within a tolerance (`rows_agree`, `top2_margin`, `tokens_agree`), because batching and chunking move logits by rounding. They skip without a model (`SUPERFLUID_TEST_GGUF`, `SUPERFLUID_TEST_MLX`).
+
+## Packaging
+
+`scripts/build_runtime_adapters.sh <stage-dir>` builds the workers a release ships and verifies each: macOS minimum version, exported tokenizer symbols, the MLX worker's weak Python link, that each worker starts with no runtime installed and says how to install it, and that it can plan a tested install. A release places workers in `libexec/superfluid/`; `runtime install` copies the worker into the install it makes.
+
+## The mock adapter, as a template
+
+```rust
+use superfluid_adapter_kit::{Loaded, Probe, Runtime, RuntimeInfo, TokenizerSource, WorkerArgs};
+use superfluid_engine::{EngineConfig, MockEngine};
+
+pub struct Mock;
+
+impl Runtime for Mock {
+    fn info(&self) -> RuntimeInfo {
+        RuntimeInfo { id: "mock", aliases: &[], formats: Vec::new(), tokenizer: TokenizerSource::Engine }
+    }
+
+    fn flags(&self) -> &'static [&'static str] {
+        &["--mock-record"]
+    }
+
+    fn needs_model(&self) -> bool {
+        false
+    }
+
+    fn probe(&self, _args: &WorkerArgs) -> Result<Probe, String> {
+        Ok(Probe { version: "mock".into(), devices: Vec::new() })
+    }
+
+    fn open(&self, args: &WorkerArgs) -> Result<Loaded, String> {
+        let mut engine = MockEngine::new(EngineConfig::default());
+        if let Some(record) = args.extra("--mock-record") {
+            engine = engine.with_capability_descriptor(record.to_string());
+        }
+        Ok(Loaded::engine(engine, None))
+    }
+}
+```
+
+The llama.cpp adapter is the fuller example of a runtime loaded as a shared library; the MLX adapter of one that embeds an interpreter.
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Writing a runtime adapter · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L12","11",{}]]

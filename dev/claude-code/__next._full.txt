@@ -1,0 +1,44 @@
+1:"$Sreact.fragment"
+2:I[39756,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js"],"DocsShell"]
+6:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/dev/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","claude-code",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","claude-code","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/dev/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/1n_3z02nf3ipn.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/dev/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"acMdTJ3DYsZTo1XUw19Jl"}
+f:[]
+9:"$Wf"
+10:I[73435,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js","/dev/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T5af,# Claude Code
+
+Claude Code speaks the Anthropic Messages API, which the server answers at `/v1/messages`.
+
+```sh
+curl -fsSL https://claude.ai/install.sh | bash     # install
+superfluid launch claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch claude -- --continue             # arguments after -- go to claude
+```
+
+Aliases: `claude-code`.
+
+## What launch gives it
+
+| given | what for |
+|---|---|
+| `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` | the server and its key (a placeholder on a keyless server) |
+| `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL` | the served model, for every tier Claude Code would pick |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | the server's context window, so Claude Code compacts in time instead of assuming 200k |
+| `CLAUDE_CODE_ATTRIBUTION_HEADER=0` | keeps the system prompt identical between sessions, so a new session reuses the cached prefix of the last one |
+| `CLAUDE_CODE_AUTO_MODE_SERVER=0` | set unless your environment sets it: auto mode's permission classifier otherwise runs on Anthropic's servers |
+| `ANTHROPIC_API_KEY` | removed from the environment, so no key is sent beside the token |
+
+`launch` warns when the window is under 32k tokens: Claude Code's first request alone is about 17k. Serve with `--max-context 65536` or more.
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Claude Code · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L12","11",{}]]

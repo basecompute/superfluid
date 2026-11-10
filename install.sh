@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install superfluid from a GitHub release.
 #
-#   curl -fsSL https://superfluid.sh/install.sh | sh
+#   curl -fsSL https://basecompute.co/sf/install.sh | sh
 #
 # Environment:
 #   SUPERFLUID_VERSION  a release tag (v0.1.0); default: the latest release

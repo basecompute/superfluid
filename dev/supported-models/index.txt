@@ -1,0 +1,117 @@
+1:"$Sreact.fragment"
+2:I[39756,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js"],"DocsShell"]
+6:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/dev/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","supported-models",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","supported-models","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/dev/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/1n_3z02nf3ipn.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/dev/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"acMdTJ3DYsZTo1XUw19Jl"}
+f:[]
+9:"$Wf"
+10:I[73435,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js","/dev/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T1eb2,# Supported models
+
+Superfluid serves whatever its runtimes read: GGUF files through llama.cpp, MLX model directories through MLX, and `.base` bundles through the baseRT engine. A model is given as a local path or as a Hugging Face-style id that the runtime pulls.
+
+## Formats and runtimes
+
+| runtime | format | recognized by | tokenizer |
+|---|---|---|---|
+| `llamacpp` | GGUF | `*.gguf`, or a file starting with `GGUF` | the GGUF vocabulary, via the adapter's library |
+| `mlx` | MLX directory (Apple silicon) | a directory with `config.json` and `*.safetensors` | the directory's `tokenizer.json` |
+| `basert` | `.base` bundle | `*.base`, or a file starting with `BASE` | the engine's own |
+
+What each runtime supports beyond plain generation:
+
+| feature | `basert` | `llamacpp` | `mlx` |
+|---|---|---|---|
+| continuous batching, prefix cache | yes | yes | yes |
+| tool calling, structured outputs | yes | yes | yes |
+| `logit_bias`, penalties, logprobs (up to 20) | yes | yes | yes |
+| park and resume (`--park`) | yes | yes (lossless) | yes (lossless) |
+| lossy park (`--park-lossy`) | per bundle | no | no |
+| `--kv-bits` | yes | no | no |
+| speculative decoding | per bundle | no | no |
+| images and audio in chat | per bundle | no | no |
+| embeddings, speech to text, LoRA | per bundle | no | no |
+| `--max-context auto` | yes | on Metal, and on CUDA with a dedicated GPU; else 8192 | yes |
+
+"Per bundle" means the bundle's capability record decides once it is loaded. Anything a model cannot do is refused per request with a 400 naming the reason. See [Runtimes](/runtimes#capability-records).
+
+## Paths and ids
+
+```sh
+superfluid serve ./Qwen3-4B-Q4_K_M.gguf                  # a path; format picks the runtime
+superfluid serve ~/models/Qwen3-4B-4bit                   # an MLX directory
+superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M           # an id, pulled by llama.cpp
+superfluid serve mlx-community/Qwen3-4B-4bit              # an id, pulled by MLX
+superfluid serve basecompute/Qwen3-1.7B                   # an id, pulled by basert
+```
+
+A token is an **id** when nothing exists on disk by that name, it does not start with `.`, `/` or `~`, it does not end in `.base` or `.gguf`, and the part before an optional `:tag` contains a `/`. Anything else is a path, so a missing file is reported as missing rather than looked up on a hub.
+
+| form | served under |
+|---|---|
+| a file path | its stem (`./model.gguf` → `model`) |
+| a directory | the directory name |
+| a `.base` bundle in the hub cache (with `hub.json` beside it) | the id `hub.json` records |
+| `org/model[:tag]` | `org/model` (the tag is dropped) |
+
+Runtime inference for ids: a repo name containing `gguf` (any case) goes to `llamacpp`; `mlx-community/...` or a repo name containing `mlx` goes to `mlx`; anything else to `basert`. `--runtime` overrides it.
+
+## Pulling models by id
+
+Pulling happens during `superfluid serve`; there is no separate `pull` command.
+
+| runtime | tool | `:tag` means | `--pull-<name>` options | cache |
+|---|---|---|---|---|
+| `llamacpp` | `llama download -hf` | the quant (`Q4_K_M`), or a size (`medium`) of a release in sizes | `--pull-file <name>`, `--pull-no-mmproj` | Hugging Face cache |
+| `mlx` | `huggingface_hub.snapshot_download` | a revision | `--pull-revision <rev>` | Hugging Face cache (no `*.py` files are fetched) |
+| `basert` | `basert pull`, then `basert list --json` for the path | a variant, or a size | `--pull-target <scheme>`, `--pull-profile <json>`, `--pull-revision <rev>`, `--pull-file <name.base>` (one of several in a repo; served from the install `basert list` records it in), `--pull-force` | the baseRT models cache (`BASERT_MODELS_DIR`) |
+
+- `--offline` only looks in the cache and fetches nothing.
+- A pull shows its progress on stderr: the percentage, the bytes fetched of the total, the rate and the time left, redrawn on a terminal and printed every ten seconds where there is none, then one line with the size, time and rate it took. Superfluid reads this from what the runtime's tool writes into its cache, so it is the same for every runtime; the total is the file's size from the Hub's listing (the GGUF `llama download` picks, with its shards and projector; the files `snapshot_download` takes; a catalog model's size from `basert list --remote`), and a pull whose total could not be looked up (or under `HF_HUB_OFFLINE`, which keeps the lookup off the Hub) shows the bytes, rate and time elapsed. A pull that resumes a partial starts the bar where it left off and reports the rest as what it fetched. Once every byte is here and the tool is still verifying, converting or copying, the bar says so.
+- A **release in sizes** is a repository whose model files are named by size, the BaseQuant repositories' `-XS`, `-Small`, `-Medium`, `-Large` and `-XL`, and none by quant. With nothing naming a file, both runtimes pull its Medium: `superfluid serve basecompute/Qwen3.8-27B-BaseQuant-V1 --runtime basert` and `--runtime llamacpp` serve `Qwen3.8-27B-BaseQuant-V1-Medium.base` and `.gguf`. A size tag takes another (`basecompute/Qwen3.8-27B-BaseQuant-V1:small`), `--pull-file <name>` a file; a size the release does not come in names the ones it does, and a release of one file gives that file. The llamacpp runtime reads the repository's listing from the Hub for this (llama.cpp's own pick, with no file named, is some file of the repository, not the Medium, and it refuses a size tag as not a quantization); a listing that fails leaves a plain pull to llama.cpp with a warning, and `--offline` lists nothing, so there a size spells its file as the releases name them (`<repo>-Small.gguf`) and no tag is left to llama.cpp's cache. The basert runtime's `basert pull` reads these releases by the same rule from basert 0.4.5; a size with basert 0.4.2–0.4.4 is passed as `--file <repo>-<Size>.base`, and each file installs under a `file-…` variant that records it, which a size tag is served from.
+- A baseRT variant is named as `basert list` names it (`default-q8`, `file-…`). One that is installed is served without a pull (unless `--pull-force`); one that is not is pulled as named with basert 0.4.2 or later (`basert pull org/model:<variant>`, without `--pull-file`, `--pull-profile` or `--pull-target`, which would name it twice), and with an older basert by the id alone, which fetches the quant its options pick.
+- An undeclared `--pull-*` option, or `--pull-*` with no model given by id, is refused before anything is fetched.
+- A gated or private model needs `HF_TOKEN`.
+- One pull of an id runs at a time across daemons.
+
+## Published sampling defaults
+
+When a request names no sampling parameter, the model author's published defaults apply (after any operator `--temperature` etc.):
+
+| runtime | source |
+|---|---|
+| `llamacpp` | GGUF `general.sampling.*` metadata (older conversions carry none) |
+| `mlx` | `generation_config.json` |
+| `basert` | the bundle header |
+
+They appear in `superfluid runtimes <model>`, `/v1/models` and `/props`. See [Sampling](/sampling).
+
+## Context and batch sizing
+
+| flag | default | meaning |
+|---|---|---|
+| `--max-context <N>` | auto | per-lane window, sized for the device: `basert` before loading, `llamacpp` on Metal or a dedicated CUDA GPU, `mlx` on Metal; elsewhere 8192 |
+| `--max-batch <N>` | 8 | concurrent lanes |
+| `--kv-bits <N>` | 0 (auto) | KV type on `basert` only |
+
+On llama.cpp and MLX the KV pool is `--max-batch` × `--max-context` cells, capped by the memory the weights leave free; the cap is printed at load. A prompt that does not fit the window is refused with `context_length_exceeded`.
+
+## Checking a model
+
+```sh
+superfluid runtimes ./Qwen3-4B-Q4_K_M.gguf
+```
+
+Prints which runtime reads it, the model's architecture and sampling defaults, and what that runtime serves and refuses. Exits 1 when no installed runtime serves it.
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Supported models · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L12","11",{}]]

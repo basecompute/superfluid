@@ -1,0 +1,94 @@
+1:"$Sreact.fragment"
+2:I[39756,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js"],"DocsShell"]
+6:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/dev/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","speculative-decoding",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","speculative-decoding","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/dev/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/1n_3z02nf3ipn.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/dev/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"acMdTJ3DYsZTo1XUw19Jl"}
+f:[]
+9:"$Wf"
+10:I[73435,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js","/dev/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T19dc,# Speculative decoding
+
+A drafter proposes several tokens per round and the target model verifies them in one forward pass. Every draft is verified, so a poor drafter costs speed, never output. Every strategy runs on the `basert` runtime; `prompt-lookup` also runs on `llamacpp` and `mlx`. Measured gates turn speculation off where it does not pay.
+
+```sh
+superfluid serve ~/models/Qwen3-4B-Q4.base --speculate auto
+superfluid serve ~/models/Qwen3-4B-Q4.base --speculate dflash:~/models/drafters/Qwen3-4B-DFlash-Q4.base
+superfluid serve ~/models/GLM-5.2-Q4.base --speculate mtp-head
+```
+
+The startup log names the strategy it registered (`superfluid: speculation: mtp-head`).
+
+## Strategies
+
+| directive | drafter | needs |
+|---|---|---|
+| `off` (default) | none | |
+| `auto` | the drafter the hub catalog marks for the target (pulled when missing), else the bundle's own MTP head, else the best installed drafter that fits, else plain decoding | |
+| `mtp-head` | the multi-token-prediction head in the target bundle (Qwen3.5/3.6/3.8's own, or Gemma 4's `-assistant` head embedded by `basert add-speculator`) | a bundle converted with the head |
+| `prompt-lookup` | n-gram drafting from the lane's own context | nothing; drafts only where text repeats |
+| `dflash:<path>` | a DFlash block drafter | a `.base` drafter |
+| `dspark:<path>` | a DSpark drafter | a `.base` drafter |
+| `eagle3:<path>` | an EAGLE-3 head | a `.base` drafter |
+| `draft-model:<path>` | a smaller model with the same tokenizer | a `.base` model |
+| `<path>` | whatever the file's header says | a `.base` file |
+
+On `llamacpp` and `mlx`, `prompt-lookup` is the one strategy, and `auto` means `prompt-lookup`. It drafts the tokens that followed the last earlier occurrence of the lane's last three (else two) tokens, so it pays where a reply copies its context: code edits, quoting, structured repeats. Verification is distribution-exact, greedy and sampled. MLX drafts while one lane decodes.
+
+> [!NOTE]
+> A model that cannot cut a rejected draft off its KV (recurrent or sliding-window state) refuses `prompt-lookup` at startup in its runtime's words, and `auto` decodes plainly. Any other strategy named on `llamacpp` or `mlx` is refused.
+
+With several models, the directive is resolved per model.
+
+## How `auto` picks a drafter
+
+1. The drafter the hub catalog marks for the target (`speculator_auto` on the drafter's row: Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters), on macOS, where those pairings were measured faster than the bundle's own head. When no copy is installed it is pulled with the target's runtime first (its `default-q4` file), for each model served, whether given at startup or loaded later, unless `--offline`; a pull that fails is said and `auto` goes on with what is installed. Gemma 4's embedded head is never displaced.
+2. The target bundle's own head, if it has one.
+3. Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a `drafters/` directory beside it or one level up, and the baseRT models cache. Nothing else is downloaded. A plain draft model is never picked.
+4. Among fitting drafters: one the hub catalog pairs with the target, then one whose name contains the target's, then DSpark, DFlash, EAGLE-3, then the target's quantization, then the newest.
+
+If the engine refuses the first pick, `auto` tries the next and finally decodes plainly. An explicit directive has no fallback: a refusal is a startup error.
+
+The hub catalog is fetched from `https://raw.githubusercontent.com/basecompute/baseRT/main/base-convert/crates/base-hub/catalog.json` into `$SUPERFLUID_HOME/cache/hub-catalog.json` (refreshed daily, never with `--offline`), plus the one baseRT caches at `$BASERT_MODELS_DIR/.catalog-cache.json`. A drafter it lists (a pulled `<org>/<repo>/<variant>/model.base`, or a file under a catalog file name) must match the catalog's size and sha256: `auto` skips one that does not and says so, and an explicit directive naming it is a startup error. Each file is hashed once and its digest kept in `$SUPERFLUID_HOME/cache/sha256/` until the file changes.
+
+## Gates
+
+| gate | flag | default | behaviour |
+|---|---|---|---|
+| adaptive depth | `--spec-adaptive` | on | picks the fastest draft depth per lane count |
+| yield floor | `--spec-min-yield`, `--spec-yield-rounds` | 0.75, 24 | a request whose drafter returns fewer accepted tokens per round stops drafting; two failing requests and none passing abandon the strategy for good |
+| throughput gate | `--spec-throughput-gate`, `--spec-min-speedup` | on, 1.08 | measures speculating against plain decoding per lane count and decodes plainly where speculation is not 1.08x faster |
+| re-probe | `--spec-gate-reprobe`, `--spec-gate-reprobe-max` | 32, 1024 | after a throughput abandonment, re-measure after 32 requests, doubling up to 1024 |
+
+Speculation is usually a low-concurrency win that can invert under load; the gates keep their verdicts per lane count. All flags are in the [CLI reference](/cli#speculative-decoding).
+
+Default draft depth: `mtp-head` lets the engine choose (3; 1 on GLM-DSA), `eagle3` 2, `dflash`/`dspark` the drafter's block width, `prompt-lookup` and `draft-model` 4.
+
+## Interactions
+
+- **Exactness.** Greedy output with speculation equals greedy output without. Sampled output follows the same distribution, but seeded sampled text can differ.
+- **Grammars, `logit_bias`, `logprobs`.** These lanes never speculate.
+- **Penalties.** Allowed, but drafters predict the unpenalized distribution, so acceptance drops.
+- **Temperature.** A flat distribution rejects most drafts. `--spec-max-temperature` caps a temperature that came from the model's default (never one a caller or `--temperature` set).
+- **Streaming.** An accepted draft arrives as one chunk carrying several tokens; `stream_options.continuous_usage_stats` reports cumulative token counts per chunk.
+
+## What is reported
+
+- `superfluid.spec` (`proposed`, `accepted`, `acceptance_rate`) on chat replies and the final stream chunk.
+- `superfluid_spec_proposed_total` and `superfluid_spec_accepted_total` on `/metrics`.
+- `spec accept` in the terminal monitor.
+
+## Expected speedups
+
+With Qwen3-4B q4 at one lane, DSpark, DFlash and EAGLE-3 drafters measured 130, 123 and 98 tokens per second (the order `auto` prefers them in). The Qwen3.8-27B MTP head accepts 41% of its drafts at temperature 1.0 against 59% at temperature 0, which is the measurement behind `--spec-max-temperature`. Measure on your own hardware before relying on a figure.
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Speculative decoding · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L12","11",{}]]
