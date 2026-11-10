@@ -1,6 +1,6 @@
 # Tool calling
 
-superfluid supports OpenAI-style tool calling on every runtime. Tools are rendered into the prompt by the model's own chat template, and calls are parsed out of the output by a parser learned from that same template, so each model is told the format it was trained on.
+Superfluid supports OpenAI-style tool calling on every runtime. Tools are rendered into the prompt by the model's own chat template, and calls are parsed out of the output by a parser learned from that same template, so each model is told the format it was trained on.
 
 ## Example
 

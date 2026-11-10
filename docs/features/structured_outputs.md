@@ -1,6 +1,6 @@
 # Structured outputs
 
-superfluid constrains decoding with a grammar so output matches a JSON schema. It works on every runtime: the baseRT engine compiles grammars itself; llama.cpp, MLX and the mock compile them through llguidance against the model's vocabulary.
+Superfluid constrains decoding with a grammar so output matches a JSON schema. It works on every runtime: the baseRT engine compiles grammars itself; llama.cpp, MLX and the mock compile them through llguidance against the model's vocabulary.
 
 ## JSON schema
 

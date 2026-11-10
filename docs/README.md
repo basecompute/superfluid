@@ -1,70 +1,56 @@
-# superfluid documentation
+# Superfluid
 
 **One serving daemon for local LLM inference — across runtimes and machines.**
 
-<!-- source: assets/diagrams/overview-dark.html (light: overview.html); render at 2x to the matching .png -->
-![Coding agents and any OpenAI, Anthropic or Ollama client reach one superfluid server, which drives baseRT, llama.cpp and MLX workers on this machine and on other machines that join it](assets/diagrams/overview-dark.png)
+Superfluid puts one scheduler, one durable session log and one set of APIs (OpenAI, Anthropic, Ollama) in front of llama.cpp, MLX and baseRT. Several agents share one machine without getting in each other's way, a session outlives a crashed worker or a restarted server, and existing clients work unchanged.
 
-superfluid is a serving daemon for local LLM inference. It puts one scheduler, one durable session log and one set of APIs (OpenAI, Anthropic, Ollama) in front of several inference runtimes: llama.cpp for GGUF files, MLX for MLX directories, and the baseRT engine for `.base` bundles.
+## Why Superfluid
+
+- **A chat is answered while agents work.** An interactive request preempts batch work at the next scheduler tick instead of waiting behind it.
+- **Nothing is lost when something dies.** Every committed token is in a write-ahead log; a killed worker or a restarted server picks its sessions up where they were.
+- **A shared prompt is prefilled once.** Thirty-two requests with one 5k-token prefix cost one prefill, not thirty-two.
+- **Your clients work unchanged.** OpenAI Chat Completions and Responses, Anthropic Messages, and Ollama, on one port.
+- **More than one machine.** Other machines join the head over an encrypted link and serve the same API.
+
+## Get started
+
+- **[Installation](getting_started/installation.md)** — get `superfluid` on your `PATH`.
+- **[Quickstart](getting_started/quickstart.md)** — serve a model and call it in under a minute.
+- **[Coding agents](integrations/index.md)** — put Claude Code, Codex, OpenCode and others on a local model.
+- **[Command-line reference](serving/cli.md)** — every command and flag.
+
+## At a glance
 
 ```sh
+# install
+curl -fsSL https://basecompute.co/sf/install.sh | sh
+
+# serve a model at http://127.0.0.1:8453
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+
+# put a coding agent on it
+superfluid launch claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+
+# add another machine to the same server
+superfluid node join --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --token <token>
 ```
 
-## Getting started
+## How it fits
 
-- [Installation](getting_started/installation.md)
-- [Quickstart](getting_started/quickstart.md)
+![Coding agents and any OpenAI, Anthropic or Ollama client reach one Superfluid server, which drives baseRT, llama.cpp and MLX workers on this machine and on other machines that join it](assets/diagrams/overview-dark.png)
 
-## Serving
+The model file picks the runtime. Each runtime runs in its own worker process, installed on first use from its own project's releases:
 
-- [OpenAI-compatible server](serving/openai_compatible_server.md)
-- [OpenAI Responses API](serving/responses_api.md)
-- [Anthropic Messages API](serving/anthropic_api.md)
-- [Ollama-compatible API](serving/ollama_api.md)
-- [Session API](serving/session_api.md)
-- [Command-line reference](serving/cli.md)
-- [Configuration](serving/configuration.md)
-- [Serving multiple models](serving/multiple_models.md)
-- [Distributed serving (fleet mode)](serving/distributed_serving.md)
+| Runtime | Serves | Comes from |
+| --- | --- | --- |
+| `llamacpp` | GGUF files | llama.cpp's release builds |
+| `mlx` | MLX model directories (Apple silicon) | a private CPython with `mlx-lm` |
+| `basert` | `.base` bundles | [baseRT](https://github.com/basecompute/baseRT)'s engine library |
 
-## Integrations
+> [!NOTE]
+> The server binds to loopback and asks for no key unless told to, and nothing phones home. Read [Security](deployment/security.md) before putting it on a network. Superfluid is pre-1.0: flags, protocols and on-disk formats may change between releases.
 
-- [superfluid launch](integrations/index.md): [Claude Code](integrations/claude_code.md), [Codex](integrations/codex.md), [pi](integrations/pi.md), [OpenCode](integrations/opencode.md), [Hermes Agent](integrations/hermes.md), [Cline](integrations/cline.md), [OpenClaw](integrations/openclaw.md), [Ollama CLI](integrations/ollama_cli.md)
+## Requirements
 
-## Models
-
-- [Supported models](models/supported_models.md)
-- [Runtimes](models/runtimes.md)
-
-## Features
-
-- [Tool calling](features/tool_calling.md)
-- [Chat templates and reasoning](features/chat_templates.md)
-- [Structured outputs](features/structured_outputs.md)
-- [Sampling](features/sampling.md)
-- [Speculative decoding](features/speculative_decoding.md)
-- [Vision and audio](features/multimodal.md)
-- [Sessions and prefix caching](features/sessions.md)
-- [Scheduling and QoS](features/scheduling.md)
-
-## Deployment
-
-- [Security](deployment/security.md)
-- [Observability](deployment/observability.md)
-
-## Design
-
-- [Architecture](design/architecture.md)
-- [Writing a runtime adapter](design/adapters.md)
-
-## Performance
-
-- [Benchmarks](performance/benchmarks.md)
-
-## Contributing
-
-- [Development](contributing/development.md)
-- [Discord](https://discord.gg/kaYmAGckCq)
-- [Contributing guide](https://github.com/basecompute/superfluid/blob/main/CONTRIBUTING.md)
-- [Security policy](https://github.com/basecompute/superfluid/blob/main/SECURITY.md)
+- macOS on Apple silicon, or Linux x86-64 / arm64 (glibc 2.28+). Other platforms build from source.
+- Runtimes, models and the Hugging Face cache need disk space; nothing else is installed outside `~/.local` and `~/.superfluid`.

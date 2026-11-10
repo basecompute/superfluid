@@ -1,6 +1,6 @@
 # Security
 
-superfluid binds to loopback and asks for no credential unless told to. Nothing in it speaks TLS: the HTTP API is meant for a trusted network or a reverse proxy, the unix socket trusts whoever can open it, and the session log holds every prompt and completion in plain text. To report a vulnerability, see the [security policy](https://github.com/basecompute/superfluid/blob/main/SECURITY.md).
+Superfluid binds to loopback and asks for no credential unless told to. Nothing in it speaks TLS: the HTTP API is meant for a trusted network or a reverse proxy, the unix socket trusts whoever can open it, and the session log holds every prompt and completion in plain text. To report a vulnerability, see the [security policy](https://github.com/basecompute/superfluid/blob/main/SECURITY.md).
 
 ## Listeners
 
