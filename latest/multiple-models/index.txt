@@ -1,0 +1,94 @@
+1:"$Sreact.fragment"
+2:I[39756,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js"],"DocsShell"]
+6:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/latest/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","multiple-models",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","multiple-models","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/latest/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/latest/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/latest/_next/static/chunks/29k-rx9rciff-.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/latest/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"CB1RfNn-dS07zIsjb9MSq"}
+f:[]
+9:"$Wf"
+10:I[73435,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js","/latest/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:Tdfc,# Serving multiple models
+
+One daemon can serve several models, on one runtime or several. Each model gets its own worker process and its own session log, and each request is routed by its `model` field.
+
+```sh
+superfluid serve ./qwen3-4b.gguf --model mlx-community/Qwen3-4B-4bit \
+    --model-dir ~/models --idle-timeout 600
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--model <model>` | required, repeatable | load at startup; the first is the default for requests that name no model |
+| `--model-dir <dir>` | none | every `.base`, GGUF or MLX directory under `<dir>` becomes a known model, loaded on the first request that names it |
+| `--idle-timeout <sec>` | 0 (never) | unload a model unused this long (checked every `<sec>/4`); only models that can be loaded again, never the default |
+| `--runtime <model>=<id>` | inferred | the runtime for one model |
+
+- A model under `--model-dir` that no installed runtime reads, or whose runtime refuses the serving flags, is skipped with the reason at startup.
+- With `--model-dir` and no `--max-context`, the window is a fixed 8192 tokens so on-demand loads find room.
+- When two artifacts would get the same name (`qwen.base` and `qwen.gguf`), the second is registered under its full file name; the startup log says so.
+
+> [!NOTE]
+> More than one model, `--fim-model` or `--model-dir` all require `--worker-process` (the default).
+
+## List models
+
+```sh
+curl http://127.0.0.1:8453/v1/models
+```
+
+```json
+{"object": "list", "data": [{
+  "id": "Qwen3-4B-Q4_K_M", "object": "model", "owned_by": "superfluid",
+  "loaded": true,
+  "meta": {"n_ctx": 8192},
+  "architecture": {"input_modalities": ["text"]},
+  "runtime": {"id": "llamacpp", "version": "llama.cpp b11284"},
+  "capabilities": {"descriptor_version": 1, "...": "..."}
+}]}
+```
+
+| field | meaning |
+|---|---|
+| `id` | the name requests use |
+| `loaded` | `false` for a `--model-dir` model not loaded yet |
+| `meta.n_ctx` | the context window |
+| `architecture.input_modalities` | `text`, plus `image` or `audio` where the model encodes them |
+| `runtime`, `capabilities` | the serving runtime and its capability record (loaded models only) |
+
+`GET /v1/models/{model}` returns one entry (404 if unknown). `/health` reports `models_loaded` and `models_known`.
+
+## Load and unload
+
+Admin routes: they need the global `--api-key`, or a policy key with `admin: true`.
+
+```sh
+curl -X POST http://127.0.0.1:8453/v1/models/load -d '{"id": "/models/qwen3-4b.gguf"}'
+curl -X POST http://127.0.0.1:8453/v1/models/unload -d '{"id": "qwen3-4b"}'
+```
+
+| route | body | effect |
+|---|---|---|
+| `POST /v1/models/load` | `{"id": "<path or known name>", "runtime"?: "<id>"}` | load and make it the default; returns the model object |
+| `POST /v1/models/unload` | `{"id": "<name>"}` | unload and free its worker; the default moves to another model |
+| `DELETE /v1/models/{model}` | | same as unload |
+
+- `/v1/models/load` takes a path or an already-known name; it does not pull an id. Pull at startup with `--model <id>`.
+- The last remaining model cannot be unloaded (400).
+- An unloaded model stays known: the next request for it loads it again.
+- Loading a model already loaded on a different runtime is refused (`unsupported_runtime`); unload it first.
+- Under `--no-worker-process` the route answers 400 `dynamic model loading is not enabled on this server`.
+
+## Per-model state
+
+Each model beside the first keeps its own session log, parks and media under `<sessions>/models/<id>/`, so models never share durable state. Prometheus `/metrics` and `/slots` describe the default model.
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Serving multiple models · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/latest/favicon.png"}],["$","$L12","11",{}]]

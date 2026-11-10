@@ -1,0 +1,190 @@
+1:"$Sreact.fragment"
+2:I[39756,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js"],"DocsShell"]
+6:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/latest/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","distributed-serving",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","distributed-serving","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/latest/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/latest/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/latest/_next/static/chunks/29k-rx9rciff-.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/latest/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"CB1RfNn-dS07zIsjb9MSq"}
+f:[]
+9:"$Wf"
+10:I[73435,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js","/latest/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T3cdb,# Distributed serving (fleet mode)
+
+Fleet mode runs one Superfluid as a **head** that owns the HTTP API and the chat template, and one or more **node agents** (`superfluid-noded`) that each own a model and sample its tokens. Each request is placed as a whole session on one node; only sampled tokens cross the network.
+
+> [!WARNING]
+> Fleet mode is early. The head keeps no durable session log and serves two routes.
+
+<!-- source: docs/assets/diagrams/fleet.excalidraw; edit it in excalidraw.com and export the SVG over fleet.svg -->
+![fleet mode: the head serves the HTTP API and places each session on a node over Link F; nodes run the worker and sample](/assets/diagrams/fleet.svg)
+
+## Join a node
+
+On the head, make the token once and start serving with a listener for nodes:
+
+```sh
+superfluid fleet token                     # prints the token; kept at ~/.superfluid/fleet/token
+superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
+```
+
+On each node:
+
+```sh
+superfluid node join --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --token <the token>
+```
+
+The node finds the head on the local network (`_superfluid-fleet._tcp`, which also carries the head's HTTP port for `superfluid top`, or give `<host:port>` as the first argument), pulls the model as `serve` would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as `joined:<identity>` and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; `--model-name` overrides that. A head with no token takes nodes from its own machine only.
+
+| flag | default | meaning |
+|---|---|---|
+| `--model <path\|id>` | required | the model; an id is pulled first |
+| `--token <value>` | `$SUPERFLUID_HOME/fleet/token` | the head's token, kept at that path |
+| `--runtime <id>` | by format | the runtime |
+| `--max-context <N>` | sized for this device | the node's window |
+| `--max-batch <N>` | 8 | the node's lanes |
+| `--identity <name>` | the host name | the name in the head's logs |
+| `--model-name <id>` | what the head announces, else the model's id | the name the head matches on |
+| `--offline` | off | pull nothing |
+| `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
+
+A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed. The head also asks it for one connection more, which no generation takes: a short call (a prompt's encoding, a state operation) goes over it while every lane is generating. A node from before this release opens only its lanes.
+
+## Run a node by hand
+
+```sh
+superfluid-noded --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --listen 100.64.0.2:8454
+```
+
+The node loads the model as `superfluid serve` does: an id is pulled, the runtime that reads it is installed if it never was, and the window is sized for the device. It checks its token and binds its port first, so a node that would be refused stops before it downloads anything. It then prints what it serves:
+
+```text
+superfluid-noded: runtime llamacpp serves /…/Qwen3.8-27B-UD-Q4_K_M.gguf: context window 40960 tokens (sized for this device), 8 lanes
+superfluid-noded: node 'box-a' serving 'unsloth/Qwen3.8-27B-GGUF' on 100.64.0.2:8454 (Link F/TCP)
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--listen <ip:port>` | `0.0.0.0:8454` | where the head connects |
+| `--model <path\|id>` | required | the model; an id is pulled first |
+| `--runtime <id>` | by format | `basert`, `llamacpp` or `mlx`; `--engine` is the same flag, and `--engine mock` serves the test engine |
+| `--model-name <id>` | the model's id | the name the head matches on; set it the same on every node |
+| `--max-context <N>` | sized for this device | the node's window, floor 512 |
+| `--max-batch <N>` | 8 | the node's lanes |
+| `--identity <name>` | the host name | the name in the head's logs |
+| `--offline` | off | pull and install nothing |
+| `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
+| `--auth-file <path>` | `$SUPERFLUID_HOME/fleet/token` | the fleet token; with it the link is encrypted and both ends are checked |
+| `--insecure-no-auth` | off | accept any peer on a non-loopback address |
+| `--handshake-timeout-ms <N>` | 10000 | time a connecting head has to say hello |
+| `--idle-timeout-ms <N>` | 30000 | drop a connection the head has said nothing on for this long; keep it well above the head's 5 s heartbeat |
+
+Nodes can run different runtimes for the same model, such as a Mac on baseRT with the `.base` build and a Linux box on llama.cpp with a GGUF. Give each the same `--model-name`. The head sends token ids, so the builds must share the model's tokenizer, which builds of one model do; nothing checks this yet. Each node's answers follow its own build's quantization.
+
+`superfluid fleet token` makes the token (32 random bytes as hex, owner-readable) at `$SUPERFLUID_HOME/fleet/token` on the head; copy that file, or its value, to the same path on each node. With a token the link between head and node is encrypted (Noise, keyed by the token) and a peer with another token is refused at the handshake. A node bound off loopback refuses to start without a token unless `--insecure-no-auth` is given. A node has no sampling flags. Its session store lasts one run: a node's sessions last one generation, and the head keeps the conversations. `superfluid-noded` keeps it under the system temp dir, and `node join` under `$SUPERFLUID_HOME/fleet/nodes/<identity>`.
+
+## Run the head
+
+```sh
+superfluid serve /models/qwen.base --http 0.0.0.0:8453 \
+    --fleet 100.64.0.2:8454,100.64.0.3:8454 \
+    --fleet-auth /etc/superfluid/fleet.key
+```
+
+At start the head connects to every node and reports each one, or why it cannot reach it:
+
+```text
+superfluid: fleet node 'box-a' at 100.64.0.2:8454: qwen, context window 32768 tokens, 8 lanes
+superfluid: fleet node 100.64.0.3:8454: closed the connection at the handshake; check that --fleet-auth holds the key in the node's --auth-file; retrying it every 10 s
+superfluid: qwen: context window 32768 tokens (the largest node's)
+```
+
+Give `--model` once per model the fleet serves; a request's `model` picks the nodes serving it, and `/v1/models` lists each. The head never loads a model's weights. A model given by path is opened there for its tokenizer and chat template only. A model given by id (`org/model[:tag]`) is not pulled at all: the head takes its tokenizer and chat template from the first node serving it, under the id without its tag (start the node with `--model-name org/model`), and has a node encode each request's text, once per request; the head waits for such a node before it serves, and needs no runtime installed. Each node tells the head its tokenizer, and a node whose tokenizer differs from the head's for that model gets none of its requests (the head says so in its log). A node that joins names its model after one the head serves when its own id is one of them, or after the head's only model; with several and none its own, give it `--model-name`.
+
+```sh
+superfluid serve /models/qwen.base /models/gemma.base --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--fleet <host:port>[,...]` | | nodes the head dials; optional with `--fleet-listen` |
+| `--fleet-listen <addr:port>` | off | take nodes that join, announced on the local network |
+| `--fleet-auth <path>` | `$SUPERFLUID_HOME/fleet/token` | the fleet token; without one the links are not encrypted |
+| `--fleet-policy` | `load-aware` | `load-aware`, `least-loaded` or `round-robin` |
+| `--fleet-pool-high <pct>` | 90 | `load-aware` avoids nodes at or above this KV occupancy |
+| `--fleet-conns-per-node <N>` | the node's lanes | connections to each node in `--fleet`, and so concurrent generations there |
+
+The head loads no engine but still reads the model for its tokenizer and chat template; its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no `--max-context`. It logs where each session is placed and every move to another node. `--dialect`, `--tool-call-parser` and `--temperature`/`--top-p`/`--top-k`/`--min-p` apply on the head. `--api-key`, `--key-policy` and `--rate-limit` protect its listener; a policy's `class` and `max_class` do not apply, since the head has no scheduler.
+
+Refused on the head (set them on each node's own `superfluid serve`): `--class-lanes`, `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant`, `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--otlp-endpoint`. A batch-invariant lane is refused however it is asked for (a key whose policy grants `batch_invariant`, or `SetQos`) with 400 `unsupported_on_fleet`: a node batches each generation with the others it runs.
+
+## Placement policies
+
+| policy | how it picks |
+|---|---|
+| `load-aware` (default) | prefers nodes whose window fits the prompt, skips nodes above `--fleet-pool-high`, then the lowest estimated completion time from each node's reported rates. A node measures its rates only while it is generating, so an idle node keeps the speed it showed when busy; one that has not generated yet counts at the mean of the others |
+| `least-loaded` | fewest sessions in progress plus requests in flight on that node, whatever its speed |
+| `round-robin` | rotate through capable nodes; use it to prove a fleet is distributing |
+
+`load-aware` and `least-loaded` first try the node that last ran the longest prefix of the prompt, 128 tokens or more, while it has a lane free. A conversation's turns so stay on the node that has its prefix cached, and other prompts are placed by load. The head keeps this in `<sessions>/fleet-warm.json`, so it holds across a head restart.
+
+A prompt no node can hold is refused with `context_length_exceeded`.
+
+## What the head serves
+
+The head runs the same HTTP server as `superfluid serve` on one machine, with the same handlers; each generation's decode loop runs on a node, so no token waits on the network between steps.
+
+- Every API format, streaming or not, with tools: OpenAI Chat Completions, Completions and Responses ([OpenAI API](/openai-server)), Anthropic Messages, and Ollama `/api/chat` and `/api/generate`.
+- `GET /v1/models`: the model the fleet serves, with the largest window a node serving it has.
+- `GET /metrics`: the server's own series, and each node as the head sees it, labelled `node` and `addr`: `superfluid_fleet_node_up`, `_lanes`, `_lanes_active`, `_queue_depth`, `_pool_blocks_used`, `_pool_blocks_total` and `_decode_tokens_total`. A generation's tokens count as they arrive. The KV pool is the node's latest status, sent every 2 s. `superfluid top` pointed at the head, or run with no address on the head's network, shows every node from it.
+- `GET /health`: 200 with `{"status": "ok"}` while a node that is up serves at least one of the head's models, 503 with `"no_nodes"` while none does. Both carry `nodes_up` and `nodes_known` over every node, and `models`, each model's own `nodes_up`. It needs no API key.
+
+Structured output (`response_format`, tool grammars), `logit_bias`, `logprobs`, presence, frequency and repeat penalties and `ignore_eos` reach the node that runs the generation: the head keeps a grammar or bias and the node compiles it. Embeddings (`/v1/embeddings`, `/api/embed`) run on a node serving the model. A LoRA (`/v1/lora/load`, `/unload`) is loaded on every node serving the model, from a path on each node; load it again after a node joins. These need nodes on this release; an older node refuses them by name.
+
+Image and audio parts, and transcription (`/v1/audio/transcriptions`, `/translations`), reach the node too: the head sends each file once per connection, by its SHA-256, and the node keeps it in its own media pool. A streamed transcription's segments come through as the node has them. The head describes the model as the first node serving it does (`capabilities` in `/v1/models`), so a route refuses what the nodes cannot do as a single server refuses what its engine cannot.
+
+Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has a ten-minute wall-clock ceiling.
+
+## Failure handling
+
+| event | what happens |
+|---|---|
+| node fails mid-stream | delivered tokens become context; the session is re-placed on the next capable node, which generates the rest. No token is delivered twice |
+| node unreachable | skipped; the head tries it again every 10 s and uses it once it answers |
+| node restarts | comes back with an empty cache, or with the prefixes it kept under `--park`; the head reconnects, and a conversation's next turn goes back to it |
+| connection idle or busy | each end sends a heartbeat when it has sent nothing for 5 s, during a generation too; a connection a node closed anyway is replaced before it is used |
+| node goes silent | after 30 s with nothing from it, the head gives the connection up and re-places what ran there, as for a node that failed |
+| head restarts | in-flight requests fail; a client that retries with its `Idempotency-Key` gets a finished answer replayed, and one the restart cut short runs again ([Retrying with Idempotency-Key](/openai-server#retrying-with-idempotency-key)). The head still knows which node ran each conversation, so the next turn goes where it is warm |
+| head misses a lease renewal | the node fences the session and emits nothing more; the head stops waiting 30 s past the generation's wall-clock budget |
+
+## Durable sessions
+
+The head keeps every conversation; a node keeps only what makes the next turn fast, its cache of prompt prefixes. Two things make that survive a restart:
+
+- The head remembers which node ran each prompt prefix and sends a conversation's next turn there (see [Placement policies](#placement-policies)), across a head restart too.
+- A node started with `--park` writes each prompt's prefix of 1024 tokens or more to disk under `$SUPERFLUID_HOME/fleet/nodes/<identity>/park`, up to 20 GB, the oldest swept first. After the node restarts, a turn whose prompt one covers starts from it instead of prefilling the whole conversation again. Writing a new prefix copies its cache at the end of that generation, which delays that response's finish and holds up the lanes beside it, so it is off by default; a prefix that one kept already mostly covers is not written again. Prompts with images or audio, and models whose cache holds more than one kind of state (hybrid or sliding-window attention), are not kept.
+
+It pays off where prefilling is slower than reading the prefix back. With Qwen3 4B (baseRT, 4-bit) and a 9.3k-token conversation:
+
+| node | cold first token | warm in the node's cache | after a node restart, with `--park` |
+|---|---|---|---|
+| Apple M4 Pro | 19.1 s | 0.39 s | 1.6 s |
+| NVIDIA GB10 | 1.6 s | 0.2 s | 4.6 s |
+
+On the GB10 the restart is faster without `--park`.
+
+A request a head restart cut short runs again when the client retries it with its `Idempotency-Key`; it is not continued from where it stopped.
+
+## Limits
+
+- No KV transfer between nodes: a failover re-prefills.
+- No QoS class crosses the wire.
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Distributed serving · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/latest/favicon.png"}],["$","$L12","11",{}]]

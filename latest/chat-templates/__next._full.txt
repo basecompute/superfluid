@@ -1,0 +1,96 @@
+1:"$Sreact.fragment"
+2:I[39756,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js"],"DocsShell"]
+6:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/latest/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","chat-templates",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","chat-templates","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/latest/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/latest/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/latest/_next/static/chunks/29k-rx9rciff-.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/latest/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"CB1RfNn-dS07zIsjb9MSq"}
+f:[]
+9:"$Wf"
+10:I[73435,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js","/latest/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T1097,# Chat templates and reasoning
+
+Superfluid renders conversations with the model's own chat template and splits the output into text, reasoning and tool-call channels on the model's special tokens. The daemon tokenizes in its own process; workers only see token ids.
+
+## Where the template comes from
+
+| artifact | template |
+|---|---|
+| GGUF | `tokenizer.chat_template` metadata (and `tokenizer.chat_template.tool_use` for requests with tools) |
+| MLX / Hugging Face directory | `chat_template.jinja`, else `tokenizer_config.json`'s `chat_template`, else `chat_template.json` |
+| `.base` bundle | the bundle's `chat_template` |
+
+`GET /props` returns the loaded model's raw `chat_template`.
+
+## Dialects
+
+`--dialect` picks the codec that frames the conversation.
+
+| dialect | what it is |
+|---|---|
+| `auto` (default) | `chatml` if it fits the model, else `template`, else `raw` |
+| `chatml` | a curated ChatML codec, used only when the vocabulary has the ChatML markers and the model's own template frames turns the same way |
+| `template` | the model's own Jinja template, rendered by the daemon |
+| `atem` | the ATEM dialect, for vocabularies with ATEM markers |
+| `raw` | no chat scaffold; chat routes refuse (session API only) |
+
+The curated ChatML codec is preferred because it is append-stable: each turn is rendered once, so the prefix cache hits on every turn of an agent loop. Templates are checked at load: one that fails to render falls back to the next dialect; one that is not append-stable still serves correctly but gets no prefix-cache guarantee, and the log says so.
+
+The renderer is `minijinja` with the Hugging Face helpers templates expect (`raise_exception`, `strftime_now`, `tojson`). `strftime_now` returns the date the model was loaded, so renders stay stable within a run.
+
+## Thinking and reasoning effort
+
+```json
+{"chat_template_kwargs": {"enable_thinking": false, "reasoning_effort": "low"}}
+```
+
+| switch | accepted as |
+|---|---|
+| `enable_thinking` | `chat_template_kwargs.enable_thinking`, top-level `enable_thinking`, Ollama `think: true/false` |
+| `reasoning_effort` | `chat_template_kwargs.reasoning_effort`, top-level `reasoning_effort`, Ollama `think: "low"` etc. |
+
+`chat_template_kwargs` wins over the top-level forms. The template decides what each switch means; a value the template rejects is a 400.
+
+`/v1/models` reports what each model supports under `capabilities.dialect`:
+
+| field | meaning |
+|---|---|
+| `enable_thinking` | the template's output changes with `enable_thinking` |
+| `reasoning_effort` | the template reads `reasoning_effort` |
+| `reasoning_effort_levels` | the levels it distinguishes |
+
+A requested effort that is not one of the template's levels moves to the nearest one on the scale `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, ties going up.
+
+Reasoning is returned as `reasoning_content` (OpenAI), `thinking` blocks (Anthropic) or `thinking` (Ollama). Send it back on assistant turns as `reasoning_content` or `reasoning`.
+
+## Channels
+
+- `<think>` … `</think>`: reasoning (Qwen3.x, Nemotron, GLM)
+- `<|channel>thought` … `<channel|>`: reasoning (Gemma 4)
+- `<tool_call>` … `</tool_call>`: tool call (Qwen, Nemotron, GLM)
+- `<|tool_call>` … `<tool_call|>`: tool call (Gemma 4)
+- Harmony headers (`<|channel|>` … `<|message|>` … `<|end|>`): channel chosen per header (gpt-oss)
+
+A channel is wired only when the model has that marker pair; otherwise its content stays plain text.
+
+## Stop conditions
+
+- Generation ends on any token in the model's stop set (for ChatML, `<|im_end|>` and `<|endoftext|>`), plus dialect terminators (Harmony's `<|return|>` and `<|call|>`, Gemma 4's `<|tool_response>`).
+- `stop` strings end generation at, and exclude, the first match. Streams hold back a tail that could still become a stop string.
+- `ignore_eos: true` disables all of this and decodes to `max_tokens`.
+
+## Marker text in client content
+
+Marker-shaped text inside client content (`<|im_end|>`, `<think>`, `<tool_call>`) is encoded as ordinary text, so a document that quotes a marker cannot forge a turn boundary. Assistant history is replayed verbatim.
+
+In fleet mode only the head renders; nodes run raw. See [Distributed serving](/distributed-serving).
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Chat templates & reasoning · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/latest/favicon.png"}],["$","$L12","11",{}]]

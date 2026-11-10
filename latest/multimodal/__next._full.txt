@@ -1,0 +1,109 @@
+1:"$Sreact.fragment"
+2:I[39756,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js"],"DocsShell"]
+6:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/latest/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","multimodal",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","multimodal","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/latest/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/latest/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/latest/_next/static/chunks/29k-rx9rciff-.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/latest/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"CB1RfNn-dS07zIsjb9MSq"}
+f:[]
+9:"$Wf"
+10:I[73435,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js","/latest/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:Teae,# Vision and audio
+
+Images and audio can be passed as parts of a chat request, and audio files can be transcribed with a Whisper model. Media support comes from the runtime and the model: only `basert` bundles with a vision or audio tower take media today.
+
+| capability | `basert` | `llamacpp`, `mlx` |
+|---|---|---|
+| images in chat (`modalities.image_encode`) | bundles with a vision tower | no |
+| audio in chat (`modalities.gemma_audio_encode`) | bundles with Gemma's Conformer audio tower | no |
+| speech to text (`modalities.whisper_*`) | Whisper bundles | no |
+
+`/v1/models` lists what a model takes in `architecture.input_modalities`. A part the model cannot take is refused before anything is stored:
+
+```json
+{"error": {"message": "model 'Qwen3-4B' on runtime llamacpp does not accept images: the llamacpp runtime has no media path",
+           "type": "invalid_request_error", "param": "messages[1].content", "code": "unsupported_input"}}
+```
+
+## Images in chat
+
+```sh
+IMG=$(base64 < tests/fixtures/images/gradient-64.png | tr -d '\n')
+cat > req.json <<EOF
+{"model": "gemma-4-E2B-it-vl", "max_tokens": 64,
+ "messages": [{"role": "user", "content": [
+   {"type": "text", "text": "Describe this image."},
+   {"type": "image_url", "image_url": {"url": "data:image/png;base64,$IMG"}}]}]}
+EOF
+curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/json' -d @req.json
+```
+
+| API | form |
+|---|---|
+| OpenAI | `{"type": "image_url", "image_url": {"url": "data:image/...;base64,..."}}` |
+| Anthropic | `{"type": "image", "source": {"type": "base64", "data": "..."}}` |
+| Ollama | `"images": ["<base64>", ...]` on the message |
+| session API | `PutMedia` then `AppendImage`; or `superfluid media put <file>` |
+
+> [!NOTE]
+> Only inline base64 is accepted. Remote URLs are never fetched (400), and the server never reads a local path.
+
+Several images in one message keep their order and the text around each.
+
+## Audio in chat
+
+```json
+{"type": "input_audio", "input_audio": {"data": "<base64>", "format": "wav"}}
+```
+
+OpenAI route only. WAV only (16-bit PCM or float32); anything else is a 400.
+
+## Speech to text
+
+```sh
+curl http://127.0.0.1:8453/v1/audio/transcriptions \
+  -F model=whisper-large-v3 -F file=@tests/fixtures/audio/jfk.wav -F response_format=srt
+```
+
+`POST /v1/audio/transcriptions` and `/v1/audio/translations` take a multipart form:
+
+| part | default | notes |
+|---|---|---|
+| `file` | required | WAV |
+| `model` | required | a Whisper model |
+| `language` | transcribe: `en`; translate: detect | `""` or `auto` detects |
+| `prompt` | none | last 8 KiB kept |
+| `response_format` | `json` | `json`, `text`, `verbose_json`, `srt`, `vtt` |
+| `timestamp_granularities[]` | | any value upgrades `json`/`text` to `verbose_json`; segment timestamps only |
+| `task` | `transcribe` | `translate` on `/transcriptions` translates to English |
+| `stream` | `false` | SSE `transcript.text.delta` events, then `transcript.text.done` |
+| `temperature` | | accepted and ignored |
+
+## Caching and limits
+
+- Requests with media never seed from or publish to the prefix cache, so `cached_tokens` is 0 and Anthropic `cache_control` pins nothing. `--park` keeps a media session warm for resume through the session API.
+- On hybrid (recurrent-state) bundles a media lane runs alone and is never preempted.
+
+| limit | value |
+|---|---|
+| request body | 100 MiB (base64 adds about a third) |
+| placeholder tokens per image | 1 to 4096 |
+| context window | placeholder tokens count toward the prompt |
+
+## Media pool
+
+Media bytes are stored once, by SHA-256, under `<sessions>/media/`, durably before any session references them. Blobs are not reference-counted; reclaim space with:
+
+```sh
+superfluid media gc      # kept N, removed M
+```
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Vision & audio · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/latest/favicon.png"}],["$","$L12","11",{}]]

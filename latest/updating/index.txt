@@ -1,0 +1,77 @@
+1:"$Sreact.fragment"
+2:I[39756,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js"],"DocsShell"]
+6:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/latest/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","updating",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","updating","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/latest/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/latest/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/latest/_next/static/chunks/29k-rx9rciff-.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/latest/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"CB1RfNn-dS07zIsjb9MSq"}
+f:[]
+9:"$Wf"
+10:I[73435,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js","/latest/_next/static/chunks/29k-rx9rciff-.js","/latest/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T1a3e,# Updating Superfluid
+
+Superfluid updates itself with `superfluid self update`, and `superfluid serve` says once a day when a newer release is out. Releases are kept side by side, so an update never overwrites the copy that is running and the version it replaced stays for going back.
+
+```sh
+superfluid self check            # is a newer release out?
+superfluid self update           # install the newest release that fits this machine
+superfluid self update --dry-run # say what it would do
+superfluid self list             # the versions here, which is current, which was replaced
+superfluid self use 0.1.3        # go back to a version that is still here
+```
+
+## Where releases live
+
+The install script unpacks a release under `$SUPERFLUID_HOME/versions/<version>/` (`~/.superfluid/versions`) and links `superfluid`, `superfluid-workerd` and `superfluid-noded` in `$SUPERFLUID_PREFIX/bin` (`~/.local/bin`) to it through a `current` link:
+
+```text
+~/.local/bin/superfluid            -> ~/.superfluid/versions/current/bin/superfluid
+~/.local/bin/superfluid-0.1.3      -> ~/.superfluid/versions/0.1.3/bin/superfluid
+~/.superfluid/versions/current     -> 0.1.4
+~/.superfluid/versions/0.1.4/      bin/ libexec/superfluid/ compat.json
+~/.superfluid/versions/0.1.3/
+```
+
+The install script places the release it downloaded with that release's own `superfluid self install`, which proves it the way an update does; a release that is refused stops the script, and nothing is copied in its place. Only a release from before `self install` existed is copied into `~/.local/bin` the old way.
+
+Each version finds its workers beside its own real executable, so a server started from 0.1.3 keeps spawning 0.1.3's workers after 0.1.4 became current. The `superfluid-<version>` names run a specific copy.
+
+## What an update does
+
+1. Reads the release listing and picks the newest release for this platform. With a baseRT engine here (an installed `basert` runtime, or `BASERT_LIB`), the release must declare the engine's ABI number, which releases carry in an asset name; with llama.cpp or MLX only, the newest release fits. `--version <v>` names one instead.
+2. Downloads the tarball and its `.sha256` into a staging directory and checks the digest, then unpacks with the same rules as a runtime install (no member may land outside the tree).
+3. Runs the new copy's `--version` and `runtimes --json`: it must start, find its workers, and, when an engine is in use, report the `basert` runtime ready. A copy that fails is removed and the current version is untouched.
+4. Makes it current by replacing the `current` link in one step, and remembers the version it replaced.
+5. Removes older versions. Kept: current, the one it replaced, any version with a `keep` file inside its directory, and any version a running Superfluid process started from. A version that cannot be removed is said and left for the next update; the update itself has succeeded.
+
+A running server keeps the version it started with; its next start uses the new one. A server started by `superfluid launch` is stopped with `superfluid stop`. One update, install or switch runs at a time: a second waits for the first and then decides on what it left. An installed version is never written to: a release placed again over a working copy is kept as it is, and only a copy that is proved first replaces one that no longer works.
+
+After an update, the runtime installs under `$SUPERFLUID_HOME/runtimes` still carry the worker copied in when they were installed. A newer daemon that does not speak that worker's protocol says so in `superfluid runtimes`, and `superfluid runtime repair <id>` installs the runtime again with the new worker.
+
+## The daily check
+
+After the server is up, `superfluid serve` reads the release listing at most once a day, with a five-second limit, and prints one line when a release newer than the running one fits here. A server that stays up looks again every hour, so it learns of a release published later, or one past its hold-off, when the day is up:
+
+```text
+superfluid 0.1.4 is available (this is 0.1.3): `superfluid self update` installs it; SUPERFLUID_NO_UPDATE_CHECK=1 silences this
+```
+
+A release is announced a few days after it is published, so early reports land first; `self update` installs it as soon as it is out. The check is skipped with `--offline` or `SUPERFLUID_NO_UPDATE_CHECK=1`, and it never delays serving. What it learned is in `$SUPERFLUID_HOME/update-check.json` and in `superfluid self list`.
+
+## Other ways Superfluid was installed
+
+`self update` only touches a Superfluid under `versions/`. A copy the install script placed before versions existed (real files in `~/.local/bin`) is kept under `versions/` as the version it is by its first `self update`, so `self use` can go back to it, and the files in `~/.local/bin` become links; its workers in `~/.local/libexec/superfluid` stay while a server still runs from that copy. A Superfluid from Homebrew or npm carries an `installed-by` file naming its package manager, and `self update` leaves the copy to that manager: for Homebrew, a global npm, pipx, uv and `cargo install` it runs the manager's own update (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`, `pipx upgrade superfluid-cli`, `uv tool upgrade superfluid-cli`, `cargo install superfluid`), asking first; `--yes` runs it without asking and is needed without a terminal. The command is built from the manager's name, with the manager's binary found from the copy's own path (the `brew` of its Cellar, the `npm` of its global folder, told that folder's prefix); the file's own text is only shown. A pinned formula, another user's Homebrew, an npm folder that needs root, a project's npm dependency and pip in an environment (a lock file or the system may own it) are named, not run, and nothing runs while a server runs from the copy, checked again once the question is answered. `--version` is the manager's to choose. The daily check's line names the same command. A source build is updated the way it was built.
+
+The Superfluid basert installs for `basert serve` is basert's (an `installed-by` file says `basert`, or basert's `.release` stamp for a copy it placed before writing one): `self update` hands over to `basert superfluid install` (the process becomes basert, which refuses while anything runs from the copy), which installs the newest release that serves basert's engine, rather than moving the copy under `~/.superfluid` and checking it against an engine that is not basert's; `--version` is refused, as basert picks the release.
+
+`SUPERFLUID_RELEASES` names another release listing, a URL or a file in GitHub's releases JSON shape, for a mirror.
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/latest/_next/static/chunks/05-c3ty_6dwfk.js","/latest/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Updating Superfluid · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/latest/favicon.png"}],["$","$L12","11",{}]]

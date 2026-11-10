@@ -1,0 +1,105 @@
+1:"$Sreact.fragment"
+2:I[73435,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js","/0.1/_next/static/chunks/1d6eslt_s7c1c.js","/0.1/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+6:I[97367,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+3:T1eb2,# Supported models
+
+Superfluid serves whatever its runtimes read: GGUF files through llama.cpp, MLX model directories through MLX, and `.base` bundles through the baseRT engine. A model is given as a local path or as a Hugging Face-style id that the runtime pulls.
+
+## Formats and runtimes
+
+| runtime | format | recognized by | tokenizer |
+|---|---|---|---|
+| `llamacpp` | GGUF | `*.gguf`, or a file starting with `GGUF` | the GGUF vocabulary, via the adapter's library |
+| `mlx` | MLX directory (Apple silicon) | a directory with `config.json` and `*.safetensors` | the directory's `tokenizer.json` |
+| `basert` | `.base` bundle | `*.base`, or a file starting with `BASE` | the engine's own |
+
+What each runtime supports beyond plain generation:
+
+| feature | `basert` | `llamacpp` | `mlx` |
+|---|---|---|---|
+| continuous batching, prefix cache | yes | yes | yes |
+| tool calling, structured outputs | yes | yes | yes |
+| `logit_bias`, penalties, logprobs (up to 20) | yes | yes | yes |
+| park and resume (`--park`) | yes | yes (lossless) | yes (lossless) |
+| lossy park (`--park-lossy`) | per bundle | no | no |
+| `--kv-bits` | yes | no | no |
+| speculative decoding | per bundle | no | no |
+| images and audio in chat | per bundle | no | no |
+| embeddings, speech to text, LoRA | per bundle | no | no |
+| `--max-context auto` | yes | on Metal, and on CUDA with a dedicated GPU; else 8192 | yes |
+
+"Per bundle" means the bundle's capability record decides once it is loaded. Anything a model cannot do is refused per request with a 400 naming the reason. See [Runtimes](/runtimes#capability-records).
+
+## Paths and ids
+
+```sh
+superfluid serve ./Qwen3-4B-Q4_K_M.gguf                  # a path; format picks the runtime
+superfluid serve ~/models/Qwen3-4B-4bit                   # an MLX directory
+superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M           # an id, pulled by llama.cpp
+superfluid serve mlx-community/Qwen3-4B-4bit              # an id, pulled by MLX
+superfluid serve basecompute/Qwen3-1.7B                   # an id, pulled by basert
+```
+
+A token is an **id** when nothing exists on disk by that name, it does not start with `.`, `/` or `~`, it does not end in `.base` or `.gguf`, and the part before an optional `:tag` contains a `/`. Anything else is a path, so a missing file is reported as missing rather than looked up on a hub.
+
+| form | served under |
+|---|---|
+| a file path | its stem (`./model.gguf` → `model`) |
+| a directory | the directory name |
+| a `.base` bundle in the hub cache (with `hub.json` beside it) | the id `hub.json` records |
+| `org/model[:tag]` | `org/model` (the tag is dropped) |
+
+Runtime inference for ids: a repo name containing `gguf` (any case) goes to `llamacpp`; `mlx-community/...` or a repo name containing `mlx` goes to `mlx`; anything else to `basert`. `--runtime` overrides it.
+
+## Pulling models by id
+
+Pulling happens during `superfluid serve`; there is no separate `pull` command.
+
+| runtime | tool | `:tag` means | `--pull-<name>` options | cache |
+|---|---|---|---|---|
+| `llamacpp` | `llama download -hf` | the quant (`Q4_K_M`), or a size (`medium`) of a release in sizes | `--pull-file <name>`, `--pull-no-mmproj` | Hugging Face cache |
+| `mlx` | `huggingface_hub.snapshot_download` | a revision | `--pull-revision <rev>` | Hugging Face cache (no `*.py` files are fetched) |
+| `basert` | `basert pull`, then `basert list --json` for the path | a variant, or a size | `--pull-target <scheme>`, `--pull-profile <json>`, `--pull-revision <rev>`, `--pull-file <name.base>` (one of several in a repo; served from the install `basert list` records it in), `--pull-force` | the baseRT models cache (`BASERT_MODELS_DIR`) |
+
+- `--offline` only looks in the cache and fetches nothing.
+- A pull shows its progress on stderr: the percentage, the bytes fetched of the total, the rate and the time left, redrawn on a terminal and printed every ten seconds where there is none, then one line with the size, time and rate it took. Superfluid reads this from what the runtime's tool writes into its cache, so it is the same for every runtime; the total is the file's size from the Hub's listing (the GGUF `llama download` picks, with its shards and projector; the files `snapshot_download` takes; a catalog model's size from `basert list --remote`), and a pull whose total could not be looked up (or under `HF_HUB_OFFLINE`, which keeps the lookup off the Hub) shows the bytes, rate and time elapsed. A pull that resumes a partial starts the bar where it left off and reports the rest as what it fetched. Once every byte is here and the tool is still verifying, converting or copying, the bar says so.
+- A **release in sizes** is a repository whose model files are named by size, the BaseQuant repositories' `-XS`, `-Small`, `-Medium`, `-Large` and `-XL`, and none by quant. With nothing naming a file, both runtimes pull its Medium: `superfluid serve basecompute/Qwen3.8-27B-BaseQuant-V1 --runtime basert` and `--runtime llamacpp` serve `Qwen3.8-27B-BaseQuant-V1-Medium.base` and `.gguf`. A size tag takes another (`basecompute/Qwen3.8-27B-BaseQuant-V1:small`), `--pull-file <name>` a file; a size the release does not come in names the ones it does, and a release of one file gives that file. The llamacpp runtime reads the repository's listing from the Hub for this (llama.cpp's own pick, with no file named, is some file of the repository, not the Medium, and it refuses a size tag as not a quantization); a listing that fails leaves a plain pull to llama.cpp with a warning, and `--offline` lists nothing, so there a size spells its file as the releases name them (`<repo>-Small.gguf`) and no tag is left to llama.cpp's cache. The basert runtime's `basert pull` reads these releases by the same rule from basert 0.4.5; a size with basert 0.4.2–0.4.4 is passed as `--file <repo>-<Size>.base`, and each file installs under a `file-…` variant that records it, which a size tag is served from.
+- A baseRT variant is named as `basert list` names it (`default-q8`, `file-…`). One that is installed is served without a pull (unless `--pull-force`); one that is not is pulled as named with basert 0.4.2 or later (`basert pull org/model:<variant>`, without `--pull-file`, `--pull-profile` or `--pull-target`, which would name it twice), and with an older basert by the id alone, which fetches the quant its options pick.
+- An undeclared `--pull-*` option, or `--pull-*` with no model given by id, is refused before anything is fetched.
+- A gated or private model needs `HF_TOKEN`.
+- One pull of an id runs at a time across daemons.
+
+## Published sampling defaults
+
+When a request names no sampling parameter, the model author's published defaults apply (after any operator `--temperature` etc.):
+
+| runtime | source |
+|---|---|
+| `llamacpp` | GGUF `general.sampling.*` metadata (older conversions carry none) |
+| `mlx` | `generation_config.json` |
+| `basert` | the bundle header |
+
+They appear in `superfluid runtimes <model>`, `/v1/models` and `/props`. See [Sampling](/sampling).
+
+## Context and batch sizing
+
+| flag | default | meaning |
+|---|---|---|
+| `--max-context <N>` | auto | per-lane window, sized for the device: `basert` before loading, `llamacpp` on Metal or a dedicated CUDA GPU, `mlx` on Metal; elsewhere 8192 |
+| `--max-batch <N>` | 8 | concurrent lanes |
+| `--kv-bits <N>` | 0 (auto) | KV type on `basert` only |
+
+On llama.cpp and MLX the KV pool is `--max-batch` × `--max-context` cells, capped by the memory the weights leave free; the cap is printed at load. A prompt that does not fit the window is refused with `context_length_exceeded`.
+
+## Checking a model
+
+```sh
+superfluid runtimes ./Qwen3-4B-Q4_K_M.gguf
+```
+
+Prints which runtime reads it, the model's architecture and sampling defaults, and what that runtime serves and refuses. Exits 1 when no installed runtime serves it.
+0:{"rsc":["$","$1","c",{"children":[["$","$L2",null,{"children":"$3"}],["$L4"],"$L5"]}],"isPartial":false,"staleTime":300,"varyParams":null,"buildId":"jKxLJBa8SfMqoG_1ne5jO"}
+4:["$","script","script-0",{"src":"/0.1/_next/static/chunks/242k9ex4exzbn.js","async":true}]
+5:["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]
+8:null

@@ -1,0 +1,85 @@
+1:"$Sreact.fragment"
+2:I[39756,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"default"]
+3:I[37457,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"default"]
+4:I[24025,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js","/0.1/_next/static/chunks/1d6eslt_s7c1c.js"],"DocsShell"]
+6:I[97367,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
+7:"$Sreact.suspense"
+a:I[97367,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"ViewportBoundary"]
+c:I[97367,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"MetadataBoundary"]
+e:I[68027,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"default",1]
+:HL["/0.1/_next/static/chunks/39c77n-__1_77.css","style"]
+:HC["/",""]
+0:{"P":null,"c":["","hosts",""],"q":"","i":false,"f":[[["",{"children":["(docs)",{"children":[["slug","hosts","d",null],{"children":["__PAGE__",{}]}]}]},"$undefined","$undefined",16],[["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/0.1/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/0.1/_next/static/chunks/05-c3ty_6dwfk.js","async":true,"nonce":"$undefined"}],["$","script","script-1",{"src":"/0.1/_next/static/chunks/2im7c515bo69p.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],{"children":[["$","$1","c",{"children":[[["$","script","script-0",{"src":"/0.1/_next/static/chunks/1d6eslt_s7c1c.js","async":true,"nonce":"$undefined"}]],["$","$L4",null,{"children":["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:f:0:1:0:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],{"children":[["$","$1","c",{"children":[null,["$","$L2",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L3",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":[["$","$1","c",{"children":["$L5",[["$","script","script-0",{"src":"/0.1/_next/static/chunks/242k9ex4exzbn.js","async":true,"nonce":"$undefined"}]],["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]]}],{},null,false,null]},null,false,"$@9"]},null,false,null]},null,false,null],["$","$1","h",{"children":[null,["$","$La",null,{"children":"$Lb"}],["$","div",null,{"hidden":true,"children":["$","$Lc",null,{"children":["$","$7",null,{"name":"Next.Metadata","children":"$Ld"}]}]}],null]}],false]],"m":"$undefined","G":["$e",[["$","link","0",{"rel":"stylesheet","href":"/0.1/_next/static/chunks/39c77n-__1_77.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"h":null,"s":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"jKxLJBa8SfMqoG_1ne5jO"}
+f:[]
+9:"$Wf"
+10:I[73435,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js","/0.1/_next/static/chunks/1d6eslt_s7c1c.js","/0.1/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
+11:T1496,# Hosting Superfluid in another product
+
+A product can run Superfluid as its server: start `superfluid serve` with its own engine and models, and keep its own command line in front. baseRT's `basert serve` does this. This page is the contract such a host builds on; the flags, fields, variables and exit codes named here are kept across releases, and a change to them is announced in the changelog.
+
+## Starting it
+
+- Exec the binary by its real path. Superfluid finds `superfluid-workerd` and the adapters it ships beside its own executable, and resolves a symlink to get there, so a link or a shim script on `PATH` works too.
+- Name the runtime: `--runtime basert` (or `native`) for `.base` bundles. A model of another format is refused.
+- Hand over the engine: `--basert-lib <dir or file>` or `BASERT_LIB` names the libbaseRT to load. Without either, Superfluid looks beside its worker, in `../lib`, and in its own runtime installs. On CUDA the engine also needs its kernel sidecar, which it finds beside the executable or at `BASERT_KERNEL_LIB`; a host that keeps the sidecar beside its own binaries sets that variable.
+- Pass `--offline` so Superfluid installs no runtime and pulls no model by itself; the host resolves model ids.
+- Give each server its own `--sessions <dir>`: one server per directory, with a lock. Two servers that share the default collide.
+- `SUPERFLUID_HOME` is where Superfluid keeps its own installs and socket; a host that wants nothing under `~/.superfluid` sets it.
+
+## Checking compatibility before serving
+
+The engine library and Superfluid must agree on the engine's C ABI. Since baseRT 0.4.0 the library states an ABI number (`baseRT_abi_version()`, the header's `BASERT_ABI_VERSION`), and Superfluid is built against a header with the same macro. The rule Superfluid applies when it opens the library:
+
+- Both sides state a number: they must be equal. The version numbers do not matter.
+- The library states none, which only 0.3.x and older do: it serves if it is 0.3.x, the line that carried ABI 1 before the number existed. (A Superfluid built against a header without the macro judges by major.minor, as before.)
+- In every case the library must export every function Superfluid calls. A library of 0.4.0 or later is asked for its model configuration by size (`baseRT_get_config_into`), so the struct may grow between them; an older one is read by value and must lay the struct out as Superfluid expects.
+
+A host asks Superfluid for its verdict rather than working it out, with the same library it will serve with:
+
+```sh
+BASERT_LIB=/path/to/engine superfluid runtimes --json
+```
+
+The `basert` row answers:
+
+```json
+{
+  "id": "basert",
+  "state": "ready",
+  "ready": true,
+  "version": "0.4.0 (/path/to/engine/libbaseRT.dylib)",
+  "abi": 1,
+  "requires": {"basert_version": "0.4.0", "basert_abi": 1, "basert_unnumbered_minor": "0.3"}
+}
+```
+
+`ready` is `true`, or the reason the library cannot be used, in Superfluid's own words. `abi` is the number the loaded library states, absent for a library that states none. `requires` is what this Superfluid was built for, present whether or not a library was found, so a host can compare numbers itself; `basert_unnumbered_minor` is the line accepted without a number.
+
+## Choosing a release
+
+Each release carries `compat.json` beside its tarball (and inside it), the same data as `superfluid compat --json`:
+
+```json
+{
+  "superfluid": "0.1.3",
+  "runtimes": {
+    "basert": {"basert_version": "0.4.0", "abi": 1, "unnumbered_minor": "0.3",
+               "pinned_engines": [{"version": "0.3.0", "abi": null}]},
+    "llamacpp": {"tested": ["b11284"]},
+    "mlx": {"tested": ["0.32.2"], "python": "3.12"}
+  }
+}
+```
+
+Every adapter the release ships answers for its runtime: for llama.cpp and MLX, `tested` is the upstream versions the adapter was built and tested against, which `superfluid runtime install` installs on its own (another version only with `--untested`). For baseRT the same list is `pinned_engines`, each engine with the ABI number it states (`null` for a 0.3.x engine, from before the number existed): only the engines this build drives, so an engine pinned for `--untested` is not among them.
+
+A host that installs Superfluid picks the newest release whose `runtimes.basert.abi` equals its engine's number (each release also carries that number in an asset name, `superfluid-basert-abi-<N>.txt`, so the listing alone says it); a Superfluid release that states no number (0.1.2 and older) serves 0.3.x engines only. The verdict above remains the final word once the release is installed. The other direction works the same way: baseRT's releases carry the engine's number beside each bundle, as `basert-engine-abi-<N>.txt`, and `superfluid runtime install basert` picks the newest engine with this build's number, or a 0.3.x engine, from the release listing alone.
+
+## Exit codes
+
+`superfluid serve` exits with 4 when the runtime for the model is not installed or cannot run here, which includes an engine library that is missing or of another ABI. A host can tell that from 2, a flag it got wrong, and from 1, a failure along the way: an install Superfluid tried that failed, or anything after the start. The full list is in the [command-line reference](/cli#exit-codes).
+5:["$","$L10",null,{"children":"$11"}]
+b:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+12:I[27201,["/0.1/_next/static/chunks/05-c3ty_6dwfk.js","/0.1/_next/static/chunks/2im7c515bo69p.js"],"IconMark"]
+8:null
+d:[["$","title","0",{"children":"Hosting in another product · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/0.1/favicon.png"}],["$","$L12","11",{}]]
