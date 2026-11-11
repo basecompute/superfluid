@@ -25,7 +25,8 @@ use ratatui::widgets::{
     Axis, Block, BorderType, Borders, Chart, Dataset, Gauge, GraphType, Paragraph,
 };
 use ratatui::{Frame, Terminal};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::scheduler::SchedStats;
 use crate::telemetry::{push_ring_line, LogLines, LogRing};
@@ -723,7 +724,11 @@ fn log_window(log: &LogLines, width: usize, height: usize, view: &mut LogView) -
         .collect()
 }
 
-/// `line` cut into rows at most `width` columns wide, between characters.
+/// `line` cut into rows at most `width` columns wide, between grapheme
+/// clusters. Widths are taken per grapheme, the way ratatui measures what it
+/// draws: the pane renders these rows unwrapped, so a row ratatui finds too
+/// wide would lose its end. A lone grapheme wider than `width` gets a row to
+/// itself.
 fn wrap_line(line: &str, width: usize) -> WrapLine<'_> {
     WrapLine { rest: line, width: width.max(1) }
 }
@@ -739,13 +744,13 @@ impl<'a> Iterator for WrapLine<'a> {
         if self.rest.is_empty() {
             return None;
         }
-        // No character is wider than its UTF-8 encoding is long.
-        if self.rest.len() <= self.width {
+        // An ASCII character is at most one column.
+        if self.rest.is_ascii() && self.rest.len() <= self.width {
             return Some(std::mem::take(&mut self.rest));
         }
         let (mut cols, mut cut) = (0, self.rest.len());
-        for (i, c) in self.rest.char_indices() {
-            let w = c.width().unwrap_or(0);
+        for (i, g) in self.rest.grapheme_indices(true) {
+            let w = g.width();
             if w > 0 && cols > 0 && cols + w > self.width {
                 cut = i;
                 break;
@@ -865,6 +870,39 @@ mod log_pane_tests {
         assert_eq!(rows("abcde\u{301}f", 5), ["abcde\u{301}", "f"], "a combining mark stays on its letter");
         assert_eq!(rows("ab", 0), ["a", "b"]);
         assert!(rows("", 4).is_empty());
+        // U+2764 is one column alone; with VS16 ratatui draws it as two.
+        assert_eq!(rows("❤️abc", 4), ["❤️ab", "c"], "a variation selector widens its emoji");
+        assert_eq!(rows("ab❤️", 3), ["ab", "❤️"]);
+        assert_eq!(rows("x👩‍💻", 2), ["x", "👩‍💻"], "a ZWJ sequence is one grapheme");
+    }
+
+    #[test]
+    fn wrapped_rows_fit_as_ratatui_measures_them() {
+        let samples = [
+            "plain ascii text that wraps",
+            "❤️abc❤️❤️ ✌️ ☺️ok",
+            "👩‍💻 then 👨‍👩‍👧 and 🏳️‍🌈 flags 🇦🇺🇳🇿",
+            "日本語のログ行 mixed with ascii",
+            "e\u{301}e\u{301} combining ā̂ marks",
+            "ﷺ wide arabic ligature ﷽",
+        ];
+        let measure = |row: &str| -> usize {
+            Line::raw(row).styled_graphemes(Style::new()).map(|g| g.symbol.width()).sum()
+        };
+        for s in samples {
+            for w in 1..=12 {
+                let rows: Vec<&str> = wrap_line(s, w).collect();
+                assert_eq!(rows.concat(), s, "{s:?} at {w}");
+                for (i, row) in rows.iter().enumerate() {
+                    let cols = measure(row);
+                    let lone = row.graphemes(true).count() == 1;
+                    assert!(cols <= w || lone, "{s:?} at {w}: row {row:?} is {cols} columns");
+                    if let Some(next) = rows.get(i + 1).and_then(|r| r.graphemes(true).next()) {
+                        assert!(cols + next.width() > w, "{s:?} at {w}: {next:?} fits after {row:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -954,6 +992,18 @@ mod log_pane_tests {
         assert_eq!(row(3), "│xxxxx               │");
         assert_eq!(buf[(1, 2)].fg, Color::Yellow);
         assert_eq!(buf[(1, 3)].fg, Color::Yellow, "a wrapped row keeps its line's colour");
+    }
+
+    #[test]
+    fn an_emoji_at_the_edge_does_not_cut_off_the_text_after_it() {
+        use ratatui::backend::TestBackend;
+        let ring = ring_of([format!("{}❤️Z", "x".repeat(18))]);
+        let mut term = Terminal::new(TestBackend::new(22, 5)).unwrap();
+        let mut view = LogView::default();
+        term.draw(|f| render_log(f, f.area(), &ring, &mut view)).unwrap();
+        let buf = term.backend().buffer();
+        assert_eq!(buf[(19, 1)].symbol(), "❤️");
+        assert_eq!(buf[(1, 2)].symbol(), "Z", "the Z wraps onto the next row");
     }
 }
 
