@@ -674,7 +674,8 @@ pub fn serve_blocking_config(
     })
 }
 
-async fn slots_retired() -> Response {
+async fn slots_retired(body: axum::body::Body) -> Response {
+    crate::http_state::drain_body(body).await;
     error_response_code(
         StatusCode::NOT_IMPLEMENTED,
         concat!(
