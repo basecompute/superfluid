@@ -22,12 +22,13 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::symbols::Marker;
 use ratatui::widgets::{
-    Axis, Block, BorderType, Borders, Chart, Dataset, Gauge, GraphType, Paragraph, Wrap,
+    Axis, Block, BorderType, Borders, Chart, Dataset, Gauge, GraphType, Paragraph,
 };
 use ratatui::{Frame, Terminal};
+use unicode_width::UnicodeWidthChar;
 
 use crate::scheduler::SchedStats;
-use crate::telemetry::{push_ring_line, LogRing};
+use crate::telemetry::{push_ring_line, LogLines, LogRing};
 use crate::Daemon;
 
 static SAVED_STDERR: AtomicI32 = AtomicI32::new(-1);
@@ -110,11 +111,7 @@ pub fn capture_stderr(ring: LogRing) -> io::Result<StderrCapture> {
                         if mirror_always || !TUI_ACTIVE.load(Ordering::SeqCst) {
                             let _ = mirror.write_all(piece);
                         }
-                        let line = String::from_utf8_lossy(piece);
-                        let line = line.trim_end();
-                        if !line.is_empty() {
-                            push_ring_line(&ring, line.to_string());
-                        }
+                        push_ring_line(&ring, &String::from_utf8_lossy(piece));
                     }
                     if let Some(seq) = seen {
                         DRAIN_SEEN.fetch_max(seq, Ordering::SeqCst);
@@ -255,36 +252,41 @@ fn event_loop<B: ratatui::backend::Backend>(
     let mut last_work_ticks = stats.work_ticks.load(Ordering::Relaxed);
     let mut frame = 0usize;
     let mut paused = false;
-    let mut log_scroll: usize = 0;
+    let mut log = LogView::default();
 
-    loop {
+    'ui: loop {
         if event::poll(Duration::from_millis(125))? {
-            let ev = event::read()?;
-            if let Event::Mouse(m) = &ev {
-                match m.kind {
-                    MouseEventKind::ScrollUp => log_scroll = log_scroll.saturating_add(3),
-                    MouseEventKind::ScrollDown => log_scroll = log_scroll.saturating_sub(3),
+            // Take everything queued before redrawing, so a burst of wheel
+            // ticks or mouse moves costs one frame rather than one each.
+            loop {
+                match event::read()? {
+                    Event::Mouse(m) => match m.kind {
+                        MouseEventKind::ScrollUp => log.up(3),
+                        MouseEventKind::ScrollDown => log.down(3),
+                        _ => {}
+                    },
+                    Event::Key(k) if k.kind == KeyEventKind::Press => {
+                        if k.code == KeyCode::Char('c')
+                            && k.modifiers.contains(event::KeyModifiers::CONTROL)
+                        {
+                            break 'ui;
+                        }
+                        match k.code {
+                            KeyCode::Char('q') | KeyCode::Esc => break 'ui,
+                            KeyCode::Char('p') => paused = !paused,
+                            KeyCode::Up => log.up(1),
+                            KeyCode::Down => log.down(1),
+                            KeyCode::PageUp => log.up(log.page_step()),
+                            KeyCode::PageDown => log.down(log.page_step()),
+                            KeyCode::Home | KeyCode::Char('g') => log.top(),
+                            KeyCode::End | KeyCode::Char('G') => log.follow(),
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
-            }
-            if let Event::Key(k) = ev {
-                if k.kind == KeyEventKind::Press {
-                    if k.code == KeyCode::Char('c')
-                        && k.modifiers.contains(event::KeyModifiers::CONTROL)
-                    {
-                        break;
-                    }
-                    match k.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('p') => paused = !paused,
-                        KeyCode::Up => log_scroll = log_scroll.saturating_add(1),
-                        KeyCode::Down => log_scroll = log_scroll.saturating_sub(1),
-                        KeyCode::PageUp => log_scroll = log_scroll.saturating_add(10),
-                        KeyCode::PageDown => log_scroll = log_scroll.saturating_sub(10),
-                        KeyCode::Char('g') => log_scroll = usize::MAX / 2,
-                        KeyCode::End => log_scroll = 0,
-                        _ => {}
-                    }
+                if !event::poll(Duration::ZERO)? {
+                    break;
                 }
             }
         }
@@ -311,7 +313,7 @@ fn event_loop<B: ratatui::backend::Backend>(
         frame = frame.wrapping_add(1);
 
         term.draw(|f| {
-            draw(f, &node, &stats, start, &tput, &pref, &kvh, frame, paused, &ring, log_scroll)
+            draw(f, &node, &stats, start, &tput, &pref, &kvh, frame, paused, &ring, &mut log)
         })?;
     }
     Ok(())
@@ -336,7 +338,7 @@ fn draw(
     frame: usize,
     paused: bool,
     ring: &LogRing,
-    log_scroll: usize,
+    log: &mut LogView,
 ) {
     let g = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
     let rows = Layout::vertical([
@@ -478,11 +480,11 @@ fn draw(
         rows[3],
     );
 
-    render_log(f, rows[4], ring, log_scroll);
+    render_log(f, rows[4], ring, log);
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            " q quit · p pause · ↑↓/PgUp/PgDn/wheel scroll · End follow ",
+            " q quit · p pause · ↑↓/PgUp/PgDn/wheel scroll · Home top · End follow ",
             Style::new().dim(),
         )]))
         .alignment(Alignment::Center),
@@ -639,40 +641,133 @@ fn in_tick_line(s: &SchedStats, width: u16) -> Line<'static> {
     Line::from(Span::styled(format!("{prefix}{text}"), Style::new().fg(col).bold()))
 }
 
-fn render_log(f: &mut Frame, area: Rect, ring: &LogRing, scroll: usize) {
-    let lines: Vec<String> = ring.lock().map(|r| r.iter().cloned().collect()).unwrap_or_default();
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let total = lines.len();
-    let scroll = scroll.min(total.saturating_sub(inner_h.max(1)));
-    let end = total.saturating_sub(scroll);
-    let begin = end.saturating_sub(inner_h);
-    let view: Vec<Line> = lines[begin..end].iter().map(|l| color_log(l)).collect();
-    let title = if scroll == 0 {
-        "logs (following)".to_string()
-    } else {
-        format!("logs (−{scroll})")
-    };
-    f.render_widget(
-        Paragraph::new(Text::from(view)).block(bordered(&title)).wrap(Wrap { trim: false }),
-        area,
-    );
+/// Where the log pane sits: `scroll` screen rows up from the newest one, so
+/// 0 follows the tail. It counts rows rather than lines because long lines
+/// wrap, and it is clamped on every draw so scrolling past the top never
+/// builds up slack that Down would first have to work off.
+#[derive(Default)]
+struct LogView {
+    scroll: usize,
+    /// `LogLines::end` at the last draw. Rows that arrive while scrolled up
+    /// are added to `scroll`, so the text being read holds still.
+    seen_end: Option<u64>,
+    /// Rows the pane showed at the last draw.
+    page: usize,
 }
 
-fn color_log(l: &str) -> Line<'static> {
-    let (col, dim) = if l.contains("ERROR") {
-        (Color::Red, false)
-    } else if l.contains("WARN") {
-        (Color::Yellow, false)
-    } else if l.contains("DEBUG") || l.contains("TRACE") {
-        (Color::DarkGray, true)
-    } else {
-        (Color::Gray, false)
-    };
-    let mut st = Style::new().fg(col);
-    if dim {
-        st = st.add_modifier(Modifier::DIM);
+impl LogView {
+    fn up(&mut self, rows: usize) {
+        self.scroll = self.scroll.saturating_add(rows);
     }
-    Line::from(Span::styled(l.to_string(), st))
+    fn down(&mut self, rows: usize) {
+        self.scroll = self.scroll.saturating_sub(rows);
+    }
+    fn top(&mut self) {
+        self.scroll = usize::MAX;
+    }
+    fn follow(&mut self) {
+        self.scroll = 0;
+    }
+    /// A page less one row, so the row at the edge stays in view.
+    fn page_step(&self) -> usize {
+        self.page.saturating_sub(1).max(1)
+    }
+}
+
+fn render_log(f: &mut Frame, area: Rect, ring: &LogRing, view: &mut LogView) {
+    let (w, h) = (area.width.saturating_sub(2) as usize, area.height.saturating_sub(2) as usize);
+    let rows = {
+        let log = ring.lock().unwrap_or_else(|p| p.into_inner());
+        log_window(&log, w, h, view)
+    };
+    let title = if view.scroll == 0 {
+        "logs (following)".to_string()
+    } else {
+        format!("logs (−{})", view.scroll)
+    };
+    f.render_widget(Paragraph::new(Text::from(rows)).block(bordered(&title)), area);
+}
+
+/// The `height` rows of `log`, wrapped to `width` columns, that `view`
+/// points at, oldest first. Clamps `view.scroll` to the oldest row and
+/// shifts it by whatever arrived since the last call.
+fn log_window(log: &LogLines, width: usize, height: usize, view: &mut LogView) -> Vec<Line<'static>> {
+    let end = log.end();
+    if let Some(seen) = view.seen_end.filter(|_| view.scroll > 0) {
+        let fresh = end.saturating_sub(seen).min(log.len() as u64) as usize;
+        let rows: usize = log.iter().rev().take(fresh).map(|l| wrap_line(l, width).count()).sum();
+        view.scroll = view.scroll.saturating_add(rows);
+    }
+    view.seen_end = Some(end);
+    view.page = height;
+
+    // Walk back from the newest line until the rows below the window's top
+    // are covered; running out first means the window is at the top.
+    let want = view.scroll.saturating_add(height);
+    let (mut first, mut below) = (log.len(), 0usize);
+    while first > 0 && below < want {
+        first -= 1;
+        below += wrap_line(&log[first], width).count();
+    }
+    view.scroll = view.scroll.min(below.saturating_sub(height));
+
+    let bottom = below - view.scroll;
+    let top = bottom.saturating_sub(height);
+    log.range(first..)
+        .flat_map(|l| {
+            let style = log_style(l);
+            wrap_line(l, width).map(move |row| Line::styled(row.to_string(), style))
+        })
+        .take(bottom)
+        .skip(top)
+        .collect()
+}
+
+/// `line` cut into rows at most `width` columns wide, between characters.
+fn wrap_line(line: &str, width: usize) -> WrapLine<'_> {
+    WrapLine { rest: line, width: width.max(1) }
+}
+
+struct WrapLine<'a> {
+    rest: &'a str,
+    width: usize,
+}
+
+impl<'a> Iterator for WrapLine<'a> {
+    type Item = &'a str;
+    fn next(&mut self) -> Option<&'a str> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        // No character is wider than its UTF-8 encoding is long.
+        if self.rest.len() <= self.width {
+            return Some(std::mem::take(&mut self.rest));
+        }
+        let (mut cols, mut cut) = (0, self.rest.len());
+        for (i, c) in self.rest.char_indices() {
+            let w = c.width().unwrap_or(0);
+            if w > 0 && cols > 0 && cols + w > self.width {
+                cut = i;
+                break;
+            }
+            cols += w;
+        }
+        let (row, rest) = self.rest.split_at(cut);
+        self.rest = rest;
+        Some(row)
+    }
+}
+
+fn log_style(l: &str) -> Style {
+    if l.contains("ERROR") {
+        Style::new().fg(Color::Red)
+    } else if l.contains("WARN") {
+        Style::new().fg(Color::Yellow)
+    } else if l.contains("DEBUG") || l.contains("TRACE") {
+        Style::new().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+    } else {
+        Style::new().fg(Color::Gray)
+    }
 }
 
 fn bordered(title: &str) -> Block<'static> {
@@ -731,6 +826,134 @@ mod chart_tests {
             let (b, t) = level_band(lo, hi);
             assert!(b <= lo && t >= hi && t > b, "{lo}..{hi} -> {b}..{t}");
         }
+    }
+}
+
+#[cfg(test)]
+mod log_pane_tests {
+    use super::*;
+    use crate::telemetry::new_log_ring;
+
+    fn ring_of(lines: impl IntoIterator<Item = String>) -> LogRing {
+        let ring = new_log_ring();
+        for l in lines {
+            push_ring_line(&ring, &l);
+        }
+        ring
+    }
+
+    fn numbered(n: usize) -> LogRing {
+        ring_of((0..n).map(|i| format!("l{i}")))
+    }
+
+    fn shown(ring: &LogRing, width: usize, height: usize, view: &mut LogView) -> Vec<String> {
+        let log = ring.lock().unwrap();
+        log_window(&log, width, height, view)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn wrap_line_cuts_on_display_columns() {
+        fn rows(s: &str, w: usize) -> Vec<&str> {
+            wrap_line(s, w).collect()
+        }
+        assert_eq!(rows("abcdefghij", 4), ["abcd", "efgh", "ij"]);
+        assert_eq!(rows("abcd", 4), ["abcd"]);
+        assert_eq!(rows("日本語ab", 4), ["日本", "語ab"]);
+        assert_eq!(rows("abcde\u{301}f", 5), ["abcde\u{301}", "f"], "a combining mark stays on its letter");
+        assert_eq!(rows("ab", 0), ["a", "b"]);
+        assert!(rows("", 4).is_empty());
+    }
+
+    #[test]
+    fn following_shows_the_newest_rows_when_the_tail_wraps() {
+        let ring = ring_of(["l1", "l2", "l3", "0123456789abcdefghij"].map(String::from));
+        let mut view = LogView::default();
+        assert_eq!(shown(&ring, 10, 3, &mut view), ["l3", "0123456789", "abcdefghij"]);
+        view.up(1);
+        assert_eq!(shown(&ring, 10, 3, &mut view), ["l2", "l3", "0123456789"]);
+    }
+
+    #[test]
+    fn scrolling_past_the_top_leaves_no_slack() {
+        let ring = numbered(10);
+        let mut view = LogView::default();
+        view.up(100);
+        assert_eq!(shown(&ring, 10, 4, &mut view), ["l0", "l1", "l2", "l3"]);
+        assert_eq!(view.scroll, 6);
+        view.down(1);
+        assert_eq!(shown(&ring, 10, 4, &mut view), ["l1", "l2", "l3", "l4"]);
+
+        view.top();
+        assert_eq!(shown(&ring, 10, 4, &mut view), ["l0", "l1", "l2", "l3"]);
+        view.down(view.page_step());
+        assert_eq!(shown(&ring, 10, 4, &mut view), ["l3", "l4", "l5", "l6"]);
+        view.follow();
+        assert_eq!(shown(&ring, 10, 4, &mut view), ["l6", "l7", "l8", "l9"]);
+    }
+
+    #[test]
+    fn fewer_lines_than_rows_sit_at_the_top_and_cannot_scroll() {
+        let ring = numbered(2);
+        let mut view = LogView::default();
+        view.up(5);
+        assert_eq!(shown(&ring, 10, 4, &mut view), ["l0", "l1"]);
+        assert_eq!(view.scroll, 0);
+        assert!(shown(&new_log_ring(), 10, 4, &mut view).is_empty());
+    }
+
+    #[test]
+    fn new_lines_do_not_move_a_scrolled_up_view() {
+        let ring = numbered(10);
+        let mut view = LogView::default();
+        view.up(2);
+        assert_eq!(shown(&ring, 10, 3, &mut view), ["l5", "l6", "l7"]);
+        push_ring_line(&ring, "new\nwraps-onto-two");
+        assert_eq!(shown(&ring, 10, 3, &mut view), ["l5", "l6", "l7"]);
+        assert_eq!(view.scroll, 5);
+
+        let mut tail = LogView::default();
+        assert_eq!(shown(&ring, 10, 3, &mut tail), ["new", "wraps-onto", "-two"]);
+    }
+
+    #[test]
+    fn a_scrolled_up_view_holds_while_the_ring_evicts() {
+        let ring = numbered(2100);
+        let mut view = LogView::default();
+        view.up(5);
+        let before = shown(&ring, 20, 3, &mut view);
+        assert_eq!(before, ["l2092", "l2093", "l2094"]);
+        for i in 0..7 {
+            push_ring_line(&ring, &format!("n{i}"));
+        }
+        assert_eq!(shown(&ring, 20, 3, &mut view), before);
+    }
+
+    #[test]
+    fn keys_before_the_first_draw_do_not_count_the_backlog_as_new() {
+        let ring = numbered(10);
+        let mut view = LogView::default();
+        view.up(1);
+        assert_eq!(shown(&ring, 10, 3, &mut view), ["l6", "l7", "l8"]);
+    }
+
+    #[test]
+    fn the_pane_renders_wrapped_rows_inside_its_border() {
+        use ratatui::backend::TestBackend;
+        let ring = ring_of(["older".to_string(), format!("WARN {}", "x".repeat(20))]);
+        let mut term = Terminal::new(TestBackend::new(22, 5)).unwrap();
+        let mut view = LogView::default();
+        term.draw(|f| render_log(f, f.area(), &ring, &mut view)).unwrap();
+        let buf = term.backend().buffer();
+        let row = |y: u16| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>();
+        assert!(row(0).contains("logs (following)"), "{:?}", row(0));
+        assert_eq!(row(1), "│older               │");
+        assert_eq!(row(2), "│WARN xxxxxxxxxxxxxxx│");
+        assert_eq!(row(3), "│xxxxx               │");
+        assert_eq!(buf[(1, 2)].fg, Color::Yellow);
+        assert_eq!(buf[(1, 3)].fg, Color::Yellow, "a wrapped row keeps its line's colour");
     }
 }
 
