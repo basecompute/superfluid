@@ -74,13 +74,17 @@ fn platform(host: &Host) -> Result<(&'static str, &'static str), String> {
         ("macos", "arm64") => Ok(("macos-arm64", "metal")),
         ("linux", "arm64") if host.nvidia_driver.is_some() => Ok(("linux-arm64-cuda", "cuda")),
         // The engine runs on HIP device 0 and refuses a GPU it has no kernels for, so device 0 decides, not any GPU.
-        ("linux", "x64") if host.amd_gpus.first().is_some_and(strix) => Ok(("linux-x64-rocm", "rocm")),
+        ("linux", "x64") if !host.amd_order_unknown && host.amd_gpus.first().is_some_and(strix) => Ok(("linux-x64-rocm", "rocm")),
+        // A visibility variable names GPUs by UUID: which one is device 0 is not known here, so the engine's own check of
+        // device 0 at start decides rather than a guess from the node order.
+        ("linux", "x64") if host.amd_order_unknown && host.amd_gpus.iter().any(strix) => Ok(("linux-x64-rocm", "rocm")),
         ("linux", "x64") if host.amd_gpus.iter().any(strix) => {
             let i = host.amd_gpus.iter().position(strix).unwrap_or(0);
+            // HIP_VISIBLE_DEVICES counts the GPUs ROCR_VISIBLE_DEVICES leaves, not the order an earlier HIP list made.
+            let selector = host.amd_hip_indices.get(i).copied().unwrap_or(i);
             Err(format!(
-                "baseRT's ROCm engine runs on HIP device 0, which is {} here; the {} is HIP device {i}. Make it device 0 for \
-                 superfluid, when it installs and when it serves: HIP_VISIBLE_DEVICES={i} (where HIP_VISIBLE_DEVICES or \
-                 ROCR_VISIBLE_DEVICES is set already, list it first there)",
+                "baseRT's ROCm engine runs on HIP device 0, which is {} here; the {} is HIP device {i}. Run superfluid with \
+                 HIP_VISIBLE_DEVICES={selector} to make it device 0, when it installs and when it serves",
                 host.amd_gpus[0], host.amd_gpus[i]
             ))
         }
@@ -615,6 +619,39 @@ mod tests {
         let other = Host { amd_gpus: vec!["gfx1100".into()], ..strix("gfx1151") };
         let e = plan_with(&asked, &other, &pinned, &Value::Null).unwrap_err();
         assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
+    }
+
+    /// A Strix machine as detection sees it: the driver's GPUs in node order, then ROCR_VISIBLE_DEVICES and
+    /// HIP_VISIBLE_DEVICES as the ROCm runtime reads them.
+    fn strix_seeing(kfd: &[&str], rocr: Option<&str>, hip: Option<&str>) -> Host {
+        let kfd: Vec<String> = kfd.iter().map(|g| g.to_string()).collect();
+        let view = superfluid_adapter_kit::install::hip_view(&kfd, rocr, hip);
+        Host { amd_gpus: view.gpus, amd_hip_indices: view.hip_indices, amd_order_unknown: !view.known, ..strix("gfx1151") }
+    }
+
+    #[test]
+    fn the_visibility_variables_decide_device_0_as_rocm_reads_them() {
+        let (same, v) = (abi(), "0.5.0");
+        let rocm = format!("basert-engine-linux-x64-rocm-{v}.tar.gz");
+        let pinned = [Pin { version: v.into(), abi: Some(same), assets: vec![Asset { name: rocm.clone(), url: format!("https://pinned/{rocm}"), sha256: Some("ef".into()), size: Some(30) }] }];
+        let plan = |h: &Host| plan_with(&Request::default(), h, &pinned, &Value::Null);
+        // A UUID selector is not resolved here: device 0 is then the engine's to check, not judged from the node order.
+        assert!(plan(&strix_seeing(&["gfx1100", "gfx1151"], Some("GPU-1a2b3c4d5e6f7a8b"), Some("0"))).is_ok());
+        // ROCm shows no GPU: an empty ROCR_VISIBLE_DEVICES, or a HIP list that is invalid from its first entry.
+        for (rocr, hip) in [(Some(""), None), (None, Some("-1"))] {
+            assert!(plan(&strix_seeing(&["gfx1151"], rocr, hip)).is_err(), "{rocr:?} {hip:?}");
+        }
+        // The command offered names the GPU as HIP_VISIBLE_DEVICES counts, and applying it makes that GPU device 0.
+        let e = plan(&strix_seeing(&["gfx1151", "gfx1100"], None, Some("1,0"))).unwrap_err();
+        assert!(e.contains("the gfx1151 is HIP device 1") && e.contains("HIP_VISIBLE_DEVICES=0"), "{e}");
+        assert!(plan(&strix_seeing(&["gfx1151", "gfx1100"], None, Some("0"))).is_ok());
+        // HIP_VISIBLE_DEVICES counts what ROCR_VISIBLE_DEVICES leaves: after "1,0,2" the gfx1151 (node 0) is index 1.
+        let (kfd, rocr) = (["gfx1151", "gfx1100", "gfx1150"], Some("1,0,2"));
+        let e = plan(&strix_seeing(&kfd, rocr, Some("0,1"))).unwrap_err();
+        assert!(e.contains("which is gfx1100 here; the gfx1151 is HIP device 1") && e.contains("HIP_VISIBLE_DEVICES=1 "), "{e}");
+        assert!(plan(&strix_seeing(&kfd, rocr, Some("1"))).is_ok(), "applying it");
+        // A HIP list that leaves no Strix GPU gets the plain refusal: there is nothing to select.
+        assert!(plan(&strix_seeing(&kfd, rocr, Some("0"))).unwrap_err().contains("this is Linux x64, AMD gfx1100"));
     }
 
     #[test]
