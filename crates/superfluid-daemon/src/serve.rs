@@ -198,6 +198,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut max_context: Option<i32> = None;
     let mut max_context_auto_flag = false;
     let mut max_batch: u32 = 8;
+    let mut lanes_pinned = false;
     let mut op_temperature: Option<f32> = None;
     let mut op_top_p: Option<f32> = None;
     let mut op_top_k: Option<u32> = None;
@@ -315,7 +316,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
             "--idle-timeout" => idle_timeout = num(a, val()),
             "--host" => host = Some(val()),
             "--port" => port = Some(num(a, val())),
-            "--max-batch-size" => max_batch = num(a, val()),
+            "--max-batch-size" => {
+                max_batch = num(a, val());
+                lanes_pinned = true;
+            }
             "--request-timeout" => {
                 completion_deadline_ms = num(a, val())
             }
@@ -333,7 +337,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 max_context_auto_flag = v == "auto";
                 max_context = if v == "auto" { None } else { Some(num(a, v)) };
             }
-            "--max-batch" => max_batch = num(a, val()),
+            "--max-batch" => {
+                max_batch = num(a, val());
+                lanes_pinned = true;
+            }
             "--temperature" => op_temperature = Some(sampling_f32("--temperature", &val(), 0.0, 2.0)),
             "--top-p" => op_top_p = Some(sampling_f32("--top-p", &val(), 0.0, 1.0)),
             "--top-k" => op_top_k = Some(num(a, val())),
@@ -508,6 +515,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 if let Some(n) = it.clone().next().and_then(|v| v.parse::<u32>().ok()) {
                     let _ = it.next();
                     max_batch = n;
+                    lanes_pinned = true;
                     retired(a, "always on; its width became --max-batch");
                 } else {
                     retired(a, "continuous batching is always on");
@@ -1320,6 +1328,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
         None
     };
     let max_context_auto = max_context_auto && unsized_why.is_none();
+    // The window the runtime sized in-process, and the speculators it charged: the set
+    // refit_to_device measures once the model has loaded.
+    let mut sized_in_process = false;
+    let mut sized_speculators: Vec<PathBuf> = Vec::new();
     let ctx = if let Some(n) = max_context {
         n
     } else if fleet_mode {
@@ -1417,6 +1429,9 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     break;
                 }
             }
+            if let Some((_, choice)) = &best {
+                sized_speculators = speculators_for(choice).into_iter().map(|(p, _, _)| p).collect();
+            }
             let fallbacks: Vec<&str> =
                 best.iter().flat_map(|(_, c)| c.iter().flatten().map(|s| s.as_str())).collect();
             let note = if fallbacks.is_empty() {
@@ -1430,10 +1445,12 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 .flat_map(|i| ranked[i].iter().filter_map(move |r| speculator_entry(i, r)))
                 .collect();
             let note = format!(", every one of {} drafter candidates charged at once", all.len());
+            sized_speculators = all.iter().map(|(p, _, _)| p.clone()).collect();
             (size(&all), note)
         };
         match sized {
             Some(n) => {
+                sized_in_process = true;
                 eprintln!(
                     "superfluid: context window {n} tokens (auto: sized for this device, {lanes} lanes{}{}{}; --max-context N pins it)",
                     if n_spec == 0 { String::new() } else { format!(", {n_spec} speculator(s)") },
@@ -1551,12 +1568,34 @@ pub fn run(args: &[String], embedding: &Embedding) {
             std::process::exit(1);
         })
     } else {
-        superfluid_daemon::linked::spawn(runtime.id, model, ctx, max_batch, kv_bits)
+        superfluid_daemon::linked::spawn(runtime.id, model.clone(), ctx, max_batch, kv_bits)
             .unwrap_or_else(|| Err(format!("this build does not link the {} runtime", runtime.id)))
             .unwrap_or_else(|e| {
                 eprintln!("superfluid: could not load '{model_display}': {e}");
                 std::process::exit(1);
             })
+    };
+
+    let mapped: Vec<PathBuf> =
+        models.iter().filter(|m| **m != model).chain(sized_speculators.iter()).cloned().collect();
+    let (host, ctx, max_batch) = if sized_in_process {
+        refit_to_device(
+            host,
+            &RefitCfg {
+                runtime: &runtime,
+                model: &model,
+                mapped: &mapped,
+                pending: &sized_speculators,
+                kv_bits,
+                lanes_pinned,
+                worker_process,
+                worker_stderr: worker_stderr.clone(),
+            },
+            ctx,
+            max_batch,
+        )
+    } else {
+        (host, ctx, max_batch)
     };
 
     let caps = host.capabilities().read().expect("capability record").clone();
@@ -2234,6 +2273,122 @@ fn runtime_for(
         .map_err(unsupported_runtime(Some(if requested.is_some() { "runtime" } else { "model" })))?;
     refuse_statically(&runtime, cfg.park_lossy, Some(cfg.kv_bits), cfg.speculate.as_deref()).map_err(unsupported_runtime(None))?;
     Ok(runtime)
+}
+
+struct RefitCfg<'a> {
+    runtime: &'a superfluid_daemon::runtimes::Runtime,
+    model: &'a Path,
+    /// The other bundles the set maps beside `model`: the models served with it and the speculators its
+    /// window was sized with.
+    mapped: &'a [PathBuf],
+    /// The drafters that attach once the daemon starts, after the measurement.
+    pending: &'a [PathBuf],
+    kv_bits: i32,
+    lanes_pinned: bool,
+    worker_process: bool,
+    worker_stderr: Option<Arc<std::os::fd::OwnedFd>>,
+}
+
+/// The primary model has loaded at the window the runtime sized in-process; measure what the set holds and,
+/// while the window and lanes are still the auto sizing's, load again at a window and lane count the device
+/// holds (`superfluid_daemon::fit`), or refuse to start when none does. Nothing has been served yet.
+fn refit_to_device(mut host: EngineHost, cfg: &RefitCfg, mut ctx: i32, mut lanes: u32) -> (EngineHost, i32, u32) {
+    use superfluid_daemon::fit::{self, gb, Fit, Measured};
+    let Some(budget) = superfluid_daemon::linked::device_budget(cfg.runtime.id) else {
+        return (host, ctx, lanes);
+    };
+    let size_of = |paths: &mut dyn Iterator<Item = &Path>| -> u64 {
+        let mut seen = std::collections::HashSet::new();
+        paths
+            .filter(|p| *p != cfg.model)
+            .filter(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())))
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum()
+    };
+    let model_bytes = std::fs::metadata(cfg.model).map(|m| m.len()).unwrap_or(0);
+    let mapped_bytes = model_bytes + size_of(&mut cfg.mapped.iter().map(PathBuf::as_path));
+    let pending_bytes = size_of(&mut cfg.pending.iter().map(PathBuf::as_path));
+    let rt = cfg.runtime.id.base().name();
+    // Lanes halve rather than the window dropping below half the one sized.
+    let keep = ctx / 2;
+    // The KV cost per token per lane: what the worker's state-space record says at first, which can
+    // overstate it (baseRT 0.4.5 counts every layer of a hybrid, 4x Qwen3.8-27B's 16 attention layers),
+    // then what a reload actually freed.
+    let mut kv_measured: Option<u64> = None;
+    let mut prev: Option<(u64, i32, u32)> = None;
+    for _ in 0..4 {
+        let pid = host.worker_pid().unwrap_or_else(std::process::id);
+        let (Some(worker_bytes), Some(kv_said)) = (fit::phys_footprint(pid), host.kv_bytes_per_token()) else {
+            return (host, ctx, lanes);
+        };
+        let m = Measured { worker_bytes, mapped_bytes, pending_bytes };
+        if let Some((was, c, l)) = prev {
+            let tokens = (c as u64 * u64::from(l)).saturating_sub(ctx as u64 * u64::from(lanes));
+            let freed = was.saturating_sub(m.total());
+            if tokens > 0 && freed > 0 {
+                kv_measured = Some(freed / tokens);
+            }
+        }
+        let kv = kv_measured.unwrap_or(kv_said).clamp(1, kv_said);
+        let held = format!(
+            "at {ctx} tokens x {lanes} lanes the set holds {} at decode (the worker's {} plus {} of mapped bundles{}) \
+             against the {} the {rt} runtime plans within",
+            gb(m.total()),
+            gb(m.worker_bytes),
+            gb(m.mapped_bytes),
+            if m.pending_bytes > 0 { format!(" plus {} for the drafter it attaches next", gb(m.pending_bytes)) } else { String::new() },
+            gb(budget)
+        );
+        let floor = superfluid_adapter_kit::sizing::WINDOW_FLOOR as i32;
+        let gran = superfluid_adapter_kit::sizing::WINDOW_GRANULARITY as i32;
+        let fit = fit::refit(budget, m.total(), ctx, lanes, kv, cfg.lanes_pinned, keep, floor, gran);
+        match fit {
+            Fit::Fits => return (host, ctx, lanes),
+            Fit::Refit { ctx: n, lanes: l } if (n, l) != (ctx, lanes) => {
+                eprintln!(
+                    "superfluid: context window {n} tokens, {l} lanes (refitted: {held}; --max-context N pins the window{})",
+                    if cfg.lanes_pinned { "" } else { ", --max-batch N the lanes" }
+                );
+                drop(host);
+                prev = Some((m.total(), ctx, lanes));
+                (ctx, lanes) = (n, l);
+                let spawned = if cfg.worker_process {
+                    EngineHost::spawn_process(superfluid_daemon::WorkerSpec {
+                        bin: cfg.runtime.worker.bin.clone(),
+                        args: cfg.runtime.serve_args(cfg.model, ctx, lanes, cfg.kv_bits),
+                        stderr: cfg.worker_stderr.clone(),
+                    })
+                    .map_err(|e| e.to_string())
+                } else {
+                    superfluid_daemon::linked::spawn(cfg.runtime.id, cfg.model.to_path_buf(), ctx, lanes, cfg.kv_bits)
+                        .unwrap_or_else(|| Err(format!("this build does not link the {} runtime", cfg.runtime.id)))
+                };
+                host = spawned.unwrap_or_else(|e| {
+                    eprintln!("superfluid: could not load '{}' again at the refitted window: {e}", cfg.model.display());
+                    std::process::exit(1);
+                });
+            }
+            Fit::Refit { .. } | Fit::Refuse { .. } => {
+                let floor_note = match fit {
+                    Fit::Refuse { floor_bytes } => format!(
+                        ", and about {} at {floor} tokens on {}",
+                        gb(floor_bytes),
+                        if cfg.lanes_pinned { format!("the {lanes} lanes --max-batch pins") } else { "one lane".to_string() }
+                    ),
+                    _ => String::new(),
+                };
+                eprintln!(
+                    "superfluid: '{}' does not fit this device: {held}{floor_note}. Serve a smaller model or variant, \
+                     drop --speculate or a --model served beside it{}, or pin --max-context N to load it anyway",
+                    cfg.model.display(),
+                    if cfg.lanes_pinned { ", serve fewer lanes" } else { "" }
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+    (host, ctx, lanes)
 }
 
 fn engine_on(
