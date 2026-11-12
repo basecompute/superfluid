@@ -8,7 +8,7 @@ Superfluid is one daemon binary plus a worker per runtime. The runtimes themselv
 |---|---|---|---|
 | macOS, Apple silicon | Metal | yes | Metal |
 | macOS, Intel | CPU | no | no |
-| Linux x86-64 | CUDA, ROCm, Vulkan or CPU | no | no |
+| Linux x86-64 | CUDA, ROCm, Vulkan or CPU | no | ROCm (AMD Strix Halo or Strix Point GPU, ROCm 10) |
 | Linux arm64 | CUDA, Vulkan or CPU | no | CUDA (NVIDIA GPU) |
 
 ## Install a release
@@ -110,7 +110,7 @@ superfluid runtime install basert
 |---|---|
 | `llamacpp` | llama.cpp's own release build for this machine (Metal; CUDA, ROCm, Vulkan or CPU on Linux), checked against pinned SHA-256s |
 | `mlx` | a private CPython 3.12 with `mlx`, `mlx-lm` and their dependencies, every wheel pinned by hash. Your own Python is never used or changed |
-| `basert` | the baseRT engine bundle (Apple silicon, or Linux arm64 with an NVIDIA GPU) from baseRT's releases |
+| `basert` | the baseRT engine bundle (Apple silicon, Linux arm64 with an NVIDIA GPU, or Linux x86-64 with an AMD Strix Halo or Strix Point GPU) from baseRT's releases |
 
 Installs live under `~/.superfluid/runtimes/` (`$SUPERFLUID_HOME`). After installing, `superfluid runtimes` shows each as `ready` with its version and device. Pinning, updates and repair are in [Runtimes](../models/runtimes.md).
 

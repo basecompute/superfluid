@@ -62,15 +62,35 @@ fn abi_marked(release: &Value) -> Option<u32> {
     release["assets"].as_array()?.iter().find_map(|a| a["name"].as_str()?.strip_prefix("basert-engine-abi-")?.strip_suffix(".txt")?.parse().ok())
 }
 
+/// The AMD GPUs baseRT's ROCm engine carries kernels for, one bundle for both: Strix Halo and Strix Point.
+const ROCM_GPUS: [&str; 2] = ["gfx1151", "gfx1150"];
+
+/// The ROCm release the ROCm engine is linked against, which it finds at `/opt/rocm/core-<version>`.
+const ROCM_RUNTIME: &str = "10.0";
+
 fn platform(host: &Host) -> Result<(&'static str, &'static str), String> {
     match (host.os.as_str(), host.arch.as_str()) {
         ("macos", "arm64") => Ok(("macos-arm64", "metal")),
         ("linux", "arm64") if host.nvidia_driver.is_some() => Ok(("linux-arm64-cuda", "cuda")),
+        ("linux", "x64") if host.amd_gpus.iter().any(|g| ROCM_GPUS.contains(&g.as_str())) => Ok(("linux-x64-rocm", "rocm")),
         _ => Err(format!(
-            "baseRT publishes engines for Apple silicon and for Linux arm64 with an NVIDIA GPU; this is {}",
+            "baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux x86-64 with an AMD \
+             Strix Halo or Strix Point GPU ({}); this is {}",
+            ROCM_GPUS.join(", "),
             host.describe()
         )),
     }
+}
+
+/// What a release's engine needs here beyond itself: for the ROCm engine, AMD's ROCm runtime where it was linked to find it.
+fn runtime_missing(host: &Host, backend: &str) -> Option<String> {
+    (backend == "rocm" && !host.rocm_runtimes.iter().any(|v| v == ROCM_RUNTIME)).then(|| {
+        format!(
+            "baseRT's ROCm engine runs on AMD's ROCm {ROCM_RUNTIME} runtime, which it finds at /opt/rocm/core-{ROCM_RUNTIME}, and this is {}: \
+             install ROCm {ROCM_RUNTIME} (AMD's amdrocm packages, with the BLAS kernels for this GPU), then `superfluid runtime install basert` again",
+            host.describe()
+        )
+    })
 }
 
 fn minor(v: &str) -> Vec<u64> {
@@ -222,6 +242,10 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
             extra: Value::Null,
         }]);
     }
+    // A bundle named with --from may be built against another ROCm; a release's engine is not.
+    if let Some(why) = runtime_missing(host, backend) {
+        return Err(why);
+    }
     let prerelease: Vec<String> = releases
         .as_array()
         .into_iter()
@@ -296,7 +320,7 @@ pub fn plan_with(req: &Request, host: &Host, pins: &[Pin], releases: &Value) -> 
         id: "basert".into(),
         install: format!("{version}-{backend}"),
         tested: drives(&version, abi),
-        why: format!("{}: baseRT's {} engine", host.describe(), if backend == "metal" { "Metal" } else { "CUDA" }),
+        why: format!("{}: baseRT's {} engine", host.describe(), match backend { "metal" => "Metal", "rocm" => "ROCm", _ => "CUDA" }),
         assets: vec![asset],
         version,
         backend: backend.into(),
@@ -373,6 +397,7 @@ mod tests {
         assert_eq!(listed[1].here.as_ref().map(|p| (p.install.as_str(), p.tested)), Ok(("0.4.5-metal", true)));
         assert_eq!(listed[1].here.as_ref().unwrap().assets[0].url, "https://pinned/basert-engine-macos-arm64-0.4.5.tar.gz", "no release listing was needed");
         assert_eq!(listed[2].here.as_ref().map(|p| p.install.as_str()), Ok("0.3.9-metal"), "the unnumbered line");
+        // Linux x86-64 with no AMD GPU: no engine for it.
         let linux = Host { os: "linux".into(), arch: "x64".into(), ..Host::default() };
         let elsewhere = versions_with(&linux, &pins);
         for (i, driven) in [(0, false), (1, true), (2, true), (3, false)] {
@@ -489,7 +514,10 @@ mod tests {
         let pins = pinned();
         assert!(!pins.is_empty());
         for Pin { version: v, abi, assets } in &pins {
-            assert_eq!(assets.len(), 2, "{v}: an engine for each platform baseRT builds");
+            // The ROCm engine (Linux x86-64) is published from 0.5.0 on, and a release may ship without it.
+            let parts: Vec<&str> = assets.iter().filter_map(|a| a.name.strip_prefix("basert-engine-")?.strip_suffix(&format!("-{v}.tar.gz"))).collect();
+            assert!(parts.contains(&"macos-arm64") && parts.contains(&"linux-arm64-cuda"), "{v}: an engine for each platform baseRT builds: {parts:?}");
+            assert!(parts.len() == assets.len() && parts.iter().all(|p| ["macos-arm64", "linux-arm64-cuda", "linux-x64-rocm"].contains(p)), "{v}: {parts:?}");
             assert!(!marker_missing(v, *abi), "{v}: a pin from {FIRST_NUMBERED} on states its engine's ABI, as its release does");
             for a in assets {
                 assert_eq!(version_of(&a.name).as_deref(), Some(v.as_str()));
@@ -506,11 +534,63 @@ mod tests {
         assert!(e.contains("the newest is 0.0.1") && e.contains("--from"), "{e}");
     }
 
+    /// Linux x86-64 with the AMD GPU named and ROCm 10 where the engine looks for it.
+    fn strix(gfx: &str) -> Host {
+        Host { os: "linux".into(), arch: "x64".into(), rocm: true, amd_gpus: vec![gfx.into()], rocm_runtimes: vec!["10.0".into()], ..Host::default() }
+    }
+
+    #[test]
+    fn linux_x86_64_with_a_strix_gpu_takes_the_rocm_engine() {
+        let (same, v) = (abi(), "0.5.0");
+        let rocm = format!("basert-engine-linux-x64-rocm-{v}.tar.gz");
+        let mut listed = release(v, Some(same));
+        listed["assets"].as_array_mut().unwrap().push(json!({"name": rocm, "size": 30, "digest": "sha256:cd",
+            "browser_download_url": format!("https://github.com/basecompute/baseRT/releases/download/v{v}/{rocm}")}));
+        let releases = json!([listed]);
+        for gfx in ["gfx1151", "gfx1150"] {
+            let p = &plan_with(&Request::default(), &strix(gfx), &[], &releases).unwrap()[0];
+            assert_eq!((p.version.as_str(), p.backend.as_str(), p.install.as_str(), p.tested), (v, "rocm", "0.5.0-rocm", true));
+            assert_eq!((p.assets[0].name.as_str(), p.assets[0].sha256.as_deref()), (rocm.as_str(), Some("cd")), "{gfx}: one bundle for both chips");
+            assert_eq!(p.why, format!("Linux x64, AMD {gfx}, ROCm 10.0: baseRT's ROCm engine"));
+        }
+        let pinned = [Pin { version: v.into(), abi: Some(same), assets: vec![Asset { name: rocm.clone(), url: format!("https://pinned/{rocm}"), sha256: Some("ef".into()), size: Some(30) }] }];
+        let p = &plan_with(&Request::default(), &strix("gfx1151"), &pinned, &Value::Null).unwrap()[0];
+        assert_eq!((p.assets[0].url.clone(), p.assets[0].sha256.as_deref()), (format!("https://pinned/{rocm}"), Some("ef")), "a pin needs no listing");
+        let cuda = Request { backend: Some("cuda".into()), ..Request::default() };
+        assert_eq!(plan_with(&cuda, &strix("gfx1151"), &[], &releases).unwrap_err(), "baseRT's engine runs on rocm here, not cuda");
+        // A release from before the ROCm engine has none for this machine.
+        let e = plan_with(&Request::default(), &strix("gfx1151"), &[], &json!([release("0.4.7", Some(same))])).unwrap_err();
+        assert!(e.contains("publishes no engine this superfluid drives") && e.contains("for linux-x64-rocm"), "{e}");
+        // Without ROCm 10 where the engine finds it, a release is refused; a bundle named with --from may be built for another ROCm.
+        for elsewhere in [vec![], vec!["7.1".to_string()]] {
+            let without = Host { rocm_runtimes: elsewhere, ..strix("gfx1151") };
+            let e = plan_with(&Request::default(), &without, &pinned, &releases).unwrap_err();
+            assert!(e.contains("AMD's ROCm 10.0 runtime, which it finds at /opt/rocm/core-10.0") && e.contains("this is Linux x64, AMD gfx1151"), "{e}");
+            let from = Request { from: Some(format!("/x/{rocm}")), ..Request::default() };
+            let p = &plan_with(&from, &without, &pinned, &Value::Null).unwrap()[0];
+            assert_eq!((p.install.as_str(), p.assets[0].sha256.as_deref()), ("0.5.0-rocm", Some("ef")));
+        }
+        // Another AMD GPU, or none: refused, naming the ones there is an engine for.
+        for gpus in [vec!["gfx1100".to_string()], vec![]] {
+            let other = Host { amd_gpus: gpus, ..strix("gfx1151") };
+            let e = plan_with(&Request::default(), &other, &pinned, &releases).unwrap_err();
+            assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
+        }
+        let both = Host { amd_gpus: vec!["gfx1100".into(), "gfx1151".into()], ..strix("gfx1151") };
+        assert_eq!(plan_with(&Request::default(), &both, &[], &releases).unwrap()[0].backend, "rocm", "one of them is a Strix GPU");
+    }
+
     #[test]
     fn a_bundle_names_its_version_and_other_machines_are_refused() {
         assert_eq!(version_of("basert-engine-linux-arm64-cuda-0.2.6.tar.gz").as_deref(), Some("0.2.6"));
-        let linux = Host { os: "linux".into(), arch: "x64".into(), ..Host::default() };
-        assert!(plan_with(&Request::default(), &linux, &[], &json!([])).unwrap_err().contains("baseRT publishes engines for"));
+        assert_eq!(version_of("basert-engine-linux-x64-rocm-0.5.0.tar.gz").as_deref(), Some("0.5.0"));
+        // Linux x86-64 with no AMD GPU, and Linux arm64 with no NVIDIA one.
+        for arch in ["x64", "arm64"] {
+            let linux = Host { os: "linux".into(), arch: arch.into(), ..Host::default() };
+            let e = plan_with(&Request::default(), &linux, &[], &json!([])).unwrap_err();
+            assert!(e.starts_with("baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux x86-64 with an AMD"), "{e}");
+            assert!(e.ends_with(&format!("; this is Linux {arch}")), "{e}");
+        }
         let from = Request { from: Some("/x/basert-engine-macos-arm64-0.0.1.tar.gz".into()), untested: true, ..Request::default() };
         let p = &plan_with(&from, &mac(), &[], &Value::Null).unwrap()[0];
         assert_eq!((p.version.as_str(), p.install.as_str(), p.assets[0].sha256.as_deref()), ("0.0.1", "0.0.1-metal", None));

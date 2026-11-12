@@ -13,6 +13,10 @@ pub struct Host {
     pub nvidia_driver: Option<String>,
     pub cuda_runtime: Option<u32>,
     pub rocm: bool,
+    /// The AMD GPUs the kernel's KFD driver lists, by LLVM target (`gfx1151`).
+    pub amd_gpus: Vec<String>,
+    /// The ROCm releases installed side by side as `/opt/rocm/core-<version>`, as AMD's ROCm 10 packages lay them out (`10.0`).
+    pub rocm_runtimes: Vec<String>,
     pub vulkan: bool,
 }
 
@@ -29,6 +33,8 @@ impl Host {
             host.nvidia_driver = std::fs::read_to_string("/proc/driver/nvidia/version").ok().and_then(|t| nvidia_driver_version(&t));
             host.cuda_runtime = cuda_runtime_major();
             host.rocm = Path::new("/dev/kfd").exists() && Path::new("/opt/rocm").is_dir();
+            host.amd_gpus = amd_gpus();
+            host.rocm_runtimes = rocm_runtimes(Path::new("/opt/rocm"));
             host.vulkan = linux_vulkan();
         }
         host
@@ -55,7 +61,12 @@ impl Host {
         if let Some(m) = self.cuda_runtime {
             facts.push(format!("CUDA runtime {m}"));
         }
-        if self.rocm {
+        if !self.amd_gpus.is_empty() {
+            facts.push(format!("AMD {}", self.amd_gpus.join(" + ")));
+        }
+        if !self.rocm_runtimes.is_empty() {
+            facts.push(format!("ROCm {}", self.rocm_runtimes.join(" + ")));
+        } else if self.rocm {
             facts.push("ROCm".into());
         }
         if self.vulkan {
@@ -67,9 +78,44 @@ impl Host {
     pub fn to_json(&self) -> Value {
         json!({
             "os": self.os, "arch": self.arch, "nvidia_driver": self.nvidia_driver,
-            "cuda_runtime": self.cuda_runtime, "rocm": self.rocm, "vulkan": self.vulkan,
+            "cuda_runtime": self.cuda_runtime, "rocm": self.rocm, "amd_gpus": self.amd_gpus,
+            "rocm_runtimes": self.rocm_runtimes, "vulkan": self.vulkan,
         })
     }
+}
+
+/// The AMD GPUs the KFD driver lists, by LLVM target, in node order; none without the driver (`/dev/kfd`).
+pub fn amd_gpus() -> Vec<String> {
+    if !Path::new("/dev/kfd").exists() {
+        return Vec::new();
+    }
+    let Ok(dir) = std::fs::read_dir("/sys/class/kfd/kfd/topology/nodes") else {
+        return Vec::new();
+    };
+    let mut nodes: Vec<(u32, PathBuf)> = dir.flatten().filter_map(|n| Some((n.file_name().to_str()?.parse().ok()?, n.path()))).collect();
+    nodes.sort();
+    nodes.into_iter().filter_map(|(_, node)| gfx_target(&std::fs::read_to_string(node.join("properties")).ok()?)).collect()
+}
+
+/// The LLVM target a KFD topology node's `properties` state, as `gfx_target_version` major*10000 + minor*100 + stepping:
+/// 110501 is gfx1151, 90010 gfx90a. A CPU node states 0.
+fn gfx_target(properties: &str) -> Option<String> {
+    let v: u32 = properties.lines().find_map(|l| l.strip_prefix("gfx_target_version "))?.trim().parse().ok()?;
+    (v != 0).then(|| format!("gfx{}{:x}{:x}", v / 10000, v / 100 % 100, v % 100))
+}
+
+/// The versions of the ROCm releases under `root` as `core-<version>/lib`, oldest first. The links beside them (`core`,
+/// `core-10`, through /etc/alternatives) name one of them again and are not counted.
+fn rocm_runtimes(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.path().join("lib").is_dir())
+        .filter_map(|e| e.file_name().to_str()?.strip_prefix("core-").map(str::to_string))
+        .collect();
+    found.sort_by_key(|v| version_key(v));
+    found
 }
 
 fn nvidia_driver_version(text: &str) -> Option<String> {
@@ -821,6 +867,35 @@ mod tests {
         let host = Host { nvidia_driver: Some("580.95.05".into()), ..Host::default() };
         assert_eq!(host.nvidia_major(), Some(580));
         assert_eq!(nvidia_driver_version("no version here"), None);
+    }
+
+    #[test]
+    fn an_amd_gpu_is_named_by_the_target_its_kfd_node_states() {
+        let node = |v: u32| format!("cpu_cores_count 0\nsimd_count 80\nmax_waves_per_simd 16\ngfx_target_version {v}\nvendor_id 4098\n");
+        assert_eq!(gfx_target(&node(110501)).as_deref(), Some("gfx1151"), "Strix Halo");
+        assert_eq!(gfx_target(&node(110500)).as_deref(), Some("gfx1150"), "Strix Point");
+        assert_eq!(gfx_target(&node(110000)).as_deref(), Some("gfx1100"));
+        assert_eq!(gfx_target(&node(90010)).as_deref(), Some("gfx90a"), "a stepping past 9 is a hex digit");
+        assert_eq!(gfx_target(&node(0)), None, "the CPU's node");
+        assert_eq!(gfx_target("cpu_cores_count 16\n"), None);
+        let host = Host { os: "linux".into(), arch: "x64".into(), rocm: true, amd_gpus: vec!["gfx1151".into()], rocm_runtimes: vec!["10.0".into()], ..Host::default() };
+        assert_eq!(host.describe(), "Linux x64, AMD gfx1151, ROCm 10.0");
+        assert_eq!(Host { rocm_runtimes: vec![], ..host }.describe(), "Linux x64, AMD gfx1151, ROCm");
+    }
+
+    #[test]
+    fn rocm_runtimes_are_the_core_trees_with_libraries_under_the_root() {
+        let root = std::env::temp_dir().join(format!("superfluid-kit-rocm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["core-10.0/lib", "core-9.9/lib", "core-11.0", "lib", "share"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        // As AMD's ROCm 10 packages leave it (Ubuntu 26.04): `core` and `core-10` link to the tree.
+        std::os::unix::fs::symlink(root.join("core-10.0"), root.join("core-10")).unwrap();
+        std::os::unix::fs::symlink(root.join("core-10.0"), root.join("core")).unwrap();
+        assert_eq!(rocm_runtimes(&root), ["9.9", "10.0"], "by version, only a tree with its lib/, and not a link to one");
+        assert!(rocm_runtimes(&root.join("missing")).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

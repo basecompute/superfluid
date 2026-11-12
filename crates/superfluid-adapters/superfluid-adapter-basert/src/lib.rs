@@ -446,7 +446,8 @@ pub fn devices() -> Vec<Device> {
     let Some(memory) = libbasert::device_memory_budget() else {
         return Vec::new();
     };
-    let backend = if cfg!(target_os = "macos") { "Metal" } else { "CUDA" };
+    // baseRT's engines: Metal on Apple silicon, CUDA on Linux arm64, ROCm on Linux x86-64.
+    let backend = if cfg!(target_os = "macos") { "Metal" } else if cfg!(target_arch = "x86_64") { "ROCm" } else { "CUDA" };
     // baseRT states its budget alone, the share of the device it plans a model against.
     vec![Device { backend: backend.into(), name: gpu_name(), memory, budget: memory }]
 }
@@ -459,6 +460,10 @@ fn gpu_name() -> String {
     #[cfg(target_os = "linux")]
     if let Some(model) = nvidia_model() {
         return model;
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(gfx) = superfluid_adapter_kit::install::amd_gpus().into_iter().next() {
+        return format!("AMD {gfx}");
     }
     "GPU".into()
 }
