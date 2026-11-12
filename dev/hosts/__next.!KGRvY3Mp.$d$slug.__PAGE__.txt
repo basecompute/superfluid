@@ -1,8 +1,22 @@
 1:"$Sreact.fragment"
-2:I[73435,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js","/dev/_next/static/chunks/1n_3z02nf3ipn.js","/dev/_next/static/chunks/242k9ex4exzbn.js"],"Markdown"]
-6:I[97367,["/dev/_next/static/chunks/05-c3ty_6dwfk.js","/dev/_next/static/chunks/2im7c515bo69p.js"],"OutletBoundary"]
-7:"$Sreact.suspense"
-3:T1496,# Hosting Superfluid in another product
+2:"/dev/_next/static/chunks/2ngzwwqeitkk7.js"
+3:I[39756,["$2"],"default"]
+4:I[37457,["$2"],"default"]
+8:"/dev/_next/static/chunks/3_zcwfmbdj4b5.js"
+9:I[24025,["$2","$8"],"DocsShell"]
+f:"/dev/_next/static/chunks/2stmo1fl2_ko-.js"
+10:I[73435,["$2","$8","$f"],"Markdown"]
+15:"ViewportBoundary"
+16:I[97367,["$2"],"$15"]
+17:"MetadataBoundary"
+18:I[97367,["$2"],"$17"]
+19:"$Sreact.suspense"
+1a:I[27201,["$2"],"IconMark"]
+:HL["/dev/_next/static/chunks/2utmj7drmfv5o.css","style"]
+6:X
+d:X
+d:C
+11:T14db,# Hosting Superfluid in another product
 
 A product can run Superfluid as its server: start `superfluid serve` with its own engine and models, and keep its own command line in front. baseRT's `basert serve` does this. This page is the contract such a host builds on; the flags, fields, variables and exit codes named here are kept across releases, and a change to them is announced in the changelog.
 
@@ -10,7 +24,7 @@ A product can run Superfluid as its server: start `superfluid serve` with its ow
 
 - Exec the binary by its real path. Superfluid finds `superfluid-workerd` and the adapters it ships beside its own executable, and resolves a symlink to get there, so a link or a shim script on `PATH` works too.
 - Name the runtime: `--runtime basert` (or `native`) for `.base` bundles. A model of another format is refused.
-- Hand over the engine: `--basert-lib <dir or file>` or `BASERT_LIB` names the libbaseRT to load. Without either, Superfluid looks beside its worker, in `../lib`, and in its own runtime installs. On CUDA the engine also needs its kernel sidecar, which it finds beside the executable or at `BASERT_KERNEL_LIB`; a host that keeps the sidecar beside its own binaries sets that variable.
+- Hand over the engine: `--basert-lib <dir or file>` or `BASERT_LIB` names the libbaseRT to load. Without either, Superfluid looks beside its worker, in `../lib`, and in its own runtime installs. On CUDA and ROCm the engine also needs its kernel sidecar (`baseRT_cuda_kernels.fatbin`, `baseRT_rocm_kernels.hsaco`), which it finds beside the executable or at `BASERT_KERNEL_LIB`; a host that keeps the sidecar beside its own binaries sets that variable.
 - Pass `--offline` so Superfluid installs no runtime and pulls no model by itself; the host resolves model ids.
 - Give each server its own `--sessions <dir>`: one server per directory, with a lock. Two servers that share the default collide.
 - `SUPERFLUID_HOME` is where Superfluid keeps its own installs and socket; a host that wants nothing under `~/.superfluid` sets it.
@@ -67,7 +81,20 @@ A host that installs Superfluid picks the newest release whose `runtimes.basert.
 ## Exit codes
 
 `superfluid serve` exits with 4 when the runtime for the model is not installed or cannot run here, which includes an engine library that is missing or of another ABI. A host can tell that from 2, a flag it got wrong, and from 1, a failure along the way: an install Superfluid tried that failed, or anything after the start. The full list is in the [command-line reference](/cli#exit-codes).
-0:{"rsc":["$","$1","c",{"children":[["$","$L2",null,{"children":"$3"}],["$L4"],"$L5"]}],"isPartial":false,"staleTime":300,"varyParams":null,"buildId":"acMdTJ3DYsZTo1XUw19Jl"}
-4:["$","script","script-0",{"src":"/dev/_next/static/chunks/242k9ex4exzbn.js","async":true}]
-5:["$","$L6",null,{"children":["$","$7",null,{"name":"Next.MetadataOutlet","children":"$@8"}]}]
-8:null
+e:[["children",{"s":"__PAGE__","h":160,"d":{"r":["$","$1","c",{"children":[["$","$L10",null,{"children":"$11"}],["$L12"],"$L13"]}],"p":"$@14","v":null,"s":"$6"}}]]
+b:[["children",{"s":{"n":"slug","t":"d","k":"hosts","s":[]},"h":96,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}]}]]}],"p":"$@c","v":"$d","s":"$6"},"c":"$Qe"}]]
+7:[["children",{"s":"(docs)","h":96,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/3_zcwfmbdj4b5.js","async":true}]],["$","$L9",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]]}]}]]}],"p":"$@a","v":null,"s":"$6"},"c":"$Qb"}]]
+0:{"t":{"t":{"s":"","h":80,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/2ngzwwqeitkk7.js","async":true}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]]}]}]}]]}],"p":"$@5","v":null,"s":"$6"},"c":"$Q7"},"h":{"r":["$","$1","h",{"children":[null,["$","$L16",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]}],["$","$L18",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$19",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"Hosting in another product · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L1a","11",{}]]}]}],null]}],null]}],"p":"$@1b","v":null,"s":"$6"}},"a":"$@1c","u":"$@1d","b":"6ghED9FevNJUutPoa1d59"}
+1e:I[97367,["$2"],"OutletBoundary"]
+12:["$","script","script-0",{"src":"/dev/_next/static/chunks/2stmo1fl2_ko-.js","async":true}]
+13:["$","$L1e",null,{"children":["$","$19",null,{"name":"Next.MetadataOutlet","children":"$@1f"}]}]
+6:300
+1f:null
+1d:true
+6:C
+1c:0
+c:"$undefined"
+a:"$undefined"
+5:"$undefined"
+1b:"$undefined"
+14:"$undefined"

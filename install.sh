@@ -91,17 +91,21 @@ fi
 
 say "installed $("$PREFIX/bin/superfluid" --version) to $(shown "$PREFIX")/bin"
 
-# The baseRT engine ships for Apple silicon and Linux arm64 (CUDA); install it
-# where it runs so .base bundles serve without a first-use wait. llama.cpp and
-# MLX install themselves the first time a model needs them.
+# The baseRT engine ships for Apple silicon, Linux arm64 (CUDA) and Linux
+# x86-64 with an AMD Strix Halo or Strix Point GPU (ROCm); install it where it
+# runs so .base bundles serve without a first-use wait. On x86-64 it is tried
+# only with an AMD GPU (the amdgpu driver's /dev/kfd), and superfluid says
+# whether that GPU is one baseRT's engine runs on. llama.cpp and MLX install
+# themselves the first time a model needs them.
+basert=""
 case "$target" in
-  aarch64-apple-darwin | aarch64-unknown-linux-gnu)
-    if [ -z "${SUPERFLUID_NO_BASERT:-}" ]; then
-            "$PREFIX/bin/superfluid" runtime install basert \
-        || say "the baseRT engine was not installed; .base bundles need it (superfluid runtime install basert), GGUF and MLX models do not"
-    fi
-    ;;
+  aarch64-apple-darwin | aarch64-unknown-linux-gnu) basert=1 ;;
+  x86_64-unknown-linux-gnu) if [ -e /dev/kfd ]; then basert=1; fi ;;
 esac
+if [ -n "$basert" ] && [ -z "${SUPERFLUID_NO_BASERT:-}" ]; then
+  "$PREFIX/bin/superfluid" runtime install basert \
+    || say "the baseRT engine was not installed; .base bundles need it (superfluid runtime install basert), GGUF and MLX models do not"
+fi
 case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;
   *) say "add $PREFIX/bin to your PATH, e.g.: export PATH=\"$PREFIX/bin:\$PATH\"" ;;
