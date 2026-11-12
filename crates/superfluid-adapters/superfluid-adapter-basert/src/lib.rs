@@ -449,23 +449,30 @@ pub fn devices() -> Vec<Device> {
     // baseRT's engines: Metal on Apple silicon, CUDA on Linux arm64, ROCm on Linux x86-64.
     let backend = if cfg!(target_os = "macos") { "Metal" } else if cfg!(target_arch = "x86_64") { "ROCm" } else { "CUDA" };
     // baseRT states its budget alone, the share of the device it plans a model against.
-    vec![Device { backend: backend.into(), name: gpu_name(), memory, budget: memory }]
+    vec![Device { backend: backend.into(), name: gpu_name(backend), memory, budget: memory }]
 }
 
-fn gpu_name() -> String {
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn gpu_name(backend: &str) -> String {
     #[cfg(target_os = "macos")]
     if let Some(chip) = sysctl_string("machdep.cpu.brand_string") {
         return chip;
     }
     #[cfg(target_os = "linux")]
-    if let Some(model) = nvidia_model() {
-        return model;
-    }
-    #[cfg(target_os = "linux")]
-    if let Some(gfx) = superfluid_adapter_kit::install::amd_gpus().into_iter().next() {
-        return format!("AMD {gfx}");
+    if let Some(name) = linux_gpu_name(backend, nvidia_model, || superfluid_adapter_kit::install::amd_gpus().into_iter().next()) {
+        return name;
     }
     "GPU".into()
+}
+
+/// The GPU the engine runs on: the ROCm engine on HIP device 0 (the first AMD GPU as HIP numbers them), the CUDA engine on
+/// the NVIDIA GPU. A machine can have both, so the name follows the backend, not whichever driver answers first.
+#[cfg(any(target_os = "linux", test))]
+fn linux_gpu_name(backend: &str, nvidia: impl FnOnce() -> Option<String>, amd: impl FnOnce() -> Option<String>) -> Option<String> {
+    match backend {
+        "ROCm" => amd().map(|gfx| format!("AMD {gfx}")),
+        _ => nvidia(),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -512,6 +519,17 @@ fn named(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_device_is_named_by_the_gpu_the_engine_runs_on() {
+        let nvidia = || Some("NVIDIA GeForce RTX 4060 Laptop GPU".to_string());
+        let amd = || Some("gfx1150".to_string());
+        // A Strix Point laptop with an NVIDIA GPU beside it: the ROCm engine runs on the AMD GPU.
+        assert_eq!(linux_gpu_name("ROCm", nvidia, amd).as_deref(), Some("AMD gfx1150"));
+        assert_eq!(linux_gpu_name("CUDA", nvidia, amd).as_deref(), Some("NVIDIA GeForce RTX 4060 Laptop GPU"));
+        assert_eq!(linux_gpu_name("CUDA", || None, amd), None, "the CUDA engine never runs on an AMD GPU");
+        assert_eq!(linux_gpu_name("ROCm", nvidia, || None), None, "nor the ROCm engine on an NVIDIA one");
+    }
 
     #[test]
     fn compat_names_only_the_engines_that_install_without_untested() {
@@ -589,7 +607,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_chip_names_the_gpu_on_apple_silicon() {
-        assert!(!gpu_name().is_empty());
+        assert!(!gpu_name("Metal").is_empty());
     }
 }
 

@@ -13,7 +13,7 @@ pub struct Host {
     pub nvidia_driver: Option<String>,
     pub cuda_runtime: Option<u32>,
     pub rocm: bool,
-    /// The AMD GPUs the kernel's KFD driver lists, by LLVM target (`gfx1151`).
+    /// The AMD GPUs by LLVM target (`gfx1151`), as HIP numbers them: the first is device 0 ([`amd_gpus`]).
     pub amd_gpus: Vec<String>,
     /// The ROCm releases installed side by side as `/opt/rocm/core-<version>`, as AMD's ROCm 10 packages lay them out (`10.0`).
     pub rocm_runtimes: Vec<String>,
@@ -84,8 +84,40 @@ impl Host {
     }
 }
 
-/// The AMD GPUs the KFD driver lists, by LLVM target, in node order; none without the driver (`/dev/kfd`).
+/// The AMD GPUs HIP numbers as devices 0, 1, ..., by LLVM target: the KFD driver's GPU nodes in node order, narrowed as the
+/// ROCm runtime narrows them, by ROCR_VISIBLE_DEVICES and then HIP_VISIBLE_DEVICES (or CUDA_VISIBLE_DEVICES when that is
+/// unset). baseRT's ROCm engine runs on device 0. None without the driver (`/dev/kfd`).
 pub fn amd_gpus() -> Vec<String> {
+    let var = |name| std::env::var(name).ok().filter(|v: &String| !v.trim().is_empty());
+    let hip = var("HIP_VISIBLE_DEVICES").or_else(|| var("CUDA_VISIBLE_DEVICES"));
+    hip_devices(kfd_gpus(), var("ROCR_VISIBLE_DEVICES").as_deref(), hip.as_deref())
+}
+
+/// `gpus` as HIP numbers them under ROCR_VISIBLE_DEVICES (`rocr`) and then HIP_VISIBLE_DEVICES (`hip`): each a comma list of
+/// indices into the GPUs the one before left, which narrows and reorders them. A repeated index is dropped and one past the
+/// end ends the list. A list that names devices by UUID is not read: the GPUs are left as they are, and the engine's own
+/// check of device 0 decides.
+pub fn hip_devices(gpus: Vec<String>, rocr: Option<&str>, hip: Option<&str>) -> Vec<String> {
+    fn narrow(gpus: Vec<String>, list: Option<&str>) -> Vec<String> {
+        let Some(list) = list.filter(|l| !l.trim().is_empty()) else {
+            return gpus;
+        };
+        let Ok(indices) = list.split(',').map(|i| i.trim().parse::<usize>()).collect::<Result<Vec<_>, _>>() else {
+            return gpus;
+        };
+        let mut kept: Vec<usize> = Vec::new();
+        for i in indices.into_iter().take_while(|&i| i < gpus.len()) {
+            if !kept.contains(&i) {
+                kept.push(i);
+            }
+        }
+        kept.into_iter().map(|i| gpus[i].clone()).collect()
+    }
+    narrow(narrow(gpus, rocr), hip)
+}
+
+/// The AMD GPUs the KFD driver lists, by LLVM target, in node order.
+fn kfd_gpus() -> Vec<String> {
     if !Path::new("/dev/kfd").exists() {
         return Vec::new();
     }
@@ -881,6 +913,20 @@ mod tests {
         let host = Host { os: "linux".into(), arch: "x64".into(), rocm: true, amd_gpus: vec!["gfx1151".into()], rocm_runtimes: vec!["10.0".into()], ..Host::default() };
         assert_eq!(host.describe(), "Linux x64, AMD gfx1151, ROCm 10.0");
         assert_eq!(Host { rocm_runtimes: vec![], ..host }.describe(), "Linux x64, AMD gfx1151, ROCm");
+    }
+
+    #[test]
+    fn hip_numbers_the_gpus_the_visibility_lists_leave() {
+        let gpus = |v: &[&str]| v.iter().map(|g| g.to_string()).collect::<Vec<_>>();
+        let all = gpus(&["gfx1100", "gfx1151", "gfx1150"]);
+        assert_eq!(hip_devices(all.clone(), None, None), all, "unset: node order");
+        assert_eq!(hip_devices(all.clone(), None, Some("1")), gpus(&["gfx1151"]));
+        assert_eq!(hip_devices(all.clone(), None, Some("2, 0")), gpus(&["gfx1150", "gfx1100"]), "a list reorders");
+        assert_eq!(hip_devices(all.clone(), Some("1,2"), Some("1")), gpus(&["gfx1150"]), "HIP's indices count what ROCR's list left");
+        assert_eq!(hip_devices(all.clone(), None, Some("1,7,0")), gpus(&["gfx1151"]), "an index past the end ends the list");
+        assert_eq!(hip_devices(all.clone(), None, Some("1,1")), gpus(&["gfx1151"]), "a repeat is dropped");
+        assert_eq!(hip_devices(all.clone(), Some("GPU-0123456789abcdef"), None), all, "a UUID list is not read");
+        assert_eq!(hip_devices(all.clone(), Some(" "), Some("")), all, "empty is unset");
     }
 
     #[test]

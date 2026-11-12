@@ -69,10 +69,21 @@ const ROCM_GPUS: [&str; 2] = ["gfx1151", "gfx1150"];
 const ROCM_RUNTIME: &str = "10.0";
 
 fn platform(host: &Host) -> Result<(&'static str, &'static str), String> {
+    let strix = |g: &String| ROCM_GPUS.contains(&g.as_str());
     match (host.os.as_str(), host.arch.as_str()) {
         ("macos", "arm64") => Ok(("macos-arm64", "metal")),
         ("linux", "arm64") if host.nvidia_driver.is_some() => Ok(("linux-arm64-cuda", "cuda")),
-        ("linux", "x64") if host.amd_gpus.iter().any(|g| ROCM_GPUS.contains(&g.as_str())) => Ok(("linux-x64-rocm", "rocm")),
+        // The engine runs on HIP device 0 and refuses a GPU it has no kernels for, so device 0 decides, not any GPU.
+        ("linux", "x64") if host.amd_gpus.first().is_some_and(strix) => Ok(("linux-x64-rocm", "rocm")),
+        ("linux", "x64") if host.amd_gpus.iter().any(strix) => {
+            let i = host.amd_gpus.iter().position(strix).unwrap_or(0);
+            Err(format!(
+                "baseRT's ROCm engine runs on HIP device 0, which is {} here; the {} is HIP device {i}. Make it device 0 for \
+                 superfluid, when it installs and when it serves: HIP_VISIBLE_DEVICES={i} (where HIP_VISIBLE_DEVICES or \
+                 ROCR_VISIBLE_DEVICES is set already, list it first there)",
+                host.amd_gpus[0], host.amd_gpus[i]
+            ))
+        }
         _ => Err(format!(
             "baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux x86-64 with an AMD \
              Strix Halo or Strix Point GPU ({}); this is {}",
@@ -576,8 +587,12 @@ mod tests {
             let e = plan_with(&Request::default(), &other, &pinned, &releases).unwrap_err();
             assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
         }
-        let both = Host { amd_gpus: vec!["gfx1100".into(), "gfx1151".into()], ..strix("gfx1151") };
-        assert_eq!(plan_with(&Request::default(), &both, &[], &releases).unwrap()[0].backend, "rocm", "one of them is a Strix GPU");
+        // The engine opens HIP device 0, the first of Host.amd_gpus: a Strix GPU behind another AMD GPU is named, not admitted.
+        let behind = Host { amd_gpus: vec!["gfx1100".into(), "gfx1151".into()], ..strix("gfx1151") };
+        let e = plan_with(&Request::default(), &behind, &pinned, &releases).unwrap_err();
+        assert!(e.contains("HIP device 0, which is gfx1100 here") && e.contains("the gfx1151 is HIP device 1") && e.contains("HIP_VISIBLE_DEVICES=1"), "{e}");
+        let first = Host { amd_gpus: vec!["gfx1150".into(), "gfx1100".into()], ..strix("gfx1150") };
+        assert_eq!(plan_with(&Request::default(), &first, &[], &releases).unwrap()[0].backend, "rocm", "device 0 is a Strix GPU");
     }
 
     /// For baseRT `--backend` chooses nothing: each machine runs one engine. Asking for ROCm on a Strix machine plans
