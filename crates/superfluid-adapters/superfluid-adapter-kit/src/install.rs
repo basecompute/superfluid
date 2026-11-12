@@ -13,6 +13,16 @@ pub struct Host {
     pub nvidia_driver: Option<String>,
     pub cuda_runtime: Option<u32>,
     pub rocm: bool,
+    /// The AMD GPUs by LLVM target (`gfx1151`), as HIP numbers them: the first is device 0 ([`hip_view`]). When
+    /// `amd_order_unknown`, the driver's GPUs in node order instead.
+    pub amd_gpus: Vec<String>,
+    /// For each of `amd_gpus`, the index HIP_VISIBLE_DEVICES names it by (its place among the GPUs ROCR_VISIBLE_DEVICES
+    /// leaves). Empty: each GPU's own place in `amd_gpus`.
+    pub amd_hip_indices: Vec<usize>,
+    /// A visibility variable names GPUs by UUID, which is not resolved here: which GPU is device 0 is unknown.
+    pub amd_order_unknown: bool,
+    /// The ROCm releases installed side by side as `/opt/rocm/core-<version>`, as AMD's ROCm 10 packages lay them out (`10.0`).
+    pub rocm_runtimes: Vec<String>,
     pub vulkan: bool,
 }
 
@@ -29,6 +39,11 @@ impl Host {
             host.nvidia_driver = std::fs::read_to_string("/proc/driver/nvidia/version").ok().and_then(|t| nvidia_driver_version(&t));
             host.cuda_runtime = cuda_runtime_major();
             host.rocm = Path::new("/dev/kfd").exists() && Path::new("/opt/rocm").is_dir();
+            let view = amd_view();
+            host.amd_gpus = view.gpus;
+            host.amd_hip_indices = view.hip_indices;
+            host.amd_order_unknown = !view.known;
+            host.rocm_runtimes = rocm_runtimes(Path::new("/opt/rocm"));
             host.vulkan = linux_vulkan();
         }
         host
@@ -55,7 +70,12 @@ impl Host {
         if let Some(m) = self.cuda_runtime {
             facts.push(format!("CUDA runtime {m}"));
         }
-        if self.rocm {
+        if !self.amd_gpus.is_empty() {
+            facts.push(format!("AMD {}", self.amd_gpus.join(" + ")));
+        }
+        if !self.rocm_runtimes.is_empty() {
+            facts.push(format!("ROCm {}", self.rocm_runtimes.join(" + ")));
+        } else if self.rocm {
             facts.push("ROCm".into());
         }
         if self.vulkan {
@@ -67,9 +87,170 @@ impl Host {
     pub fn to_json(&self) -> Value {
         json!({
             "os": self.os, "arch": self.arch, "nvidia_driver": self.nvidia_driver,
-            "cuda_runtime": self.cuda_runtime, "rocm": self.rocm, "vulkan": self.vulkan,
+            "cuda_runtime": self.cuda_runtime, "rocm": self.rocm, "amd_gpus": self.amd_gpus,
+            "amd_order_unknown": self.amd_order_unknown, "rocm_runtimes": self.rocm_runtimes, "vulkan": self.vulkan,
         })
     }
+}
+
+/// The AMD GPUs HIP numbers as devices 0, 1, ..., by LLVM target ([`hip_view`] of the driver's GPUs and this process's
+/// visibility variables). baseRT's ROCm engine runs on device 0. None without the driver (`/dev/kfd`).
+pub fn amd_gpus() -> Vec<String> {
+    amd_view().gpus
+}
+
+/// The driver's GPUs as HIP will number them in this process: [`hip_view`] under ROCR_VISIBLE_DEVICES and HIP's own
+/// variable, HIP_VISIBLE_DEVICES, or CUDA_VISIBLE_DEVICES when that is unset or empty.
+pub fn amd_view() -> HipView {
+    let rocr = std::env::var("ROCR_VISIBLE_DEVICES").ok();
+    let set = |name| std::env::var(name).ok().filter(|v: &String| !v.is_empty());
+    let hip = set("HIP_VISIBLE_DEVICES").or_else(|| set("CUDA_VISIBLE_DEVICES"));
+    hip_view(&kfd_gpus(), rocr.as_deref(), hip.as_deref())
+}
+
+/// AMD GPUs as HIP numbers them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HipView {
+    /// Device 0 first; with `known` false, the driver's GPUs in node order.
+    pub gpus: Vec<String>,
+    /// For each of `gpus`, the index HIP_VISIBLE_DEVICES names it by: its place among the GPUs ROCR_VISIBLE_DEVICES leaves.
+    pub hip_indices: Vec<usize>,
+    /// False when a visibility variable reaches an entry naming a GPU by UUID, which this does not resolve.
+    pub known: bool,
+}
+
+/// The GPUs in `kfd` (the driver's, in node order) as HIP numbers them, under `rocr` (ROCR_VISIBLE_DEVICES; `None` when
+/// unset) and then `hip` (HIP's variable; `None` when unset or empty), each read as the ROCm runtime reads it:
+///
+/// - ROCr (`amd_filter_device.cpp`): set but empty shows no GPU. Entries are trimmed and read up to the number of GPUs;
+///   each is an index (C `strtol`, base 0, so `0x1` is 1) into the driver's GPUs. An entry that does not parse, an index
+///   out of range, or a repeat ends the list.
+/// - HIP (`rocdevice.cpp`): entries index the GPUs ROCr left; only the plain decimal form counts (`01`, `-1` and ` 1`
+///   do not). An invalid entry ends the list; a repeat is skipped.
+///
+/// Either may name a GPU by UUID (`GPU-...`): that needs the GPUs' unique IDs and each runtime's matching rule, so a UUID
+/// entry the runtime would reach makes the order unknown (`known` false) rather than guessed.
+pub fn hip_view(kfd: &[String], rocr: Option<&str>, hip: Option<&str>) -> HipView {
+    let unknown = || HipView { gpus: kfd.to_vec(), hip_indices: Vec::new(), known: false };
+    let after_rocr = match rocr {
+        None => (0..kfd.len()).collect(),
+        Some(list) => match rocr_selection(kfd.len(), list) {
+            Some(picked) => picked,
+            None => return unknown(),
+        },
+    };
+    let order = match hip {
+        None => (0..after_rocr.len()).collect(),
+        Some(list) => match hip_selection(after_rocr.len(), list) {
+            Some(picked) => picked,
+            None => return unknown(),
+        },
+    };
+    HipView { gpus: order.iter().map(|&j| kfd[after_rocr[j]].clone()).collect(), hip_indices: order, known: true }
+}
+
+/// A comma list's entries as C's `getline` and a `do { } while (pos < size)` loop see them: a final empty entry after a
+/// trailing comma is not one.
+fn entries(list: &str) -> Vec<&str> {
+    let mut all: Vec<&str> = list.split(',').collect();
+    if all.len() > 1 && all.last() == Some(&"") {
+        all.pop();
+    }
+    all
+}
+
+/// The driver indices ROCR_VISIBLE_DEVICES selects, in its order; `None` when it reaches a UUID or an empty entry.
+fn rocr_selection(gpus: usize, list: &str) -> Option<Vec<usize>> {
+    if list.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut picked = Vec::new();
+    for entry in entries(list).into_iter().take(gpus) {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.starts_with(['G', 'g']) {
+            return None;
+        }
+        match strtol0(entry) {
+            Some(i) if i >= 0 && (i as u128) < gpus as u128 && !picked.contains(&(i as usize)) => picked.push(i as usize),
+            _ => break,
+        }
+    }
+    Some(picked)
+}
+
+/// The indices HIP_VISIBLE_DEVICES selects among `gpus`, in its order; `None` when it reaches a UUID.
+fn hip_selection(gpus: usize, list: &str) -> Option<Vec<usize>> {
+    let mut picked = Vec::new();
+    for entry in entries(list) {
+        if entry.contains("GPU-") {
+            return None;
+        }
+        match entry.parse::<usize>() {
+            Ok(i) if i < gpus && entry == i.to_string() => {
+                if !picked.contains(&i) {
+                    picked.push(i);
+                }
+            }
+            _ => break,
+        }
+    }
+    Some(picked)
+}
+
+/// C's `strtol(s, &end, 0)` when it consumes all of `s`: an optional sign, then hex after `0x`, octal after `0`, else
+/// decimal. `None` when anything is left over or there are no digits.
+fn strtol0(s: &str) -> Option<i128> {
+    let (negative, digits) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let (radix, body) = if let Some(hex) = digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X")) {
+        (16, hex)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        (8, &digits[1..])
+    } else {
+        (10, digits)
+    };
+    if body.is_empty() || !body.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    let value = body.chars().try_fold(0i128, |v, c| v.checked_mul(radix as i128)?.checked_add(c.to_digit(radix)? as i128)).unwrap_or(i128::MAX);
+    Some(if negative { -value } else { value })
+}
+
+/// The AMD GPUs the KFD driver lists, by LLVM target, in node order.
+fn kfd_gpus() -> Vec<String> {
+    if !Path::new("/dev/kfd").exists() {
+        return Vec::new();
+    }
+    let Ok(dir) = std::fs::read_dir("/sys/class/kfd/kfd/topology/nodes") else {
+        return Vec::new();
+    };
+    let mut nodes: Vec<(u32, PathBuf)> = dir.flatten().filter_map(|n| Some((n.file_name().to_str()?.parse().ok()?, n.path()))).collect();
+    nodes.sort();
+    nodes.into_iter().filter_map(|(_, node)| gfx_target(&std::fs::read_to_string(node.join("properties")).ok()?)).collect()
+}
+
+/// The LLVM target a KFD topology node's `properties` state, as `gfx_target_version` major*10000 + minor*100 + stepping:
+/// 110501 is gfx1151, 90010 gfx90a. A CPU node states 0.
+fn gfx_target(properties: &str) -> Option<String> {
+    let v: u32 = properties.lines().find_map(|l| l.strip_prefix("gfx_target_version "))?.trim().parse().ok()?;
+    (v != 0).then(|| format!("gfx{}{:x}{:x}", v / 10000, v / 100 % 100, v % 100))
+}
+
+/// The versions of the ROCm releases under `root` as `core-<version>/lib`, oldest first. The links beside them (`core`,
+/// `core-10`, through /etc/alternatives) name one of them again and are not counted.
+fn rocm_runtimes(root: &Path) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.path().join("lib").is_dir())
+        .filter_map(|e| e.file_name().to_str()?.strip_prefix("core-").map(str::to_string))
+        .collect();
+    found.sort_by_key(|v| version_key(v));
+    found
 }
 
 fn nvidia_driver_version(text: &str) -> Option<String> {
@@ -821,6 +1002,68 @@ mod tests {
         let host = Host { nvidia_driver: Some("580.95.05".into()), ..Host::default() };
         assert_eq!(host.nvidia_major(), Some(580));
         assert_eq!(nvidia_driver_version("no version here"), None);
+    }
+
+    #[test]
+    fn an_amd_gpu_is_named_by_the_target_its_kfd_node_states() {
+        let node = |v: u32| format!("cpu_cores_count 0\nsimd_count 80\nmax_waves_per_simd 16\ngfx_target_version {v}\nvendor_id 4098\n");
+        assert_eq!(gfx_target(&node(110501)).as_deref(), Some("gfx1151"), "Strix Halo");
+        assert_eq!(gfx_target(&node(110500)).as_deref(), Some("gfx1150"), "Strix Point");
+        assert_eq!(gfx_target(&node(110000)).as_deref(), Some("gfx1100"));
+        assert_eq!(gfx_target(&node(90010)).as_deref(), Some("gfx90a"), "a stepping past 9 is a hex digit");
+        assert_eq!(gfx_target(&node(0)), None, "the CPU's node");
+        assert_eq!(gfx_target("cpu_cores_count 16\n"), None);
+        let host = Host { os: "linux".into(), arch: "x64".into(), rocm: true, amd_gpus: vec!["gfx1151".into()], rocm_runtimes: vec!["10.0".into()], ..Host::default() };
+        assert_eq!(host.describe(), "Linux x64, AMD gfx1151, ROCm 10.0");
+        assert_eq!(Host { rocm_runtimes: vec![], ..host }.describe(), "Linux x64, AMD gfx1151, ROCm");
+    }
+
+    #[test]
+    fn hip_numbers_the_gpus_as_rocr_then_hip_read_their_lists() {
+        let kfd: Vec<String> = ["gfx1100", "gfx1151", "gfx1150"].iter().map(|g| g.to_string()).collect();
+        let seen = |rocr: Option<&str>, hip: Option<&str>| {
+            let v = hip_view(&kfd, rocr, hip);
+            (v.known, v.gpus, v.hip_indices)
+        };
+        let gpus = |v: &[&str]| v.iter().map(|g| g.to_string()).collect::<Vec<_>>();
+        assert_eq!(seen(None, None), (true, kfd.clone(), vec![0, 1, 2]), "unset: node order");
+        // ROCR_VISIBLE_DEVICES, as amd_filter_device.cpp reads it.
+        assert_eq!(seen(Some(""), None), (true, vec![], vec![]), "set but empty: no GPU");
+        assert_eq!(seen(Some("2, 0"), None), (true, gpus(&["gfx1150", "gfx1100"]), vec![0, 1]), "trimmed, in its order");
+        assert_eq!(seen(Some("0x1"), None).1, gpus(&["gfx1151"]), "strtol base 0");
+        assert_eq!(seen(Some("1,1,0"), None).1, gpus(&["gfx1151"]), "a repeat ends the list");
+        assert_eq!(seen(Some("1,7,0"), None).1, gpus(&["gfx1151"]), "so does an index out of range");
+        assert_eq!(seen(Some("1,x,0"), None).1, gpus(&["gfx1151"]), "and an entry that does not parse");
+        assert_eq!(seen(Some("-1"), None).1, gpus(&[]));
+        assert_eq!(seen(Some("1,"), None).1, gpus(&["gfx1151"]), "no entry after a final comma");
+        assert_eq!(seen(Some("0,1,2,GPU-1a2b"), None).1, kfd, "entries past the GPU count are not read");
+        assert!(!seen(Some("GPU-1a2b3c4d5e6f7a8b"), None).0, "a UUID: unknown");
+        assert!(!seen(Some(",1"), None).0, "an empty entry: unknown");
+        // HIP_VISIBLE_DEVICES, as rocdevice.cpp reads it, counting what ROCr left.
+        assert_eq!(seen(None, Some("-1")), (true, vec![], vec![]), "invalid from the first entry: no GPU");
+        assert_eq!(seen(None, Some("1,0")), (true, gpus(&["gfx1151", "gfx1100"]), vec![1, 0]));
+        assert_eq!(seen(None, Some("1,1,0")).1, gpus(&["gfx1151", "gfx1100"]), "a repeat is skipped, not an end");
+        assert_eq!(seen(None, Some("01")).1, gpus(&[]), "only the plain decimal form");
+        assert_eq!(seen(None, Some("1, 0")).1, gpus(&["gfx1151"]), "no trimming");
+        assert_eq!(seen(None, Some("1,,0")).1, gpus(&["gfx1151"]), "an empty entry ends the list");
+        assert_eq!(seen(Some("2,1"), Some("1")), (true, gpus(&["gfx1151"]), vec![1]), "HIP counts ROCr's list");
+        assert!(!seen(None, Some("0,GPU-1a2b")).0, "a UUID it reaches: unknown");
+        assert!(seen(None, Some("9,GPU-1a2b")).0, "not one past an invalid entry");
+    }
+
+    #[test]
+    fn rocm_runtimes_are_the_core_trees_with_libraries_under_the_root() {
+        let root = std::env::temp_dir().join(format!("superfluid-kit-rocm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["core-10.0/lib", "core-9.9/lib", "core-11.0", "lib", "share"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        // As AMD's ROCm 10 packages leave it (Ubuntu 26.04): `core` and `core-10` link to the tree.
+        std::os::unix::fs::symlink(root.join("core-10.0"), root.join("core-10")).unwrap();
+        std::os::unix::fs::symlink(root.join("core-10.0"), root.join("core")).unwrap();
+        assert_eq!(rocm_runtimes(&root), ["9.9", "10.0"], "by version, only a tree with its lib/, and not a link to one");
+        assert!(rocm_runtimes(&root.join("missing")).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
