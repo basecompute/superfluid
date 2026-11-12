@@ -28,9 +28,12 @@ cargo build --release --manifest-path "$MANIFEST" \
   -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
 
 # The baseRT worker installs the engine (its release ships a worker of its own
-# that serves); the engine runs on Apple silicon and Linux arm64.
+# that serves); the engine runs on Apple silicon, Linux arm64 (NVIDIA) and
+# Linux x86-64 (AMD Strix Halo and Strix Point).
 BASERT=""
-{ [ "$OS" = Darwin ] && [ "$ARCH" = arm64 ]; } || { [ "$OS" = Linux ] && [ "$ARCH" = aarch64 ]; } && BASERT=1
+case "$OS-$ARCH" in
+  Darwin-arm64 | Linux-aarch64 | Linux-x86_64) BASERT=1 ;;
+esac
 say "building the baseRT adapter's worker"
 cargo build --release --manifest-path "$MANIFEST" -p superfluid-adapter-basert --bin superfluid-worker-basert
 
@@ -115,8 +118,8 @@ bare() { env -i HOME="$EMPTY" SUPERFLUID_HOME="$EMPTY/superfluid" PATH=/usr/bin:
 
 # check_adapter <id> [starts]: the worker starts and reports with no runtime
 # here, and plans its install; "starts" asks for the report only, where a plan
-# cannot be answered on the builder (the baseRT engine for Linux arm64 wants an
-# NVIDIA GPU the builder lacks).
+# cannot be answered on the builder (the baseRT engine for Linux wants a GPU
+# the builder lacks: NVIDIA's on arm64, AMD's on x86-64).
 check_adapter() {
   local id="$1" worker="$STAGE/superfluid-worker-$1" report plans
   if report="$(bare "$worker" check 2>"$EMPTY/check.err")"; then

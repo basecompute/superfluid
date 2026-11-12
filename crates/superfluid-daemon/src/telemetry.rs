@@ -165,12 +165,101 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for QueueWriter {
     }
 }
 
-pub type LogRing = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>;
+pub type LogRing = std::sync::Arc<std::sync::Mutex<LogLines>>;
 
 const LOG_RING_CAP: usize = 2000;
 
 pub fn new_log_ring() -> LogRing {
-    std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(256)))
+    std::sync::Arc::new(std::sync::Mutex::new(LogLines {
+        lines: std::collections::VecDeque::with_capacity(256),
+        evicted: 0,
+    }))
+}
+
+/// The lines the TUI log pane shows, oldest first, capped at
+/// `LOG_RING_CAP`. `evicted` counts lines dropped off the front, so
+/// `evicted + i` numbers line `i` for good: the pane compares numbers across
+/// redraws to hold its place while new lines stream in.
+#[derive(Debug, Default)]
+pub struct LogLines {
+    lines: std::collections::VecDeque<String>,
+    evicted: u64,
+}
+
+impl LogLines {
+    /// The number the next line will get.
+    pub fn end(&self) -> u64 {
+        self.evicted + self.lines.len() as u64
+    }
+
+    /// Adds `text` one line per `\n`, cleaned for the terminal; blank lines
+    /// are dropped.
+    fn push(&mut self, text: &str) {
+        for line in text.split('\n') {
+            let line = clean_log_line(line);
+            if line.is_empty() {
+                continue;
+            }
+            while self.lines.len() >= LOG_RING_CAP {
+                self.lines.pop_front();
+                self.evicted += 1;
+            }
+            self.lines.push_back(line);
+        }
+    }
+}
+
+impl std::ops::Deref for LogLines {
+    type Target = std::collections::VecDeque<String>;
+    fn deref(&self) -> &Self::Target {
+        &self.lines
+    }
+}
+
+/// What a terminal would leave on screen for `line`, with nothing that moves
+/// its cursor. The TUI writes cell text straight to the terminal, so a stray
+/// `\r` or escape sequence would tear the display. A carriage return keeps
+/// only what follows it (progress bars redraw that way), ANSI escape
+/// sequences go, tabs become spaces, and other control characters are dropped.
+fn clean_log_line(line: &str) -> String {
+    let line = line.trim_end();
+    let line = line.rsplit('\r').next().unwrap_or(line);
+    if !line.contains(char::is_control) {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\t' => out.push_str("    "),
+            '\x1b' => match chars.next() {
+                // CSI: parameters and intermediates, then one final byte.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ST (ESC \).
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out.trim_end().to_string()
 }
 
 struct RingWriter {
@@ -186,27 +275,16 @@ impl std::io::Write for RingWriter {
         Ok(())
     }
 }
-pub fn push_ring_line(ring: &LogRing, line: String) {
+pub fn push_ring_line(ring: &LogRing, text: &str) {
     if let Ok(mut r) = ring.lock() {
-        while r.len() >= LOG_RING_CAP {
-            r.pop_front();
-        }
-        r.push_back(line);
+        r.push(text);
     }
 }
 
 impl Drop for RingWriter {
     fn drop(&mut self) {
-        let line = String::from_utf8_lossy(&self.buf);
-        let line = line.trim_end();
-        if line.is_empty() {
-            return;
-        }
-        if let Ok(mut r) = self.ring.lock() {
-            while r.len() >= LOG_RING_CAP {
-                r.pop_front();
-            }
-            r.push_back(line.to_string());
+        if !self.buf.is_empty() {
+            push_ring_line(&self.ring, &String::from_utf8_lossy(&self.buf));
         }
     }
 }
@@ -354,3 +432,39 @@ pub fn dropped_total() -> u64 {
 }
 
 pub type SharedLogConfig = Arc<LogConfig>;
+
+#[cfg(test)]
+mod log_ring_tests {
+    use super::*;
+
+    #[test]
+    fn lines_are_cleaned_of_anything_that_moves_the_cursor() {
+        for (raw, want) in [
+            ("plain line  ", "plain line"),
+            ("loading 10%\rloading 55%\rloading 100%\r\n", "loading 100%"),
+            ("\x1b[1;31mERROR\x1b[0m boom", "ERROR boom"),
+            ("\x1b]0;window title\x07after", "after"),
+            ("\x1b]8;;https://x.test\x1b\\link\x1b]8;;\x1b\\ text", "link text"),
+            ("a\tb", "a    b"),
+            ("bell\x07 and \x08backspace", "bell and backspace"),
+            ("日本語 \u{fffd} ok", "日本語 \u{fffd} ok"),
+        ] {
+            assert_eq!(clean_log_line(raw), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn push_splits_lines_drops_blanks_and_numbers_through_eviction() {
+        let mut log = LogLines::default();
+        log.push("first\n  second\n\n\x1b[0m\nthird\n");
+        assert_eq!(log.iter().collect::<Vec<_>>(), ["first", "  second", "third"]);
+        assert_eq!(log.end(), 3);
+
+        for i in 0..LOG_RING_CAP {
+            log.push(&format!("line {i}"));
+        }
+        assert_eq!(log.len(), LOG_RING_CAP);
+        assert_eq!(log.end(), 3 + LOG_RING_CAP as u64, "evicted lines keep counting");
+        assert_eq!(log.front().map(String::as_str), Some("line 0"));
+    }
+}

@@ -82,7 +82,8 @@ pub(crate) async fn error_layer(req: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::from(json!({"error": message}).to_string()))
 }
 
-async fn unsupported_management() -> Response {
+async fn unsupported_management(body: Body) -> Response {
+    http_state::drain_body(body).await;
     error(StatusCode::NOT_IMPLEMENTED, "Ollama model distribution and Modelfiles are not supported; load models with superfluid and use a model listed by /api/tags")
 }
 

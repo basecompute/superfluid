@@ -19,7 +19,7 @@ default = ["basert"]
 basert = ["dep:superfluid-engine-ffi", "dep:superfluid-adapter-basert", "tui"]
 llamacpp = ["dep:superfluid-adapter-llamacpp"]
 mlx = ["dep:superfluid-adapter-mlx"]
-tui = ["dep:ratatui"]
+tui = ["dep:ratatui", "dep:unicode-segmentation", "dep:unicode-width"]
 
 [dependencies]
 superfluid-abi.workspace = true
@@ -30,7 +30,7 @@ superfluid-shm.workspace = true
 superfluid-worker.workspace = true
 superfluid-agent.workspace = true
 superfluid-linkf.workspace = true
-superfluid-engine-ffi = { path = "../superfluid-engine-ffi", version = "0.1.11", optional = true }
+superfluid-engine-ffi = { path = "../superfluid-engine-ffi", version = "0.1.12", optional = true }
 superfluid-adapter-kit = { workspace = true }
 superfluid-adapter-mock = { workspace = true }
 superfluid-adapter-basert = { workspace = true, optional = true }
@@ -56,6 +56,8 @@ sha2 = "0.10"
 base64 = "0.22"
 xxhash-rust.workspace = true
 ratatui = { version = "0.29", optional = true }
+unicode-segmentation = { version = "1", optional = true }
+unicode-width = { version = "0.2", optional = true }
 mdns-sd = { version = "0.21", default-features = false }
 
 [dev-dependencies]

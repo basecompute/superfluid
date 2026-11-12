@@ -210,6 +210,21 @@ impl AuthenticatedCredential {
     }
 }
 
+/// The most of an unread body [`drain_body`] reads before giving up on it.
+const UNREAD_BODY_LIMIT: usize = 1024 * 1024;
+
+/// Reads a request's body to its end and drops it, for a handler that answers without it.
+///
+/// hyper makes one attempt to read a body the handler left unread and, when it has not all
+/// arrived yet, closes the connection behind the response. The rest of the body then reaches a
+/// closed socket and resets the connection under the client, often before the client has read
+/// the answer (on macOS its next socket call fails with `EINVAL`). Reading the body first keeps
+/// the answer readable. A body past [`UNREAD_BODY_LIMIT`] is still left to that close: an upload
+/// that size is not held in memory only to be thrown away.
+pub(crate) async fn drain_body(body: axum::body::Body) {
+    let _ = axum::body::to_bytes(body, UNREAD_BODY_LIMIT).await;
+}
+
 pub(crate) fn refusal_response(status: StatusCode, r: &crate::Refusal) -> Response {
     (
         status,

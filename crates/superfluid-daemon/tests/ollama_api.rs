@@ -782,3 +782,32 @@ fn cohosted_protocols_keep_their_wire_contracts_under_concurrent_requests() {
         }
     });
 }
+
+/// A route that answers without reading the body still waits for it. hyper closes a connection
+/// whose body it could not read at once, and a body that arrives after that resets the
+/// connection under the client, on macOS before the client has read the answer. The body goes
+/// out a beat after the head here, as from a client that writes the two separately.
+#[test]
+fn a_bodyless_answer_waits_for_a_body_sent_after_its_head() {
+    let addr = scripted(Vec::new());
+    for path in ["/api/pull", "/slots/0/save"] {
+        let body = r#"{"model":"llama3"}"#;
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(stream, "POST {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n", body.len()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(300)))
+            .unwrap();
+        let early = stream.read(&mut [0u8; 1]);
+        assert!(
+            matches!(&early, Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)),
+            "{path} answered before its body arrived: {early:?}"
+        );
+        stream.write_all(body.as_bytes()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).unwrap();
+        assert!(answer.starts_with("HTTP/1.1 501"), "{path}: {answer}");
+    }
+}
