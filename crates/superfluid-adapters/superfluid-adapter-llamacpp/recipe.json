@@ -4,6 +4,87 @@
   "api": "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}",
   "tested": [
     {
+      "version": "b12283",
+      "published": "2026-11-11",
+      "assets": [
+        {
+          "name": "cudart-llama-b12283-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 594371475,
+          "sha256": "44f5e6f622a13396c86e30dee6c9f723b403aadb2300839d499d87b0da27e0fa"
+        },
+        {
+          "name": "cudart-llama-b12283-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "size": 559874480,
+          "sha256": "7b06d51960abbdcfa90eede9c60e891ac9474da2c0dd84303d491aefefaae609"
+        },
+        {
+          "name": "cudart-llama-b12283-bin-ubuntu-cuda-13.5-x64.tar.gz",
+          "size": 444078938,
+          "sha256": "b2c37d8a63183e9f6286f1d70926268d7f0d0ea5f0356571a78310d4b1c84517"
+        },
+        {
+          "name": "llama-b12283-bin-macos-arm64.tar.gz",
+          "size": 16870708,
+          "sha256": "bbc2abe2001293687540fb274bf4114b27b56af1fc166ee76730f64996d68b00"
+        },
+        {
+          "name": "llama-b12283-bin-macos-x64.tar.gz",
+          "size": 12613034,
+          "sha256": "7179905c572cd11e9eadf9669058b49846cc9519f3d8d10497cad19fbf9eb8b0"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-arm64.tar.gz",
+          "size": 18926106,
+          "sha256": "2e44d8517120793b0227d28012a794d114a7d4ad7c3bead4a62b6f3f78b469e7"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 188353916,
+          "sha256": "0334bd73d3e5e6e5dd751724986e8e696f14e2849443b313562babe3e1eef6ce"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "size": 164947076,
+          "sha256": "ef1ffe782ff597d9a7f9eec52375b2635bf0eabab8d71403c3d56fa58da128a3"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-cuda-13.5-x64.tar.gz",
+          "size": 169841725,
+          "sha256": "e09786a7a5cfe094c9fb0011003e017bb1ad1d4fb52cfeba3e9d974d9c7ae7ea"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-rocm-10.0-x64.tar.gz",
+          "size": 255786639,
+          "sha256": "01587e7ab40a1001c20fcbddfc21b7c6a1d721f6d70bd6682a033cad378bc32c"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-sycl-fp16-x64.tar.gz",
+          "size": 66998290,
+          "sha256": "0ff103bdc89831e5cc8597ec7b200fad559cbf47b64c470b15217df6f144dc43"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-sycl-fp32-x64.tar.gz",
+          "size": 66906100,
+          "sha256": "c0c0eb28dec2015c837f6f1b086e124b480bca31b5ec1d1e2b2c7d7a1949749f"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-vulkan-arm64.tar.gz",
+          "size": 29383025,
+          "sha256": "3b8af7db1538b7995bbec32c4b3d739addf1f39f888ca668dd8a3478b106a5cf"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-vulkan-x64.tar.gz",
+          "size": 36106160,
+          "sha256": "34138a7d99f2cc4b2be8b6978a656eb77240e742ba0870a58d418024c6e2e8b8"
+        },
+        {
+          "name": "llama-b12283-bin-ubuntu-x64.tar.gz",
+          "size": 23283834,
+          "sha256": "5f24a62b84a37c186efd1e3e1d77bfad3a1772d9aa35bfcc9e1572723d0c4faf"
+        }
+      ]
+    },
+    {
       "version": "b12244",
       "published": "2026-11-10",
       "assets": [
