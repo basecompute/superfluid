@@ -111,8 +111,8 @@ On by default when stdout is a terminal; `--no-tui` turns it off, `--tui` forces
 |---|---|
 | `q`, `Esc`, `Ctrl-C` | quit (stops the server) |
 | `p` | pause sampling |
-| `Up`/`Down`, `PgUp`/`PgDn`, wheel | scroll the log |
-| `g` / `End` | oldest line / follow |
+| `Up`/`Down`, `PgUp`/`PgDn`, wheel | scroll the log; while scrolled up, new lines don't move the view |
+| `Home` or `g` / `End` or `G` | oldest line / follow |
 
 ### `superfluid top`
 
