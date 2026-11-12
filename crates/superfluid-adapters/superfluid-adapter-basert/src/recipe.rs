@@ -580,6 +580,28 @@ mod tests {
         assert_eq!(plan_with(&Request::default(), &both, &[], &releases).unwrap()[0].backend, "rocm", "one of them is a Strix GPU");
     }
 
+    /// For baseRT `--backend` chooses nothing: each machine runs one engine. Asking for ROCm on a Strix machine plans
+    /// exactly what the plain install does, and anywhere else it is refused rather than quietly installing another engine.
+    #[test]
+    fn backend_rocm_is_the_strix_engine_and_refused_elsewhere() {
+        let (same, v) = (abi(), "0.5.0");
+        let rocm = format!("basert-engine-linux-x64-rocm-{v}.tar.gz");
+        let pinned = [Pin { version: v.into(), abi: Some(same), assets: vec![Asset { name: rocm.clone(), url: format!("https://pinned/{rocm}"), sha256: Some("ef".into()), size: Some(30) }] }];
+        let asked = Request { backend: Some("rocm".into()), ..Request::default() };
+        for gfx in ["gfx1151", "gfx1150"] {
+            let p = plan_with(&asked, &strix(gfx), &pinned, &Value::Null).unwrap();
+            assert_eq!((p[0].backend.as_str(), p[0].install.as_str(), p[0].assets[0].name.as_str()), ("rocm", "0.5.0-rocm", rocm.as_str()), "{gfx}");
+            assert_eq!(p, plan_with(&Request::default(), &strix(gfx), &pinned, &Value::Null).unwrap(), "{gfx}: the plan without --backend");
+        }
+        let gb10 = Host { os: "linux".into(), arch: "arm64".into(), nvidia_driver: Some("580.95".into()), ..Host::default() };
+        assert_eq!(plan_with(&asked, &mac(), &pinned, &Value::Null).unwrap_err(), "baseRT's engine runs on metal here, not rocm");
+        assert_eq!(plan_with(&asked, &gb10, &pinned, &Value::Null).unwrap_err(), "baseRT's engine runs on cuda here, not rocm");
+        // Linux x86-64 without a Strix GPU has no baseRT engine, asked for by backend or not.
+        let other = Host { amd_gpus: vec!["gfx1100".into()], ..strix("gfx1151") };
+        let e = plan_with(&asked, &other, &pinned, &Value::Null).unwrap_err();
+        assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
+    }
+
     #[test]
     fn a_bundle_names_its_version_and_other_machines_are_refused() {
         assert_eq!(version_of("basert-engine-linux-arm64-cuda-0.2.6.tar.gz").as_deref(), Some("0.2.6"));
