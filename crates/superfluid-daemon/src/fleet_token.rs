@@ -63,11 +63,18 @@ pub fn read_or_create(home: &Path) -> Result<Vec<u8>, String> {
     Ok(token.into_bytes())
 }
 
-pub const HELP: &str = "The fleet's shared token.
+pub const HELP: &str = "The fleet's shared token, and a head's nodes.
 Usage: superfluid fleet token          Print the token, making it the first time
   The token lives at $SUPERFLUID_HOME/fleet/token. `serve --fleet` presents it to every
   node and `superfluid-noded` expects it (both read that path by default), and the link
   between them is encrypted with it. Copy the file, or the printed value, to each node.
+       superfluid fleet nodes [<head>] [--json]
+  The head's nodes: each one's address, link, state, lanes busy of its lanes, and models.
+       superfluid fleet remove <name> [<head>]
+  Removes a node: its sessions move to the others, and the head refuses it until the head
+  restarts; a node that joined exits. From another machine, the head must have a key.
+  <head> is the head's HTTP address [default: 127.0.0.1:8453]; the key, when the head has
+  one, is read from $SUPERFLUID_API_KEY.
 ";
 
 pub fn run(args: &[String]) {
@@ -85,6 +92,8 @@ pub fn run(args: &[String]) {
                 }
             }
         }
+        Some("nodes") => std::process::exit(crate::fleet_api::nodes_cli(&args[1..])),
+        Some("remove") => std::process::exit(crate::fleet_api::remove_cli(&args[1..])),
         _ => {
             eprint!("{HELP}");
             std::process::exit(2);

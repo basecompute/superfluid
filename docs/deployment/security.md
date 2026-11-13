@@ -33,7 +33,7 @@ curl -H 'x-api-key: <key>' http://127.0.0.1:8453/v1/models
 - Keys are compared in constant time against a SHA-256 digest.
 - A missing or wrong key is 401 with `type: "authentication_error"`, `code: "invalid_api_key"`.
 
-Admin routes change the server for everyone and need the global key or a policy key with `admin: true`: `POST /v1/models/load`, `/v1/models/unload`, `DELETE /v1/models/{id}`, `POST /v1/lora/load`, `/v1/lora/unload`.
+Admin routes change the server for everyone and need the global key or a policy key with `admin: true`: `POST /v1/models/load`, `/v1/models/unload`, `DELETE /v1/models/{id}`, `POST /v1/lora/load`, `/v1/lora/unload`, and on a fleet head `DELETE /v1/fleet/nodes/{name}`. A fleet head with no key takes node removal only from its own machine.
 
 > [!WARNING]
 > `POST /v1/models/load` loads any path the daemon's user can read. Never expose an unauthenticated server beyond the host.

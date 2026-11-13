@@ -59,6 +59,10 @@ pub mod msg_type {
     /// The head asks a node that dialed it for one connection more, kept for short calls
     /// while generations hold the rest; droppable, so a node that predates it dials no more.
     pub const CONTROL_ASK: u16 = 0x8003;
+    /// The head removed the node from its fleet and refuses it until the head restarts: sent
+    /// on each of the node's links before the head closes it, and on a link the node opens
+    /// after. Droppable, so a node that predates it sees only the link close, and dials again.
+    pub const REMOVED: u16 = 0x8004;
 
     pub const ALL: &[u16] = &[
         HELLO,
@@ -99,6 +103,7 @@ pub mod msg_type {
         TELEMETRY,
         KEEPALIVE,
         CONTROL_ASK,
+        REMOVED,
     ];
 }
 
@@ -494,6 +499,20 @@ mod tests {
             assert!(is_known_type(t));
         }
         assert!(!is_known_type(0x00FF));
+    }
+
+    #[test]
+    fn a_node_that_predates_removal_skips_the_head_saying_so() {
+        use crate::envelope::{encode_frame, FrameClass, FrameDecoder};
+        assert_ne!(msg_type::REMOVED & 0x8000, 0, "sent droppable, as every 0x8000 type is");
+        let mut said = encode_frame(3, msg_type::REMOVED, 7, 0, FrameClass::Droppable, &[]).unwrap();
+        said.extend(encode_frame(3, msg_type::KEEPALIVE, 8, 0, FrameClass::Droppable, &[]).unwrap());
+        let mut old = FrameDecoder::new(|t: u16| t != msg_type::REMOVED && is_known_type(t));
+        old.feed(&said);
+        assert_eq!(old.decode_next().unwrap().map(|f| f.msg_type), Some(msg_type::KEEPALIVE), "skipped, and what follows read");
+        let mut new = FrameDecoder::new(is_known_type);
+        new.feed(&said);
+        assert_eq!(new.decode_next().unwrap().map(|f| f.msg_type), Some(msg_type::REMOVED));
     }
 
     #[test]

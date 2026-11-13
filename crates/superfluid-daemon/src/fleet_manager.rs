@@ -66,8 +66,10 @@ impl NodeLoad {
     }
 }
 
-/// Keeps `node`'s live load from each status `head` reads; weak, as the node owns the head.
+/// Keeps `node`'s live load from each status `head` reads (weak, as the node owns the head), and
+/// ends `head`'s calls once the node is removed.
 fn watch(node: &Arc<NodeConn>, head: &mut FleetHead) {
+    head.removed_when(Arc::clone(&node.removed));
     let node = Arc::downgrade(node);
     head.on_status(Arc::new(move |cap| {
         if let Some(node) = node.upgrade() {
@@ -97,6 +99,8 @@ struct NodeConn {
     /// The last status any of its connections read, mid-generation included, for `/metrics`;
     /// the load placement reads is synced from a connection between calls.
     live: Mutex<NodeLoad>,
+    /// Set once the node is removed ([`FleetManager::remove`]); every connection to it reads it.
+    removed: Arc<AtomicBool>,
 }
 
 impl NodeMeta {
@@ -109,13 +113,17 @@ impl NodeMeta {
             last_retry: None,
             learned: false,
             max_context_tokens: 0,
+            max_lanes: 0,
             load: NodeLoad::default(),
             tokenizer_refused: Vec::new(),
+            since: std::time::Instant::now(),
+            removed: false,
+            refusal_said: false,
         }
     }
 
     fn up(&self) -> bool {
-        self.down_since.is_none()
+        self.down_since.is_none() && !self.removed
     }
 }
 
@@ -224,9 +232,18 @@ struct NodeMeta {
     last_retry: Option<std::time::Instant>,
     learned: bool,
     max_context_tokens: u64,
+    max_lanes: u32,
     load: NodeLoad,
     /// The models the node serves with a tokenizer other than the head's.
     tokenizer_refused: Vec<String>,
+    /// When the node last came up or went down, or the head learned of it.
+    since: std::time::Instant,
+    /// Removed by [`FleetManager::remove`]: kept in place, as sessions and counters hold nodes
+    /// by index, but never placed on, listed or dialed again, and its identity refused when it
+    /// dials in, until the head restarts.
+    removed: bool,
+    /// Whether the head said it refused the removed node dialing in again, which it says once.
+    refusal_said: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -356,6 +373,31 @@ pub struct NodeStatus {
     pub models: Vec<String>,
 }
 
+/// One node as the head lists it (`GET /v1/fleet/nodes`).
+#[derive(Debug, Clone)]
+pub struct NodeEntry {
+    pub status: NodeStatus,
+    /// Whether it dialed the head (`superfluid node join`), rather than the head dialing it
+    /// (`--fleet`).
+    pub joined: bool,
+    /// The window and lanes it reported; 0 until it has.
+    pub max_context_tokens: u64,
+    pub max_lanes: u32,
+    /// Sessions placed on it now, as [`FleetManager::load`] counts them.
+    pub sessions: usize,
+    /// When it last came up or went down, or the head learned of it.
+    pub since: std::time::SystemTime,
+}
+
+/// Why [`FleetManager::remove`] removed nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoveError {
+    /// No node the head lists goes by the name.
+    Unknown,
+    /// Several do, at these addresses.
+    Ambiguous(Vec<String>),
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeReport {
     pub addr: String,
@@ -401,6 +443,7 @@ impl FleetManager {
                     cursor: std::sync::atomic::AtomicUsize::new(0),
                     decoded: std::sync::atomic::AtomicU64::new(0),
                     live: Mutex::new(NodeLoad::default()),
+                    removed: Arc::new(AtomicBool::new(false)),
                 })
             })
             .collect();
@@ -452,6 +495,12 @@ impl FleetManager {
         let (i, new) = {
             let mut sh = self.shared.lock().expect("shared");
             match sh.meta.iter().position(|m| m.identity == identity) {
+                Some(i) if sh.meta[i].removed => {
+                    drop(sh);
+                    let mut head = head;
+                    head.say_removed();
+                    return Err(format!("'{identity}' was removed from this fleet; it is refused until this head restarts"));
+                }
                 Some(i) => {
                     let node = self.node(i);
                     let connected = node.conns.iter().any(in_use);
@@ -473,6 +522,7 @@ impl FleetManager {
                         cursor: std::sync::atomic::AtomicUsize::new(0),
                         decoded: std::sync::atomic::AtomicU64::new(0),
                         live: Mutex::new(NodeLoad::default()),
+                        removed: Arc::new(AtomicBool::new(false)),
                     });
                     first = Some(fresh.conns[0].lock().expect("node conn"));
                     let mut nodes = self.nodes.write().expect("nodes");
@@ -517,7 +567,9 @@ impl FleetManager {
         node.open.store(open.max(1), std::sync::atomic::Ordering::Relaxed);
         if new {
             // Listed as down only until this connection was in place: not a return.
-            self.shared.lock().expect("shared").meta[i].down_since = None;
+            let mut sh = self.shared.lock().expect("shared");
+            sh.meta[i].down_since = None;
+            sh.meta[i].since = std::time::Instant::now();
         } else {
             self.mark_up(i);
         }
@@ -540,22 +592,41 @@ impl FleetManager {
         counts
     }
 
-    /// Every node the head knows, in the order it learned them.
+    /// Every node the head knows, in the order it learned them, but those removed.
     pub fn status(&self) -> Vec<NodeStatus> {
+        self.nodes().into_iter().map(|n| n.status).collect()
+    }
+
+    /// Every node the head knows, as [`Self::status`] gives it and more, for the head's list.
+    pub fn nodes(&self) -> Vec<NodeEntry> {
+        self.listed().into_iter().map(|(_, n)| n).collect()
+    }
+
+    /// The nodes not removed, each with its index.
+    fn listed(&self) -> Vec<(usize, NodeEntry)> {
         let nodes: Vec<Arc<NodeConn>> = self.nodes.read().expect("nodes").clone();
         let sh = self.shared.lock().expect("shared");
+        let mut sessions = vec![0usize; nodes.len()];
+        for p in sh.sessions.values().filter(|p| !p.parked) {
+            if let Some(n) = sessions.get_mut(p.node) {
+                *n += 1;
+            }
+        }
+        let now = (std::time::SystemTime::now(), std::time::Instant::now());
         nodes
             .iter()
             .zip(&sh.meta)
             .zip(&sh.inflight)
-            .map(|((node, meta), &inflight)| {
+            .enumerate()
+            .filter(|(_, ((_, meta), _))| !meta.removed)
+            .map(|(i, ((node, meta), &inflight))| {
                 let live = *node.live.lock().expect("live");
                 let load = if live.at > meta.load.at { live } else { meta.load };
                 let addr = match (&meta.peer, node.spec.addr.strip_prefix(JOINED)) {
                     (Some(peer), Some(_)) => peer.to_string(),
                     _ => node.spec.addr.clone(),
                 };
-                NodeStatus {
+                let status = NodeStatus {
                     name: if meta.identity.is_empty() { addr.clone() } else { meta.identity.clone() },
                     addr,
                     up: meta.up() && meta.learned,
@@ -566,16 +637,79 @@ impl FleetManager {
                     kv_blocks_total: load.kv_total,
                     decode_tokens: node.decoded.load(Ordering::Relaxed),
                     models: meta.models.clone(),
-                }
+                };
+                let entry = NodeEntry {
+                    status,
+                    joined: node.spec.addr.starts_with(JOINED),
+                    max_context_tokens: meta.max_context_tokens,
+                    max_lanes: meta.max_lanes,
+                    sessions: sessions[i],
+                    since: now.0 - now.1.saturating_duration_since(meta.since),
+                };
+                (i, entry)
             })
             .collect()
+    }
+
+    /// Removes the node `name` names, by its identity or else the address it is listed at, until
+    /// the head restarts; the node as it was listed. It is no longer placed on, listed or counted.
+    /// Each of its idle connections tells it so and closes; a call holding one ends at its next
+    /// read, as on a node lost, and a session there moves to another node as it does then. The
+    /// head dials it no more, and refuses its identity when it dials in.
+    pub fn remove(&self, name: &str) -> Result<NodeEntry, RemoveError> {
+        let listed = self.listed();
+        let mut named: Vec<&(usize, NodeEntry)> = listed.iter().filter(|(_, n)| n.status.name == name).collect();
+        if named.is_empty() {
+            named = listed.iter().filter(|(_, n)| n.status.addr == name).collect();
+        }
+        let (i, entry) = match named[..] {
+            [] => return Err(RemoveError::Unknown),
+            [(i, entry)] => (*i, entry.clone()),
+            _ => return Err(RemoveError::Ambiguous(named.iter().map(|(_, n)| n.status.addr.clone()).collect())),
+        };
+        {
+            let mut sh = self.shared.lock().expect("shared");
+            if sh.meta[i].removed {
+                return Err(RemoveError::Unknown);
+            }
+            sh.meta[i].removed = true;
+            // Down, so that losing its connections says nothing more.
+            sh.meta[i].down_since.get_or_insert_with(std::time::Instant::now);
+            sh.forgets.retain(|&(n, ..)| n != i);
+        }
+        let node = self.node(i);
+        node.removed.store(true, Ordering::SeqCst);
+        for slot in node.conns.iter().chain([&node.control]) {
+            if let Some(mut head) = slot.try_lock().ok().and_then(|mut g| g.take()) {
+                std::thread::spawn(move || head.say_removed());
+            }
+        }
+        Ok(entry)
+    }
+
+    /// `head`, unless its node was removed: then it is told so, the link closes and none is
+    /// returned. Said once per node, as a node that predates being told dials again.
+    pub fn unless_removed(&self, mut head: FleetHead, peer: std::net::IpAddr) -> Option<FleetHead> {
+        let identity = head.node().node_identity.clone();
+        let say = {
+            let mut sh = self.shared.lock().expect("shared");
+            let Some(meta) = sh.meta.iter_mut().find(|m| m.identity == identity && m.removed) else {
+                return Some(head);
+            };
+            !std::mem::replace(&mut meta.refusal_said, true)
+        };
+        if say {
+            eprintln!("superfluid: fleet node '{identity}' at {peer} was removed; refusing it until this head restarts");
+        }
+        head.say_removed();
+        None
     }
 
     /// The nodes up now that serve `model`, and every node the head knows.
     /// Nodes up of all the head knows, whatever each serves.
     pub fn nodes_up(&self) -> (usize, usize) {
         let sh = self.shared.lock().expect("shared");
-        (sh.meta.iter().filter(|m| m.up() && m.learned).count(), sh.meta.len())
+        (sh.meta.iter().filter(|m| m.up() && m.learned).count(), Self::known(&sh))
     }
 
     pub fn serving(&self, model: &str) -> (usize, usize) {
@@ -583,7 +717,12 @@ impl FleetManager {
         let up = (0..sh.meta.len())
             .filter(|&i| sh.meta[i].up() && sh.meta[i].learned && Self::serves(&sh, i, model))
             .count();
-        (up, sh.meta.len())
+        (up, Self::known(&sh))
+    }
+
+    /// The nodes the head knows, but those removed.
+    fn known(sh: &Shared) -> usize {
+        sh.meta.iter().filter(|m| !m.removed).count()
     }
 
     pub fn node_of(&self, session: u64) -> Option<String> {
@@ -625,13 +764,18 @@ impl FleetManager {
             let now = std::time::Instant::now();
             sh.meta[i].down_since = Some(now);
             sh.meta[i].last_retry = Some(now);
+            sh.meta[i].since = now;
             tracing::warn!("fleet: node {} is down ({why}); retrying it in the background", self.label(&sh, i));
         }
     }
 
     fn mark_up(&self, i: usize) {
         let mut sh = self.shared.lock().expect("shared");
+        if sh.meta[i].removed {
+            return;
+        }
         if let Some(since) = sh.meta[i].down_since.take() {
+            sh.meta[i].since = std::time::Instant::now();
             tracing::info!("fleet: node {} is back after {} s", self.label(&sh, i), since.elapsed().as_secs());
         }
     }
@@ -668,6 +812,9 @@ impl FleetManager {
         }
         let node = self.node(i);
         let spec = &node.spec;
+        if node.removed.load(Ordering::SeqCst) {
+            return Err(DaemonError::FleetNode { addr: spec.addr.clone(), why: crate::fleet::REMOVED_WHY.into() });
+        }
         if spec.addr.starts_with(JOINED) {
             let e = DaemonError::FleetNode { addr: spec.addr.clone(), why: "left; waiting for it to join again".into() };
             self.mark_unhealthy(i, &e);
@@ -776,6 +923,7 @@ impl FleetManager {
         sh.meta[i].tokenizer_refused = refused;
         sh.meta[i].models = models;
         sh.meta[i].max_context_tokens = cap.max_context_tokens;
+        sh.meta[i].max_lanes = cap.max_lanes;
         sh.meta[i].identity = head.node().node_identity.clone();
         sh.meta[i].learned = true;
         sh.meta[i].load = Self::load_from(cap);
@@ -1781,7 +1929,7 @@ impl FleetManager {
             let now = std::time::Instant::now();
             let mut due = Vec::new();
             for (i, m) in sh.meta.iter_mut().enumerate() {
-                if m.down_since.is_some() && m.last_retry.is_none_or(|t| now.duration_since(t) >= self.retry_every) {
+                if m.down_since.is_some() && !m.removed && m.last_retry.is_none_or(|t| now.duration_since(t) >= self.retry_every) {
                     m.last_retry = Some(now);
                     due.push(i);
                 }
