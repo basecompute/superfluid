@@ -698,7 +698,7 @@ async fn metrics(
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         {
-            let mut text = state.default_daemon().metrics_text();
+            let mut text = state.default_daemon().metrics_text_serving(&state.registry.names());
             if let Some(keys) = &state.keys {
                 let only = key.as_ref().map(|k| &*k.0 .0).filter(|k| !k.admin);
                 text.push_str(&keys.metrics_text_for(only));

@@ -1973,9 +1973,17 @@ impl Daemon {
     }
 
     pub fn metrics_text(&self) -> String {
+        self.metrics_text_serving(&[])
+    }
+
+    /// As [`Self::metrics_text`]; over a fleet, the head's info names every model in `served`
+    /// after this daemon's own, where a server with several models knows them all.
+    pub fn metrics_text_serving(&self, served: &[String]) -> String {
         let mut out = metrics::render_prometheus(&self.stats);
         if let Some((fleet, model)) = &self.fleet {
-            out.push_str(&fleet_metrics::fleet_metrics(&fleet.status(), &metrics::hostname(), model));
+            let models: Vec<String> =
+                std::iter::once(model.clone()).chain(served.iter().filter(|m| *m != model).cloned()).collect();
+            out.push_str(&fleet_metrics::fleet_metrics(&fleet.status(), &metrics::hostname(), &models));
         }
         out.push_str(&format!(
             "# HELP superfluid_telemetry_dropped_total Telemetry records dropped by the bounded sinks (log lines and OTLP spans).\n# TYPE superfluid_telemetry_dropped_total counter\nsuperfluid_telemetry_dropped_total {}\n",

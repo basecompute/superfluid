@@ -352,6 +352,8 @@ pub struct NodeStatus {
     pub kv_blocks_used: u64,
     pub kv_blocks_total: u64,
     pub decode_tokens: u64,
+    /// The models the head places on it, from its report: none until it has reported.
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -563,6 +565,7 @@ impl FleetManager {
                     kv_blocks_used: load.kv_used,
                     kv_blocks_total: load.kv_total,
                     decode_tokens: node.decoded.load(Ordering::Relaxed),
+                    models: meta.models.clone(),
                 }
             })
             .collect()
