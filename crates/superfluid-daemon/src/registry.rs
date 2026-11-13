@@ -110,6 +110,9 @@ pub type ModelReloader =
 
 pub type RuntimeNames = Box<dyn Fn(&str) -> Result<crate::runtime_pick::RuntimeId, String> + Send + Sync>;
 
+/// Told the models served after each load, insert or unload changes them.
+pub type OnChange = Box<dyn Fn(&[String]) + Send + Sync>;
+
 #[derive(Debug)]
 pub enum ResolveError {
     NotFound,
@@ -129,6 +132,7 @@ pub struct ModelRegistry {
     sources: RwLock<HashMap<String, (String, Option<crate::runtime_pick::RuntimeId>)>>,
     reload_failed: Mutex<HashMap<String, Instant>>,
     reloader: RwLock<Option<ModelReloader>>,
+    on_change: RwLock<Option<OnChange>>,
 }
 
 const RELOAD_RETRY: Duration = Duration::from_secs(10);
@@ -153,6 +157,18 @@ impl ModelRegistry {
             sources: RwLock::new(HashMap::new()),
             reload_failed: Mutex::new(HashMap::new()),
             reloader: RwLock::new(None),
+            on_change: RwLock::new(None),
+        }
+    }
+
+    /// Tells `hook` the models served, sorted, each time a load, insert or unload changes them.
+    pub fn on_change(&self, hook: OnChange) {
+        *self.on_change.write().expect("registry") = Some(hook);
+    }
+
+    fn changed(&self) {
+        if let Some(hook) = self.on_change.read().expect("registry").as_ref() {
+            hook(&self.names());
         }
     }
 
@@ -226,6 +242,7 @@ impl ModelRegistry {
     /// Serves `daemon` as `name` beside the models already loaded.
     pub fn insert_loaded(&self, name: &str, daemon: Arc<Daemon>) {
         self.models.write().expect("registry").insert(name.to_string(), daemon);
+        self.changed();
     }
 
     pub fn default_name(&self) -> String {
@@ -389,6 +406,7 @@ impl ModelRegistry {
         let ran_on = runtime.filter(|r| r.install().is_some()).or_else(|| daemon.runtime_id().map(crate::runtime_pick::RuntimeId::new));
         self.models.write().expect("registry").insert(name.to_string(), daemon);
         self.sources.write().expect("registry").insert(name.to_string(), (source.to_string(), ran_on));
+        self.changed();
         Ok(true)
     }
 
@@ -429,6 +447,7 @@ impl ModelRegistry {
         drop(models);
         drop(def);
         drop(removed);
+        self.changed();
         Ok(true)
     }
 }

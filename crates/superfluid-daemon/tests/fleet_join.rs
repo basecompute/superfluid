@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use superfluid_daemon::fleet_join::accept_nodes;
+use superfluid_daemon::fleet_models::HeadModels;
 use superfluid_daemon::fleet_manager::{FleetManager, PlacementPolicy};
 use superfluid_daemon::nodeagent::NodeAgent;
 use superfluid_daemon::{Daemon, EngineHost, GenParams, MockCodec, SessionStore};
@@ -62,7 +63,8 @@ fn a_node_that_dials_in_is_adopted_and_serves_a_session() {
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
     let m = Arc::clone(&manager);
-    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), vec!["mock".into()]));
+    let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), models));
     assert!(manager.load().is_empty(), "no node yet");
 
     join(head_addr.clone(), "box-a", 1);
@@ -93,7 +95,8 @@ fn a_node_dials_once_per_lane_and_serves_that_many_at_once() {
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
     let m = Arc::clone(&manager);
-    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), vec!["mock".into()]));
+    let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), models));
     join(head_addr, "box-c", 3);
     wait_for("three connections", || manager.load().len() == 1 && manager.connections(0) == 3);
     let params = GenParams::default();
@@ -124,7 +127,8 @@ fn a_joined_node_keeps_a_connection_for_short_calls_when_its_head_asks() {
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
     let m = Arc::clone(&manager);
-    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), vec!["mock".into()]));
+    let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), models));
 
     // As `superfluid node join` does: one connection per lane, and one more the first time the
     // head asks.
@@ -174,7 +178,8 @@ fn a_session_goes_to_a_joined_nodes_idle_lane_rather_than_wait_behind_a_generati
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
     let m = Arc::clone(&manager);
-    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), vec!["mock".into()]));
+    let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), models));
     // Steps slow enough that the long generation outlasts the short ones by seconds.
     let node = NodeAgent::new(Arc::new(mock_daemon_ticking(Duration::from_millis(400))), "box-e", "mock")
         .with_max_lanes(2)
@@ -213,7 +218,8 @@ fn a_node_with_another_token_does_not_join() {
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
     let m = Arc::clone(&manager);
-    std::thread::spawn(move || accept_nodes(listener, m, b"the head's token".to_vec(), vec!["mock".into()]));
+    let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, m, b"the head's token".to_vec(), models));
     let sock = TcpStream::connect(&head_addr).unwrap();
     let ep = Endpoint::from_tcp_secure(sock, TOKEN, Role::Responder, Duration::from_secs(5));
     assert!(ep.is_err(), "the handshake with another token must fail");

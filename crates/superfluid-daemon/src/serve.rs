@@ -788,6 +788,31 @@ pub fn run(args: &[String], embedding: &Embedding) {
             eprintln!("superfluid: no model to serve");
             std::process::exit(2);
         });
+        let fleet_model = Arc::new(FleetModel {
+            manager: Arc::clone(&manager),
+            sessions: sessions.clone(),
+            first: model_name.clone(),
+            dialect: dialect.clone(),
+            tool_lease_ms,
+            files_max_bytes,
+            files_expiry,
+            completion_deadline_ms,
+        });
+        // A model a node brings later is served as one given by id is: with the tokenizer and
+        // chat template of the node serving it.
+        let head_models = {
+            let fm = Arc::clone(&fleet_model);
+            superfluid_daemon::fleet_models::HeadModels::new(
+                Arc::clone(&manager),
+                names.clone(),
+                Box::new(move |name| {
+                    let tok = fm.manager.remote_tokenizer(name)?;
+                    let codec = fm.codec(name, tok).map_err(superfluid_daemon::DaemonError::EngineLoad)?;
+                    let dir = fm.dir(name).map_err(superfluid_daemon::DaemonError::Io)?;
+                    Ok(Arc::new(fm.daemon(name, SessionStore::open(&dir.join("wal.log"))?, codec)?))
+                }),
+            )
+        };
         let mut reached = 0;
         for node in manager.probe() {
             match node {
@@ -804,7 +829,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     if !n.models.iter().any(|m| names.contains(m)) {
                         eprintln!(
                             "superfluid: fleet node '{}' serves {}, none of {}, so nothing is placed \
-                             there; start it with --model-name <one of them>",
+                             there; start it with --model-name <one of them>, or have it join this head",
                             n.identity,
                             n.models.join(", "),
                             names.join(", ")
@@ -823,27 +848,24 @@ pub fn run(args: &[String], embedding: &Embedding) {
             }
         }
         manager.spawn_keepalive();
-        let _announced = fleet_listen.as_deref().map(|listen| {
+        if let Some(listen) = fleet_listen.as_deref() {
             let listener = std::net::TcpListener::bind(listen).unwrap_or_else(|e| {
                 eprintln!("superfluid: --fleet-listen {listen}: {e}");
                 std::process::exit(1);
             });
             let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
             eprintln!("superfluid: fleet head takes joining nodes on {listen}");
-            let (m, a, all) = (Arc::clone(&manager), auth.clone(), names.clone());
+            let (m, a, all) = (Arc::clone(&manager), auth.clone(), Arc::clone(&head_models));
             std::thread::spawn(move || superfluid_daemon::fleet_join::accept_nodes(listener, m, a, all));
             // `superfluid top` finds the head's API by this; one on loopback is no use off this machine.
             let http_port = addr.parse::<std::net::SocketAddr>().ok().filter(|a| !a.ip().is_loopback()).map(|a| a.port());
             // Nodes take only a head of their own network: one whose token they hold.
             let net = (!auth.is_empty()).then(|| superfluid_daemon::fleet_mdns::network_id(&auth));
-            match superfluid_daemon::fleet_mdns::advertise(port, &names, http_port, net.as_deref()) {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    eprintln!("superfluid: not announced on the local network ({e}); give nodes this head's address");
-                    None
-                }
+            match superfluid_daemon::fleet_mdns::advertise(port, &head_models.names(), http_port, net.as_deref()) {
+                Ok(announced) => head_models.announce_with(announced),
+                Err(e) => eprintln!("superfluid: not announced on the local network ({e}); give nodes this head's address"),
             }
-        });
+        }
         if !qos_flags.is_empty() {
             eprintln!(
                 "superfluid: {} not supported in fleet-head mode (the fleet head has no \
@@ -904,8 +926,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                         }
                     };
                     eprintln!("superfluid: {name}: tokenizer and chat template from a node serving it");
-                    manager.expect_tokenizer(&name, tok.digest());
-                    codec_for_dialect(&dialect, Arc::new(tok)).map(|(c, _)| c).unwrap_or_else(|e| {
+                    fleet_model.codec(&name, tok).unwrap_or_else(|e| {
                         eprintln!("superfluid: {name}: {e}");
                         std::process::exit(2);
                     })
@@ -915,42 +936,27 @@ pub fn run(args: &[String], embedding: &Embedding) {
             .collect();
         let advertised = manager.advertised_context(&model_name).map(|n| n.min(u32::MAX as u64) as u32);
         let mut registry = None;
-        for (i, (name, codec)) in served.into_iter().enumerate() {
-            // The first model's sessions where a single server keeps them; each other's in a
-            // directory of its own, as a server with several models keeps them.
-            let dir = if i == 0 {
-                sessions.clone()
-            } else {
-                superfluid_daemon::registry::state_dir(&sessions.join("models"), &name).unwrap_or_else(|e| {
-                    eprintln!("superfluid: {name}: cannot keep its sessions: {e}");
-                    std::process::exit(1);
-                })
-            };
-            let daemon = Daemon::over_fleet(
-                open_session_store(&dir),
-                codec,
-                Arc::clone(&manager),
-                name.clone(),
-                superfluid_daemon::DaemonOptions {
-                    tool_lease_ms,
-                    media_dir: Some(sessions.join("media")),
-                    files_max_bytes,
-                    files_expiry_secs: files_expiry,
-                    completion_deadline_ms,
-                    trace_scope: superfluid_daemon::otlp::TraceScope::model(&name),
-                    ..Default::default()
-                },
-            )
-            .unwrap_or_else(|e| {
+        for (name, codec) in served {
+            let dir = fleet_model.dir(&name).unwrap_or_else(|e| {
+                eprintln!("superfluid: {name}: cannot keep its sessions: {e}");
+                std::process::exit(1);
+            });
+            let daemon = fleet_model.daemon(&name, open_session_store(&dir), codec).unwrap_or_else(|e| {
                 eprintln!("superfluid: cannot serve '{name}' over the fleet: {e}");
                 std::process::exit(2);
             });
             match &registry {
-                None => registry = Some(Arc::new(superfluid_daemon::registry::ModelRegistry::single(name, Arc::new(daemon)))),
+                // A model loaded later is one a node serves.
+                None => registry = Some(Arc::new(superfluid_daemon::registry::ModelRegistry::with_initial(
+                    name,
+                    Arc::new(daemon),
+                    head_models.loader(),
+                ))),
                 Some(r) => r.insert_loaded(&name, Arc::new(daemon)),
             }
         }
         let registry = registry.expect("the first model is served");
+        head_models.attach(&registry);
         superfluid_daemon::openai::serve_blocking_config(
             http_listener,
             registry,
@@ -2145,6 +2151,65 @@ fn artifacts_under(
 
 fn not_there(model: &std::path::Path) -> Option<String> {
     (!model.exists()).then(|| format!("{}: no such file or directory", model.display()))
+}
+
+/// What a fleet head needs to serve a model over its nodes, at start or once a node brings it.
+struct FleetModel {
+    manager: Arc<superfluid_daemon::fleet_manager::FleetManager>,
+    sessions: PathBuf,
+    /// The model the head started with first.
+    first: String,
+    dialect: String,
+    tool_lease_ms: u64,
+    files_max_bytes: Option<u64>,
+    files_expiry: Option<u64>,
+    completion_deadline_ms: u64,
+}
+
+impl FleetModel {
+    /// Where `name` keeps its sessions: the first model's where a single server keeps them,
+    /// each other's in a directory of its own, as a server with several models keeps them.
+    fn dir(&self, name: &str) -> std::io::Result<PathBuf> {
+        if name == self.first {
+            return Ok(self.sessions.clone());
+        }
+        superfluid_daemon::registry::state_dir(&self.sessions.join("models"), name)
+    }
+
+    /// The codec for `name` from the tokenizer of a node serving it, which every node serving
+    /// it is held to from now on.
+    fn codec(
+        &self,
+        name: &str,
+        tok: superfluid_daemon::fleet::RemoteTokenizer,
+    ) -> Result<Box<dyn superfluid_daemon::TextCodec + Send + Sync>, String> {
+        self.manager.expect_tokenizer(name, tok.digest());
+        codec_for_dialect(&self.dialect, Arc::new(tok)).map(|(c, _)| c)
+    }
+
+    /// The daemon that serves `name` over the fleet, its sessions in `store`.
+    fn daemon(
+        &self,
+        name: &str,
+        store: SessionStore,
+        codec: Box<dyn superfluid_daemon::TextCodec + Send + Sync>,
+    ) -> Result<Daemon, superfluid_daemon::DaemonError> {
+        Daemon::over_fleet(
+            store,
+            codec,
+            Arc::clone(&self.manager),
+            name.to_string(),
+            superfluid_daemon::DaemonOptions {
+                tool_lease_ms: self.tool_lease_ms,
+                media_dir: Some(self.sessions.join("media")),
+                files_max_bytes: self.files_max_bytes,
+                files_expiry_secs: self.files_expiry,
+                completion_deadline_ms: self.completion_deadline_ms,
+                trace_scope: superfluid_daemon::otlp::TraceScope::model(name),
+                ..Default::default()
+            },
+        )
+    }
 }
 
 fn codec_for_dialect(

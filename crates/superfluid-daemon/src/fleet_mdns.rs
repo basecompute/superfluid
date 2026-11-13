@@ -39,42 +39,64 @@ pub fn network_id(token: &[u8]) -> String {
 /// Announces this head's node listener, its HTTP port for `superfluid top` when it has one
 /// off loopback, and its network when it has a token; the service stays announced while the
 /// daemon lives.
-pub fn advertise(port: u16, models: &[String], http: Option<u16>, net: Option<&str>) -> Result<ServiceDaemon, String> {
+pub fn advertise(port: u16, models: &[String], http: Option<u16>, net: Option<&str>) -> Result<Announcement, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     daemon.set_service_name_len_max(SERVICE_NAME_LEN_MAX).map_err(|e| e.to_string())?;
     // mdns-sd checks a registration on its own thread and tells only its monitors of a refusal.
     let events = daemon.monitor().map_err(|e| e.to_string())?;
     let host = host_label(&crate::metrics::hostname()).to_string();
-    // `model` is the first, as a node from before `models` reads it.
-    let mut props: HashMap<String, String> = [
-        ("model".to_string(), models.first().cloned().unwrap_or_default()),
-        ("models".to_string(), models.join(",")),
-    ]
-    .into();
-    if let Some(http) = http {
-        props.insert("http".to_string(), http.to_string());
-    }
-    if let Some(net) = net {
-        props.insert("net".to_string(), net.to_string());
-    }
-    let info = ServiceInfo::new(SERVICE, &format!("superfluid on {host}"), &format!("{host}.local."), (), port, props)
-        .map_err(|e| e.to_string())?
-        .enable_addr_auto();
-    daemon.register(info).map_err(|e| e.to_string())?;
+    let announced = Announcement { daemon, host, port, http, net: net.map(str::to_string) };
+    announced.daemon.register(announced.info(models)?).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + REGISTERED;
     loop {
         match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(DaemonEvent::Announce(..)) => return Ok(daemon),
+            Ok(DaemonEvent::Announce(..)) => return Ok(announced),
             Ok(DaemonEvent::Error(e)) => {
-                let _ = daemon.shutdown();
+                let _ = announced.daemon.shutdown();
                 return Err(e.to_string());
             }
             Ok(_) => {}
             Err(_) => {
-                let _ = daemon.shutdown();
+                let _ = announced.daemon.shutdown();
                 return Err(format!("no interface announced it within {} s", REGISTERED.as_secs()));
             }
         }
+    }
+}
+
+/// A head's announcement on the local network, kept while the daemon lives.
+pub struct Announcement {
+    daemon: ServiceDaemon,
+    host: String,
+    port: u16,
+    http: Option<u16>,
+    net: Option<String>,
+}
+
+impl Announcement {
+    /// Announces `models` in place of the models announced before: the same service with new
+    /// TXT properties, which a node browsing for heads resolves again.
+    pub fn update(&self, models: &[String]) -> Result<(), String> {
+        self.daemon.register(self.info(models)?).map_err(|e| e.to_string())
+    }
+
+    fn info(&self, models: &[String]) -> Result<ServiceInfo, String> {
+        // `model` is the first, as a node from before `models` reads it.
+        let mut props: HashMap<String, String> = [
+            ("model".to_string(), models.first().cloned().unwrap_or_default()),
+            ("models".to_string(), models.join(",")),
+        ]
+        .into();
+        if let Some(http) = self.http {
+            props.insert("http".to_string(), http.to_string());
+        }
+        if let Some(net) = &self.net {
+            props.insert("net".to_string(), net.clone());
+        }
+        let host = &self.host;
+        Ok(ServiceInfo::new(SERVICE, &format!("superfluid on {host}"), &format!("{host}.local."), (), self.port, props)
+            .map_err(|e| e.to_string())?
+            .enable_addr_auto())
     }
 }
 
@@ -389,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs multicast on an interface: cargo test -p superfluid --lib fleet_mdns -- --ignored"]
+    #[ignore = "needs multicast on an interface, one head per host at a time: cargo test -p superfluid --lib fleet_mdns -- --ignored --test-threads=1"]
     fn a_node_finds_the_head_it_announced() {
         let net = network_id(b"a_node_finds_the_head_it_announced");
         let _head = advertise(48456, &["test-model".into(), "other-model".into()], Some(48453), Some(&net)).unwrap();
@@ -400,5 +422,31 @@ mod tests {
         assert_eq!(head.net.as_deref(), Some(net.as_str()));
         assert!(head.nodes.iter().all(|a| a.port() == 48456));
         assert!(!head.http.is_empty() && head.http.iter().all(|a| a.port() == 48453));
+    }
+
+    #[test]
+    #[ignore = "needs multicast on an interface, one head per host at a time: cargo test -p superfluid --lib fleet_mdns -- --ignored --test-threads=1"]
+    fn a_browsing_node_sees_the_models_a_head_announces_later() {
+        let token = b"a_browsing_node_sees_the_models_a_head_announces_later";
+        let net = network_id(token);
+        let head = advertise(48457, &["first".into()], None, Some(&net)).unwrap();
+        let ours = move |h: &Head| h.net.as_deref() == Some(net.as_str());
+        let seen = browse(Duration::from_secs(10), |h| ours(&h).then_some(h)).unwrap().expect("the head answers");
+        assert_eq!(seen.models, ["first"]);
+        // One browse that already resolved the head hears it again with the new models.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = std::thread::spawn(move || {
+            browse(Duration::from_secs(15), |h| {
+                if !ours(&h) {
+                    return None;
+                }
+                let _ = tx.send(h.models.clone());
+                (h.models.len() == 2).then_some(h)
+            })
+        });
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), ["first"], "resolved once as it was");
+        head.update(&["first".into(), "second".into()]).unwrap();
+        let updated = watcher.join().unwrap().unwrap().expect("the update is heard");
+        assert_eq!(updated.models, ["first", "second"]);
     }
 }
