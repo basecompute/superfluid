@@ -11,6 +11,10 @@ A product can run Superfluid as its server: start `superfluid serve` with its ow
 - Give each server its own `--sessions <dir>`: one server per directory, with a lock. Two servers that share the default collide.
 - `SUPERFLUID_HOME` is where Superfluid keeps its own installs and socket; a host that wants nothing under `~/.superfluid` sets it.
 
+## Following the start
+
+Pass `--log-format json` (or set `SUPERFLUID_LOG_FORMAT=json`) and read stderr line by line: each line is one JSON event, and the start's steps have names of their own: `pull.progress` while a model is fetched, `model.load.done` once it is loaded, and `serve.ready` once the server answers, which carries the port it bound, so `--http 127.0.0.1:0` lets the system pick one. A start that fails ends with an `error` event that says why. [Start-up events](events.md) lists every event and what is kept across releases.
+
 ## Checking compatibility before serving
 
 The engine library and Superfluid must agree on the engine's C ABI. Since baseRT 0.4.0 the library states an ABI number (`baseRT_abi_version()`, the header's `BASERT_ABI_VERSION`), and Superfluid is built against a header with the same macro. The rule Superfluid applies when it opens the library:

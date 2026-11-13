@@ -27,6 +27,7 @@ export const groups = [
       { slug: "multiple-models", title: "Serving multiple models", src: "serving/multiple_models.md" },
       { slug: "distributed-serving", title: "Distributed serving", src: "serving/distributed_serving.md" },
       { slug: "hosts", title: "Hosting in another product", src: "serving/hosts.md" },
+      { slug: "events", title: "Start-up events", src: "serving/events.md" },
     ],
   },
   {
