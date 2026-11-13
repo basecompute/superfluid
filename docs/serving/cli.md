@@ -48,7 +48,7 @@ A model is a path or a Hugging Face-style id `org/model[:tag]`. Everything else 
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M        # llama.cpp
 superfluid serve mlx-community/Qwen3-4B-4bit           # MLX (Apple silicon)
 superfluid serve ./Qwen3-4B-Q4_K_M.gguf                 # runtime picked by format
-superfluid serve ./model.gguf --port 9000 --api-key "$KEY" --max-batch 4
+superfluid serve ./model.gguf --port 9000 --api-key-file ~/.superfluid/key --max-batch 4
 ```
 
 ### Model
@@ -76,7 +76,8 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--host <addr>` / `--port <N>` | `127.0.0.1` / `8453` | The HTTP address as two flags; `--http` wins. |
 | `--socket <path>` | `$SUPERFLUID_HOME/superfluid.sock` | Native session API socket. Falls back to `$TMPDIR/superfluid-<uid>.sock` when the default path is too long for a unix socket. |
 | `--sessions <dir>` | `$SUPERFLUID_HOME/sessions` | Session store: log, parks, media, files, batches. One server per directory. |
-| `--api-key <key>` | none | Require `Authorization: Bearer <key>` or `X-Api-Key` on every route but `/health`. |
+| `--api-key <key>` | none | Require `Authorization: Bearer <key>` or `X-Api-Key` on every route but `/health`. `ps` shows it to every user; prefer `--api-key-file` or `SUPERFLUID_API_KEY`. |
+| `--api-key-file <path>` | | The key, read from this file with the whitespace around it trimmed; a missing or empty file is refused, one group or others can read is warned about. Refused beside `--api-key`. With neither flag, `SUPERFLUID_API_KEY` gives the key. |
 | `--key-policy <file.json>` | none | Per-key class, rate, concurrency and admin rights; turns authentication on. See [Security](../deployment/security.md#key-policy). |
 | `--rate-limit <rpm>` | 0 (off) | Requests per minute per client IP. |
 | `--drain-timeout <sec>` | 60 | On `SIGUSR1`, how long in-flight requests get before exit. |
@@ -295,10 +296,10 @@ superfluid media gc [--socket <path>]            # sweep blobs no session refere
 ## `superfluid top`
 
 ```sh
-superfluid top [--api-key <key>] [<host:port> ...]
+superfluid top [--api-key <key> | --api-key-file <path>] [<host:port> ...]
 ```
 
-Live per-node view over each server's `/metrics`. A [fleet head](distributed_serving.md)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds the fleet head on the local network. A keyed server needs `--api-key`, else it shows as `401`. `q` or `Esc` quits.
+Live per-node view over each server's `/metrics`. A [fleet head](distributed_serving.md)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds the fleet head on the local network. A keyed server needs its key (`--api-key`, `--api-key-file` or `SUPERFLUID_API_KEY`), else it shows as `401`. `q` or `Esc` quits.
 
 ## `superfluid-workerd` and `superfluid-noded`
 

@@ -178,6 +178,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut pull_flags = superfluid_daemon::pulls::PullFlags::default();
     let mut runtime_pick = RuntimePick::default();
     let mut api_key: Option<String> = None;
+    let mut api_key_file: Option<PathBuf> = None;
     let mut rate_limit: u32 = 0;
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
@@ -283,6 +284,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 }
             }
             "--api-key" => api_key = Some(val()),
+            "--api-key-file" => api_key_file = Some(PathBuf::from(val())),
             "--rate-limit" => rate_limit = num(a, val()),
             "--files-max-bytes" => {
                 files_max_bytes = Some(num(a, val()))
@@ -567,6 +569,15 @@ pub fn run(args: &[String], embedding: &Embedding) {
             }
         }
         // SERVE-FLAGS-END
+    }
+    let env_key = std::env::var(superfluid_daemon::keypolicy::API_KEY_ENV).ok().filter(|k| !k.is_empty());
+    let key_from_env = api_key.is_none() && api_key_file.is_none() && env_key.is_some();
+    let api_key = superfluid_daemon::keypolicy::global_key(api_key, api_key_file.as_deref(), env_key, |w| {
+        eprintln!("superfluid: WARNING {w}")
+    })
+    .unwrap_or_else(|e| usage_error(&e, "serve"));
+    if key_from_env {
+        eprintln!("superfluid: authentication on, with the key in ${}", superfluid_daemon::keypolicy::API_KEY_ENV);
     }
     if models.is_empty() {
         usage_error(
@@ -1118,11 +1129,15 @@ pub fn run(args: &[String], embedding: &Embedding) {
             addr.starts_with("localhost:") || addr.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback())
         };
         if http.as_deref().is_none_or(loopback) && web.as_deref().is_none_or(loopback) {
-            eprintln!("superfluid: no --api-key: the HTTP API is open to every process on this machine");
+            eprintln!(
+                "superfluid: no API key (--api-key-file, --api-key or $SUPERFLUID_API_KEY): \
+                 the HTTP API is open to every process on this machine"
+            );
         } else {
             eprintln!(
-                "superfluid: WARNING --api-key not set. Authentication is OFF — anyone \
-                 who can reach this port can use the API. Bind loopback or set --api-key."
+                "superfluid: WARNING no API key set. Authentication is OFF — anyone who can reach \
+                 this port can use the API. Bind loopback or set --api-key-file (or --api-key, \
+                 $SUPERFLUID_API_KEY)."
             );
         }
     }
