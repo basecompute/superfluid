@@ -10,6 +10,7 @@ use superfluid_linkf::{Endpoint, LinkFError, Role};
 
 use crate::fleet::FleetHead;
 use crate::fleet_manager::FleetManager;
+use crate::fleet_mdns::Search;
 use crate::nodeagent::NodeAgent;
 use crate::runtime_pick::RuntimeId;
 use crate::runtimes::Catalog;
@@ -20,6 +21,11 @@ Usage: superfluid node join [<head-host:port>] --model <path|org/model[:tag]> [o
   Dials the head (found on the local network when no address is given), serves the
   model to it, and dials again whenever the link drops. The head's token, from
   `superfluid fleet token` there, authenticates both ends and encrypts the link.
+  A head found on the local network must be of this token's network: a head of another
+  network is never joined, and one that announces none (released before network ids)
+  only when no head of this network answers. When the head is lost, the node looks
+  again and joins whichever head of its network answers, which may be another machine
+  that took over; a head given by address is dialed again there, never looked for.
 Options:
   --model <m>             The model; an id is pulled first, as `serve` pulls it
   --token <value>         The head's fleet token, kept at $SUPERFLUID_HOME/fleet/token
@@ -95,11 +101,12 @@ fn join(args: &[String]) {
         crate::fleet_token::write(&home, t.trim().as_bytes()).unwrap_or_else(|e| fail(e));
     }
     let token = crate::fleet_token::read(&home).unwrap_or_default();
+    let mut search = Search::for_token(&token);
     let (target, announced) = match head {
-        Some(h) => (Target { given: Some(h), found: Mutex::new(Vec::new()) }, None),
+        Some(h) => (Target { given: Some(h), found: Mutex::new(Vec::new()), search: Mutex::new(search) }, None),
         None => {
-            let (addrs, served) = discover();
-            (Target { given: None, found: Mutex::new(addrs) }, Some(served))
+            let (addrs, served) = discover(&mut search);
+            (Target { given: None, found: Mutex::new(addrs), search: Mutex::new(search) }, Some(served))
         }
     };
     let addrs = target.addrs();
@@ -141,10 +148,12 @@ fn join(args: &[String]) {
 }
 
 /// Where the head is: an address given on the command line, resolved at each dial, or the
-/// addresses the local network announced, looked for again when none of them answers.
+/// addresses the local network announced, looked for again when none of them answers. A look
+/// takes only a head of this node's network, which may be another machine that took over.
 struct Target {
     given: Option<String>,
     found: Mutex<Vec<SocketAddr>>,
+    search: Mutex<Search>,
 }
 
 impl Target {
@@ -155,15 +164,18 @@ impl Target {
         }
     }
 
-    /// After every address in `tried` failed: looks on the network again, unless the head was
-    /// given or another lane already found it anew. Lanes wait on the one that is looking.
+    /// After every address in `tried` failed: looks on the network again for a head of this
+    /// node's network, unless another lane already found one anew. Lanes wait on the one that is
+    /// looking. A head given by address is not looked for: that address is the head asked for,
+    /// and it is dialed again until it answers.
     fn refind(&self, tried: &[SocketAddr]) {
         if self.given.is_some() {
             return;
         }
         let mut found = self.found.lock().expect("head addrs");
         if *found == tried {
-            if let Ok(head) = crate::fleet_mdns::find_head(DISCOVER) {
+            let mut search = self.search.lock().expect("head search");
+            if let Ok(head) = crate::fleet_mdns::find_head(&mut search, DISCOVER, &|msg| eprintln!("superfluid: {msg}")) {
                 *found = head.nodes;
             }
         }
@@ -182,11 +194,11 @@ impl std::fmt::Display for Target {
     }
 }
 
-/// The head on the local network, however long it takes to appear.
-fn discover() -> (Vec<SocketAddr>, Vec<String>) {
+/// The head of this node's network on the local network, however long it takes to appear.
+fn discover(search: &mut Search) -> (Vec<SocketAddr>, Vec<String>) {
     eprintln!("superfluid: looking for a fleet head on the local network");
     loop {
-        match crate::fleet_mdns::find_head(DISCOVER) {
+        match crate::fleet_mdns::find_head(search, DISCOVER, &|msg| eprintln!("superfluid: {msg}")) {
             Ok(head) => {
                 eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.models.join(", "));
                 return (head.nodes, head.models);

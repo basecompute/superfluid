@@ -591,7 +591,11 @@ fn top_cmd(args: &[String]) {
         let answers = |a: &&std::net::SocketAddr| {
             std::net::TcpStream::connect_timeout(a, std::time::Duration::from_secs(1)).is_ok()
         };
-        match superfluid_daemon::fleet_mdns::find_head(std::time::Duration::from_secs(5)) {
+        // This machine's network first, when it holds a token; else any head that answers.
+        let token = superfluid_daemon::fleet_token::read(&superfluid_daemon::runtimes::default_home()).unwrap_or_default();
+        let mut search = superfluid_daemon::fleet_mdns::Search::for_token(&token).or_any();
+        let say = |msg: String| eprintln!("superfluid top: {msg}");
+        match superfluid_daemon::fleet_mdns::find_head(&mut search, std::time::Duration::from_secs(5), &say) {
             Ok(head) => match head.http.iter().find(answers).or(head.http.first()) {
                 Some(http) => nodes.push(http.to_string()),
                 None => {
