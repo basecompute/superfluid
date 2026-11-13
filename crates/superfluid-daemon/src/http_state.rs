@@ -346,7 +346,9 @@ pub(crate) fn daemon_error(e: DaemonError) -> Response {
         return throttled_response(std::time::Duration::from_millis(retry_after_ms));
     }
     if let DaemonError::Unsupported(r) = &e {
-        return refusal_response(StatusCode::BAD_REQUEST, r);
+        // A fleet head asked to load a model no node of it serves.
+        let status = if r.code == "model_not_found" { StatusCode::NOT_FOUND } else { StatusCode::BAD_REQUEST };
+        return refusal_response(status, r);
     }
     if matches!(e, DaemonError::NoNode(_)) {
         return no_node_response(e.to_string());

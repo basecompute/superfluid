@@ -602,6 +602,15 @@ impl FleetManager {
         self.tokenizers.write().expect("tokenizers").insert(model.to_string(), digest);
     }
 
+    /// As [`Self::expect_tokenizer`], for a model the head holds no digest for yet: the first
+    /// node to bring a model sets the digest the others are held to. A digest of 0 (a node that
+    /// does not say) sets none.
+    pub fn expect_tokenizer_first(&self, model: &str, digest: u64) {
+        if digest != 0 {
+            self.tokenizers.write().expect("tokenizers").entry(model.to_string()).or_insert(digest);
+        }
+    }
+
     /// How the head's connections are kept alive (default [`Liveness::DEFAULT`]); the
     /// background tend reads each idle one every `heartbeat`.
     pub fn with_liveness(mut self, liveness: Liveness) -> FleetManager {
