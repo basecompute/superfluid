@@ -38,6 +38,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 | `POST`, `GET` | `/v1/files`, `/v1/files/{id}`, `/v1/files/{id}/content` | upload, list, read, delete files |
 | `POST`, `GET` | `/v1/batches`, `/v1/batches/{id}`, `/v1/batches/{id}/cancel` | batch jobs |
 | `POST`, `GET` | `/v1/lora/load`, `/v1/lora/unload`, `/v1/lora` | activate (admin), clear (admin) or show a LoRA adapter; `basert` bundles only |
+| `GET`, `DELETE` | `/v1/fleet/nodes`, `/v1/fleet/nodes/{name}` | a fleet head's nodes; remove one (admin) ([Distributed serving](distributed_serving.md#list-and-remove-nodes)) |
 | `GET` | `/health` | liveness; never authenticated |
 | `GET` | `/props` | the served model and its effective generation defaults |
 | `GET` | `/slots` | lane and KV-pool snapshot (llama.cpp shape) |

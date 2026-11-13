@@ -203,6 +203,17 @@ fn main() {
                 }
                 // A head that restarts or closes its connections is not news.
                 Err(DaemonError::Fleet(LinkFError::Closed)) => tracing::debug!("connection from {peer} closed"),
+                // One line per head, not per connection: it closes each of them.
+                Err(DaemonError::Fleet(LinkFError::Removed)) => {
+                    static TOLD: std::sync::Mutex<Vec<std::net::IpAddr>> = std::sync::Mutex::new(Vec::new());
+                    let ip = peer.parse::<std::net::SocketAddr>().map(|a| a.ip()).ok();
+                    let mut told = TOLD.lock().expect("heads told");
+                    if ip.is_none_or(|ip| !told.contains(&ip)) {
+                        told.extend(ip);
+                        let head = ip.map_or(peer, |ip| ip.to_string());
+                        eprintln!("superfluid-noded: the head at {head} removed this node; it will not dial it again until it restarts");
+                    }
+                }
                 Err(e) => eprintln!("superfluid-noded: the connection from {peer} ended: {e}"),
             }
         });

@@ -527,6 +527,8 @@ impl NodeAgent {
                     dial();
                 }
             }
+            // The head removed this node and closes the link; whoever serves it says so.
+            msg_type::REMOVED => return Err(LinkFError::Removed.into()),
             msg_type::TOKENIZER_EXPORT_REQ => {
                 let m: linkf::TokenizerExportReqMsg = postcard::from_bytes(&frame.payload)?;
                 endpoint.send(msg_type::TOKENIZER_EXPORT, &self.export(m.request_id))?;

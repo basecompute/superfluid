@@ -8,6 +8,8 @@
 | `superfluid launch <agent>` | run a coding agent against a local model, starting a server if none answers |
 | `superfluid stop` | stop the server `launch` started |
 | `superfluid fleet token` | print the fleet token, making it the first time |
+| `superfluid fleet nodes [<head>]` | list a fleet head's nodes; `--json` prints the head's answer |
+| `superfluid fleet remove <name> [<head>]` | remove a node from a fleet head until the head restarts |
 | `superfluid node join [<head>] --model <m>` | serve a model to a fleet head from this machine |
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
@@ -35,6 +37,7 @@ Flags take their value as `--flag value` or `--flag=value`. The last occurrence 
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
 | 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts Superfluid can tell this from a flag it got wrong (2), and from an install Superfluid tried that failed (1) |
+| 5 | (`node join`) the fleet head removed this node; it refuses the node until the head restarts |
 
 ## `superfluid serve`
 

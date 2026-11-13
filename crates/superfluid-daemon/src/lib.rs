@@ -23,6 +23,7 @@ pub mod template_codec;
 pub mod tool_fragment;
 pub mod fleet;
 pub mod fleet_manager;
+pub mod fleet_api;
 pub mod fleet_warm;
 pub(crate) mod fleet_daemon;
 pub mod idempotency;
@@ -885,6 +886,11 @@ impl Daemon {
     /// For a daemon over a fleet: the nodes up of all the head knows, whatever each serves.
     pub fn fleet_nodes(&self) -> Option<(usize, usize)> {
         self.fleet.as_ref().map(|(fleet, _)| fleet.nodes_up())
+    }
+
+    /// The fleet a daemon over one places its generations on.
+    pub fn fleet_manager(&self) -> Option<std::sync::Arc<fleet_manager::FleetManager>> {
+        self.fleet.as_ref().map(|(fleet, _)| std::sync::Arc::clone(fleet))
     }
 
     fn assemble(

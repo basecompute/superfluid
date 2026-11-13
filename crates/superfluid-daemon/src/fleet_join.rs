@@ -40,6 +40,9 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 const DISCOVER: Duration = Duration::from_secs(30);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 const REFUSED: &str = "the head refused this node's token; copy the head's `superfluid fleet token` here with --token";
+/// The exit code of a node the head removed, told apart from a flag it got wrong (2) and a
+/// failure along the way (1).
+pub const REMOVED_EXIT: i32 = 5;
 /// Peers in the handshake at once; more wait in the backlog, so a burst of connects cannot
 /// take a thread each.
 const HANDSHAKES_AT_ONCE: usize = 8;
@@ -235,6 +238,10 @@ fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, lane: u32) {
                         say("the head closed the link".into())
                     }
                     Err(crate::DaemonError::Fleet(LinkFError::Unauthorized)) => fail(REFUSED),
+                    Err(crate::DaemonError::Fleet(LinkFError::Removed)) => {
+                        eprintln!("superfluid: the head at {target} removed this node; it will refuse it until it restarts");
+                        std::process::exit(REMOVED_EXIT);
+                    }
                     Err(e) => {
                         tracing::debug!(lane, error = %e, "the link to the head ended");
                         say(format!("the link to the head ended: {e}"))
@@ -275,6 +282,10 @@ pub fn load_node(
     state: &NodeState,
 ) -> Result<LoadedNode, String> {
     let lanes = lanes.max(1);
+    // The test engine, which needs no model, as `superfluid-noded --engine mock` serves it.
+    if runtime == Some("mock") {
+        return load_mock_node(max_context, lanes, state);
+    }
     let catalog = Catalog::from_env();
     let runtime = runtime.map(|r| if r == "native" { "basert" } else { r });
     let (path, model_name, id) = resolve_model(&catalog, model, runtime, offline)?;
@@ -449,6 +460,7 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
             in_handshake.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             match opened {
                 Ok(head) => {
+                    let Some(head) = manager.unless_removed(head, peer.ip()) else { return };
                     let node = head.node();
                     let (identity, models, ctx) = (node.node_identity.clone(), node.loadable_models.join(", "), node.capacity.max_context_tokens);
                     let serves_one = node.loadable_models.iter().any(|m| served.contains(m));
