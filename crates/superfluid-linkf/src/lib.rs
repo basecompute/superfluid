@@ -28,4 +28,8 @@ pub enum LinkFError {
     TimedOut,
     #[error("peer failed authentication")]
     Unauthorized,
+    /// The head removed this node from its fleet ([`superfluid_proto::linkf::msg_type::REMOVED`])
+    /// and refuses it until the head restarts.
+    #[error("the head removed this node from its fleet")]
+    Removed,
 }

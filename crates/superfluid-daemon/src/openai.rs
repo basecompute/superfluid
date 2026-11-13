@@ -171,7 +171,9 @@ async fn auth_layer(
             || (path.starts_with("/v1/files/") && !path.ends_with("/content"))
             || path.starts_with("/v1/responses/")))
         || is_cancel
-        || (m == axum::http::Method::DELETE && (path.starts_with("/v1/files/") || path.starts_with("/v1/responses/")));
+        || (m == axum::http::Method::DELETE && (path.starts_with("/v1/files/") || path.starts_with("/v1/responses/")))
+        || path == "/v1/fleet/nodes"
+        || path.starts_with("/v1/fleet/nodes/");
     let takes_slot = !lightweight;
     let spends_rate = !is_cancel;
     let h = req.headers();
@@ -186,7 +188,8 @@ async fn auth_layer(
         .and_then(|t| bearer.and_then(|v| t.lookup(v)).or_else(|| x_api_key.and_then(|v| t.lookup(v))));
     let admin_route = *req.method() == axum::http::Method::POST
         && matches!(path, "/v1/models/load" | "/v1/models/unload" | "/v1/lora/load" | "/v1/lora/unload")
-        || (*req.method() == axum::http::Method::DELETE && path.starts_with("/v1/models/"));
+        || (*req.method() == axum::http::Method::DELETE
+            && (path.starts_with("/v1/models/") || path.starts_with("/v1/fleet/nodes/")));
     if let Some(key) = keyed {
         if admin_route && !key.admin {
             if key.admit(false, true).is_err() {
@@ -215,8 +218,8 @@ async fn auth_layer(
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"error": {
                     "message": format!(
-                        "API key '{}' may not administer the server (model and LoRA load/unload); \
-                         use the global --api-key or grant \"admin\": true on this key",
+                        "API key '{}' may not administer the server (model and LoRA load/unload, fleet \
+                         node removal); use the global --api-key or grant \"admin\": true on this key",
                         key.name
                     ),
                     "type": "permission_error",
@@ -573,7 +576,9 @@ pub fn serve_blocking_config(
             .route("/v1/responses/{id}/cancel", post(crate::responses::cancel))
             .route("/v1/lora/load", post(lora_load))
             .route("/v1/lora/unload", post(lora_unload))
-            .route("/v1/lora", get(lora_list));
+            .route("/v1/lora", get(lora_list))
+            .route("/v1/fleet/nodes", get(crate::fleet_api::nodes_list))
+            .route("/v1/fleet/nodes/{name}", axum::routing::delete(crate::fleet_api::nodes_remove));
         if cfg.surface.anthropic {
             app = app.route("/v1/messages", post(crate::anthropic::messages));
         }

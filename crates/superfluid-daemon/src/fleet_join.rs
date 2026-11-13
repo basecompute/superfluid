@@ -66,6 +66,9 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 const DISCOVER: Duration = Duration::from_secs(30);
 const RETRY_MAX: Duration = Duration::from_secs(30);
 const REFUSED: &str = "the head refused this node's token; copy the head's `superfluid fleet token` here with --token";
+/// The exit code of a node the head removed, told apart from a flag it got wrong (2) and a
+/// failure along the way (1).
+pub const REMOVED_EXIT: i32 = 5;
 /// Peers in the handshake at once; more wait in the backlog, so a burst of connects cannot
 /// take a thread each.
 const HANDSHAKES_AT_ONCE: usize = 8;
@@ -78,6 +81,13 @@ pub fn run(args: &[String]) {
             std::process::exit(2);
         }
     }
+}
+
+/// Ends a node the head at `head` removed, with [`REMOVED_EXIT`]: it neither dials that head
+/// again nor starts again to follow it.
+fn removed(head: impl std::fmt::Display) -> ! {
+    eprintln!("superfluid: the head at {head} removed this node; it will refuse it until it restarts");
+    std::process::exit(REMOVED_EXIT);
 }
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -448,6 +458,7 @@ fn watch_head(target: Arc<Target>, token: Vec<u8>, identity: String) {
 /// `asking`, to be asked again; only the last try that gets no answer says so.
 fn ask(target: &Target, follower: &Follower, token: &[u8], identity: &str, asking: &mut Asking, models: &[String]) -> bool {
     match ask_head(&target.addrs(), token, identity) {
+        Err(LinkFError::Removed) => removed(target),
         Ok(serves) => {
             if settles(serves.as_ref(), models) {
                 asking.answered(models);
@@ -611,6 +622,7 @@ fn learn_head(given: Option<&str>, search: &mut Search, token: &[u8], identity: 
                  so a node with no --model does not follow it; give this node --model"
             )),
             Err(LinkFError::Unauthorized) if given.is_some() => fail(REFUSED),
+            Err(LinkFError::Removed) => removed(at),
             Err(LinkFError::Unauthorized) => say_once(format!(
                 "the head announced at {at} does not hold this network's token, so it is not followed \
                  (anyone on the network can copy an announcement)"
@@ -623,7 +635,8 @@ fn learn_head(given: Option<&str>, search: &mut Search, token: &[u8], identity: 
 /// What the head at `addrs` states it serves in its hello, read over a link `token`
 /// authenticates and answered as a node that only asks ([`superfluid_proto::handshake::ASKS_ONLY`]),
 /// which the head does not take in; `None` from a head that states nothing (one released before
-/// heads did), which is left unanswered.
+/// heads did), which is left unanswered. [`LinkFError::Removed`] from a head that removed this
+/// node, which says so once it has the node's answer; what it stated is then not to be acted on.
 pub fn ask_head(addrs: &[SocketAddr], token: &[u8], identity: &str) -> Result<Option<Served>, LinkFError> {
     let (mut ep, _sock) = dial(addrs, token)?;
     let hello = ep.read_hello_within(HANDSHAKE)?;
@@ -643,8 +656,24 @@ pub fn ask_head(addrs: &[SocketAddr], token: &[u8], identity: &str) -> Result<Op
         model_ids: Vec::new(),
     };
     ep.answer_hello(&hello, &ack, token)?;
+    // A head that removed this node says so before it closes the link; any other just closes it.
+    let by = std::time::Instant::now() + REMOVED_WAIT;
+    while std::time::Instant::now() < by {
+        match ep.pump() {
+            Ok(frames) if frames.iter().any(|f| f.msg_type == superfluid_proto::linkf::msg_type::REMOVED) => {
+                return Err(LinkFError::Removed)
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
     Ok(Some(serves))
 }
+
+/// How long [`ask_head`] waits, once answered, for the head to say it removed this node before
+/// taking what it stated: a head closes the link to a node that only asks as soon as it has read
+/// its answer.
+const REMOVED_WAIT: Duration = Duration::from_secs(2);
 
 /// Whether the node runs or holds a generation.
 fn busy(daemon: &Daemon) -> bool {
@@ -746,6 +775,10 @@ fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, lane: u32, l
                 backoff = Duration::from_secs(2);
                 let served = conn.serve(ep);
                 links.close(lane);
+                // Before the links stopping: a node that was about to follow another model ends.
+                if let Err(crate::DaemonError::Fleet(LinkFError::Removed)) = served {
+                    removed(target);
+                }
                 if links.stopping() {
                     return;
                 }
@@ -802,6 +835,10 @@ pub fn load_node(
     state: &NodeState,
 ) -> Result<LoadedNode, String> {
     let lanes = lanes.max(1);
+    // The test engine, which needs no model, as `superfluid-noded --engine mock` serves it.
+    if runtime == Some("mock") {
+        return load_mock_node(max_context, lanes, state);
+    }
     let catalog = Catalog::from_env();
     let runtime = runtime.map(|r| if r == "native" { "basert" } else { r });
     let (path, model_name, id) = resolve_model(&catalog, model, runtime, offline)?;
@@ -978,10 +1015,10 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
         in_handshake.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let (manager, auth, models, in_handshake) = (Arc::clone(&manager), auth.clone(), Arc::clone(&models), Arc::clone(&in_handshake));
         std::thread::spawn(move || {
-            let opened = FleetHead::accept_serving(sock, auth, models.served());
+            let opened = FleetHead::accept_serving(sock, auth, models.served(), &|identity| manager.refuses(identity, peer.ip()));
             in_handshake.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             match opened {
-                Ok(None) => tracing::debug!(%peer, "a node asked what this head serves"),
+                Ok(None) => tracing::debug!(%peer, "a node asked what this head serves, or was refused"),
                 Ok(Some(head)) => {
                     let node = head.node();
                     let (identity, serves, ctx) = (node.node_identity.clone(), node.loadable_models.clone(), node.capacity.max_context_tokens);
