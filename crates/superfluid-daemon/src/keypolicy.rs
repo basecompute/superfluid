@@ -340,6 +340,54 @@ impl KeyTable {
     }
 }
 
+/// The variable that gives the global key when neither `--api-key` nor `--api-key-file` does.
+pub const API_KEY_ENV: &str = "SUPERFLUID_API_KEY";
+
+/// The global key, from the first that gives one of `--api-key <key>` (`flag`), `--api-key-file
+/// <path>` (`file`) and `$SUPERFLUID_API_KEY` (`env`; an empty one gives none). A key on the
+/// command line is shown to every user by `ps`; the file and the variable are not. The two flags
+/// together are refused, as is a file that is missing, unreadable or empty. `warn` is told when
+/// the file is open to group or others.
+pub fn global_key(
+    flag: Option<String>,
+    file: Option<&std::path::Path>,
+    env: Option<String>,
+    warn: impl FnOnce(String),
+) -> Result<Option<String>, String> {
+    match (flag, file) {
+        (Some(_), Some(_)) => Err("--api-key and --api-key-file both give the key; pass one".into()),
+        (Some(key), None) => Ok(Some(key)),
+        (None, Some(path)) => {
+            let (key, open) = read_key_file(path)?;
+            if let Some(w) = open {
+                warn(w);
+            }
+            Ok(Some(key))
+        }
+        (None, None) => Ok(env.filter(|k| !k.is_empty())),
+    }
+}
+
+/// The key `path` holds, with the whitespace around it trimmed, and a warning when group or
+/// others may read or change the file (ssh refuses such a private key; this only says so).
+pub fn read_key_file(path: &std::path::Path) -> Result<(String, Option<String>), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let shown = path.display();
+    let text = std::fs::read_to_string(path).map_err(|e| format!("--api-key-file {shown}: {e}"))?;
+    let key = text.trim();
+    if key.is_empty() {
+        return Err(format!("--api-key-file {shown} is empty; it should hold the key"));
+    }
+    if key.contains(['\n', '\r']) {
+        return Err(format!("--api-key-file {shown} holds more than one line; it should hold the key alone"));
+    }
+    let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+    let open = (mode & 0o077 != 0).then(|| {
+        format!("--api-key-file {shown} is open to group or others (mode {mode:03o}); `chmod 600 {shown}` keeps the key yours")
+    });
+    Ok((key.to_string(), open))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +489,69 @@ mod tests {
         assert!(m.contains("superfluid_key_requests_total{key=\"b\"} 10"), "{m}");
         assert!(m.contains("superfluid_key_in_flight{key=\"a\"} 2"), "{m}");
         assert!(!m.contains("sk-") && !m.contains("\"k\""), "no secret in metrics: {m}");
+    }
+
+    fn key_file(tag: &str, text: &str, mode: u32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("superfluid-keyfile-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("key");
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    fn quiet(w: String) {
+        panic!("no warning was expected: {w}");
+    }
+
+    #[test]
+    fn the_flag_wins_over_the_file_and_the_file_over_the_environment() {
+        let file = key_file("order", "from-file\n", 0o600);
+        let env = || Some("from-env".to_string());
+        assert_eq!(global_key(Some("from-flag".into()), None, env(), quiet).unwrap().as_deref(), Some("from-flag"));
+        assert_eq!(global_key(None, Some(&file), env(), quiet).unwrap().as_deref(), Some("from-file"));
+        assert_eq!(global_key(None, None, env(), quiet).unwrap().as_deref(), Some("from-env"));
+        assert_eq!(global_key(None, None, Some(String::new()), quiet).unwrap(), None, "an empty variable gives no key");
+        assert_eq!(global_key(None, None, None, quiet).unwrap(), None);
+        let both = global_key(Some("from-flag".into()), Some(&file), env(), quiet).unwrap_err();
+        assert!(both.contains("--api-key and --api-key-file"), "{both}");
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn a_key_file_is_trimmed_and_an_empty_or_missing_one_is_refused() {
+        let file = key_file("trim", "  sk-local-1 \r\n\n", 0o600);
+        assert_eq!(read_key_file(&file).unwrap(), ("sk-local-1".to_string(), None));
+        std::fs::write(&file, " \n\t\n").unwrap();
+        let e = read_key_file(&file).unwrap_err();
+        assert!(e.contains("is empty") && e.contains(&file.display().to_string()), "{e}");
+        std::fs::write(&file, "sk-one\nsk-two\n").unwrap();
+        assert!(read_key_file(&file).unwrap_err().contains("more than one line"));
+        let missing = file.with_file_name("nope");
+        let e = global_key(None, Some(&missing), Some("from-env".into()), quiet).unwrap_err();
+        assert!(e.starts_with(&format!("--api-key-file {}: ", missing.display())), "a missing file does not fall back: {e}");
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn a_key_file_others_can_read_is_used_with_a_warning() {
+        let file = key_file("open", "sk-shared\n", 0o644);
+        let mut warned = None;
+        let key = global_key(None, Some(&file), None, |w| warned = Some(w)).unwrap();
+        assert_eq!(key.as_deref(), Some("sk-shared"));
+        let w = warned.expect("a warning");
+        assert!(w.contains("mode 644") && w.contains("chmod 600"), "{w}");
+        assert!(!w.contains("sk-shared"), "the warning does not show the key: {w}");
+        for mode in [0o640, 0o604, 0o620] {
+            std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+            assert!(read_key_file(&file).unwrap().1.is_some(), "{mode:o}");
+        }
+        for mode in [0o600, 0o400] {
+            std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(mode)).unwrap();
+            assert_eq!(read_key_file(&file).unwrap().1, None, "{mode:o}");
+        }
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 }

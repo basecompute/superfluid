@@ -128,4 +128,4 @@ A log record that was written completely but fails its checksum stops the start.
 | runtime | `/v1/models/load`'s `runtime`, then `--runtime <model>=<id>`, then `--runtime <id>`, then inferred |
 | context window | `--max-context N`, else sized for the device where the runtime can, else 8192 |
 | HTTP address | `--http`, then `--host`/`--port`, then `127.0.0.1:8453` |
-| authentication | `--key-policy`, then `--api-key`, else off with a warning |
+| authentication | `--key-policy`, then `--api-key`, then `--api-key-file`, then `SUPERFLUID_API_KEY`, else off with a warning |

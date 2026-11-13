@@ -11,10 +11,10 @@ Superfluid binds to loopback and asks for no credential unless told to. Nothing 
 | browser transport | `--web` | off; loopback only | a minted bearer token |
 | fleet node agent | `superfluid-noded --listen` | `0.0.0.0:8454` | `--auth-file`; required off loopback |
 
-Without `--api-key` or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
+Without a key (`--api-key-file`, `--api-key` or `SUPERFLUID_API_KEY`) or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
 
 ```
-superfluid: WARNING --api-key not set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key.
+superfluid: WARNING no API key set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key-file (or --api-key, $SUPERFLUID_API_KEY).
 ```
 
 ## Requests from web pages
@@ -24,11 +24,14 @@ Every HTTP listener refuses, with `403` and code `origin_refused`, a request who
 ## API key
 
 ```sh
-superfluid serve <model> --api-key "$(cat /etc/superfluid/key)"
+superfluid serve <model> --api-key-file /etc/superfluid/key
 curl -H 'Authorization: Bearer <key>' http://127.0.0.1:8453/v1/models
 curl -H 'x-api-key: <key>' http://127.0.0.1:8453/v1/models
 ```
 
+- The key comes from `--api-key <key>`, else `--api-key-file <path>`, else the `SUPERFLUID_API_KEY` environment variable. `ps` shows a key on the command line to every user of the machine; the file and the variable it does not. The two flags together are refused.
+- `--api-key-file` reads the file with the whitespace around the key trimmed, and refuses a missing or empty one. Like ssh with a private key, it warns when group or others may read the file: `chmod 600` it.
+- `superfluid launch` hands the server it starts the key in `SUPERFLUID_API_KEY`, not on its command line. `superfluid top` takes `--api-key-file` and the variable too.
 - Every route except `GET /health` needs the key, including `/metrics` and the Ollama routes. An unknown path without a key is a 401.
 - Keys are compared in constant time against a SHA-256 digest.
 - A missing or wrong key is 401 with `type: "authentication_error"`, `code: "invalid_api_key"`.

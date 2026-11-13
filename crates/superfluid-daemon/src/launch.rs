@@ -616,7 +616,7 @@ pub fn run(args: &[String]) {
         .unwrap_or_else(|| DEFAULT_HTTP.to_string());
     let addr = addr.trim_start_matches("http://").trim_end_matches('/').to_string();
     let base = format!("http://{addr}");
-    let api_key = a.api_key.clone().or_else(|| std::env::var("SUPERFLUID_API_KEY").ok().filter(|s| !s.is_empty()));
+    let api_key = a.api_key.clone().or_else(|| std::env::var(crate::keypolicy::API_KEY_ENV).ok().filter(|s| !s.is_empty()));
     let mut started = false;
     let served = match probe(&base, api_key.as_deref()) {
         Probe::Up(served) => served,
@@ -777,9 +777,11 @@ fn start_server(model: &str, addr: &str, api_key: Option<&str>) -> Vec<Served> {
     let start_len = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("serve").arg(model).args(["--http", addr, "--no-tui", "--log-file"]).arg(&log);
-    if let Some(key) = api_key {
-        cmd.args(["--api-key", key]);
-    }
+    // In the environment, not on the command line, where `ps` would show it to every user.
+    match api_key {
+        Some(key) => cmd.env(crate::keypolicy::API_KEY_ENV, key),
+        None => cmd.env_remove(crate::keypolicy::API_KEY_ENV),
+    };
     let stdout = std::fs::OpenOptions::new().create(true).append(true).open(&log);
     cmd.stdin(std::process::Stdio::null())
         .stdout(stdout.map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null()))

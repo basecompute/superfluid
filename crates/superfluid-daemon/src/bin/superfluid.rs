@@ -565,18 +565,21 @@ fn main() {
 fn top_cmd(args: &[String]) {
     let usage = || -> ! {
         eprintln!(
-            "usage: superfluid top [--api-key <key>] [<host:port> ...]   \
+            "usage: superfluid top [--api-key <key> | --api-key-file <path>] [<host:port> ...]   \
              (each a `serve --http` endpoint, a fleet head standing for its nodes; none finds \
-             the fleet head on the local network; the key opens a keyed server's /metrics)"
+             the fleet head on the local network; the key, else $SUPERFLUID_API_KEY's, opens \
+             a keyed server's /metrics)"
         );
         std::process::exit(2);
     };
     let mut nodes: Vec<String> = Vec::new();
     let mut api_key: Option<String> = None;
+    let mut api_key_file: Option<std::path::PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--api-key" => api_key = Some(it.next().cloned().unwrap_or_else(|| usage())),
+            "--api-key-file" => api_key_file = Some(it.next().map(Into::into).unwrap_or_else(|| usage())),
             "--help" | "-h" => usage(),
             s if s.starts_with("--") => {
                 eprintln!("superfluid top: unknown flag {s}");
@@ -585,6 +588,13 @@ fn top_cmd(args: &[String]) {
             s => nodes.push(s.to_string()),
         }
     }
+    let env_key = std::env::var(superfluid_daemon::keypolicy::API_KEY_ENV).ok();
+    let warn = |w| eprintln!("superfluid top: WARNING {w}");
+    let api_key = superfluid_daemon::keypolicy::global_key(api_key, api_key_file.as_deref(), env_key, warn)
+        .unwrap_or_else(|e| {
+            eprintln!("superfluid top: {e}");
+            std::process::exit(2);
+        });
     if nodes.is_empty() {
         eprintln!("superfluid top: looking for a fleet head on the local network");
         // The first address the head's API answers on; an announced one may be unroutable here.
