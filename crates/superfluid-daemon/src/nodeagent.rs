@@ -75,6 +75,10 @@ pub struct NodeAgent {
     shared: Arc<Mutex<AgentShared>>,
     identity: String,
     model_name: String,
+    /// The id the model is pulled by, told to the head, which announces it to nodes that follow.
+    model_id: Option<String>,
+    /// What the node tells the head of itself ([`superfluid_proto::handshake::FOLLOWS_HEAD`]).
+    feature_flags: u64,
     start: Instant,
     handshake_timeout: Duration,
     idle_timeout: Duration,
@@ -143,6 +147,8 @@ impl NodeAgent {
             })),
             identity: identity.into(),
             model_name: model_name.into(),
+            model_id: None,
+            feature_flags: 0,
             start: Instant::now(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -161,6 +167,8 @@ impl NodeAgent {
             shared: Arc::clone(&self.shared),
             identity: self.identity.clone(),
             model_name: self.model_name.clone(),
+            model_id: self.model_id.clone(),
+            feature_flags: self.feature_flags,
             start: self.start,
             handshake_timeout: self.handshake_timeout,
             idle_timeout: self.idle_timeout,
@@ -182,6 +190,19 @@ impl NodeAgent {
     pub fn with_timeouts(mut self, handshake: Duration, idle: Duration) -> NodeAgent {
         self.handshake_timeout = handshake;
         self.idle_timeout = idle;
+        self
+    }
+
+    /// Tells each head the id the model is pulled by, `org/model:tag`.
+    pub fn with_model_id(mut self, id: impl Into<String>) -> NodeAgent {
+        self.model_id = Some(id.into());
+        self
+    }
+
+    /// Tells each head this node follows its first model, so the head does not take on the
+    /// model the node serves.
+    pub fn following(mut self) -> NodeAgent {
+        self.feature_flags |= superfluid_proto::handshake::FOLLOWS_HEAD;
         self
     }
 
@@ -304,7 +325,8 @@ impl NodeAgent {
             node_identity: self.identity.clone(),
             capacity: self.capacity(),
             loadable_models: vec![self.model_name.clone()],
-            feature_flags: 0,
+            feature_flags: self.feature_flags,
+            model_ids: self.model_id.iter().cloned().collect(),
             limits: LinkFLimits {
                 max_frame: superfluid_proto::MAX_FRAME,
                 transfer_window: 8,

@@ -422,6 +422,7 @@ fn a_node_that_goes_silent_mid_generation_is_given_up_on() {
             loadable_models: vec!["mock".into()],
             feature_flags: 0,
             limits: LinkFLimits { max_frame: 1 << 20, transfer_window: 8, max_transfer: 1 << 26, transfer_budget: 1 << 28 },
+            model_ids: Vec::new(),
         };
         for sock in listener.incoming() {
             let Ok(sock) = sock else { break };
@@ -482,6 +483,7 @@ fn mute_ack() -> superfluid_proto::handshake::HelloAckF {
         loadable_models: vec!["mock".into()],
         feature_flags: 0,
         limits: LinkFLimits { max_frame: 1 << 20, transfer_window: 8, max_transfer: 1 << 26, transfer_budget: 1 << 28 },
+        model_ids: Vec::new(),
     }
 }
 
