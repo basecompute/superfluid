@@ -40,6 +40,7 @@ fn ackf() -> HelloAckF {
             max_transfer: 1 << 24,
             transfer_budget: 1 << 26,
         },
+        model_ids: Vec::new(),
     }
 }
 

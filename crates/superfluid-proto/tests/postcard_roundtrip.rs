@@ -557,6 +557,7 @@ fn handshake_hello_and_acks_roundtrip() {
             max_transfer: 1 << 30,
             transfer_budget: 1 << 31,
         },
+        model_ids: Vec::new(),
     };
     assert_eq!(roundtrip(&ack_f), ack_f);
 }

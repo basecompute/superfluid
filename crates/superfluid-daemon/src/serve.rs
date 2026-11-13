@@ -756,6 +756,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
         // chat template only; one given by id takes them from a node serving it, below.
         let mut served: Vec<(String, Option<Box<dyn superfluid_daemon::TextCodec + Send + Sync>>)> = Vec::new();
         let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // The id a node pulls a model given by id by, which the head announces to nodes that follow it.
+        let mut pulled_by: Vec<(String, String)> = Vec::new();
         for m in &models {
             let token = m.to_string_lossy().into_owned();
             let by_id = !m.exists() && superfluid_daemon::pulls::looks_like_id(&token);
@@ -765,6 +767,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 continue;
             }
             if by_id {
+                pulled_by.push((name.clone(), token));
                 served.push((name, None));
                 continue;
             }
@@ -813,6 +816,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 }),
             )
         };
+        let (by_id, ids): (Vec<String>, Vec<String>) = pulled_by.into_iter().unzip();
+        head_models.know_ids(&by_id, &ids);
         let mut reached = 0;
         for node in manager.probe() {
             match node {
@@ -861,7 +866,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             let http_port = addr.parse::<std::net::SocketAddr>().ok().filter(|a| !a.ip().is_loopback()).map(|a| a.port());
             // Nodes take only a head of their own network: one whose token they hold.
             let net = (!auth.is_empty()).then(|| superfluid_daemon::fleet_mdns::network_id(&auth));
-            match superfluid_daemon::fleet_mdns::advertise(port, &head_models.names(), http_port, net.as_deref()) {
+            match superfluid_daemon::fleet_mdns::advertise(port, &head_models.names(), &head_models.ids(), http_port, net.as_deref()) {
                 Ok(announced) => head_models.announce_with(announced),
                 Err(e) => eprintln!("superfluid: not announced on the local network ({e}); give nodes this head's address"),
             }

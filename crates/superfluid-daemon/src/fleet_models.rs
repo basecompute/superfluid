@@ -9,8 +9,12 @@
 //!
 //! An unloaded model stays unloaded when a node that serves it joins, or joins again: the head
 //! says so and does not serve it. `/v1/models/load` serves it again.
+//!
+//! The head announces the id a node pulls each model by, where it knows one: the id it was
+//! given at start, else the first a node serving the model reported. A node that follows its
+//! head pulls the head's first model by it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::fleet_manager::FleetManager;
@@ -38,6 +42,8 @@ struct Listed {
     unloaded: HashSet<String>,
     /// Brought by a node, with its name, before the head's registry was in place.
     pending: Vec<(String, String)>,
+    /// The id a node pulls each model by, `org/model:tag`, where the head knows one.
+    ids: HashMap<String, String>,
 }
 
 impl HeadModels {
@@ -60,6 +66,31 @@ impl HeadModels {
     /// The models served, in the order they are announced.
     pub fn names(&self) -> Vec<String> {
         self.listed.lock().expect("head models").order.clone()
+    }
+
+    /// The id a node pulls each of [`Self::names`] by, in the same order; empty for one the
+    /// head knows by path only.
+    pub fn ids(&self) -> Vec<String> {
+        let listed = self.listed.lock().expect("head models");
+        listed.order.iter().map(|m| listed.ids.get(m).cloned().unwrap_or_default()).collect()
+    }
+
+    /// Notes the id each of `models` is pulled by, as far as `ids` gives them, for a model the
+    /// head knows no id for yet, and announces an id that is new for a model served.
+    pub fn know_ids(&self, models: &[String], ids: &[String]) {
+        let mut announce = false;
+        {
+            let mut listed = self.listed.lock().expect("head models");
+            for (m, id) in models.iter().zip(ids).filter(|(_, id)| !id.is_empty()) {
+                if !listed.ids.contains_key(m) {
+                    listed.ids.insert(m.clone(), id.clone());
+                    announce |= listed.order.contains(m);
+                }
+            }
+        }
+        if announce {
+            self.announce();
+        }
     }
 
     /// The loader for the head's registry: a model a node that is up serves is served; any other
@@ -139,7 +170,7 @@ impl HeadModels {
     }
 
     fn changed(&self, names: &[String]) {
-        let order = {
+        {
             let mut listed = self.listed.lock().expect("head models");
             let gone: Vec<String> = listed.order.iter().filter(|m| !names.contains(m)).cloned().collect();
             listed.unloaded.extend(gone);
@@ -149,10 +180,14 @@ impl HeadModels {
                     listed.order.push(n.clone());
                 }
             }
-            listed.order.clone()
-        };
+        }
+        self.announce();
+    }
+
+    fn announce(&self) {
+        let (names, ids) = (self.names(), self.ids());
         if let Some(a) = self.announcement.lock().expect("head announcement").as_ref() {
-            if let Err(e) = a.update(&order) {
+            if let Err(e) = a.update(&names, &ids) {
                 eprintln!("superfluid: the local network was not told of the models served now ({e})");
             }
         }

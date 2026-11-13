@@ -42,8 +42,16 @@ fn join(head: &str, identity: &'static str, model: &'static str) {
 
 /// As [`join`], telling the head its tokenizer by `tokenizer`.
 fn join_with(head: &str, identity: &'static str, model: &'static str, tokenizer: u64) {
-    let daemon = Arc::new(Daemon::new(store(identity), engine(), Box::new(MockCodec), 2));
-    let node = NodeAgent::new(daemon, identity, model).with_max_lanes(2).with_auth(TOKEN.to_vec()).with_tokenizer(tokenizer);
+    join_as(head, NodeAgent::new(node_daemon(identity), identity, model).with_tokenizer(tokenizer));
+}
+
+fn node_daemon(identity: &str) -> Arc<Daemon> {
+    Arc::new(Daemon::new(store(identity), engine(), Box::new(MockCodec), 2))
+}
+
+/// `node`, dialing `head` as [`join`] does.
+fn join_as(head: &str, node: NodeAgent) {
+    let node = node.with_max_lanes(2).with_auth(TOKEN.to_vec());
     for _ in 0..2 {
         let (head, mut conn) = (head.to_string(), node.connection());
         std::thread::spawn(move || loop {
@@ -58,12 +66,12 @@ fn join_with(head: &str, identity: &'static str, model: &'static str, tokenizer:
 /// A head serving `first` over the nodes that join it, with an HTTP API; it builds another model
 /// as the head's own `serve` does, minus the tokenizer a node shares.
 fn head(first: &str) -> (String, String) {
-    let (nodes, http, _) = head_of_fleet(first);
+    let (nodes, http, _, _) = head_of_fleet(first);
     (nodes, http)
 }
 
-/// As [`head`], with the head's fleet.
-fn head_of_fleet(first: &str) -> (String, String, Arc<FleetManager>) {
+/// As [`head`], with the head's fleet and models.
+fn head_of_fleet(first: &str) -> (String, String, Arc<FleetManager>, Arc<HeadModels>) {
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
     let over_fleet = {
@@ -80,14 +88,14 @@ fn head_of_fleet(first: &str) -> (String, String, Arc<FleetManager>) {
 
     let nodes = TcpListener::bind("127.0.0.1:0").unwrap();
     let nodes_addr = nodes.local_addr().unwrap().to_string();
-    let fleet = Arc::clone(&manager);
+    let (fleet, served) = (Arc::clone(&manager), Arc::clone(&models));
     std::thread::spawn(move || accept_nodes(nodes, manager, TOKEN.to_vec(), models));
     let http = TcpListener::bind("127.0.0.1:0").unwrap();
     let http_addr = http.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
         let _ = openai::serve_blocking_config(http, registry, openai::ServeConfig::default());
     });
-    (nodes_addr, http_addr, fleet)
+    (nodes_addr, http_addr, fleet, served)
 }
 
 fn agent() -> ureq::Agent {
@@ -175,7 +183,7 @@ fn a_head_loads_only_a_model_a_node_serves_and_an_unload_outlasts_a_join() {
 
 #[test]
 fn the_first_node_to_bring_a_model_sets_the_tokenizer_the_next_is_held_to() {
-    let (nodes, http, fleet) = head_of_fleet("model-a");
+    let (nodes, http, fleet, _) = head_of_fleet("model-a");
     join_with(&nodes, "box-b", "model-b", 7);
     wait_for("the node's model is served", || models(&http).contains(&"model-b".to_string()));
     join_with(&nodes, "box-other", "model-b", 9);
@@ -185,4 +193,22 @@ fn the_first_node_to_bring_a_model_sets_the_tokenizer_the_next_is_held_to() {
     assert_eq!(status, 200, "{body}");
     let decoded: std::collections::HashMap<String, u64> = fleet.status().into_iter().map(|n| (n.name, n.decode_tokens)).collect();
     assert_eq!(decoded["box-other"], 0, "{decoded:?}");
+}
+
+#[test]
+fn a_head_announces_the_id_a_node_pulled_its_model_by() {
+    let (nodes, http, _, served) = head_of_fleet("model-a");
+    join_as(&nodes, NodeAgent::new(node_daemon("box-b"), "box-b", "org/model-b").with_model_id("org/model-b:q4"));
+    wait_for("the node's model is served", || models(&http).contains(&"org/model-b".to_string()));
+    assert_eq!(served.names(), ["model-a", "org/model-b"]);
+    assert_eq!(served.ids(), ["", "org/model-b:q4"], "the head started with model-a by path");
+}
+
+#[test]
+fn a_head_does_not_take_on_the_model_of_a_node_that_follows_it() {
+    let (nodes, http, fleet, _) = head_of_fleet("model-a");
+    join_as(&nodes, NodeAgent::new(node_daemon("box-f"), "box-f", "model-old").following());
+    wait_for("the node joined", || fleet.status().iter().any(|n| n.up));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(models(&http), ["model-a"], "it is about to serve the head's model");
 }

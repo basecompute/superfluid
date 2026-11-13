@@ -274,7 +274,7 @@ impl Endpoint {
                 let ack = frames.remove(at);
                 // What the node sent right after its answer is for the next read.
                 self.held = frames.split_off(at);
-                let ack: HelloAckF = postcard::from_bytes(&ack.payload)?;
+                let ack = HelloAckF::decode(&ack.payload)?;
                 self.version = ack.chosen_version;
                 return Ok(ack);
             }
@@ -381,6 +381,7 @@ mod tests {
             loadable_models: vec!["mock".into()],
             feature_flags: 0,
             limits: linkf::LinkFLimits { max_frame: 1 << 20, transfer_window: 4, max_transfer: 1 << 30, transfer_budget: 1 << 30 },
+            model_ids: Vec::new(),
         }
     }
 

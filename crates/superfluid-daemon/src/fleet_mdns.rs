@@ -2,8 +2,10 @@
 //! address given.
 //!
 //! The announcement's TXT properties: `model`, the head's first model (a node from before
-//! `models` reads only it); `models`, every model it serves, comma-separated; `http`, the port
-//! of its HTTP API when that is off loopback; and `net`, the id of its fleet token's network
+//! `models` reads only it); `models`, every model it serves, comma-separated; `ids`, the id a
+//! node pulls each of `models` by (`org/model:tag`), comma-separated in the same order, empty
+//! for one the head knows by path only, and left out when it knows none; `http`, the port of
+//! its HTTP API when that is off loopback; and `net`, the id of its fleet token's network
 //! ([`network_id`]), when it has a token.
 
 use std::collections::{HashMap, HashSet};
@@ -39,14 +41,14 @@ pub fn network_id(token: &[u8]) -> String {
 /// Announces this head's node listener, its HTTP port for `superfluid top` when it has one
 /// off loopback, and its network when it has a token; the service stays announced while the
 /// daemon lives.
-pub fn advertise(port: u16, models: &[String], http: Option<u16>, net: Option<&str>) -> Result<Announcement, String> {
+pub fn advertise(port: u16, models: &[String], ids: &[String], http: Option<u16>, net: Option<&str>) -> Result<Announcement, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     daemon.set_service_name_len_max(SERVICE_NAME_LEN_MAX).map_err(|e| e.to_string())?;
     // mdns-sd checks a registration on its own thread and tells only its monitors of a refusal.
     let events = daemon.monitor().map_err(|e| e.to_string())?;
     let host = host_label(&crate::metrics::hostname()).to_string();
     let announced = Announcement { daemon, host, port, http, net: net.map(str::to_string) };
-    announced.daemon.register(announced.info(models)?).map_err(|e| e.to_string())?;
+    announced.daemon.register(announced.info(models, ids)?).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + REGISTERED;
     loop {
         match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -74,19 +76,22 @@ pub struct Announcement {
 }
 
 impl Announcement {
-    /// Announces `models` in place of the models announced before: the same service with new
-    /// TXT properties, which a node browsing for heads resolves again.
-    pub fn update(&self, models: &[String]) -> Result<(), String> {
-        self.daemon.register(self.info(models)?).map_err(|e| e.to_string())
+    /// Announces `models`, pulled by `ids`, in place of the models announced before: the same
+    /// service with new TXT properties, which a node browsing for heads resolves again.
+    pub fn update(&self, models: &[String], ids: &[String]) -> Result<(), String> {
+        self.daemon.register(self.info(models, ids)?).map_err(|e| e.to_string())
     }
 
-    fn info(&self, models: &[String]) -> Result<ServiceInfo, String> {
+    fn info(&self, models: &[String], ids: &[String]) -> Result<ServiceInfo, String> {
         // `model` is the first, as a node from before `models` reads it.
         let mut props: HashMap<String, String> = [
             ("model".to_string(), models.first().cloned().unwrap_or_default()),
             ("models".to_string(), models.join(",")),
         ]
         .into();
+        if ids.iter().any(|id| !id.is_empty()) {
+            props.insert("ids".to_string(), ids.join(","));
+        }
         if let Some(http) = self.http {
             props.insert("http".to_string(), http.to_string());
         }
@@ -109,10 +114,15 @@ fn host_label(host: &str) -> &str {
 /// A head announced on the local network.
 #[derive(Debug, Clone)]
 pub struct Head {
+    /// Its service instance, `superfluid on <host>`, one name however many addresses it has.
+    pub instance: String,
     /// Where its node listener answers, IPv4 first.
     pub nodes: Vec<SocketAddr>,
-    /// The models it serves.
+    /// The models it serves, its first first.
     pub models: Vec<String>,
+    /// The id a node pulls each of `models` by, in the same order: empty, or shorter, where the
+    /// head announced none.
+    pub ids: Vec<String>,
     /// Where its HTTP API answers, IPv4 first; empty when it announced none.
     pub http: Vec<SocketAddr>,
     /// Its network ([`network_id`]); `None` from a head with no token, or one released before
@@ -150,7 +160,7 @@ pub struct Search {
     others: bool,
     fallback: Option<Head>,
     foreign: Option<Head>,
-    said: HashSet<SocketAddr>,
+    said: HashSet<String>,
 }
 
 /// What a [`Search`] makes of a head it hears.
@@ -198,8 +208,7 @@ impl Search {
                 if self.others && self.foreign.is_none() {
                     self.foreign = Some(head.clone());
                 }
-                let first = head.nodes.first().is_some_and(|a| self.said.insert(*a));
-                if first {
+                if self.said.insert(head.instance.clone()) {
                     Heard::Foreign
                 } else {
                     Heard::Nothing
@@ -222,7 +231,7 @@ impl Search {
 /// unmarked one heard in the wait. `say` is told of a head of another network the first time
 /// the search hears it, and of an unmarked head taken.
 pub fn find_head(search: &mut Search, wait: Duration, say: &dyn Fn(String)) -> Result<Head, String> {
-    let found = browse(wait, |head| match search.hear(&head) {
+    let found = watch(wait, |head| match search.hear(&head) {
         Heard::Take => Some(head),
         Heard::Foreign => {
             let then = if search.others { "taken only if no other answers" } else { "not joining it" };
@@ -249,8 +258,9 @@ pub fn find_head(search: &mut Search, wait: Duration, say: &dyn Fn(String)) -> R
     }
 }
 
-/// Browses for heads for `wait`, handing each one resolved to `take` until it takes one.
-fn browse(wait: Duration, mut take: impl FnMut(Head) -> Option<Head>) -> Result<Option<Head>, String> {
+/// Watches the heads announced on the local network for `wait`, handing each to `take` as it
+/// resolves, and again when its announcement changes, until `take` returns something.
+pub fn watch<T>(wait: Duration, mut take: impl FnMut(Head) -> Option<T>) -> Result<Option<T>, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let events = daemon.browse(SERVICE).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + wait;
@@ -264,9 +274,9 @@ fn browse(wait: Duration, mut take: impl FnMut(Head) -> Option<Head>) -> Result<
                 let mut ips: Vec<_> = s.addresses.iter().map(|a| a.to_ip_addr()).filter(reachable).collect();
                 ips.sort_by_key(|ip| !ip.is_ipv4());
                 let txt = |k: &str| s.txt_properties.get_property_val_str(k).unwrap_or_default().to_string();
-                if let Some(head) = head_of(&ips, s.port, txt) {
-                    if let Some(head) = take(head) {
-                        break Some(head);
+                if let Some(head) = head_of(&s.fullname, &ips, s.port, txt) {
+                    if let Some(taken) = take(head) {
+                        break Some(taken);
                     }
                 }
             }
@@ -284,15 +294,20 @@ fn browse(wait: Duration, mut take: impl FnMut(Head) -> Option<Head>) -> Result<
 
 /// The head an announcement describes, from its addresses, port and TXT properties; none when
 /// no address can be dialed.
-fn head_of(ips: &[std::net::IpAddr], port: u16, txt: impl Fn(&str) -> String) -> Option<Head> {
+fn head_of(instance: &str, ips: &[std::net::IpAddr], port: u16, txt: impl Fn(&str) -> String) -> Option<Head> {
     if ips.is_empty() {
         return None;
     }
     let http: Option<u16> = txt("http").parse().ok();
     Some(Head {
+        instance: instance.to_string(),
         nodes: ips.iter().map(|&ip| SocketAddr::new(ip, port)).collect(),
         models: match txt("models").as_str() {
             "" => Some(txt("model")).filter(|m| !m.is_empty()).into_iter().collect(),
+            all => all.split(',').map(str::to_string).collect(),
+        },
+        ids: match txt("ids").as_str() {
+            "" => Vec::new(),
             all => all.split(',').map(str::to_string).collect(),
         },
         http: http.map(|p| ips.iter().map(|&ip| SocketAddr::new(ip, p)).collect()).unwrap_or_default(),
@@ -338,8 +353,10 @@ mod tests {
 
     fn head(port: u16, net: Option<&str>) -> Head {
         Head {
+            instance: format!("superfluid on box-{port}"),
             nodes: vec![SocketAddr::from(([192, 168, 1, 20], port))],
             models: vec!["m".into()],
+            ids: Vec::new(),
             http: Vec::new(),
             net: net.map(str::to_string),
         }
@@ -372,6 +389,9 @@ mod tests {
         assert_eq!(search.net(), Some(ours.as_str()));
         assert_eq!(search.hear(&head(1, Some("0000000000000000"))), Heard::Foreign);
         assert_eq!(search.hear(&head(1, Some("0000000000000000"))), Heard::Nothing, "said once");
+        let mut elsewhere = head(1, Some("0000000000000000"));
+        elsewhere.nodes = vec!["127.0.0.1:48456".parse().unwrap()];
+        assert_eq!(search.hear(&elsewhere), Heard::Nothing, "said once for the head, whichever address it is heard at");
         assert_eq!(search.hear(&head(2, None)), Heard::Kept);
         assert_eq!(search.hear(&head(3, None)), Heard::Kept);
         assert_eq!(search.hear(&head(4, Some(&ours))), Heard::Take);
@@ -399,26 +419,29 @@ mod tests {
     #[test]
     fn an_announcement_reads_back_as_a_head() {
         let ips = ["192.168.1.20".parse().unwrap(), "fd7a::1".parse().unwrap()];
-        let props: HashMap<&str, &str> = [("model", "a"), ("models", "a,b"), ("http", "8453"), ("net", "00112233aabbccdd")].into();
-        let head = head_of(&ips, 48456, |k| props.get(k).copied().unwrap_or_default().to_string()).unwrap();
+        let props: HashMap<&str, &str> =
+            [("model", "a"), ("models", "a,b"), ("ids", ",org/b:q4"), ("http", "8453"), ("net", "00112233aabbccdd")].into();
+        let head = head_of("superfluid on box-a", &ips, 48456, |k| props.get(k).copied().unwrap_or_default().to_string()).unwrap();
         assert_eq!(head.models, ["a", "b"]);
+        assert_eq!(head.ids, ["", "org/b:q4"], "a by path, b by id");
         assert_eq!(head.net.as_deref(), Some("00112233aabbccdd"));
         assert_eq!(head.http[0], "192.168.1.20:8453".parse().unwrap());
         let old: HashMap<&str, &str> = [("model", "a")].into();
-        let head = head_of(&ips, 48456, |k| old.get(k).copied().unwrap_or_default().to_string()).unwrap();
-        assert_eq!((head.models, head.net, head.http.len()), (vec!["a".to_string()], None, 0), "a head from before");
-        assert!(head_of(&[], 48456, |_| String::new()).is_none());
+        let head = head_of("superfluid on box-a", &ips, 48456, |k| old.get(k).copied().unwrap_or_default().to_string()).unwrap();
+        assert_eq!((head.models, head.ids.len(), head.net, head.http.len()), (vec!["a".to_string()], 0, None, 0), "a head from before");
+        assert!(head_of("superfluid on box-a", &[], 48456, |_| String::new()).is_none());
     }
 
     #[test]
     #[ignore = "needs multicast on an interface, one head per host at a time: cargo test -p superfluid --lib fleet_mdns -- --ignored --test-threads=1"]
     fn a_node_finds_the_head_it_announced() {
         let net = network_id(b"a_node_finds_the_head_it_announced");
-        let _head = advertise(48456, &["test-model".into(), "other-model".into()], Some(48453), Some(&net)).unwrap();
+        let _head = advertise(48456, &["test-model".into(), "other-model".into()], &["org/test-model:q4".into()], Some(48453), Some(&net)).unwrap();
         // Another head on this network may answer first; this one is of its own network.
         let mut search = Search::for_token(b"a_node_finds_the_head_it_announced");
         let head = find_head(&mut search, Duration::from_secs(10), &|_| {}).unwrap();
         assert_eq!(head.models, ["test-model", "other-model"]);
+        assert_eq!(head.ids, ["org/test-model:q4"]);
         assert_eq!(head.net.as_deref(), Some(net.as_str()));
         assert!(head.nodes.iter().all(|a| a.port() == 48456));
         assert!(!head.http.is_empty() && head.http.iter().all(|a| a.port() == 48453));
@@ -429,14 +452,14 @@ mod tests {
     fn a_browsing_node_sees_the_models_a_head_announces_later() {
         let token = b"a_browsing_node_sees_the_models_a_head_announces_later";
         let net = network_id(token);
-        let head = advertise(48457, &["first".into()], None, Some(&net)).unwrap();
+        let head = advertise(48457, &["first".into()], &[], None, Some(&net)).unwrap();
         let ours = move |h: &Head| h.net.as_deref() == Some(net.as_str());
-        let seen = browse(Duration::from_secs(10), |h| ours(&h).then_some(h)).unwrap().expect("the head answers");
+        let seen = watch(Duration::from_secs(10), |h| ours(&h).then_some(h)).unwrap().expect("the head answers");
         assert_eq!(seen.models, ["first"]);
         // One browse that already resolved the head hears it again with the new models.
         let (tx, rx) = std::sync::mpsc::channel();
         let watcher = std::thread::spawn(move || {
-            browse(Duration::from_secs(15), |h| {
+            watch(Duration::from_secs(15), |h| {
                 if !ours(&h) {
                     return None;
                 }
@@ -445,8 +468,9 @@ mod tests {
             })
         });
         assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), ["first"], "resolved once as it was");
-        head.update(&["first".into(), "second".into()]).unwrap();
+        head.update(&["first".into(), "second".into()], &["".into(), "org/second:q8".into()]).unwrap();
         let updated = watcher.join().unwrap().unwrap().expect("the update is heard");
         assert_eq!(updated.models, ["first", "second"]);
+        assert_eq!(updated.ids, ["", "org/second:q8"]);
     }
 }
