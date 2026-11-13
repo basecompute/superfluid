@@ -136,6 +136,9 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
         return Err(format!("pulling {id} gave {}, which is not there", path.display()));
     }
     eprintln!("superfluid: {id} is {}", path.display());
+    if let Err(e) = crate::models::record(catalog.home(), id, runtime, &path) {
+        eprintln!("superfluid: {e}; `superfluid models` lists {id} by its lock alone");
+    }
     ahead(&rt, &path);
     Ok(path)
 }
@@ -190,14 +193,20 @@ fn install(catalog: &Catalog, runtime: RuntimeId) -> Result<(), String> {
     Ok(())
 }
 
+/// The name a pull of `id` keeps its lock under in `$SUPERFLUID_HOME/pulls`, and its record beside it: `id` with
+/// every character outside `[A-Za-z0-9._-]` made `_`. `/`, `:` and `_` all end up `_`, so the name does not give
+/// the id back; the record does.
+pub(crate) fn stem(id: &str) -> String {
+    id.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect()
+}
+
 pub(crate) struct Lock(#[allow(dead_code)] std::fs::File);
 
 impl Lock {
     pub(crate) fn take(dir: &Path, id: &str, what: &str) -> Result<Lock, String> {
         use std::os::unix::io::AsRawFd;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let name: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
-        let path = dir.join(format!("{name}.lock"));
+        let path = dir.join(format!("{}.lock", stem(id)));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -285,6 +294,9 @@ esac
         let flags = PullFlags { offline: true, options: vec![("target".into(), Some("q8".into()))] };
         assert_eq!(pull(&cat, toy, "org/m:q4", &flags).unwrap(), model);
         assert_eq!(std::fs::read_to_string(dir.join("pull-args")).unwrap().trim(), "org/m:q4 --offline --target q8");
+        let here = crate::models::downloaded(cat.home(), &crate::models::HubCatalog::default());
+        assert_eq!(here.len(), 1, "an offline pull that finds the model records it too");
+        assert_eq!((here[0].id.as_str(), here[0].runtime.as_deref(), here[0].path.as_deref()), ("org/m:q4", Some("toyrt"), Some(model.as_path())));
         let bad = PullFlags { offline: false, options: vec![("force".into(), None)] };
         assert!(pull(&cat, toy, "org/m", &bad).unwrap_err().contains("--pull-force: the toyrt runtime's pull takes no such option"));
         let e = pull(&cat, RuntimeId::new("nowhere"), "org/m", &PullFlags { offline: true, options: Vec::new() }).unwrap_err();
