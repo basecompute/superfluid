@@ -93,7 +93,10 @@ pub fn ensure_installed(catalog: &Catalog, runtime: RuntimeId, offline: bool) ->
         Err(why) => match named_by_the_operator(catalog, runtime) {
             Some(by) => Err(Unready::NotHere(format!("{why} ({by} names the runtime to load, so none was installed)"))),
             None => {
-                install(catalog, runtime).map_err(|e| Unready::InstallFailed(format!("{why}; and installing it failed: {e}")))?;
+                install(catalog, runtime).map_err(|e| {
+                    crate::events::emit("runtime.install.failed", serde_json::json!({"runtime": runtime.base().name(), "error": e}));
+                    Unready::InstallFailed(format!("{why}; and installing it failed: {e}"))
+                })?;
                 // Installed, yet not usable: what it found here, not the install, is why.
                 catalog.require(runtime).map_err(Unready::NotHere)
             }
@@ -109,7 +112,17 @@ pub fn pull_command_args(worker: &crate::runtimes::Worker, request: &Pull) -> Ve
     args
 }
 
+/// The model `id` on disk, pulled by `runtime` (installed first if it never was) unless it is in
+/// the runtime's cache already.
 pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) -> Result<PathBuf, String> {
+    let pulled = pull_by_id(catalog, runtime, id, flags);
+    if let Err(e) = &pulled {
+        crate::events::pull_failed(id, e);
+    }
+    pulled
+}
+
+fn pull_by_id(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) -> Result<PathBuf, String> {
     let rt = ensure_installed(catalog, runtime, flags.offline)?;
     let Some(declared) = &rt.pull else {
         return Err(format!("the {runtime} runtime pulls no model by id: give --model a path to one of its models"));
@@ -118,6 +131,7 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
     let request = Pull { id: id.to_string(), offline: flags.offline, options: flags.options.clone() };
     let _one_at_a_time = Lock::take(&catalog.home().join("pulls"), id, &format!("pull of {id}"))?;
     eprintln!("superfluid: pulling {id} with the {runtime} runtime{}", if flags.offline { " (offline)" } else { "" });
+    crate::events::pull_started(id, runtime.name(), flags.offline);
     let path = if rt.worker.source == Source::BuiltIn {
         let linked = crate::linked::get(runtime.base()).ok_or_else(|| format!("this build does not link the {runtime} runtime"))?;
         linked.pull(&request, &crate::runtime_options::pull_args(runtime.base())?)?
@@ -136,6 +150,7 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
         return Err(format!("pulling {id} gave {}, which is not there", path.display()));
     }
     eprintln!("superfluid: {id} is {}", path.display());
+    crate::events::pull_done(id, &path);
     ahead(&rt, &path);
     Ok(path)
 }
@@ -183,10 +198,14 @@ fn named_by_the_operator(catalog: &Catalog, runtime: RuntimeId) -> Option<String
 fn install(catalog: &Catalog, runtime: RuntimeId) -> Result<(), String> {
     let id = runtime.base();
     eprintln!("superfluid: the {id} runtime is not here: installing it (`superfluid runtime install {id}`)");
+    crate::events::emit("runtime.install.start", serde_json::json!({"runtime": id.name()}));
     let installer = crate::installs::installer(catalog, id)?;
     let plans = crate::installs::plan(&installer, &superfluid_adapter_kit::install::Request::default())?;
     let done = crate::installs::install(catalog, id, &installer, &plans.plans)?;
     eprintln!("superfluid: installed {id} {} ({})", done.install.name, done.version);
+    // The runtime's version string may carry the library's path after the version.
+    let version = done.version.split_whitespace().next().unwrap_or_default();
+    crate::events::emit("runtime.install.done", serde_json::json!({"runtime": id.name(), "install": done.install.name, "version": version}));
     Ok(())
 }
 

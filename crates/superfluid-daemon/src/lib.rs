@@ -58,6 +58,7 @@ pub mod versions;
 pub mod selfupdate;
 pub mod linked;
 pub mod dylib_tokenizer;
+pub mod events;
 pub mod export;
 pub mod otlp;
 pub mod media;
