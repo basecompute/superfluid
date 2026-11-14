@@ -283,6 +283,7 @@ Commands:
   stop                 Stop the server `launch` started
   fleet token          Print the fleet token, making it the first time
   node join [<head>]   Serve a model to a fleet head from this machine
+  models [--json]      List the models pulled here and the hub catalog's
   runtimes [<model>]   List the inference runtimes here, or which one serves a model
   runtime <action>     Install, update, repair, remove or pin a runtime
   compat               What this build was built for: the runtime contracts it checks at load
@@ -482,6 +483,29 @@ fn version_and_backend(install: &str) -> Option<(&str, &str)> {
         .filter(|(version, _)| *version != "custom")
 }
 
+pub const MODELS_HELP: &str = "List the models pulled here, and the hub catalog's.
+
+Usage: superfluid models [--catalog] [--refresh] [--json]
+
+  A pull that succeeds records the model in $SUPERFLUID_HOME/pulls (~/.superfluid): the id as it
+  was pulled, the runtime that pulled it, where it is and its size. One whose path is gone is
+  listed as missing. One pulled before superfluid kept records is listed by the id its lock's
+  name gives back, marked as guessed, with no path.
+  The hub catalog lists the models baseRT has converted, each quant of each. `serve` keeps a copy
+  in $SUPERFLUID_HOME/cache and fetches it again once a day; this command fetches it only when
+  --refresh asks.
+
+Options:
+  --catalog    List the hub catalog's models instead, marking those downloaded here
+  --refresh    Fetch the hub catalog now; exit 1, after listing the copy kept here, if it cannot be
+  --json       Print one JSON document with both lists, whatever --catalog says. \"schema\" is 1.
+               \"downloaded\": each model's id, served_name, runtime, path, size (bytes),
+               pulled_at (seconds since the Unix epoch), exists and id_guessed, with null for
+               what a guessed one's lock does not say. \"catalog\": each entry with the fields the
+               cache has, and downloaded. \"catalog_updated\": the catalog's own date.
+               \"catalog_fetched\": when the copy here was fetched (seconds since the Unix epoch).
+";
+
 pub const SESSION_HELP: &str = "Inspect or export a session of a running server.
 
 Usage:
@@ -536,12 +560,13 @@ pub fn command_help(command: &str) -> Option<String> {
         "fleet" => crate::fleet_token::HELP.to_string(),
         "node" => crate::fleet_join::HELP.to_string(),
         "stop" => crate::launch::STOP_HELP.to_string(),
+        "models" => MODELS_HELP.to_string(),
         _ => return None,
     })
 }
 
 pub const COMMANDS: &[&str] =
-    &["serve", "launch", "stop", "runtimes", "runtime", "compat", "self", "session", "media", "top", "fleet", "node", "help", "version"];
+    &["serve", "launch", "stop", "models", "runtimes", "runtime", "compat", "self", "session", "media", "top", "fleet", "node", "help", "version"];
 
 pub const COMPAT_HELP: &str = "What this build was built and tested for, per runtime.
 

@@ -548,6 +548,9 @@ fn main() {
         runtimes_cmd(&args[1..]);
         return;
     }
+    if command == Some("models") {
+        std::process::exit(superfluid_daemon::models::run(&args[1..]));
+    }
     if command == Some("self") {
         std::process::exit(superfluid_daemon::selfupdate::run(&args[1..]));
     }
