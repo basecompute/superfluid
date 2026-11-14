@@ -834,7 +834,9 @@ pub fn run(args: &[String], embedding: &Embedding) {
             std::thread::spawn(move || superfluid_daemon::fleet_join::accept_nodes(listener, m, a, all));
             // `superfluid top` finds the head's API by this; one on loopback is no use off this machine.
             let http_port = addr.parse::<std::net::SocketAddr>().ok().filter(|a| !a.ip().is_loopback()).map(|a| a.port());
-            match superfluid_daemon::fleet_mdns::advertise(port, &names, http_port) {
+            // Nodes take only a head of their own network: one whose token they hold.
+            let net = (!auth.is_empty()).then(|| superfluid_daemon::fleet_mdns::network_id(&auth));
+            match superfluid_daemon::fleet_mdns::advertise(port, &names, http_port, net.as_deref()) {
                 Ok(d) => Some(d),
                 Err(e) => {
                     eprintln!("superfluid: not announced on the local network ({e}); give nodes this head's address");
