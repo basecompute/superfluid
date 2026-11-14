@@ -388,7 +388,7 @@ pub fn find(name: &str) -> Option<&'static Agent> {
 pub const HELP: &str = "Run a coding agent against a local model.
 
 Usage: superfluid launch <agent> [options] [-- <agent arguments>...]
-       superfluid launch            List the agents and whether each is installed
+       superfluid launch [--json]   List the agents and whether each is installed
 
   Agents: claude, codex, pi, opencode, hermes, cline, openclaw, ollama (its CLI's chat).
 
@@ -404,6 +404,9 @@ Options:
   --api-key <key>                  The server's key, for one behind --api-key
                                    [default: $SUPERFLUID_API_KEY]
   --print                          Print what would run instead of running it
+  --json                           With no agent: print the list as JSON, with where each
+                                   agent is installed, the server launch started and the
+                                   model it starts one with
 
 Examples:
   superfluid launch claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
@@ -425,6 +428,7 @@ struct Args {
     http: Option<String>,
     api_key: Option<String>,
     print: bool,
+    json: bool,
     extra: Vec<String>,
 }
 
@@ -446,8 +450,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--http" => out.http = Some(value(flag)?),
             "--api-key" => out.api_key = Some(value(flag)?),
             "--print" => out.print = true,
+            "--json" => out.json = true,
             f if f.starts_with('-') => {
-                let known = ["--model", "--http", "--api-key", "--print"];
+                let known = ["--model", "--http", "--api-key", "--print", "--json"];
                 return Err(match crate::cli::suggest(f, known) {
                     Some(s) => format!("unknown flag {f} (did you mean {s}?); pass the agent's own flags after --"),
                     None => format!("unknown flag {f}; pass the agent's own flags after --"),
@@ -455,6 +460,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
             }
             name if out.agent.is_none() => out.agent = Some(name.to_string()),
             other => return Err(format!("unexpected argument {other}; pass the agent's own arguments after --")),
+        }
+    }
+    if out.json {
+        if let Some(agent) = &out.agent {
+            return Err(format!(
+                "--json prints the list of agents, and running {agent} has no JSON to print; \
+                 `superfluid launch --json` lists them"
+            ));
         }
     }
     Ok(out)
@@ -578,7 +591,12 @@ pub fn run(args: &[String]) {
         std::process::exit(2);
     });
     let Some(name) = a.agent.as_deref() else {
-        list();
+        if a.json {
+            let listing = listing(on_path, read_server(), remembered());
+            println!("{}", serde_json::to_string_pretty(&listing).expect("the listing is JSON"));
+        } else {
+            list();
+        }
         return;
     };
     let agent = find(name).unwrap_or_else(|| {
@@ -678,6 +696,67 @@ fn list() {
                 println!("\nWith no server running, launch starts one with {m}.");
             }
         }
+    }
+}
+
+/// The version of [`Listing`]'s shape. A key is only ever added under the same number; one
+/// renamed, removed or changed in meaning bumps it.
+const LISTING_SCHEMA: u32 = 1;
+
+/// `superfluid launch --json`: what `list` prints, for a program to read.
+#[derive(serde::Serialize)]
+struct Listing {
+    schema: u32,
+    agents: Vec<ListedAgent>,
+    /// The server launch started, while its process lives; null when there is none.
+    server: Option<ListedServer>,
+    /// The model launch last started a server with, which it starts one with when none answers
+    /// and no --model is given; null before the first.
+    last_model: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ListedAgent {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    title: &'static str,
+    /// The program launch runs, looked for on PATH.
+    binary: &'static str,
+    installed: bool,
+    /// Where on PATH the binary was found; null when it was not.
+    path: Option<String>,
+    /// The command (or, for Ollama, the page) that installs the agent.
+    install: &'static str,
+}
+
+#[derive(serde::Serialize)]
+struct ListedServer {
+    pid: i32,
+    /// `host:port`, as --http takes it.
+    address: String,
+}
+
+fn listing(on_path: impl Fn(&str) -> Option<PathBuf>, server: Option<(i32, String)>, last_model: Option<String>) -> Listing {
+    let agents = AGENTS
+        .iter()
+        .map(|a| {
+            let path = on_path(a.binary).map(|p| p.to_string_lossy().into_owned());
+            ListedAgent {
+                name: a.name,
+                aliases: a.aliases,
+                title: a.title,
+                binary: a.binary,
+                installed: path.is_some(),
+                path,
+                install: a.install,
+            }
+        })
+        .collect();
+    Listing {
+        schema: LISTING_SCHEMA,
+        agents,
+        server: server.map(|(pid, address)| ListedServer { pid, address }),
+        last_model,
     }
 }
 
@@ -1011,6 +1090,51 @@ mod tests {
             ..Plan::default()
         };
         assert_eq!(render(&p), "unset K\nA=http://x:1 \\\n  B='two words' \\\n  claude \\\n  -p \\\n  'it'\\''s here'\n");
+    }
+
+    #[test]
+    fn json_lists_the_agents_and_is_refused_beside_an_agent() {
+        let a = parse(&strings(&["--json"])).unwrap();
+        assert!(a.json && a.agent.is_none());
+        let e = parse(&strings(&["claude", "--json"])).unwrap_err();
+        assert!(e.contains("--json") && e.contains("superfluid launch --json"), "{e}");
+        assert!(parse(&strings(&["--json", "codex"])).is_err(), "the order does not matter");
+        assert_eq!(parse(&strings(&["claude", "--", "--json"])).unwrap().extra, strings(&["--json"]), "after -- it is the agent's");
+        assert!(parse(&strings(&["--jsn"])).unwrap_err().contains("--json"));
+    }
+
+    #[test]
+    fn the_json_listing_names_every_agent_where_it_is_installed_and_the_server_launch_started() {
+        let installed = |binary: &str| (binary == "codex").then(|| PathBuf::from("/opt/bin/codex"));
+        let v = serde_json::to_value(listing(installed, Some((4242, "127.0.0.1:8453".into())), Some("unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M".into())))
+            .unwrap();
+        let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&v), strings(&["schema", "agents", "server", "last_model"]));
+        assert_eq!(v["schema"], 1);
+        let agents = v["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), AGENTS.len());
+        for (row, a) in agents.iter().zip(AGENTS) {
+            assert_eq!(keys(row), strings(&["name", "aliases", "title", "binary", "installed", "path", "install"]));
+            assert_eq!((row["name"].as_str(), row["binary"].as_str()), (Some(a.name), Some(a.binary)));
+            assert_eq!(row["install"].as_str(), Some(a.install));
+        }
+        let codex = agents.iter().find(|r| r["name"] == "codex").unwrap();
+        assert_eq!((&codex["installed"], &codex["path"]), (&serde_json::json!(true), &serde_json::json!("/opt/bin/codex")));
+        assert_eq!(codex["aliases"], serde_json::json!(["codex-cli"]));
+        let claude = &agents[0];
+        assert_eq!((&claude["installed"], &claude["path"]), (&serde_json::json!(false), &serde_json::Value::Null));
+        assert_eq!(claude["title"], "Claude Code");
+        assert_eq!(v["server"], serde_json::json!({"pid": 4242, "address": "127.0.0.1:8453"}));
+        assert_eq!(v["last_model"], "unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M");
+    }
+
+    #[test]
+    fn with_no_server_and_no_model_yet_the_json_listing_says_null() {
+        let v = serde_json::to_value(listing(|_| None, None, None)).unwrap();
+        assert_eq!((&v["server"], &v["last_model"]), (&serde_json::Value::Null, &serde_json::Value::Null));
+        assert!(v["agents"].as_array().unwrap().iter().all(|r| r["installed"] == false));
+        let ollama = v["agents"].as_array().unwrap().iter().find(|r| r["name"] == "ollama").unwrap();
+        assert_eq!(ollama["aliases"], serde_json::json!([]), "an agent with no alias has an empty list");
     }
 
     #[test]

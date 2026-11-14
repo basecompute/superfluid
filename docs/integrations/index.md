@@ -12,7 +12,7 @@ superfluid launch claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
 | `--model` | the model to serve or, on a running server, the served model to use; default the model `launch` last started a server with, else the server's first |
 | `--api-key` | the server's key (or `SUPERFLUID_API_KEY`), given to the agent |
 | `--print` | show the environment, arguments and files instead of running |
-| `superfluid launch` | list the agents and whether each is installed |
+| `superfluid launch` | list the agents and whether each is installed; `--json` prints the list for a program to read (see [the CLI reference](../serving/cli.md#superfluid-launch)) |
 | `superfluid stop` | stop the server `launch` started |
 
 Arguments after `--` go to the agent:
