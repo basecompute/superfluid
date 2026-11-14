@@ -141,7 +141,7 @@ fn head_metrics(a: &ureq::Agent, http_addr: &str) -> String {
 }
 
 fn series(metrics: &str, name: &str, node_addr: &str) -> u64 {
-    let key = format!("{name}{{node=\"openai-node\",addr=\"{node_addr}\"}} ");
+    let key = format!("{name}{{node=\"openai-node\",addr=\"{node_addr}\",model=\"mock\"}} ");
     let line = metrics.lines().find(|l| l.starts_with(&key)).unwrap_or_else(|| panic!("no {key}in {metrics}"));
     line[key.len()..].parse().unwrap()
 }
@@ -173,6 +173,7 @@ fn fleet_head_metrics_list_each_node_and_count_its_tokens() {
     let completion = json["usage"]["completion_tokens"].as_u64().unwrap();
     let m = head_metrics(&a, &http_addr);
     assert!(m.contains("superfluid_fleet_head_info{"), "{m}");
+    assert!(m.contains(",model=\"mock\",models=\"mock\"} 1"), "the head names every model it serves: {m}");
     assert_eq!(series(&m, "superfluid_fleet_node_up", &node_addr), 1);
     assert_eq!(series(&m, "superfluid_fleet_node_lanes_active", &node_addr), 0);
     assert_eq!(series(&m, "superfluid_fleet_node_decode_tokens_total", &node_addr), completion);
