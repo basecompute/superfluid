@@ -4,6 +4,27 @@
   "releases": "https://api.github.com/repos/basecompute/baseRT/releases?per_page=50",
   "pinned": [
     {
+      "version": "0.5.0",
+      "abi": 1,
+      "assets": [
+        {
+          "name": "basert-engine-linux-arm64-cuda-0.5.0.tar.gz",
+          "size": 35896905,
+          "sha256": "8ae208b225f35b6543383c0ced44c5b5e5072037fc40e787ffc11c2bc92f0fd6"
+        },
+        {
+          "name": "basert-engine-linux-x64-rocm-0.5.0.tar.gz",
+          "size": 28234528,
+          "sha256": "3d7ec9a00a7793f9a7384801edfa7ee3ee20d97512ae2ba788a4166d32a4700d"
+        },
+        {
+          "name": "basert-engine-macos-arm64-0.5.0.tar.gz",
+          "size": 25513358,
+          "sha256": "b6675eb40dfe31d08fc9abc4af2d99783e0ea1bad0c788880b274cc021448f4e"
+        }
+      ]
+    },
+    {
       "version": "0.4.0",
       "abi": 1,
       "assets": [
