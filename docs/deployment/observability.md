@@ -31,6 +31,7 @@ Both rates are measured at delivery to the client: a slow consumer lowers `decod
 | `-v`, `--verbose` | | `--log-filter debug` |
 | `--log-dir <dir>` | stderr | JSON lines in `superfluid.<n>.jsonl`, 64 MiB per file, newest 8 kept, mode 0600 |
 | `--log-file <path>` | none | redirect stderr (daemon and worker output) to a file |
+| `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event ([Start-up events](../serving/events.md)) |
 
 - With the monitor on and no `--log-dir`, logs go to `<sessions>/logs`.
 - The JSON sink has an 8192-line queue; a full queue drops lines (counted in `superfluid_telemetry_dropped_total`) rather than stall the scheduler.

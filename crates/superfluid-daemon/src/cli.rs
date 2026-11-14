@@ -144,6 +144,7 @@ pub const SERVE: &[Group] = &[
             f("--verbose", None, "", "The same as --log-filter debug; also -v."),
             f("--log-dir", Some("<dir>"), "stderr", "Write JSON logs to rotating files here."),
             f("--log-file", Some("<path>"), "", "Send stderr to this file (appended)."),
+            f("--log-format", Some("<text|json>"), "text", "Stderr as prose, or one JSON event a line for a program that runs serve; also SUPERFLUID_LOG_FORMAT."),
             f("--tui", None, "on a terminal", "The live terminal monitor. --no-tui turns it off."),
             f("--otlp-metrics", Some("<url>"), "off", "Push scheduler metrics to an OTLP/HTTP collector."),
             f("--otlp-interval-ms", Some("<N>"), "15000", "The metrics push interval."),

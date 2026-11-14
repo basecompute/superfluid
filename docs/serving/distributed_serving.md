@@ -36,6 +36,7 @@ The node finds the head on the local network (`_superfluid-fleet._tcp`, which al
 | `--model-name <id>` | what the head announces, else the model's id | the name the head matches on |
 | `--offline` | off | pull nothing |
 | `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
+| `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event, for a program that runs the node ([Start-up events](events.md)) |
 
 A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed. The head also asks it for one connection more, which no generation takes: a short call (a prompt's encoding, a state operation) goes over it while every lane is generating. A node from before this release opens only its lanes.
 

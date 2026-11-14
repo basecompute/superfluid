@@ -182,6 +182,7 @@ See [Speculative decoding](../features/speculative_decoding.md).
 | `-v`, `--verbose` | | Same as `--log-filter debug`. |
 | `--log-dir <dir>` | stderr | JSON log files `superfluid.<n>.jsonl` (64 MiB each, 8 kept). |
 | `--log-file <path>` | none | Redirect stderr to this file (append). |
+| `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event, for a program that runs `serve` ([Start-up events](events.md)). Also `SUPERFLUID_LOG_FORMAT`. |
 | `--tui` / `--no-tui` | on in a terminal | Live monitor in the terminal. |
 | `--otlp-metrics <url>` | off | Push metrics to `<url>/v1/metrics` (`http://` only). |
 | `--otlp-interval-ms <N>` | 15000 | Metrics push interval. |
