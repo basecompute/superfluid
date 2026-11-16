@@ -414,8 +414,9 @@ pub const STOP_HELP: &str = "Stop the server `superfluid launch` started.
 
 Usage: superfluid stop
 
-  Sends it SIGTERM and waits for it to finish what is in flight. A server you started
-  yourself with `superfluid serve` is yours to stop.
+  Sends it SIGTERM, which ends it without draining (in-flight requests are cut), and waits
+  up to 90 s for it to exit. For a graceful drain, send `kill -USR1 <pid>` instead. A server
+  you started yourself with `superfluid serve` is yours to stop.
 ";
 
 #[derive(Debug, Default, PartialEq)]

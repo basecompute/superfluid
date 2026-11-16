@@ -5,7 +5,7 @@ Superfluid serves a subset of Ollama's API (inference, discovery and embeddings)
 Point an Ollama client at the server root:
 
 ```sh
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --port 11434
+superfluid serve basecompute/Qwen3.8-27B --port 11434
 curl http://127.0.0.1:11434/api/tags
 ```
 
@@ -46,13 +46,13 @@ Discovery routes never load a cold model.
 
 ```sh
 curl -N http://127.0.0.1:11434/api/chat -d '{
-  "model": "unsloth/Qwen3.8-27B-GGUF",
+  "model": "basecompute/Qwen3.8-27B",
   "messages": [{"role": "user", "content": "Explain prefix caching briefly."}],
   "options": {"num_predict": 128, "temperature": 0.2}
 }'
 
 curl http://127.0.0.1:11434/api/chat -d '{
-  "model": "unsloth/Qwen3.8-27B-GGUF", "stream": false,
+  "model": "basecompute/Qwen3.8-27B", "stream": false,
   "messages": [{"role": "user", "content": "Return a planet name as JSON."}],
   "format": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
 }'

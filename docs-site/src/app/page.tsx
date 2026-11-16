@@ -65,9 +65,11 @@ export default function Home() {
               Superfluid
             </h1>
             <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-muted-foreground">
-              One serving daemon for local LLM inference, across runtimes and
-              machines. Serve llama.cpp, MLX, and baseRT models behind the
-              OpenAI, Anthropic, and Ollama APIs.
+              Superfluid is an open-source server that runs LLMs on your own
+              hardware. It serves a model from one machine, or from several
+              machines that act as one server. It supports llama.cpp, MLX, and
+              BaseRT, and exposes OpenAI-, Anthropic-, and Ollama-compatible
+              API endpoints.
             </p>
 
             <div className="mx-auto mt-10 max-w-2xl">

@@ -18,11 +18,11 @@ Superfluid is split into processes: the daemon, which owns sessions, policy and 
 | link | between | transport | version |
 |---|---|---|---|
 | Link W | daemon and worker, same host | two unix sockets (frames on fd 3, `SCM_RIGHTS` descriptors on fd 4) plus shared-memory rings | 8 |
-| Link F | fleet head and node | TCP, same frame envelope | 2 |
+| Link F | fleet head and node | TCP, same frame envelope; Noise-encrypted with a fleet token | 3 (speaks 2 too) |
 
-Both share one frame envelope: `u32 len | u16 proto_version | u16 msg_type | u64 seq | u64 correlation_id | u8 class | payload`, little-endian, postcard payloads, 16 MiB cap. A peer at another version fails the handshake.
+Both share one frame envelope: `u32 len | u16 proto_version | u16 msg_type | u64 seq | u64 correlation_id | u8 class | payload`, little-endian, postcard payloads, 16 MiB cap. On Link W, a peer at another version fails the handshake; on Link F, the ends agree on the newest version both speak, 2 or 3 (2 has no heartbeat).
 
-Token spans and logits rows never ride the frames. Each worker has three shared-memory rings allocated by the daemon: an inbound token ring for prompts (64 slots of one context window), an outbound token ring (64 slots of 1024 tokens) and a logits ring (8 vocabulary-wide rows) for host-sampled lanes. Slots carry a generation counter so a recycled slot is detected rather than read torn.
+Token spans and logits rows never ride the frames. Each worker has three shared-memory rings allocated by the daemon: an inbound token ring for prompts (64 slots of one context window), an outbound token ring (256 slots of 1024 tokens) and a logits ring (8 vocabulary-wide rows) for host-sampled lanes. Slots carry a generation counter so a recycled slot is detected rather than read torn.
 
 Link F carries sessions, not ticks: assignments with epochs and leases, prompt tokens, generate requests, sampled tokens back, and watermark acks. See [Distributed serving](../serving/distributed_serving.md).
 

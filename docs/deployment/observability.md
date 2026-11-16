@@ -50,6 +50,7 @@ curl -s http://127.0.0.1:8453/metrics | grep -v '^#'
 | `prefill_tokens_total`, `decode_tokens_total` | tokens prefilled and decoded |
 | `warm_prefix_tokens_total` | tokens served from the prefix cache or park artifacts |
 | `cold_admissions_total` | admissions that started cold |
+| `unservable_cold_admissions_total`, `unservable_park_refusals_total` | admissions forced cold, and parks refused, because the model's recurrent state cannot be seeded or sealed |
 | `preemptions_total` | lanes preempted and requeued |
 | `admits_deferred_total` | admissions with no room in their tick, requeued |
 | `starvation_grants_total` | ticks where a starving lane was served first |
@@ -73,6 +74,8 @@ curl -s http://127.0.0.1:8453/metrics | grep -v '^#'
 | `queue_depth{class}` | queued jobs per QoS class |
 | `node_info{host}` | always 1; `host` is `SUPERFLUID_NODE_NAME` or the hostname |
 | `key_in_flight{key}` | requests holding a key's slots |
+
+With `--fim-model`, the satellite adds `fim_satellite_info{model}` (always 1), `fim_satellite_decode_tokens_total`, `fim_satellite_lanes_active`, `fim_satellite_pool_blocks_used` and `fim_satellite_pool_blocks_total`.
 
 `superfluid_ttft_seconds` is a histogram of admission to first token, with buckets from 5 ms to 40 s. It excludes the wait before admission; the access log's `ttft` includes it.
 

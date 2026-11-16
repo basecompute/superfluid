@@ -5,19 +5,19 @@ Serve a model with one command and call it with any OpenAI client. This assumes 
 ## Serve a model
 
 ```sh
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid serve basecompute/Qwen3.8-27B
 ```
 
-On first run this installs the llama.cpp runtime, downloads the model into the Hugging Face cache, and serves it at `http://127.0.0.1:8453`. The runtime is inferred from the model id:
+On first run this installs the BaseRT runtime, downloads the model into baseRT's model cache (`BASERT_MODELS_DIR`), and serves it at `http://127.0.0.1:8453`. BaseRT runs on Apple silicon, on Linux arm64 with an NVIDIA GPU and on Linux x86-64 with an AMD Strix Halo or Strix Point GPU. The runtime is inferred from the model id:
 
 | model | runtime |
 |---|---|
 | `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` (repo name contains `gguf`) | `llamacpp` |
 | `mlx-community/Qwen3-4B-4bit` (`mlx-community/...` or a repo name containing `mlx`) | `mlx` (Apple silicon) |
-| any other `org/model` id | `basert` |
+| `basecompute/Qwen3.8-27B`, or any other `org/model` id | `basert` |
 | `./Qwen3-4B-Q4_K_M.gguf`, an MLX directory, a `.base` file | picked by the file's format |
 
-A model id is served under its name without the `:tag`, here `unsloth/Qwen3.8-27B-GGUF`. A path is served under its file stem. Gated or private models need `HF_TOKEN` in the environment.
+A model id is served under its name without the `:tag`, here `basecompute/Qwen3.8-27B`. A path is served under its file stem. Gated or private models need `HF_TOKEN` in the environment.
 
 > [!TIP]
 > In a terminal the daemon shows a live monitor instead of scrolling logs. Pass `--no-tui` for plain logs.
@@ -26,7 +26,7 @@ A model id is served under its name without the `:tag`, here `unsloth/Qwen3.8-27
 
 ```sh
 curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/json' \
-  -d '{"model":"unsloth/Qwen3.8-27B-GGUF","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"basecompute/Qwen3.8-27B","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 With the OpenAI Python client:
@@ -36,7 +36,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8453/v1", api_key="unused")
 stream = client.chat.completions.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     messages=[{"role": "user", "content": "hello"}],
     stream=True,
 )

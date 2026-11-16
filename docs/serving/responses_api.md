@@ -7,12 +7,12 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8453/v1", api_key="unused")
 first = client.responses.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     instructions="Be terse.",
     input="My name is Ada.",
 )
 second = client.responses.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     instructions="Be terse.",
     previous_response_id=first.id,
     input="What is my name?",
@@ -135,5 +135,5 @@ Under `--key-policy`, a key reads, lists, continues and deletes only the respons
 | built-in tools (`web_search`, `file_search`, `computer_use`, `code_interpreter`, `image_generation`, `mcp`, custom tools) | 400 `unsupported_tool` |
 | `background: true`, `/cancel` | 400 `unsupported_parameter` |
 | `conversation`, `prompt` (stored prompts), `item_reference` items, `input_file` parts, `input_image` by `file_id` | 400 `unsupported_parameter` |
-| tool choices other than `auto`, `none`, `required`, a function | 400 `unsupported_parameter` |
+| tool choices other than `auto`, `none`, `required`, a function | 400 `invalid_value` for another string, `unsupported_parameter` for another object type |
 | `include`, logprobs, `top_logprobs`, annotations, refusals | ignored or empty |

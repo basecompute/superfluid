@@ -1,8 +1,8 @@
 # Superfluid
 
-**One serving daemon for local LLM inference — across runtimes and machines.**
+**Local AI server for distributed inference.**
 
-Superfluid puts one scheduler, one durable session log and one set of APIs (OpenAI, Anthropic, Ollama) in front of llama.cpp, MLX and baseRT. Several agents share one machine without getting in each other's way, a session outlives a crashed worker or a restarted server, and existing clients work unchanged.
+Superfluid is an open-source server that runs LLMs on your own hardware. It serves a model from one machine, or from several machines that act as one server. It supports llama.cpp, MLX, and BaseRT, and exposes OpenAI-, Anthropic-, and Ollama-compatible API endpoints.
 
 ## Why Superfluid
 
@@ -26,13 +26,13 @@ Superfluid puts one scheduler, one durable session log and one set of APIs (Open
 curl -fsSL https://basecompute.co/sf/install.sh | sh
 
 # serve a model at http://127.0.0.1:8453
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid serve basecompute/Qwen3.8-27B
 
 # put a coding agent on it
-superfluid launch claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch claude --model basecompute/Qwen3.8-27B
 
 # add another machine to the same server
-superfluid node join --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --token <token>
+superfluid node join --model basecompute/Qwen3.8-27B --token <token>
 ```
 
 ## How it fits
@@ -48,7 +48,7 @@ The model file picks the runtime. Each runtime runs in its own worker process, i
 | `basert` | `.base` bundles | [baseRT](https://github.com/basecompute/baseRT)'s engine library |
 
 > [!NOTE]
-> The server binds to loopback and asks for no key unless told to, and nothing phones home. Read [Security](deployment/security.md) before putting it on a network. Superfluid is pre-1.0: flags, protocols and on-disk formats may change between releases.
+> The server binds to loopback and asks for no key unless told to. Read [Security](deployment/security.md) before putting it on a network. Superfluid is pre-1.0: flags, protocols and on-disk formats may change between releases.
 
 ## Requirements
 

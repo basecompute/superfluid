@@ -14,7 +14,7 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 | `SUPERFLUID_WORKER_<ID>` | unset | Explicit worker executable for runtime `<ID>` (upper-cased, `-` and `.` as `_`, e.g. `SUPERFLUID_WORKER_LLAMACPP`). Also the installer `runtime install` uses. A runtime named this way is never auto-installed. |
 | `BASERT_LIB` | search | libbaseRT file or directory. Set by `--basert-lib`. When set, nothing else is searched. |
 | `BASERT_CLI` | search | The `basert` tool that pulls `.base` models; else the one beside libbaseRT, else `PATH`. |
-| `BASERT_MODELS_DIR` | platform cache | Where `--speculate auto` looks for drafters (default `~/Library/Caches/baseRT/models` on macOS, `$XDG_CACHE_HOME/baseRT/models` or `~/.cache/baseRT/models` elsewhere). |
+| `BASERT_MODELS_DIR` | platform cache | Where `basert` keeps the models it pulls, and where `--speculate auto` looks for drafters (default `~/Library/Caches/baseRT/models` on macOS, `$XDG_CACHE_HOME/baseRT/models` or `~/.cache/baseRT/models` elsewhere). |
 | `SUPERFLUID_LLAMA_LIB` | search | Your own llama.cpp build: the `libllama` file or its directory. When set, nothing else is searched. `--llamacpp-lib` on `serve` is the same. |
 | `SUPERFLUID_MLX_VENV` | the install's `env/` | Python environment with `mlx` and `mlx-lm`, when the worker is not running from an install. `--mlx-venv` on `serve` is the same. |
 
@@ -23,6 +23,9 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 | variable | default | meaning |
 |---|---|---|
 | `HF_TOKEN` | unset | Hugging Face token for gated or private models, read by the pull tools. |
+| `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | unset | `1`, `on`, `yes` or `true` keeps a pull off the Hub: it fetches nothing and looks up no size for its progress bar. |
+| `SUPERFLUID_HTTP` | `127.0.0.1:8453` | The server `launch` points the agent at, when `--http` is not given. |
+| `SUPERFLUID_API_KEY` | unset | The key `launch` gives the agent, when `--api-key` is not given. |
 | `SUPERFLUID_MLX_TRUST_MODEL_CODE` | unset | `1` (exactly) loads an MLX directory whose `config.json` names its own Python code. |
 | `SUPERFLUID_MLX_SKIP_FIT_CHECK` | unset | `1` loads MLX weights even when they do not fit free memory. |
 | `SUPERFLUID_NODE_NAME` | hostname | The `host` label on Prometheus metrics. |
@@ -60,7 +63,7 @@ Each `--spec-*` flag, when absent, falls back to a variable, then to a constant.
 | `SUPERFLUID_DEBUG_PRESSURE` | one `[pressure]` line per memory report |
 | `SUPERFLUID_ENGINE_VERBOSE` | the baseRT engine's verbose output at load |
 
-There is no `RUST_LOG`; use `--log-filter`.
+`serve` does not read `RUST_LOG`; use `--log-filter`. `superfluid node join` (default `warn`) and `superfluid-noded` (default `info`) do read it.
 
 ## The home directory
 
@@ -70,6 +73,13 @@ There is no `RUST_LOG`; use `--log-filter`.
 ~/.superfluid/
   sessions/                 default --sessions
   superfluid.sock           default --socket
+  versions/<v>/             the installed Superfluid releases (self update, the install script)
+  update-check.json         the daily update check's last result
+  fleet/
+    token                   the fleet token (`superfluid fleet token`)
+    nodes/<identity>/       a `node join` node's session store
+  launch/                   the server `launch` started, and its model
+  logs/serve.log            that server's log
   runtimes/
     <id>/                   llamacpp, mlx, basert
       <install>/            one per version and backend: b11284-metal, 0.3.0-metal
@@ -83,7 +93,7 @@ There is no `RUST_LOG`; use `--log-filter`.
     <id>.lock               one pull of a model at a time
 ```
 
-Models pulled by id are not stored here; each runtime keeps them where its own tool does (llama.cpp and MLX use the Hugging Face cache).
+Models pulled by id are not stored here; each runtime keeps them where its own tool does (llama.cpp and MLX use the Hugging Face cache; `basert` uses `BASERT_MODELS_DIR`).
 
 ## The sessions directory
 

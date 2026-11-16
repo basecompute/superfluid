@@ -16,7 +16,7 @@ tools = [{
     },
 }]
 reply = client.chat.completions.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     messages=[{"role": "user", "content": "What is the weather in Oslo?"}],
     tools=tools,
     tool_choice="auto",
@@ -38,7 +38,7 @@ The same tools work on the [Anthropic API](../serving/anthropic_api.md) (`tools`
 | `{"type":"function","function":{"name":"f"}}` | yes | must be a call to `f`; an undeclared name is a 400 |
 
 - Unknown or malformed values fall back to `auto`.
-- `tool_choice` wins over `response_format` when both are set.
+- Declared tools win over `response_format`: unless `tool_choice` is `none`, including the default `auto`, `response_format` is not applied.
 - A forced choice whose grammar cannot be compiled is a 400, never served unconstrained.
 - On the Anthropic route there is no `tool_choice` and decoding is not constrained.
 

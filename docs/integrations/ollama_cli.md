@@ -4,9 +4,9 @@ The `ollama` command line is a client of whatever `OLLAMA_HOST` names, and the s
 
 ```sh
 # install: https://ollama.com/download
-superfluid launch ollama --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M               # ollama run <model>
+superfluid launch ollama --model basecompute/Qwen3.8-27B     # ollama run <model>
 superfluid launch ollama -- list
-superfluid launch ollama -- show unsloth/Qwen3.8-27B-GGUF
+superfluid launch ollama -- show basecompute/Qwen3.8-27B
 ```
 
 ## What launch gives it

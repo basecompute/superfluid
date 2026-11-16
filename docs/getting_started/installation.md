@@ -17,12 +17,14 @@ Superfluid is one daemon binary plus a worker per runtime. The runtimes themselv
 curl -fsSL https://basecompute.co/sf/install.sh | sh
 ```
 
-Prebuilt tarballs exist for macOS arm64 and Linux x86-64 and arm64 (glibc 2.28 or newer: Ubuntu 20.04, Debian 11, RHEL 8 and later); other platforms build from source. The script checks the tarball's SHA-256, installs `superfluid` into `~/.local/bin` and the runtime workers into `~/.local/libexec/superfluid/`, and touches nothing outside that prefix.
+Prebuilt tarballs exist for macOS arm64 and Linux x86-64 and arm64 (glibc 2.28 or newer: Ubuntu 20.04, Debian 11, RHEL 8 and later); other platforms build from source. The script checks the tarball's SHA-256 and keeps the release under `~/.superfluid/versions/<v>`. It links `superfluid`, `superfluid-workerd` and `superfluid-noded` from `~/.local/bin` into it. On Apple silicon, Linux arm64 and Linux x86-64 with an AMD GPU it also runs `superfluid runtime install basert`, which installs the baseRT engine under `~/.superfluid/runtimes`.
 
 | variable | default | meaning |
 |---|---|---|
 | `SUPERFLUID_VERSION` | latest release | a release tag, e.g. `v0.1.0` |
 | `SUPERFLUID_PREFIX` | `~/.local` | where the `superfluid` command goes (its `bin/`); the release itself is kept under `$SUPERFLUID_HOME/versions` (`~/.superfluid`), so `superfluid self update` can install the next one beside it |
+| `SUPERFLUID_HOME` | `~/.superfluid` | where releases and runtimes are kept |
+| `SUPERFLUID_NO_BASERT` | unset | set to anything to skip installing the baseRT engine |
 
 Add `~/.local/bin` to your `PATH` if the script says it is missing.
 
