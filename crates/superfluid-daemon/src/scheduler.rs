@@ -867,7 +867,8 @@ impl PrefillBudget {
     }
 
     fn take(&mut self, chunk: u64, completes: bool) {
-        self.left -= chunk;
+        // A media chunk may run past its offer to take an image whole.
+        self.left = self.left.saturating_sub(chunk);
         if completes && !self.tail_capped {
             self.tail_capped = true;
             self.left = self.left.min(chunk.max(Self::TAIL_FLOOR));
@@ -900,6 +901,43 @@ fn starved_after(prev: u32, waiting: bool, youngest_served: Option<u64>, tag: u6
 fn prefill_rank(class: u8, remaining: u64, tag: u64, starved_ticks: u32, bound: u32) -> (bool, u8, u64, u64) {
     let starving = remaining > 0 && starved_ticks >= bound;
     (!starving, class, remaining, tag)
+}
+
+/// The tokens a media lane's prefill chunk from `start` takes, offered `offered` with
+/// `left` left to prefill. `runs` are its images' placeholder runs (offset, tokens).
+///
+/// The engine faults a lane whose chunk ends inside a run, so a run the offer would cut
+/// is left to the next chunk, or, when it starts the chunk, taken whole past the offer.
+/// A chunk also carries at most one run: baseRT through 0.5.0 splices one image per
+/// engine chunk and faults a chunk that holds two. An engine with the fix splits such a
+/// chunk at the second run itself, so cutting it here costs it only a tick.
+fn media_prefill_chunk(start: u64, offered: u64, left: u64, runs: &[(u64, u32)]) -> u64 {
+    if offered == 0 {
+        return 0;
+    }
+    let mut runs: Vec<(u64, u64)> =
+        runs.iter().map(|&(off, n)| (off, off + n as u64)).filter(|&(_, re)| re > start).collect();
+    runs.sort_unstable();
+    let mut end = start + offered.min(left);
+    let mut taken = false;
+    for (rs, re) in runs {
+        if rs >= end {
+            break;
+        }
+        if taken {
+            end = rs;
+            break;
+        }
+        if re > end {
+            if rs > start {
+                end = rs;
+                break;
+            }
+            end = re.min(start + left);
+        }
+        taken = true;
+    }
+    end - start
 }
 
 #[cfg(test)]
@@ -969,6 +1007,25 @@ mod prefill_order_tests {
         assert_eq!(target(true, false), super::OPEN_PREFILL_TICK_SECS_YIELDING, "agents alone, on an engine that yields");
         assert_eq!(target(true, true), super::OPEN_PREFILL_TICK_SECS, "a chat around: its next tokens wait out each tick");
         assert_eq!(target(false, false), super::OPEN_PREFILL_TICK_SECS, "an engine that runs a tick whole");
+    }
+
+    #[test]
+    fn a_media_chunk_ends_at_an_image_and_carries_one() {
+        use super::media_prefill_chunk as chunk;
+        // Text 0..10, an image 10..110, text, an image 120..220, text to 400.
+        let runs = [(120, 100), (10, 100)];
+        assert_eq!(chunk(0, 512, 400, &runs), 120, "the first image whole, then up to the second");
+        assert_eq!(chunk(120, 512, 280, &runs), 280, "the second image and the text after it");
+        assert_eq!(chunk(0, 50, 400, &runs), 10, "an image the offer would cut waits for the next chunk");
+        assert_eq!(chunk(10, 50, 390, &runs), 100, "an image that starts the chunk goes whole past the offer");
+        assert_eq!(chunk(110, 30, 290, &runs), 10, "the text before the next image");
+        assert_eq!(chunk(220, 64, 180, &runs), 64, "past the images, the offer as given");
+        assert_eq!(chunk(10, 0, 390, &runs), 0, "nothing offered, nothing taken");
+        assert_eq!(chunk(0, 512, 400, &[]), 400);
+        // Two images back to back: one a chunk.
+        let adjacent = [(10, 100), (110, 100)];
+        assert_eq!(chunk(0, 4096, 300, &adjacent), 110);
+        assert_eq!(chunk(110, 4096, 190, &adjacent), 190);
     }
 
     #[test]
@@ -3573,13 +3630,10 @@ impl Scheduler {
                 .all(|l| matches!(l.phase, LanePhase::Prefilling));
         let solo_budget = if solo { rate_cap(SOLO_PREFILL_BUDGET) } else { None };
         let open = self.joiner_waits_on_this_tick();
-        let tick_prefill_budget = if self
-            .lanes
-            .iter()
-            .any(|l| !l.job.media.is_empty() && matches!(l.phase, LanePhase::Prefilling))
-        {
-            PREFILL_BUDGET
-        } else if open {
+        // A media lane prefills under the same budget as any other, one image at a
+        // time (media_prefill_chunk): the decoding lanes' rounds follow each image's
+        // prefill instead of the whole prompt's.
+        let tick_prefill_budget = if open {
             // One chunk until two ticks have taught the rate; then the slower of the
             // average and the last tick.
             let spt = match (self.prefill_secs_per_token_bulk, self.prefill_secs_per_token_last) {
@@ -3721,12 +3775,9 @@ impl Scheduler {
                 if lane.checkpoint_at > lane.prefilled {
                     chunk = chunk.min((lane.checkpoint_at - lane.prefilled) as u32);
                 }
-                for &(off, _, n) in &lane.job.media {
-                    let (rs, re) = (off, off + n as u64);
-                    let (cs, ce) = (lane.prefilled, lane.prefilled + chunk as u64);
-                    if rs < ce && re > ce {
-                        chunk = if rs > cs { (rs - cs) as u32 } else { 0 };
-                    }
+                if !lane.job.media.is_empty() {
+                    let runs: Vec<(u64, u32)> = lane.job.media.iter().map(|&(off, _, n)| (off, n)).collect();
+                    chunk = media_prefill_chunk(lane.prefilled, chunk as u64, total - lane.prefilled, &runs) as u32;
                 }
                 if chunk > 0 {
                     lane.prefill_starved_ticks = 0;
@@ -3752,6 +3803,10 @@ impl Scheduler {
                 }
             }
         }
+        // A media chunk may run past its offer to take an image whole, and the engine
+        // sheds what passes the plan's budget: it would cut that image.
+        let planned_prefill: u32 = plan.prefills.iter().map(|p| p.token_count).sum();
+        plan.prefill_token_budget = plan.prefill_token_budget.max(planned_prefill);
         // A lane counts a starved tick only when the prefill went to a younger lane.
         let youngest_served = plan.prefills.iter().map(|p| p.lane_tag).max();
         for lane in self.lanes.iter_mut() {

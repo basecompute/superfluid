@@ -35,8 +35,34 @@ pub struct EngineConfig {
     pub kernel_caps: u32,
     pub image_token_id: u32,
     pub media_tokens_per_image: u32,
+    /// Fault a prefill chunk that carries more than this many images' runs
+    /// (0: any number), as baseRT through 0.5.0 does with two in one engine chunk.
+    pub media_runs_per_chunk: u32,
+    /// How long the mock takes per prompt token it prefills, so a tick with a
+    /// long prefill runs long, as on a real engine.
+    pub prefill_token_delay: std::time::Duration,
+    /// Each tick's prefill chunks and decoding lanes, kept for a test to read.
+    pub tick_log: Option<std::sync::Arc<std::sync::Mutex<Vec<TickRecord>>>>,
     pub scripted: Vec<u32>,
     pub tick_delay: std::time::Duration,
+}
+
+/// One tick the mock ran, as `EngineConfig::tick_log` keeps it.
+#[derive(Debug, Clone, Default)]
+pub struct TickRecord {
+    pub prefills: Vec<PrefillRecord>,
+    /// The lanes granted decode rounds.
+    pub decodes: Vec<u64>,
+}
+
+/// A prefill chunk `[start, end)` of a lane's prompt, with each image
+/// placeholder run of that prompt that overlaps it, whole.
+#[derive(Debug, Clone, Default)]
+pub struct PrefillRecord {
+    pub lane_tag: u64,
+    pub start: u32,
+    pub end: u32,
+    pub runs: Vec<(u32, u32)>,
 }
 
 impl Default for EngineConfig {
@@ -74,6 +100,9 @@ impl Default for EngineConfig {
             seed_ttl_ticks: 8,
             image_token_id: 0,
             media_tokens_per_image: 4,
+            media_runs_per_chunk: 0,
+            prefill_token_delay: std::time::Duration::ZERO,
+            tick_log: None,
             vocab: 32000,
             kernel_caps: 0b111,
             scripted: Vec::new(),
