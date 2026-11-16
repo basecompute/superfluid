@@ -33,7 +33,7 @@ Install Superfluid and serve a model:
 
 ```sh
 curl -fsSL https://basecompute.co/sf/install.sh | sh
-superfluid serve basecompute/Qwen3.8-27B-BaseQuant-V1
+superfluid serve basecompute/Qwen3.8-27B
 ```
 
 The first run installs the BaseRT runtime, downloads the model and serves it at `http://127.0.0.1:8453`. BaseRT runs on Apple silicon, on Linux arm64 with an NVIDIA GPU and on Linux x86-64 with an AMD Strix Halo or Strix Point GPU.
@@ -44,19 +44,19 @@ Send a request:
 
 ```sh
 curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/json' \
-  -d '{"model":"basecompute/Qwen3.8-27B-BaseQuant-V1","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"model":"basecompute/Qwen3.8-27B","messages":[{"role":"user","content":"hello"}]}'
 ```
 
 Point a coding agent at the server. `launch` starts the server if none is running:
 
 ```sh
-superfluid launch claude --model basecompute/Qwen3.8-27B-BaseQuant-V1
+superfluid launch claude --model basecompute/Qwen3.8-27B
 ```
 
 The same works for Pi:
 
 ```sh
-superfluid launch pi --model basecompute/Qwen3.8-27B-BaseQuant-V1
+superfluid launch pi --model basecompute/Qwen3.8-27B
 ```
 
 Superfluid also supports Codex, OpenCode, Hermes Agent, Cline, OpenClaw and the Ollama CLI out of the box.
@@ -69,13 +69,13 @@ On the head, create a token and start the server with a listener for nodes:
 
 ```sh
 superfluid fleet token
-superfluid serve basecompute/Qwen3.8-27B-BaseQuant-V1 --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
+superfluid serve basecompute/Qwen3.8-27B --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
 ```
 
 On each node, join with the token that the head printed:
 
 ```sh
-superfluid node join --model basecompute/Qwen3.8-27B-BaseQuant-V1 --token <the token>
+superfluid node join --model basecompute/Qwen3.8-27B --token <the token>
 ```
 
 A node finds the head on the local network. To join a head on another network, pass its address: `superfluid node join <host:port> --model ...`. The head starts serving when the first node has joined. Clients use the head's endpoint on port 8453.
