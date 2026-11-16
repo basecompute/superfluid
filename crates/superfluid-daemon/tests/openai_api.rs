@@ -4130,6 +4130,17 @@ fn demanded_constraints_fail_closed() {
             "response_format":{"type":"json_schema"}}"#,
     );
     assert_eq!(status, 400, "{v}");
+    for wrapper in [r#"{"name":"planet"}"#, r#"{"name":"planet","strict":true,"description":"d"}"#, "{}"] {
+        let (status, v) = post(&format!(
+            r#"{{"model":"mock-model","messages":[{{"role":"user","content":"hi"}}],"max_tokens":6,
+                "response_format":{{"type":"json_schema","json_schema":{wrapper}}}}}"#
+        ));
+        assert_eq!(status, 400, "a json_schema of {wrapper} names no schema: {v}");
+        assert!(
+            v["error"]["message"].as_str().is_some_and(|m| m.contains("json_schema.schema")),
+            "{v}"
+        );
+    }
     let (status, v) = post(
         r#"{"model":"mock-model","max_tokens":6,
             "tool_choice":{"type":"function","function":{"name":"not_declared"}},
