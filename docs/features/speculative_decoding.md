@@ -10,12 +10,14 @@ superfluid serve ~/models/GLM-5.2-Q4.base --speculate mtp-head
 
 The startup log names the strategy it registered (`superfluid: speculation: mtp-head`).
 
+On the `basert` runtime speculative decoding is on by default: a model served with no `--speculate` serves under `auto`, and `--speculate off` decodes plainly. The default uses what is installed and pulls nothing; where `auto` named by hand would pull a drafter (step 1 below), the startup log says so instead. The other runtimes decode plainly unless asked. Speculative greedy text is not bit-identical to plain decoding unless `--spec-bitexact` is on, and the auto-sized context window counts the drafter's weights and KV, so measure plain decoding with `--speculate off`.
+
 ## Strategies
 
 | directive | drafter | needs |
 |---|---|---|
-| `off` (default) | none | |
-| `auto` | the drafter the hub catalog marks for the target (pulled when missing), else the bundle's own MTP head, else the best installed drafter that fits, else plain decoding | |
+| `off` | none; the default on `llamacpp` and `mlx` | |
+| `auto` | the drafter the hub catalog marks for the target (pulled when missing, when named), else the bundle's own MTP head, else the best installed drafter that fits, else plain decoding; the default on `basert` | |
 | `mtp-head` | the multi-token-prediction head in the target bundle (Qwen3.5/3.6/3.8's own, or Gemma 4's `-assistant` head embedded by `basert add-speculator`) | a bundle converted with the head |
 | `prompt-lookup` | n-gram drafting from the lane's own context | nothing; drafts only where text repeats |
 | `dflash:<path>` | a DFlash block drafter | a `.base` drafter |
@@ -33,7 +35,7 @@ With several models, the directive is resolved per model.
 
 ## How `auto` picks a drafter
 
-1. The drafter the hub catalog marks for the target (`speculator_auto` on the drafter's row: Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters), on macOS, where those pairings were measured faster than the bundle's own head. When no copy is installed it is pulled with the target's runtime first (its `default-q4` file), for each model served, whether given at startup or loaded later, unless `--offline`; a pull that fails is said and `auto` goes on with what is installed. Gemma 4's embedded head is never displaced.
+1. The drafter the hub catalog marks for the target (`speculator_auto` on the drafter's row: Qwen3.8-27B and Qwen3.6-35B-A3B with their DFlash2 drafters), on macOS, where those pairings were measured faster than the bundle's own head. When no copy is installed and `auto` was named on the command line, it is pulled with the target's runtime first (its `default-q4` file), for each model served, whether given at startup or loaded later, unless `--offline`; a pull that fails is said and `auto` goes on with what is installed. The default `auto` (no `--speculate`) pulls nothing: it says the drafter is missing and goes on with what is installed. Gemma 4's embedded head is never displaced.
 2. The target bundle's own head, if it has one.
 3. Otherwise installed DSpark, DFlash and EAGLE-3 drafters whose header fits the target (same hidden size, vocabulary and backend), searched in the target's directory, a `drafters/` directory beside it or one level up, and the baseRT models cache. Nothing else is downloaded. A plain draft model is never picked.
 4. Among fitting drafters: one the hub catalog pairs with the target, then one whose name contains the target's, then DSpark, DFlash, EAGLE-3, then the target's quantization, then the newest.

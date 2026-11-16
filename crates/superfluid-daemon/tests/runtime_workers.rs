@@ -278,6 +278,8 @@ fn a_gguf_is_served_through_the_llamacpp_worker_and_its_tokenizer_library() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("--max-context auto"), "{stderr}");
+    // Speculative decoding is the default on basert only: llama.cpp with no --speculate stays plain.
+    assert!(!stderr.contains("speculation:"), "{stderr}");
     if declined(&stderr) {
         assert!(stderr.contains("superfluid: context window 8192 tokens (the llamacpp runtime ") && stderr.contains("; --max-context N pins it)"), "{stderr}");
     } else {

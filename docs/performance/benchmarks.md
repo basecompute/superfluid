@@ -100,7 +100,7 @@ The bench harness is not shipped; the method is.
 | `--prefill-budget N` | 4096 | `0` trades prompt throughput for decode continuity on slow models |
 | `--tick-target-ms N` | 2000 | longer ticks amortize per-tick cost; shorter admit and cancel sooner (capped at 250 on llama.cpp and MLX) |
 | `--class-lanes` | uncapped | reserve lanes between QoS classes |
-| `--speculate` | off | `basert` only; a low-concurrency win the gates turn off under load |
+| `--speculate` | `auto` on `basert`, else off | `basert` only; a low-concurrency win the gates turn off under load; `off` to measure plain decoding |
 | `--kv-bits` | 0 | `basert` only; narrower KV fits more context |
 | `--park` | off | does not raise throughput; sealing copies a finishing session's whole KV on the tick thread |
 

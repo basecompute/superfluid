@@ -111,7 +111,7 @@ pub const SERVE: &[Group] = &[
     Group {
         title: "Speculative decoding",
         flags: &[
-            f("--speculate", Some("<auto|prompt-lookup|mtp-head|<drafter>|off>"), "off", "Draft tokens and verify them; also dflash:, dspark:, eagle3:, draft-model: <path>."),
+            f("--speculate", Some("<auto|prompt-lookup|mtp-head|<drafter>|off>"), "auto on basert, else off", "Draft tokens and verify them; also dflash:, dspark:, eagle3:, draft-model: <path>."),
             f("--spec-draft-tokens", Some("<N>"), "per strategy", "Draft depth, 1..15."),
             f("--spec-adaptive", None, "on", "Adapt the depth to the acceptance rate. --no-spec-adaptive pins it."),
             f("--spec-min-yield", Some("<F>"), "0.75", "The yield below which a lane stops drafting."),
