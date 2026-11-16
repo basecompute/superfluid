@@ -37,6 +37,11 @@ pub struct EngineConfig {
     pub media_tokens_per_image: u32,
     pub scripted: Vec<u32>,
     pub tick_delay: std::time::Duration,
+    /// How long the mock takes to encode one image: the vision tower's cost.
+    pub media_encode_delay: std::time::Duration,
+    /// Encoded images the mock holds at once (0: no limit); an encode past
+    /// it fails, so a handle left unreleased shows.
+    pub max_live_media: usize,
 }
 
 impl Default for EngineConfig {
@@ -78,6 +83,8 @@ impl Default for EngineConfig {
             kernel_caps: 0b111,
             scripted: Vec::new(),
             tick_delay: std::time::Duration::ZERO,
+            media_encode_delay: std::time::Duration::ZERO,
+            max_live_media: 0,
         }
     }
 }

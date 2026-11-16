@@ -135,6 +135,11 @@ const TURN_CHECKPOINTS_TRACKED: usize = 64;
 
 const PREFILL_RATE_MIN_TOKENS: u32 = 256;
 
+/// A request that holds a seed and is encoding its images encodes the rest
+/// at once after this many ticks: its seed's lease (8 ticks on the mock
+/// engine, 64 on baseRT) runs out before it is admitted otherwise.
+const SEEDED_ENCODE_MAX_TICKS: u64 = 4;
+
 
 /// The daemon's cache classes (a bitset the engine maps its entries onto):
 /// a resident prefix, and one that has started two lanes or more.
@@ -529,6 +534,36 @@ struct Lane {
     ttft_observed: bool,
     ttft_frame_ms: Option<u64>,
     fault_code: Option<u32>,
+    /// The images bound to this lane: the engine releases them with the lane
+    /// once it is admitted; a lane that ends before that releases them here.
+    media_bound: Vec<u64>,
+}
+
+/// A request taken from its queue whose images are encoding, between ticks:
+/// its prompt staged and its seed held, it joins the lanes once every image
+/// it needs is encoded and bound, and holds a lane's slot meanwhile.
+struct Admitting {
+    job: GenerateJob,
+    tag: u64,
+    span: linkw::TokenRefMsg,
+    seed_handle: u64,
+    warm_prefix: u64,
+    /// The images still to encode, in prompt order: (offset, path).
+    left: VecDeque<(u64, std::path::PathBuf)>,
+    bound: Vec<u64>,
+    /// The tick it was taken in.
+    since_tick: u64,
+}
+
+/// Releases encoded images the engine was not left to release (a worker
+/// that is gone took them with it).
+fn release_media(host: &mut EngineHost, handles: &[u64]) {
+    if !host.is_alive() {
+        return;
+    }
+    for &media_handle in handles {
+        let _ = host.client().state_sync(linkw::StateSyncReqMsg::MediaRelease { media_handle });
+    }
 }
 
 impl Lane {
@@ -1388,6 +1423,8 @@ pub struct Scheduler {
     deferred_sync: VecDeque<(u8, u64, SchedCmd)>,
     admit_retry: bool,
     pins: crate::pins::Pins,
+    /// Requests whose images are encoding, oldest first.
+    admitting: VecDeque<Admitting>,
 }
 
 impl Scheduler {
@@ -1568,6 +1605,7 @@ impl Scheduler {
                     staged_unread: 0,
                     deferred_sync: VecDeque::new(),
                     admit_retry: false,
+                    admitting: VecDeque::new(),
                     pins: crate::pins::Pins::new(
                         opts.pin_budget_pct,
                         host_max_stream * max_lanes as u64,
@@ -1660,8 +1698,9 @@ impl Scheduler {
                         .expect("retired")
                         .clone()
                         .unwrap_or_else(|| "engine worker unavailable (respawn failed)".into());
-                    let orphaned: Vec<GenerateJob> =
-                        self.queues.iter_mut().flat_map(|q| q.jobs.drain(..)).collect();
+                    // The images it encoded went with the worker.
+                    let mut orphaned: Vec<GenerateJob> = self.admitting.drain(..).map(|a| a.job).collect();
+                    orphaned.extend(self.queues.iter_mut().flat_map(|q| q.jobs.drain(..)));
                     for job in orphaned {
                         self.finish_failed(&job, &why);
                     }
@@ -1690,6 +1729,7 @@ impl Scheduler {
             self.poll_os_pressure();
             self.preempt_for_queued();
             self.admit_from_queue();
+            self.encode_admitting();
             self.run_deferred_syncs();
             let ticks_before = self.tick_count;
             let tick_result = self.tick_once(&tick_span);
@@ -1800,6 +1840,7 @@ impl Scheduler {
 
     fn sync_must_wait(&self, class: u8) -> bool {
         self.lanes.iter().any(|l| l.job.class < class)
+            || self.admitting.iter().any(|a| a.job.class < class)
             || self.queues.iter().take(class as usize).any(|q| !q.jobs.is_empty())
     }
 
@@ -1854,8 +1895,9 @@ impl Scheduler {
         let _ = reply.send(res);
     }
 
+    /// Requests waiting to run: queued, or taken and encoding their images.
     fn queued(&self) -> usize {
-        self.queues.iter().map(|q| q.jobs.len()).sum()
+        self.queues.iter().map(|q| q.jobs.len()).sum::<usize>() + self.admitting.len()
     }
 
     fn enqueue(&mut self, mut job: GenerateJob) {
@@ -1888,13 +1930,15 @@ impl Scheduler {
     }
 
     fn pop_admissible(&mut self) -> Option<GenerateJob> {
-        if self.lanes.iter().any(|l| self.engine_exclusive(&l.job)) {
+        let taken = || self.lanes.iter().map(|l| &l.job).chain(self.admitting.iter().map(|a| &a.job));
+        if taken().any(|j| self.engine_exclusive(j)) {
             return None;
         }
         let mut per_class = [0usize; 4];
-        for l in &self.lanes {
-            per_class[(l.job.class as usize).min(3)] += 1;
+        for j in taken() {
+            per_class[(j.class as usize).min(3)] += 1;
         }
+        let idle = self.lanes.is_empty() && self.admitting.is_empty();
         let now = self.tick_count;
         let period = self.starvation_ticks as u64;
         let mut best: Option<(u8, usize)> = None;
@@ -1914,7 +1958,7 @@ impl Scheduler {
             let waited = now.saturating_sub(head.queued_at);
             let aged = (waited / period).min(c as u64) as u8;
             let eff = c as u8 - aged;
-            if self.engine_exclusive(head) && !self.lanes.is_empty() {
+            if self.engine_exclusive(head) && !idle {
                 if excl_waiting.is_none_or(|b| eff < b) {
                     excl_waiting = Some(eff);
                 }
@@ -2160,6 +2204,7 @@ impl Scheduler {
         self.cancels.latency_recent(LATENCY_HOLD)
             || self.queues[..=crate::qos::INLINE_COMPLETION as usize].iter().any(|q| !q.jobs.is_empty())
             || self.lanes.iter().any(|l| l.job.class <= crate::qos::INLINE_COMPLETION && !l.preempted)
+            || self.admitting.iter().any(|a| a.job.class <= crate::qos::INLINE_COMPLETION)
     }
 
     fn joiner_waits_on_this_tick(&self) -> bool {
@@ -2167,6 +2212,7 @@ impl Scheduler {
             return false;
         }
         self.live_lanes() < self.max_lanes
+            || !self.admitting.is_empty()
             || self.queues[..=crate::qos::INLINE_COMPLETION as usize]
                 .iter()
                 .any(|q| !q.jobs.is_empty())
@@ -2180,11 +2226,13 @@ impl Scheduler {
 
     /// Lanes holding a slot past this tick: a preempted lane retires in it,
     /// and the engine retires before it admits, so its slot is already free.
+    /// A request encoding its images holds the slot it joins in.
     fn live_lanes(&self) -> usize {
         self.lanes
             .iter()
             .filter(|l| !(l.preempted && matches!(l.phase, LanePhase::Finishing)))
             .count()
+            + self.admitting.len()
     }
 
     fn preempt_for_queued(&mut self) {
@@ -2296,6 +2344,12 @@ impl Scheduler {
     }
 
     fn after_respawn(&mut self) {
+        // What they staged, held and encoded went with the old worker: they
+        // start again from their queues, ahead of what was queued behind them.
+        for a in std::mem::take(&mut self.admitting).into_iter().rev() {
+            let c = (a.job.class as usize).min(3);
+            self.queues[c].jobs.push_front(a.job);
+        }
         self.max_lanes = lane_cap(
             self.configured_lanes,
             self.host.max_seqs(),
@@ -2329,6 +2383,13 @@ impl Scheduler {
         for session in drained {
             self.drop_ephemeral_artifact(session);
         }
+        for a in std::mem::take(&mut self.admitting) {
+            release_media(&mut self.host, &a.bound);
+            if a.seed_handle != 0 && self.host.is_alive() {
+                let _ = self.host.client().seed_release(a.seed_handle);
+            }
+            self.finish_failed(&a.job, &msg);
+        }
         let queued: Vec<GenerateJob> = self.queues.iter_mut().flat_map(|q| q.jobs.drain(..)).collect();
         for job in queued {
             self.finish_failed(&job, &msg);
@@ -2351,7 +2412,8 @@ impl Scheduler {
             return;
         }
         let mut held: Vec<GenerateJob> = Vec::new();
-        if self.lanes.iter().all(|l| l.admitted) {
+        // A request encoding its images has a prompt staged and still unread.
+        if self.lanes.iter().all(|l| l.admitted) && self.admitting.is_empty() {
             self.staged_unread = 0;
         }
         let stage_slots = ring_slots(&mut self.host, superfluid_shm::TOKEN_RING_IN).unwrap_or(u32::MAX);
@@ -2463,100 +2525,176 @@ impl Scheduler {
             }
             let tag = self.next_lane;
             self.next_lane += 1;
-            let mut job = job;
-            let mut media_ok = true;
-            let mut bound: Vec<u64> = Vec::new();
-            for (offset, path, _n) in job.media.iter().filter(|(o, _, _)| *o >= warm_prefix) {
-                let path_s = path.to_string_lossy().into_owned();
-                let enc = self.host.client().state_sync(linkw::StateSyncReqMsg::MediaEncode {
-                    image_path: path_s.clone(),
+            let left: VecDeque<(u64, std::path::PathBuf)> = job
+                .media
+                .iter()
+                .filter(|(o, _, _)| *o >= warm_prefix)
+                .map(|(o, p, _)| (*o, p.clone()))
+                .collect();
+            if !left.is_empty() {
+                // Its images encode between ticks ([`Self::encode_admitting`]).
+                self.admitting.push_back(Admitting {
+                    job,
+                    tag,
+                    span,
+                    seed_handle,
+                    warm_prefix,
+                    left,
+                    bound: Vec::new(),
+                    since_tick: self.tick_count,
                 });
-                let handle = match enc {
-                    Ok(linkw::StateSyncOkMsg::MediaEncode { media_handle, .. }) => media_handle,
-                    other => {
-                        eprintln!("[superfluid] media encode failed for {path_s}: {other:?}");
-                        media_ok = false;
-                        break;
-                    }
-                };
-                let bind = self.host.client().state_sync(linkw::StateSyncReqMsg::MediaBind {
-                    lane_tag: tag,
-                    media_handle: handle,
-                    token_offset: *offset as u32,
-                });
-                if matches!(bind, Ok(linkw::StateSyncOkMsg::MediaBind)) {
-                    bound.push(handle);
-                } else {
-                    let _ = self
-                        .host
-                        .client()
-                        .state_sync(linkw::StateSyncReqMsg::MediaRelease { media_handle: handle });
-                    media_ok = false;
-                    break;
-                }
-            }
-            if !media_ok {
-                for handle in &bound {
-                    let _ = self.host.client().state_sync(
-                        linkw::StateSyncReqMsg::MediaRelease { media_handle: *handle },
-                    );
-                }
-                if seed_handle != 0 {
-                    let _ = self.host.client().seed_release(seed_handle);
-                }
-                self.finish_failed(&job, "media encode/bind failed (see daemon log)");
                 continue;
             }
-            let spec_before = job.carry.as_ref().map(|c| c.spec_before).unwrap_or_default();
-            let decode_before = job.carry.as_ref().map(|c| c.decode_before).unwrap_or_default();
-            let (out, produced_before, warm_prefix_first) = match job.carry.take() {
-                Some(mut c) => {
-                    c.out.disp_tokens = c.produced_before;
-                    (c.out, c.produced_before, c.warm_prefix_first)
-                }
-                None => (LaneOutput::new(&self.codec, job.extras.open_channel, 0), 0, None),
-            };
-            let all_tokens = job.stream.clone();
-            self.lanes.push(Lane {
-                tag,
-                session: job.session,
-                job,
-                phase: LanePhase::Prefilling,
-                prefilled: warm_prefix,
-                produced: 0,
-                fin: finish::NONE,
-                warm_prefix,
-                out,
-                frame_fed: 0,
-                emit_dead: false,
-                admitted: false,
-                seed_handle,
-                span,
-                all_tokens,
-                parked: false,
-                parked_lossy: false,
-                preempted: false,
-                starved_ticks: 0,
-                prefill_starved_ticks: 0,
-                checkpoint_at: 0,
-                checkpoint_due: false,
-                checkpointed: 0,
-                turn_kept: false,
-                produced_before,
-                spec: spec_before,
-                decode: decode_before,
-                decode_ticks: None,
-                warm_prefix_first,
-                admitted_at: std::time::Instant::now(),
-                ttft_observed: false,
-                ttft_frame_ms: None,
-                fault_code: None,
-            });
+            self.push_lane(job, tag, span, seed_handle, warm_prefix, Vec::new());
         }
         for job in held.into_iter().rev() {
             let c = (job.class as usize).min(3);
             self.queues[c].jobs.push_front(job);
         }
+    }
+
+    /// Encodes the images of the requests taken from their queues, oldest
+    /// first, between two ticks: while lanes run, about an open tick's worth
+    /// (one image at least), so a decoding lane waits about one image's
+    /// encode between ticks however many images a request carries, and the
+    /// ticks between are short; with nothing running, all of them. A request
+    /// whose images are bound joins the lanes (the round after its last
+    /// encode while lanes run); one cancelled or past its deadline stops
+    /// encoding and joins them as it is, to end before it is admitted.
+    fn encode_admitting(&mut self) {
+        let start = std::time::Instant::now();
+        let mut slowest = 0.0f64;
+        let mut encoded = 0u32;
+        while let Some(a) = self.admitting.front_mut() {
+            let ended = self.cancels.lock().expect("cancels").contains(&a.job.session)
+                || a.job.deadline.is_some_and(|d| std::time::Instant::now() > d);
+            if ended || a.left.is_empty() {
+                let a = self.admitting.pop_front().expect("front");
+                self.push_lane(a.job, a.tag, a.span, a.seed_handle, a.warm_prefix, a.bound);
+                continue;
+            }
+            // A seed is leased for some ticks: one held this long finishes now.
+            let lease_due = a.seed_handle != 0 && self.tick_count.saturating_sub(a.since_tick) >= SEEDED_ENCODE_MAX_TICKS;
+            let spent = start.elapsed().as_secs_f64();
+            if encoded > 0 && !self.lanes.is_empty() && !lease_due && spent + slowest > self.tick_shape.open_secs {
+                break;
+            }
+            let (offset, path) = a.left.pop_front().expect("non-empty");
+            let tag = a.tag;
+            let t0 = std::time::Instant::now();
+            let res = self.encode_and_bind(tag, offset, &path);
+            let secs = t0.elapsed().as_secs_f64();
+            slowest = slowest.max(secs);
+            encoded += 1;
+            tracing::debug!(lane = tag, offset, ms = (secs * 1000.0) as u64, "image encoded");
+            match res {
+                Ok(handle) => {
+                    let a = self.admitting.front_mut().expect("front");
+                    a.bound.push(handle);
+                    // It joins next round: its prefill tick does not follow
+                    // this encode with nothing between for the running lanes.
+                    if a.left.is_empty() && !self.lanes.is_empty() {
+                        break;
+                    }
+                }
+                Err(()) => {
+                    let a = self.admitting.pop_front().expect("front");
+                    release_media(&mut self.host, &a.bound);
+                    if a.seed_handle != 0 && self.host.is_alive() {
+                        let _ = self.host.client().seed_release(a.seed_handle);
+                    }
+                    self.finish_failed(&a.job, "media encode/bind failed (see daemon log)");
+                    // The rest wait for the next round: a worker that died
+                    // here is respawned before it, and they start again on
+                    // the fresh one (after_respawn) instead of failing too.
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Encodes one image and binds it to lane `tag` where its run starts;
+    /// what is encoded is released again if the bind fails.
+    fn encode_and_bind(&mut self, tag: u64, offset: u64, path: &std::path::Path) -> Result<u64, ()> {
+        let path_s = path.to_string_lossy().into_owned();
+        let enc = self.host.client().state_sync(linkw::StateSyncReqMsg::MediaEncode {
+            image_path: path_s.clone(),
+        });
+        let handle = match enc {
+            Ok(linkw::StateSyncOkMsg::MediaEncode { media_handle, .. }) => media_handle,
+            other => {
+                eprintln!("[superfluid] media encode failed for {path_s}: {other:?}");
+                return Err(());
+            }
+        };
+        let bind = self.host.client().state_sync(linkw::StateSyncReqMsg::MediaBind {
+            lane_tag: tag,
+            media_handle: handle,
+            token_offset: offset as u32,
+        });
+        if matches!(bind, Ok(linkw::StateSyncOkMsg::MediaBind)) {
+            Ok(handle)
+        } else {
+            release_media(&mut self.host, &[handle]);
+            Err(())
+        }
+    }
+
+    fn push_lane(
+        &mut self,
+        mut job: GenerateJob,
+        tag: u64,
+        span: linkw::TokenRefMsg,
+        seed_handle: u64,
+        warm_prefix: u64,
+        media_bound: Vec<u64>,
+    ) {
+        let spec_before = job.carry.as_ref().map(|c| c.spec_before).unwrap_or_default();
+        let decode_before = job.carry.as_ref().map(|c| c.decode_before).unwrap_or_default();
+        let (out, produced_before, warm_prefix_first) = match job.carry.take() {
+            Some(mut c) => {
+                c.out.disp_tokens = c.produced_before;
+                (c.out, c.produced_before, c.warm_prefix_first)
+            }
+            None => (LaneOutput::new(&self.codec, job.extras.open_channel, 0), 0, None),
+        };
+        let all_tokens = job.stream.clone();
+        self.lanes.push(Lane {
+            tag,
+            session: job.session,
+            job,
+            phase: LanePhase::Prefilling,
+            prefilled: warm_prefix,
+            produced: 0,
+            fin: finish::NONE,
+            warm_prefix,
+            out,
+            frame_fed: 0,
+            emit_dead: false,
+            admitted: false,
+            seed_handle,
+            span,
+            all_tokens,
+            parked: false,
+            parked_lossy: false,
+            preempted: false,
+            starved_ticks: 0,
+            prefill_starved_ticks: 0,
+            checkpoint_at: 0,
+            checkpoint_due: false,
+            checkpointed: 0,
+            turn_kept: false,
+            produced_before,
+            spec: spec_before,
+            decode: decode_before,
+            decode_ticks: None,
+            warm_prefix_first,
+            admitted_at: std::time::Instant::now(),
+            ttft_observed: false,
+            ttft_frame_ms: None,
+            fault_code: None,
+            media_bound,
+        });
     }
 
     fn resume_from_park(
@@ -3400,7 +3538,8 @@ impl Scheduler {
             .lanes_active
             .store(self.lanes.len() as u64, Ordering::Relaxed);
         for (c, q) in self.queues.iter().enumerate() {
-            self.stats.queue_depth[c].store(q.jobs.len() as u64, Ordering::Relaxed);
+            let admitting = self.admitting.iter().filter(|a| (a.job.class as usize).min(3) == c).count();
+            self.stats.queue_depth[c].store((q.jobs.len() + admitting) as u64, Ordering::Relaxed);
         }
     }
 
@@ -3425,6 +3564,7 @@ impl Scheduler {
                     if lane.seed_handle != 0 {
                         let _ = self.host.client().seed_release(lane.seed_handle);
                     }
+                    release_media(&mut self.host, &std::mem::take(&mut lane.media_bound));
                     locally_done.push(lane.tag);
                 }
             }
@@ -3457,6 +3597,7 @@ impl Scheduler {
                 if lane.seed_handle != 0 {
                     let _ = self.host.client().seed_release(lane.seed_handle);
                 }
+                release_media(&mut self.host, &std::mem::take(&mut lane.media_bound));
                 locally_done.push(lane.tag);
             }
         }
@@ -3790,7 +3931,10 @@ impl Scheduler {
                         .min()
                         .unwrap_or(rounds);
                     let rounds = rounds.min(first_out.max(shape.beside_prefill as u32));
-                    if self.just_retired {
+                    // A request encoding its images encodes again after this
+                    // tick: a short one, as beside a prefill, so it joins
+                    // about as soon as if its images encoded all at once.
+                    if self.just_retired || !self.admitting.is_empty() {
                         rounds.min(shape.beside_prefill as u32) as u16
                     } else {
                         rounds as u16
