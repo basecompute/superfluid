@@ -44,11 +44,13 @@ pub trait Runtime: Send + Sync {
     fn options(&self) -> &'static [ServeOption] { &[] }        // knobs of this runtime, --<id>-<name> <value> on serve
     fn needs_model(&self) -> bool { true }
     fn prepare(&self, _args: &WorkerArgs) {}
+    fn ahead(&self, _args: &WorkerArgs) -> Result<Option<String>, String> { Ok(None) }
     fn named(&self, _args: &WorkerArgs) -> Option<String> { None }
     fn static_capabilities(&self) -> String { String::new() }
     fn compat(&self) -> serde_json::Value { json!({}) }           // what the adapter was built and tested for: `tested` versions, by convention (basert: `pinned_engines`, with their ABI)
     fn reads(&self, path: &Path) -> Result<(), String> { /* by info().formats */ }
     fn model_facts(&self, _path: &Path) -> Option<Result<String, String>> { None }
+    fn sizing(&self, _path: &Path, _args: &WorkerArgs) -> Option<Result<Sizing, String>> { None }
     fn tokenizer(&self, _model: &Path) -> Option<Result<Arc<dyn Tokenizer>, String>> { None }
     fn plan(&self, _req: &Request, _host: &Host) -> Option<Result<Vec<Plan>, String>> { None }
     fn versions(&self, host: &Host) -> Vec<Candidate> { /* each `tested` version of compat(), planned here */ }
@@ -67,10 +69,12 @@ pub trait Runtime: Send + Sync {
 | `flags()` | extra worker flags it reads (`--name`); anything else is refused |
 | `options()` | the knobs it takes on `serve` as `--<id>-<name> <value>`, each with a kind (`Int`, `IntFrom(least)`, `IntIn(least, most)`, `Float`, `FloatFrom(least)`, `OnOff`, `Choice`, `Text`; bound a number the runtime would clamp, wrap or fail on), a default for the help and a description; the daemon checks a value against the kind before the worker starts and forwards it as `--<name> <value>`, the worker refuses a bad one at start, and the adapter reads it with `superfluid_adapter_kit::option(args, name)`. A knob every runtime could take is a flag of `serve` instead |
 | `prepare()` | process-wide setup in the worker (an interpreter home, a library path) |
+| `ahead()` | work for a model before its first load, run after a pull by the executable that will load it (`superfluid-workerd ahead`); basert compiles the model's Neural Engine programs. A line to print, or none; an error leaves the work to the first load |
 | `named()` | the library the operator named, if any; the daemon then installs nothing |
 | `static_capabilities()` | the capability record any model on this runtime has; for primitives, `superfluid_executor::capabilities::static_descriptor` |
 | `reads()` | a stricter format check than `info().formats`, loading no weights |
 | `model_facts()` | architecture and published sampling defaults, without loading |
+| `sizing()` | what `--max-context auto` sizes the window from, read without loading weights: the device's budget, the weights' bytes, KV bytes per token and the trained context; `check --model` reports it as `sizing` (llamacpp, mlx) |
 | `tokenizer()` | an in-process tokenizer, for a daemon that links the adapter |
 | `plan()`, `install()` | what installing fetches, and how |
 | `versions()`, `unlisted()` | the versions it installs on its own, and, when some it does not list install without `--untested` too (basert: any release that states this build's ABI), a clause saying which, and what the rule asks of a version (basert: `engine ABI <n>`), which an install of an unlisted version keeps in its `runtime.json` as `requires`; `superfluid runtime versions` prints the clause, and counts an install newer than every listed version that installs here as one the adapter installs when its `requires` is what this build's rule asks |

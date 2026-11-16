@@ -18,13 +18,15 @@
 | `superfluid top [<host:port>...]` | live monitor over one or more servers, or a fleet |
 
 ```sh
-superfluid --help                 # command overview (also: superfluid, superfluid help)
+superfluid --help                 # command overview (also: superfluid help; a bare superfluid prints it to stderr and exits 2)
 superfluid serve --help           # every serve flag, grouped, with its default
 superfluid help runtime           # one command's help
 superfluid --version              # also -V, superfluid version
 ```
 
-Flags take their value as `--flag value` or `--flag=value`. The last occurrence of a scalar flag wins; repeatable flags accumulate.
+Flags of `serve`, `launch`, `runtime`, `session`, `media` and `self` take their value as `--flag value` or `--flag=value`. `top`, `node join` and `superfluid-noded` take only `--flag value`. The last occurrence of a scalar flag wins; repeatable flags accumulate.
+
+`fleet token` and `node join` are described in [Distributed serving](distributed_serving.md).
 
 ## Exit codes
 
@@ -35,6 +37,8 @@ Flags take their value as `--flag value` or `--flag=value`. The last occurrence 
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
 | 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts Superfluid can tell this from a flag it got wrong (2), and from an install Superfluid tried that failed (1) |
+
+`superfluid node join` exits 2 on every failure, including a model that did not load, a failed pull and a head that refused the token.
 
 ## `superfluid serve`
 
@@ -128,7 +132,7 @@ See [Sessions](../features/sessions.md).
 
 | flag | default | description |
 |---|---|---|
-| `--tick-decode-budget <N>` | 0 (`--max-batch` × grant) | Decode tokens per tick across all lanes. |
+| `--tick-decode-budget <N>` | 0 (`--max-batch` × 32) | Decode tokens per tick across all lanes. |
 | `--tick-target-ms <N>` | 2000 | Tick duration while every lane is busy (250 max on `llamacpp`, `mlx`). |
 | `--prefill-budget <N>` | 4096 | Prompt tokens per tick, 64-4096; `0` is adaptive. |
 | `--starvation-ticks <N>` | 8 | Ticks before a starved lane is served first; also the queue aging period. |
@@ -205,7 +209,7 @@ See [Observability](../deployment/observability.md).
 | `--fleet-auth <path>` | `$SUPERFLUID_HOME/fleet/token` | The fleet token; the links to the nodes are encrypted with it. |
 | `--fleet-policy <policy>` | `load-aware` | Placement: `load-aware`, `least-loaded` or `round-robin`. |
 | `--fleet-pool-high <pct>` | 90 | KV occupancy at which `load-aware` routes around a node. |
-| `--fleet-conns-per-node <N>` | 1 | Connections, and so concurrent generations, per node. |
+| `--fleet-conns-per-node <N>` | the node's lanes | Connections, and so concurrent generations, per node. |
 
 See [Distributed serving](distributed_serving.md).
 
@@ -220,11 +224,11 @@ superfluid launch                                   # list the agents and whethe
 superfluid launch <agent> [--model <m>] [--http <addr:port>] [--api-key <key>] [--print] [-- <agent args>...]
 ```
 
-Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](../integrations/index.md).
+Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. That server's log goes to `$SUPERFLUID_HOME/logs/serve.log`. `--http` defaults to `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`; `--api-key` to `$SUPERFLUID_API_KEY`. `--model` defaults to the model `launch` last started a server with. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](../integrations/index.md).
 
 ## `superfluid stop`
 
-Sends the server `launch` started SIGTERM and waits for it to drain. A server started with `superfluid serve` is not touched.
+Sends the server `launch` started SIGTERM, which ends it without draining: in-flight requests are cut. It then waits up to 90 s for the process to exit. For a graceful drain, send `kill -USR1 <pid>` instead (see [Quickstart](../getting_started/quickstart.md#stop)). A server started with `superfluid serve` is not touched.
 
 ## `superfluid runtimes`
 
@@ -278,11 +282,11 @@ superfluid self install --from <dir> [--prefix <dir>]
 
 ```sh
 superfluid session inspect <id> [--socket <path>] [--json]
-superfluid session export <id> [--socket <path>] --format jsonl|otlp-jsonl [--out <dir>] \
+superfluid session export <id> [--socket <path>] [--format jsonl|otlp-jsonl] [--out <dir>] \
     [--include-content] [--model <name>] [--endpoint <otlp-http-url> [--allow-content-egress]]
 ```
 
-`inspect` prints a session's summary and events. `export` writes its events as JSONL or OTLP trace lines, or pushes them to a collector. Content is omitted unless `--include-content`, and leaves the host only with `--allow-content-egress`. `--socket` defaults to `$SUPERFLUID_HOME/superfluid.sock`. See [Sessions](../features/sessions.md#command-line-tools).
+`inspect` prints a session's summary and events. `export` writes its events as JSONL (the default) or OTLP trace lines, or pushes them to a collector. Content is omitted unless `--include-content`, and leaves the host only with `--allow-content-egress`. `--socket` defaults to `$SUPERFLUID_HOME/superfluid.sock`. See [Sessions](../features/sessions.md#command-line-tools).
 
 ## `superfluid media`
 

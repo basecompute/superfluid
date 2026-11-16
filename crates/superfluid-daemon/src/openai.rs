@@ -684,7 +684,7 @@ async fn slots_retired(body: axum::body::Body) -> Response {
             "prefix is served from the prefix cache rather than re-prefilled. KV ",
             "itself is NOT sealed to disk by default — that is `--park`, it applies ",
             "to sessions you resume by id through the session API, and a session ",
-            "minted per HTTP request is never resumable by one. See OPERATIONS.md.",
+            "minted per HTTP request is never resumable by one. See docs/features/sessions.md#parking.",
         )
             .into(),
         "route_retired",

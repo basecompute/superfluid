@@ -163,7 +163,7 @@ Superfluid is written in Rust and runs as three kinds of process:
 | Worker | One per loaded model. Owns the weights, KV cache and sampling. |
 | Node | Runs on another machine and serves the same model for the head. |
 
-**The cluster replicates the model. It does not split it.** Every node holds a full copy of the model. The head places each session on one node, and only token ids cross the network. A slow machine receives less work, and a machine that leaves costs only its share of throughput.
+**The cluster replicates the model. It does not split it.** Every node holds a full copy of the model. The head places each session on one node. Requests and tokens cross the network; weights and KV caches do not. A slow machine receives less work, and a machine that leaves costs only its share of throughput.
 
 **The model file picks the runtime.** Each runtime is installed on first use from its own project's releases. Nothing of llama.cpp, MLX or BaseRT is vendored or linked.
 
@@ -177,14 +177,14 @@ Adding a runtime is one adapter crate. See [Writing a runtime adapter](docs/desi
 
 ## Security
 
-The server binds to loopback and asks for no API key unless configured to. It does not speak TLS, so use it on loopback, on a trusted network or behind a reverse proxy. Nothing phones home. Read [Security](docs/deployment/security.md) before putting it on a network.
+The server binds to loopback and asks for no API key unless configured to. It does not speak TLS, so use it on loopback, on a trusted network or behind a reverse proxy. Read [Security](docs/deployment/security.md) before putting it on a network.
 
 ## Limitations
 
 - Every node needs enough memory for a full copy of the model.
 - A session that moves to another node recomputes its prompt. Nodes do not exchange KV caches.
 - Nodes may run different quantisations of the model. In that case output depends on the node that serves the session.
-- Images, audio and speculative decoding are served only by BaseRT.
+- Images and audio are served only by BaseRT. On llama.cpp and MLX, speculative decoding is prompt lookup only.
 
 > [!NOTE]
 > Superfluid is pre-1.0. Flags, protocols and on-disk formats may change between releases.

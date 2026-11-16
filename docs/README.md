@@ -48,7 +48,7 @@ The model file picks the runtime. Each runtime runs in its own worker process, i
 | `basert` | `.base` bundles | [baseRT](https://github.com/basecompute/baseRT)'s engine library |
 
 > [!NOTE]
-> The server binds to loopback and asks for no key unless told to, and nothing phones home. Read [Security](deployment/security.md) before putting it on a network. Superfluid is pre-1.0: flags, protocols and on-disk formats may change between releases.
+> The server binds to loopback and asks for no key unless told to. Read [Security](deployment/security.md) before putting it on a network. Superfluid is pre-1.0: flags, protocols and on-disk formats may change between releases.
 
 ## Requirements
 

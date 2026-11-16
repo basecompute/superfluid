@@ -36,12 +36,12 @@ print(reply.choices[0].message.content)
 | `{"type": "json_object"}` | output is a JSON object |
 | `{"type": "json_schema", "json_schema": {"schema": {...}}}` | output matches the schema |
 
-A `json_schema` with no schema block is a 400. On the Ollama API, `format: "json"` or a schema object does the same. The Anthropic API has no structured-output parameter.
+`{"type": "json_schema"}` with no `json_schema` object is a 400. A `json_schema` object without a `schema` key is read as the schema itself, so `{"name": "planet"}` alone constrains nothing. On the Responses API, a `json_schema` format without `schema` is a 400. On the Ollama API, `format: "json"` or a schema object does the same. The Anthropic API has no structured-output parameter.
 
 ## Rules
 
 - A constraint the client asked for is a contract: a schema that cannot be compiled is a 400 (`response_format grammar did not compile on this engine ...`), never served unconstrained.
-- `tool_choice` wins over `response_format` when both are set. See [Tool calling](tool_calling.md).
+- Declared tools win over `response_format`: unless `tool_choice` is `none`, a request with tools is constrained to the tool-call format and `response_format` is not applied. See [Tool calling](tool_calling.md).
 - On gpt-oss (Harmony), the schema is applied inside the `final` channel, so the model can still reason first.
 - A constrained lane is sampled on the host and never speculates.
 - The grammar mask is applied before `logit_bias` and penalties. See [Sampling](sampling.md).

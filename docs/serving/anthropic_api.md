@@ -46,7 +46,7 @@ Ignored: `stop_sequences`, `tool_choice`, `thinking`, `metadata`, `service_tier`
 | block | mapping |
 |---|---|
 | `text` | text |
-| `image` with `source.type: "base64"` | an image, on a model that accepts images (else 400 `unsupported_input`); URL sources are refused |
+| `image` with `source.type: "base64"` | an image, on a model that accepts images (else 400 `invalid_request_error`); URL sources are refused |
 | `tool_use` | a prior call in assistant history |
 | `tool_result` | a tool result; `content` a string or text blocks. `is_error` is not read |
 | `thinking` | prior reasoning in assistant history |
@@ -110,7 +110,7 @@ Whether the model reasons is its template's default; this route passes no templa
 {"type": "error", "error": {"type": "invalid_request_error", "message": "..."}}
 ```
 
-Every daemon-side refusal on this route is a 400 (`invalid_request_error`); a worker failure is a 500 (`api_error`). Refusals made before the handler runs (401, 403, 404, 413, 429) use the OpenAI error envelope.
+Every daemon-side refusal on this route is a 400 (`invalid_request_error`); a worker failure is a 500 (`api_error`); a fleet head with no node up for the model is a 503 (`api_error`). The Anthropic envelope carries no `code`. Refusals made before the handler runs (401, 403, 404, 413, 429) use the OpenAI error envelope.
 
 ## Not supported
 

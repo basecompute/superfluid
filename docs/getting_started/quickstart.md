@@ -8,7 +8,7 @@ Serve a model with one command and call it with any OpenAI client. This assumes 
 superfluid serve basecompute/Qwen3.8-27B
 ```
 
-On first run this installs the BaseRT runtime, downloads the model into the Hugging Face cache, and serves it at `http://127.0.0.1:8453`. BaseRT runs on Apple silicon, on Linux arm64 with an NVIDIA GPU and on Linux x86-64 with an AMD Strix Halo or Strix Point GPU. The runtime is inferred from the model id:
+On first run this installs the BaseRT runtime, downloads the model into baseRT's model cache (`BASERT_MODELS_DIR`), and serves it at `http://127.0.0.1:8453`. BaseRT runs on Apple silicon, on Linux arm64 with an NVIDIA GPU and on Linux x86-64 with an AMD Strix Halo or Strix Point GPU. The runtime is inferred from the model id:
 
 | model | runtime |
 |---|---|

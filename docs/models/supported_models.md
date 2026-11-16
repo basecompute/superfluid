@@ -20,7 +20,7 @@ What each runtime supports beyond plain generation:
 | park and resume (`--park`) | yes | yes (lossless) | yes (lossless) |
 | lossy park (`--park-lossy`) | per bundle | no | no |
 | `--kv-bits` | yes | no | no |
-| speculative decoding | per bundle | no | no |
+| speculative decoding | per bundle | `prompt-lookup` only | `prompt-lookup` only |
 | images and audio in chat | per bundle | no | no |
 | embeddings, speech to text, LoRA | per bundle | no | no |
 | `--max-context auto` | yes | on Metal, and on CUDA with a dedicated GPU; else 8192 | yes |
