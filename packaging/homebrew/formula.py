@@ -31,7 +31,7 @@ TEMPLATE = """\
 # Written by superfluid's publish workflow (packaging/homebrew/formula.py in
 # basecompute/superfluid) for each release; a change made here is overwritten.
 class Superfluid < Formula
-  desc "Serving daemon for local LLM inference across runtimes and machines"
+  desc "Local AI server for distributed LLM inference"
   homepage "https://superfluid.sh"
   license "Apache-2.0"
 

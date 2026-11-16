@@ -1,8 +1,8 @@
 # Superfluid
 
-**One serving daemon for local LLM inference — across runtimes and machines.**
+**Local AI server for distributed inference.**
 
-Superfluid puts one scheduler, one durable session log and one set of APIs (OpenAI, Anthropic, Ollama) in front of llama.cpp, MLX and baseRT. Several agents share one machine without getting in each other's way, a session outlives a crashed worker or a restarted server, and existing clients work unchanged.
+Superfluid is an open-source server that runs LLMs on your own hardware. It serves a model from one machine, or from several machines that act as one server. It supports llama.cpp, MLX, and BaseRT, and exposes OpenAI-, Anthropic-, and Ollama-compatible API endpoints.
 
 ## Why Superfluid
 

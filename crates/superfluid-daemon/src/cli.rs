@@ -272,8 +272,8 @@ pub fn version() -> String {
 pub fn overview() -> String {
     format!(
         "{}
-A serving daemon for local LLM inference: one scheduler, one session log and one set of APIs
-over llama.cpp, MLX and baseRT.
+An open-source server that runs LLMs on your own hardware, from one machine or several that
+act as one server, over llama.cpp, MLX and BaseRT.
 
 Usage: superfluid <command> [options]
 
