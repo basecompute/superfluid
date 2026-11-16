@@ -110,4 +110,8 @@ case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;
   *) say "add $PREFIX/bin to your PATH, e.g.: export PATH=\"$PREFIX/bin:\$PATH\"" ;;
 esac
-say "get started: superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M"
+if [ -n "$basert" ]; then
+  say "get started: superfluid serve basecompute/Qwen3.8-27B"
+else
+  say "get started: superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M"
+fi

@@ -16,12 +16,12 @@ f:"/dev/_next/static/chunks/2stmo1fl2_ko-.js"
 6:X
 d:X
 d:C
-11:T353a,# OpenAI-compatible server
+11:T3871,# OpenAI-compatible server
 
 `superfluid serve` exposes an OpenAI-compatible HTTP API at `http://127.0.0.1:8453` by default, on the same listener as the [Anthropic](/anthropic-api) and [Ollama](/ollama-api) APIs. Every request runs as a fresh durable session, so a later request that repeats a conversation prefix is served warm from the prefix cache with no client-side session handling.
 
 ```sh
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid serve basecompute/Qwen3.8-27B
 ```
 
 ```python
@@ -29,14 +29,14 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8453/v1", api_key="unused")
 reply = client.chat.completions.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     messages=[{"role": "user", "content": "Say hello."}],
     max_tokens=32,
 )
 print(reply.choices[0].message.content)
 ```
 
-The `model` field names an id from `GET /v1/models`. Unknown fields are ignored. The request body limit is 100 MiB (413 above it).
+The `model` field names an id from `GET /v1/models`. Unknown fields are ignored. The request body limit is 100 MiB (413 above it; the multipart routes answer with code `payload_too_large`, the JSON routes with a plain-text body).
 
 ## Endpoints
 
@@ -44,7 +44,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 |---|---|---|
 | `POST` | `/v1/chat/completions` | chat completion, streaming or not |
 | `POST` | `/v1/completions` | raw-text completion; with `suffix`, fill-in-the-middle |
-| `POST`, `GET`, `DELETE` | `/v1/responses`, `/v1/responses/{id}`, `/v1/responses/{id}/input_items` | [Responses API](/responses-api), with `previous_response_id` |
+| `POST`, `GET`, `DELETE` | `/v1/responses`, `/v1/responses/{id}`, `/v1/responses/{id}/input_items`, `/v1/responses/{id}/cancel` | [Responses API](/responses-api), with `previous_response_id` |
 | `POST` | `/v1/embeddings` | text embeddings (embedding models only) |
 | `POST` | `/v1/rerank` | cosine rerank of documents against a query |
 | `POST` | `/v1/audio/transcriptions`, `/v1/audio/translations` | speech to text (Whisper models only) |
@@ -53,7 +53,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 | `POST` | `/v1/models/load`, `/v1/models/unload` | load / unload a model (admin) |
 | `DELETE` | `/v1/models/{model}` | unload a model (admin) |
 | `POST` | `/v1/tokenize` | token ids of a text, no chat scaffold |
-| `POST`, `GET` | `/v1/files`, `/v1/files/{id}`, `/v1/files/{id}/content` | upload, list, read, delete files |
+| `POST`, `GET`, `DELETE` | `/v1/files`, `/v1/files/{id}`, `/v1/files/{id}/content` | upload, list, read, delete files |
 | `POST`, `GET` | `/v1/batches`, `/v1/batches/{id}`, `/v1/batches/{id}/cancel` | batch jobs |
 | `POST`, `GET` | `/v1/lora/load`, `/v1/lora/unload`, `/v1/lora` | activate (admin), clear (admin) or show a LoRA adapter; `basert` bundles only |
 | `GET` | `/health` | liveness; never authenticated |
@@ -66,7 +66,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 
 ```sh
 curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "unsloth/Qwen3.8-27B-GGUF",
+  "model": "basecompute/Qwen3.8-27B",
   "messages": [{"role": "user", "content": "Three facts about Oslo."}],
   "stream": true,
   "chat_template_kwargs": {"enable_thinking": false}
@@ -84,8 +84,8 @@ curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/jso
 | `stream_options` | | `include_usage` is always on |
 | `n` | 1 | 1-128; streaming uses 1 |
 | `temperature`, `top_p` | model default | see [Sampling](/sampling) |
-| `seed` | fresh per request | do not send `0` (read as unseeded) |
-| `presence_penalty`, `frequency_penalty` | 0 | |
+| `seed` | fresh per request | |
+| `presence_penalty`, `frequency_penalty` | 0 | -2 to 2; outside is a 400 |
 | `stop` | none | string or array; excluded from output |
 | `logprobs`, `top_logprobs` | off | `top_logprobs` 0-20 |
 | `logit_bias` | none | `{"<token id>": bias}` |
@@ -227,14 +227,23 @@ Use a new key for each new request: a retry loop that sends the same request wit
 | 400 | `unsupported_input` | an image or audio part the model cannot take |
 | 400 | `unsupported_model` | embeddings, rerank or audio on a model that does not serve them |
 | 400 | `unsupported_runtime` | `/v1/models/load` on a runtime that is missing or does not read the model |
-| 400 | | malformed body; `constraint unsatisfiable: ...` (a grammar that cannot compile) |
+| 400 | `unsupported_parameter`, `invalid_value` | `fim_mode` without `suffix`, or not `psm`/`spm` |
+| 400 | `idempotency_key` | an `Idempotency-Key` that is empty or over 255 characters |
+| 400 | | malformed body; `constraint unsatisfiable: ...` (a grammar that cannot compile); a penalty outside -2 to 2 |
 | 401 | `invalid_api_key` | missing or wrong key |
-| 403 | `admin_required` | a non-admin key on an admin route; also a QoS header above the key's ceiling |
+| 403 | `admin_required` | a non-admin key on an admin route |
+| 403 | `origin_refused` | an `Origin` or `Host` from off this machine; see [Security](/security#requests-from-web-pages) |
+| 403 | | a QoS header above the key's ceiling, or a batch-invariant lane not allowed |
 | 404 | | unknown model |
-| 413 | `payload_too_large`, `files_quota_exceeded` | body over 100 MiB; file store full |
+| 404 | `model_not_found` | `/props?model=` names an unknown model |
+| 413 | `payload_too_large`, `files_quota_exceeded` | multipart body over 100 MiB; file store full |
+| 413 | | JSON body over 100 MiB (plain-text body) |
+| 422 | `idempotency_key` | an `Idempotency-Key` reused with another body or route |
 | 429 | `rate_limit_exceeded`, `concurrency_limit_exceeded`, `completion_rate_limited` | per-IP, per-key, FIM limits |
 | 500 | | engine or worker failure |
 | 501 | `route_retired` | `/slots/{id}/save`, `/restore` |
+| 503 | | the model failed to load |
+| 503 | `no_node_up` | a fleet head with no node up for the model |
 
 ## Browser transport (`--web`)
 
@@ -242,7 +251,7 @@ Use a new key for each new request: a retry loop that sends the same request wit
 e:[["children",{"s":"__PAGE__","h":160,"d":{"r":["$","$1","c",{"children":[["$","$L10",null,{"children":"$11"}],["$L12"],"$L13"]}],"p":"$@14","v":null,"s":"$6"}}]]
 b:[["children",{"s":{"n":"slug","t":"d","k":"openai-server","s":[]},"h":96,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}]}]]}],"p":"$@c","v":"$d","s":"$6"},"c":"$Qe"}]]
 7:[["children",{"s":"(docs)","h":96,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/3_zcwfmbdj4b5.js","async":true}]],["$","$L9",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]]}]}]]}],"p":"$@a","v":null,"s":"$6"},"c":"$Qb"}]]
-0:{"t":{"t":{"s":"","h":80,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/2ngzwwqeitkk7.js","async":true}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]]}]}]}]]}],"p":"$@5","v":null,"s":"$6"},"c":"$Q7"},"h":{"r":["$","$1","h",{"children":[null,["$","$L16",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]}],["$","$L18",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$19",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"OpenAI-compatible server · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"One serving daemon for local LLM inference — across runtimes and machines."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L1a","11",{}]]}]}],null]}],null]}],"p":"$@1b","v":null,"s":"$6"}},"a":"$@1c","u":"$@1d","b":"6ghED9FevNJUutPoa1d59"}
+0:{"t":{"t":{"s":"","h":80,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/2ngzwwqeitkk7.js","async":true}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]]}]}]}]]}],"p":"$@5","v":null,"s":"$6"},"c":"$Q7"},"h":{"r":["$","$1","h",{"children":[null,["$","$L16",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]}],["$","$L18",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$19",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"OpenAI-compatible server · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L1a","11",{}]]}]}],null]}],null]}],"p":"$@1b","v":null,"s":"$6"}},"a":"$@1c","u":"$@1d","b":"NyI3ZdkbateUfQXmtJR7j"}
 1e:I[97367,["$2"],"OutletBoundary"]
 12:["$","script","script-0",{"src":"/dev/_next/static/chunks/2stmo1fl2_ko-.js","async":true}]
 13:["$","$L1e",null,{"children":["$","$19",null,{"name":"Next.MetadataOutlet","children":"$@1f"}]}]
