@@ -2195,13 +2195,19 @@ fn auto_drafter_pull<'a>(
 
 /// The `--speculate` a model on `runtime` serves under: the one the command line names (`off` is
 /// none), else `auto` on the baseRT runtime, where speculative decoding is on by default, and none on
-/// the other runtimes, whose `auto` is prompt-lookup.
+/// the other runtimes, whose `auto` is prompt-lookup. A pinned installation (`basert@<install>`) is
+/// its base runtime here (is_basert).
 fn speculate_directive<'a>(named: Option<&'a str>, runtime: &str) -> Option<&'a str> {
     match named {
         Some(d) if d.trim() == "off" => None,
         Some(d) => Some(d),
-        None => (runtime == "basert").then_some("auto"),
+        None => is_basert(runtime).then_some("auto"),
     }
+}
+
+/// Whether `runtime` (a runtime id, pinned to an installation or not) is the baseRT runtime.
+fn is_basert(runtime: &str) -> bool {
+    RuntimeId::new(runtime).base().name() == "basert"
 }
 
 /// The strategy a model serves with, from the `--speculate` the command line names (None: not named;
@@ -2223,7 +2229,7 @@ fn speculation_for<'a>(
         }
         // The other runtimes draft from the prompt alone: there is no
         // drafter artifact for `auto` to look for.
-        None if runtime != "basert" => {
+        None if !is_basert(runtime) => {
             eprintln!("superfluid: speculation: auto: prompt-lookup on the {runtime} runtime");
             Some("prompt-lookup")
         }
@@ -2459,6 +2465,15 @@ mod tests {
         );
         assert_eq!(speculation_for(None, &hybrid, m, "basert"), None);
         assert_eq!(speculation_for(Some("auto"), &hybrid, m, "basert"), None);
+
+        // A pinned installation (`--runtime basert@<install>`) is the runtime it pins: its id keeps the
+        // suffix, and the policy goes by the base runtime.
+        let pinned = |id: &str| RuntimeId::parse(id).expect("a valid runtime id").name();
+        assert_eq!(speculate_directive(None, pinned("basert@0.5.0-metal")), Some("auto"));
+        assert_eq!(speculate_directive(None, pinned("llamacpp@b12408")), None);
+        assert_eq!(speculation_for(None, &caps, m, pinned("basert@0.5.0-metal")), Some("auto"));
+        assert_eq!(speculation_for(Some("auto"), &caps, m, pinned("basert@0.5.0-metal")), Some("auto"));
+        assert_eq!(speculation_for(Some("auto"), &caps, m, pinned("llamacpp@b12408")), Some("prompt-lookup"));
     }
 
     #[test]
