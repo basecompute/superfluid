@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/SF_logo.svg">
-    <img alt="super:fluid" src="docs/assets/logos/SF_logo.svg" width="60%">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/SF_dark.svg">
+    <img alt="super:fluid" src="docs/assets/logos/SF_light.svg" width="60%">
   </picture>
 </p>
 
