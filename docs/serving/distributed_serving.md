@@ -14,13 +14,13 @@ On the head, make the token once and start serving with a listener for nodes:
 
 ```sh
 superfluid fleet token                     # prints the token; kept at ~/.superfluid/fleet/token
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
+superfluid serve basecompute/Qwen3.8-27B --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
 ```
 
 On each node:
 
 ```sh
-superfluid node join --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --token <the token>
+superfluid node join --model basecompute/Qwen3.8-27B --token <the token>
 ```
 
 The node finds the head on the local network (`_superfluid-fleet._tcp`, which also carries the head's HTTP port for `superfluid top`, or give `<host:port>` as the first argument), pulls the model as `serve` would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as `joined:<identity>` and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; `--model-name` overrides that. A head with no token takes nodes from its own machine only.
@@ -42,14 +42,14 @@ A node that joins opens one connection per lane, and the head runs one generatio
 ## Run a node by hand
 
 ```sh
-superfluid-noded --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --listen 100.64.0.2:8454
+superfluid-noded --model basecompute/Qwen3.8-27B --listen 100.64.0.2:8454
 ```
 
 The node loads the model as `superfluid serve` does: an id is pulled, the runtime that reads it is installed if it never was, and the window is sized for the device. It checks its token and binds its port first, so a node that would be refused stops before it downloads anything. It then prints what it serves:
 
 ```text
-superfluid-noded: runtime llamacpp serves /…/Qwen3.8-27B-UD-Q4_K_M.gguf: context window 40960 tokens (sized for this device), 8 lanes
-superfluid-noded: node 'box-a' serving 'unsloth/Qwen3.8-27B-GGUF' on 100.64.0.2:8454 (Link F/TCP)
+superfluid-noded: runtime basert serves /…/Qwen3.8-27B-Q4.base: context window 40960 tokens (sized for this device), 8 lanes
+superfluid-noded: node 'box-a' serving 'basecompute/Qwen3.8-27B' on 100.64.0.2:8454 (Link F/TCP)
 ```
 
 | flag | default | meaning |

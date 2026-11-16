@@ -4,7 +4,7 @@ Claude Code speaks the Anthropic Messages API, which the server answers at `/v1/
 
 ```sh
 curl -fsSL https://claude.ai/install.sh | bash     # install
-superfluid launch claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch claude --model basecompute/Qwen3.8-27B
 superfluid launch claude -- --continue             # arguments after -- go to claude
 ```
 

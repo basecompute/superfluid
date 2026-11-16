@@ -16,7 +16,7 @@ tools = [{
     },
 }]
 reply = client.chat.completions.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     messages=[{"role": "user", "content": "What is the weather in Oslo?"}],
     tools=tools,
     tool_choice="auto",

@@ -4,7 +4,7 @@
 
 ```sh
 curl http://127.0.0.1:8453/v1/messages -H 'content-type: application/json' -d '{
-  "model": "unsloth/Qwen3.8-27B-GGUF",
+  "model": "basecompute/Qwen3.8-27B",
   "max_tokens": 256,
   "system": "Be terse.",
   "messages": [{"role": "user", "content": "Why is the sky blue?"}]
@@ -18,7 +18,7 @@ from anthropic import Anthropic
 
 client = Anthropic(base_url="http://127.0.0.1:8453", api_key="unused")
 msg = client.messages.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     max_tokens=256,
     messages=[{"role": "user", "content": "Why is the sky blue?"}],
 )

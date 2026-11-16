@@ -4,7 +4,7 @@ OpenClaw speaks Chat Completions through a provider in its config. `launch` keep
 
 ```sh
 npm install -g openclaw@latest                     # install
-superfluid launch openclaw --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch openclaw --model basecompute/Qwen3.8-27B
 superfluid launch openclaw -- agent --local -m "summarize this repo"
 ```
 

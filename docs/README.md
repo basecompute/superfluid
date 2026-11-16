@@ -26,13 +26,13 @@ Superfluid is an open-source server that runs LLMs on your own hardware. It serv
 curl -fsSL https://basecompute.co/sf/install.sh | sh
 
 # serve a model at http://127.0.0.1:8453
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid serve basecompute/Qwen3.8-27B
 
 # put a coding agent on it
-superfluid launch claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch claude --model basecompute/Qwen3.8-27B
 
 # add another machine to the same server
-superfluid node join --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --token <token>
+superfluid node join --model basecompute/Qwen3.8-27B --token <token>
 ```
 
 ## How it fits

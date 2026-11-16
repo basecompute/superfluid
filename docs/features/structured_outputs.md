@@ -6,7 +6,7 @@ Superfluid constrains decoding with a grammar so output matches a JSON schema. I
 
 ```sh
 curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "unsloth/Qwen3.8-27B-GGUF",
+  "model": "basecompute/Qwen3.8-27B",
   "messages": [{"role": "user", "content": "A planet, as JSON."}],
   "response_format": {"type": "json_schema", "json_schema": {"name": "planet",
     "schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}}
@@ -21,7 +21,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8453/v1", api_key="unused")
 schema = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
 reply = client.chat.completions.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     messages=[{"role": "user", "content": "A planet, as JSON."}],
     response_format={"type": "json_schema", "json_schema": {"name": "planet", "schema": schema}},
 )

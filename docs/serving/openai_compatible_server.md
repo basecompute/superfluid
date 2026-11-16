@@ -3,7 +3,7 @@
 `superfluid serve` exposes an OpenAI-compatible HTTP API at `http://127.0.0.1:8453` by default, on the same listener as the [Anthropic](anthropic_api.md) and [Ollama](ollama_api.md) APIs. Every request runs as a fresh durable session, so a later request that repeats a conversation prefix is served warm from the prefix cache with no client-side session handling.
 
 ```sh
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid serve basecompute/Qwen3.8-27B
 ```
 
 ```python
@@ -11,7 +11,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8453/v1", api_key="unused")
 reply = client.chat.completions.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     messages=[{"role": "user", "content": "Say hello."}],
     max_tokens=32,
 )
@@ -48,7 +48,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 
 ```sh
 curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "unsloth/Qwen3.8-27B-GGUF",
+  "model": "basecompute/Qwen3.8-27B",
   "messages": [{"role": "user", "content": "Three facts about Oslo."}],
   "stream": true,
   "chat_template_kwargs": {"enable_thinking": false}

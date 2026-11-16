@@ -45,6 +45,7 @@ superfluid serve <model> [--model <model> ...] [flags]
 A model is a path or a Hugging Face-style id `org/model[:tag]`. Everything else has a default: the session log goes to `~/.superfluid/sessions`, the session socket to `~/.superfluid/superfluid.sock`, and the HTTP API listens on `127.0.0.1:8453`. A runtime that was never installed is installed on first use.
 
 ```sh
+superfluid serve basecompute/Qwen3.8-27B                # BaseRT
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M        # llama.cpp
 superfluid serve mlx-community/Qwen3-4B-4bit           # MLX (Apple silicon)
 superfluid serve ./Qwen3-4B-Q4_K_M.gguf                 # runtime picked by format

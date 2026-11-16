@@ -7,12 +7,12 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8453/v1", api_key="unused")
 first = client.responses.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     instructions="Be terse.",
     input="My name is Ada.",
 )
 second = client.responses.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     instructions="Be terse.",
     previous_response_id=first.id,
     input="What is my name?",

@@ -4,7 +4,7 @@ Cline speaks Chat Completions through its `openai-compatible` provider.
 
 ```sh
 npm install -g cline                               # install
-superfluid launch cline --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch cline --model basecompute/Qwen3.8-27B
 ```
 
 Aliases: `cline-cli`.

@@ -12,7 +12,7 @@ Both carry the same requests and replies. `superfluid session` and `superfluid m
 ## Over HTTP
 
 ```sh
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --web 127.0.0.1:8455
+superfluid serve basecompute/Qwen3.8-27B --web 127.0.0.1:8455
 ```
 
 The server prints the listener's address and the path of the token it wrote, `<sessions>/web-token`:
@@ -40,7 +40,7 @@ To continue the conversation, append the next user message and stream again: gen
 A web page can use only `/web/ws`. Browsers apply CORS to `fetch`, and the listener sends no CORS headers, so a page's request to `/web/rpc` or `/web/stream` fails before it is sent. List the page's origin with `--web-origin`, and pass the token in the subprotocol list, since a browser cannot set headers on a WebSocket:
 
 ```sh
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --web 127.0.0.1:8455 --web-origin http://localhost:5173
+superfluid serve basecompute/Qwen3.8-27B --web 127.0.0.1:8455 --web-origin http://localhost:5173
 ```
 
 ```js

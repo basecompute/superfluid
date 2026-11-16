@@ -34,7 +34,7 @@ superfluid serve ./Qwen3-4B-Q4_K_M.gguf                  # a path; format picks 
 superfluid serve ~/models/Qwen3-4B-4bit                   # an MLX directory
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M           # an id, pulled by llama.cpp
 superfluid serve mlx-community/Qwen3-4B-4bit              # an id, pulled by MLX
-superfluid serve basecompute/Qwen3-1.7B                   # an id, pulled by basert
+superfluid serve basecompute/Qwen3.8-27B                  # an id, pulled by basert
 ```
 
 A token is an **id** when nothing exists on disk by that name, it does not start with `.`, `/` or `~`, it does not end in `.base` or `.gguf`, and the part before an optional `:tag` contains a `/`. Anything else is a path, so a missing file is reported as missing rather than looked up on a hub.
