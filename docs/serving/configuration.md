@@ -81,6 +81,9 @@ There is no `RUST_LOG`; use `--log-filter`.
       pinned                (optional) the install `runtime use` pinned
   pulls/
     <id>.lock               one pull of a model at a time
+    <id>.json               the record of a pull that succeeded: id, runtime, path, size; `superfluid models` reads it
+  cache/
+    hub-catalog.json        the hub catalog, refreshed daily by `serve`
 ```
 
 Models pulled by id are not stored here; each runtime keeps them where its own tool does (llama.cpp and MLX use the Hugging Face cache).

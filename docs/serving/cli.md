@@ -11,6 +11,7 @@
 | `superfluid node join [<head>] --model <m>` | serve a model to a fleet head from this machine |
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
+| `superfluid models` | list the models pulled here, or the hub catalog's |
 | `superfluid compat` | what this build was built for: the runtime contracts it checks at load |
 | `superfluid self <subcommand>` | update Superfluid itself, or switch between the versions installed here |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
@@ -252,6 +253,30 @@ superfluid runtime options <id> [--json]
 `remove <id>` with no install removes the runtime's only install; when it has more, it names them and removes nothing, and `--all` removes every one. The bare id is also how `superfluid runtimes` lists the default install.
 
 See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](../models/runtimes.md#per-runtime-options).
+
+## `superfluid models`
+
+```sh
+superfluid models [--catalog] [--refresh] [--json]
+```
+
+Lists the models pulled here, with their id, runtime, size and path. A pull that succeeds records the model in `$SUPERFLUID_HOME/pulls/`. A model whose path is gone is listed as `missing: <path>`; `superfluid serve <id>` pulls it again. A model pulled before Superfluid kept these records is marked `*`: its id is read back from its lock's name, with the hub catalog's help, and its runtime, size and path are not known. A last line counts the hub catalog's variants and models, how many of them are downloaded here, and when the copy here was fetched.
+
+| flag | meaning |
+|---|---|
+| `--catalog` | list the hub catalog's models instead (`id:quant`, size, architecture, backend), marking those downloaded here |
+| `--refresh` | fetch the hub catalog now; if that fails, list the copy kept here and exit 1 |
+| `--json` | print one JSON document with both lists, whatever `--catalog` says |
+
+Without `--refresh` the command never fetches the catalog. `serve` refreshes the copy at `$SUPERFLUID_HOME/cache/hub-catalog.json` once a day.
+
+```json
+{"schema": 1, "downloaded": [...], "catalog_updated": "2026-11-06", "catalog_fetched": 1762905600, "catalog": [...]}
+```
+
+Each `downloaded` entry has `id` (as pulled, `:tag` included), `served_name`, `runtime`, `path`, `size` (bytes), `pulled_at` (Unix seconds), `exists` and `id_guessed`. A guessed entry has `null` for what its lock does not say. Each `catalog` entry has the fields the cached catalog has, plus `downloaded`. `catalog_updated` is the catalog's own date and `catalog_fetched` is when the copy here was fetched (Unix seconds).
+
+A size counts each file once and follows links to files wherever they lead, so a Hugging Face snapshot whose weights live in the shared `blobs/` directory is counted in full.
 
 ## `superfluid compat`
 

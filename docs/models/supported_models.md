@@ -50,7 +50,7 @@ Runtime inference for ids: a repo name containing `gguf` (any case) goes to `lla
 
 ## Pulling models by id
 
-Pulling happens during `superfluid serve`; there is no separate `pull` command.
+Pulling happens during `superfluid serve`; there is no separate `pull` command. `superfluid models` lists the models pulled here; see the [Command-line reference](../serving/cli.md#superfluid-models).
 
 | runtime | tool | `:tag` means | `--pull-<name>` options | cache |
 |---|---|---|---|---|
