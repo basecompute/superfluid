@@ -132,6 +132,12 @@ Head-to-node traffic is unencrypted TCP; prompts and generated tokens cross it i
 - A node bound off loopback refuses to start without `--auth-file`, unless `--insecure-no-auth`.
 - `--api-key`, `--key-policy` and `--rate-limit` protect the head's own HTTP listener (a policy's class ceilings do not apply: the head has no scheduler).
 
+## Fleet discovery
+
+A head with `--fleet-listen` announces itself on the local network over mDNS (`_superfluid-fleet._tcp`): its fleet port, its HTTP port, the models it serves and, when it has a token, a network id. The network id is the first 16 hex digits of SHA-256 over a fixed prefix and the token. Nodes use it to join only a head of their own network.
+
+The network id reveals nothing practical about a token made by `superfluid fleet token` (256 random bits). A short or guessable `--token` can be brute-forced from it offline by anyone on the network, so use a generated token. A head with no token announces no network id.
+
 ## Putting it on a network
 
 1. Keep `--http` on loopback and put a TLS-terminating reverse proxy in front.

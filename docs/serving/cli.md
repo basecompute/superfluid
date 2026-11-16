@@ -296,7 +296,7 @@ superfluid media gc [--socket <path>]            # sweep blobs no session refere
 superfluid top [--api-key <key>] [<host:port> ...]
 ```
 
-Live per-node view over each server's `/metrics`. A [fleet head](distributed_serving.md)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds the fleet head on the local network. A keyed server needs `--api-key`, else it shows as `401`. `q` or `Esc` quits.
+Live per-node view over each server's `/metrics`. A [fleet head](distributed_serving.md)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds a fleet head on the local network: one of this machine's fleet token if a token is here, else one that announces no network, else any. A keyed server needs `--api-key`, else it shows as `401`. `q` or `Esc` quits.
 
 ## `superfluid-workerd` and `superfluid-noded`
 
