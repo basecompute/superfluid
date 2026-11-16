@@ -1024,7 +1024,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let directive = speculation_for(speculate.as_deref(), &runtime.static_capabilities(), &model, runtime.id.name());
     let speculate_auto = directive.map(str::trim) == Some("auto");
     let resolved = directive.map(|d| {
-        let pull = auto_drafter_pull(&catalog, runtime.id, &model, speculate.is_some());
+        let pull = auto_drafter_pull(&catalog, runtime.id, &model);
         let pull = (!pull_flags.offline).then_some(&pull as &dyn Fn(&str));
         superfluid_daemon::speculate_resolve::resolve_all(d, &model, pull)
     });
@@ -1362,7 +1362,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     let rt = runtime_pick.resolve(m, &catalog).and_then(|rt| catalog.require(rt)).ok();
                     let directive = speculate_directive(speculate.as_deref(), rt.as_ref().map_or("", |rt| rt.id.name()));
                     let serves = rt.filter(|rt| rt.static_capabilities().declines_auto_speculation().is_none());
-                    let pull = serves.map(|rt| auto_drafter_pull(&catalog, rt.id, m, speculate.is_some()));
+                    let pull = serves.map(|rt| auto_drafter_pull(&catalog, rt.id, m));
                     let pull = pull.as_ref().filter(|_| !pull_flags.offline).map(|f| f as &dyn Fn(&str));
                     directive.and_then(|d| resolve_all(d, m, pull).ok()).unwrap_or_default()
                 }
@@ -2178,24 +2178,14 @@ fn codec_for_dialect(
 
 /// `--speculate auto`'s pull (speculate_resolve::resolve_all) of the drafter the hub catalog marks
 /// for `target` when no copy is installed, by `runtime`, the one that serves the target, as a drafter
-/// given by id is pulled. A pull that fails is said, and `auto` settles among what is installed.
-/// `named`: `auto` was given on the command line. The default `auto` (none given) pulls nothing: it
-/// says what the start lacks and how to get it, and settles among what is installed.
+/// given by id is pulled. A pull that fails is said, and `auto` settles among what is installed. The
+/// default `auto` (no `--speculate`, speculate_directive) pulls as a named one does.
 fn auto_drafter_pull<'a>(
     catalog: &'a superfluid_daemon::runtimes::Catalog,
     runtime: RuntimeId,
     target: &'a std::path::Path,
-    named: bool,
 ) -> impl Fn(&str) + 'a {
     move |id: &str| {
-        if !named {
-            eprintln!(
-                "superfluid: speculation: auto (the default): the hub catalog pairs {} with {id}, which is not \
-                 installed, so this start drafts with what is installed; start with --speculate auto to pull it",
-                target.display()
-            );
-            return;
-        }
         eprintln!("superfluid: speculation: auto: the hub catalog pairs {} with {id}, which is not installed", target.display());
         if let Err(e) = superfluid_daemon::pulls::pull(catalog, runtime, id, &superfluid_daemon::pulls::PullFlags::default()) {
             eprintln!("superfluid: speculation: auto: {id}: {e} — choosing among what is installed");
@@ -2315,7 +2305,7 @@ fn build_loaded_daemon(
     let caps = host.capabilities().read().expect("capability record").clone();
     // A model loaded after startup (another --model, --model-dir, /v1/models/load) pulls its marked
     // drafter here, as the first model does before it starts.
-    let pull = auto_drafter_pull(&cfg.catalog, runtime.id, model_path, cfg.speculate.is_some());
+    let pull = auto_drafter_pull(&cfg.catalog, runtime.id, model_path);
     let pull = (!cfg.offline).then_some(&pull as &dyn Fn(&str));
     let directive = speculation_for(cfg.speculate.as_deref(), &caps, model_path, runtime.id.name());
     let mut speculate_ranked = match directive {
