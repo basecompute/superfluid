@@ -36,7 +36,7 @@ print(reply.choices[0].message.content)
 | `{"type": "json_object"}` | output is a JSON object |
 | `{"type": "json_schema", "json_schema": {"schema": {...}}}` | output matches the schema |
 
-`{"type": "json_schema"}` with no `json_schema` object is a 400. A `json_schema` object without a `schema` key is read as the schema itself, so `{"name": "planet"}` alone constrains nothing. On the Responses API, a `json_schema` format without `schema` is a 400. On the Ollama API, `format: "json"` or a schema object does the same. The Anthropic API has no structured-output parameter.
+A `json_schema` that names no schema is a 400: a missing `json_schema` object, or one with only `name`, `description` and `strict`. A schema given directly as `json_schema`, without the `schema` wrapper, is accepted. On the Responses API, a `json_schema` format needs `schema`. On the Ollama API, `format: "json"` or a schema object does the same. The Anthropic API has no structured-output parameter.
 
 ## Rules
 
