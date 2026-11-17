@@ -404,31 +404,35 @@ impl std::fmt::Display for Target {
 
 /// Watches the announcement of the head a following node dials. Anyone on the network can
 /// announce, so a change there only has the node ask the head it dials, over a link the token
-/// authenticates, what it serves; it follows what the head states.
+/// authenticates, what it serves; it follows what the head states. A query the head does not
+/// answer is asked again ([`Asking`]), announced again or not, since a head whose lanes stay
+/// connected may not announce again.
 fn watch_head(target: Arc<Target>, token: Vec<u8>, identity: String) {
     std::thread::spawn(move || {
         let Some(follower) = target.follower.clone() else { return };
-        let mut asked: Option<Vec<String>> = None;
+        let mut asking = Asking::new(ASK_BACKOFF);
         loop {
-            let heard = crate::fleet_mdns::watch(WATCH, |head| {
-                let hint = target.is(&head)
-                    && head.models.first() != Some(&follower.serving.name)
-                    && asked.as_ref() != Some(&head.models);
-                if !hint {
+            let wait = asking.next().map_or(WATCH, |due| due.saturating_duration_since(std::time::Instant::now()).max(Duration::from_millis(50)));
+            // Ends with `true` once the node is told to follow, and with `false` after a query that
+            // got no answer, to wait no longer than its next try.
+            let heard = crate::fleet_mdns::watch(wait, |head| {
+                let changed = target.is(&head) && head.models.first() != Some(&follower.serving.name);
+                if !(changed && asking.hint(&head.models, std::time::Instant::now())) {
                     return None;
                 }
-                asked = Some(head.models.clone());
-                match ask_head(&target.addrs(), &token, &identity) {
-                    Ok(serves) => follower.hear(serves.as_ref()).then_some(()),
-                    Err(e) => {
-                        tracing::debug!(error = %e, "could not ask the head what it serves after its announcement changed");
-                        None
-                    }
-                }
+                let followed = ask(&target, &follower, &token, &identity, &mut asking, &head.models);
+                (followed || asking.next().is_some()).then_some(followed)
             });
             match heard {
-                Ok(Some(())) => return,
-                Ok(None) => {}
+                Ok(Some(true)) => return,
+                Ok(Some(false)) => {}
+                Ok(None) => {
+                    if let Some(models) = asking.due(std::time::Instant::now()) {
+                        if ask(&target, &follower, &token, &identity, &mut asking, &models) {
+                            return;
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("superfluid: cannot watch the head's announcement ({e}); looking again in {} s", LOOK_AGAIN.as_secs());
                     std::thread::sleep(LOOK_AGAIN);
@@ -436,6 +440,100 @@ fn watch_head(target: Arc<Target>, token: Vec<u8>, identity: String) {
             }
         }
     });
+}
+
+/// Asks the head a following node dials what it serves, after its announcement changed to list
+/// `models`, and tells the follower; `true` once the node is told to follow. A query with no
+/// answer is noted in `asking`, to be asked again; only the last try that fails says so.
+fn ask(target: &Target, follower: &Follower, token: &[u8], identity: &str, asking: &mut Asking, models: &[String]) -> bool {
+    match ask_head(&target.addrs(), token, identity) {
+        Ok(serves) => {
+            asking.answered(models);
+            follower.hear(serves.as_ref())
+        }
+        Err(e) => {
+            let again = asking.failed(models, std::time::Instant::now());
+            tracing::debug!(error = %e, again, "the head did not say what it serves after its announcement changed");
+            if !again {
+                eprintln!(
+                    "superfluid: the head did not say what it serves after its announcement changed ({ASK_TRIES} tries, the last: {e}); \
+                     this node keeps serving {}",
+                    follower.serving.name
+                );
+            }
+            false
+        }
+    }
+}
+
+/// How many times a following node asks its head what it serves, for one announcement change
+/// the head does not answer for.
+const ASK_TRIES: u32 = 5;
+/// The wait before a following node asks its head again, doubling with each try.
+const ASK_BACKOFF: Duration = Duration::from_secs(2);
+
+/// When a following node asks its head what it serves after the head's announcement changes:
+/// once for each model list announced, and, while a query gets no answer, again up to
+/// [`ASK_TRIES`] times with a wait that doubles, whether or not the head announces again. A
+/// list counts as asked only once the head answered for it.
+struct Asking {
+    /// The announced list the head last answered for.
+    answered: Option<Vec<String>>,
+    /// The announced list not answered for yet: its tries so far, and when it is next asked.
+    pending: Option<(Vec<String>, u32, std::time::Instant)>,
+    backoff: Duration,
+}
+
+impl Asking {
+    fn new(backoff: Duration) -> Asking {
+        Asking { answered: None, pending: None, backoff }
+    }
+
+    /// Whether to ask now, for an announcement listing `models` heard at `now`.
+    fn hint(&mut self, models: &[String], now: std::time::Instant) -> bool {
+        if self.answered.as_deref() == Some(models) {
+            return false;
+        }
+        match &self.pending {
+            Some((asked, _, due)) if asked[..] == *models => *due <= now,
+            _ => {
+                self.pending = Some((models.to_vec(), 0, now));
+                true
+            }
+        }
+    }
+
+    /// The list a query is due for at `now`, with no announcement heard.
+    fn due(&self, now: std::time::Instant) -> Option<Vec<String>> {
+        self.pending.as_ref().filter(|(_, _, due)| *due <= now).map(|(models, _, _)| models.clone())
+    }
+
+    /// When a query is next due.
+    fn next(&self) -> Option<std::time::Instant> {
+        self.pending.as_ref().map(|(_, _, due)| *due)
+    }
+
+    /// The head answered for `models`.
+    fn answered(&mut self, models: &[String]) {
+        self.answered = Some(models.to_vec());
+        if self.pending.as_ref().is_some_and(|(asked, _, _)| asked[..] == *models) {
+            self.pending = None;
+        }
+    }
+
+    /// A query for `models` got no answer at `now`: `true` while it is to be asked again.
+    fn failed(&mut self, models: &[String], now: std::time::Instant) -> bool {
+        let Some((_, tries, due)) = self.pending.as_mut().filter(|(asked, _, _)| asked[..] == *models) else {
+            return false;
+        };
+        *tries += 1;
+        if *tries >= ASK_TRIES {
+            self.pending = None;
+            return false;
+        }
+        *due = now + self.backoff * 2u32.pow(*tries - 1);
+        true
+    }
 }
 
 /// The head of this node's network on the local network, however long it takes to appear.
@@ -932,6 +1030,94 @@ mod tests {
         assert!(!follower.hear(None), "a head that states nothing is not followed");
         assert!(!follower.hear(None));
         assert!(heard.try_recv().is_err());
+    }
+
+    fn list(models: &[&str]) -> Vec<String> {
+        models.iter().map(|m| m.to_string()).collect()
+    }
+
+    #[test]
+    fn a_change_the_head_did_not_answer_for_is_asked_again_and_one_it_answered_is_not() {
+        let (b, c) = (list(&["org/b"]), list(&["org/c"]));
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut asking = Asking::new(Duration::from_millis(100));
+        assert!(asking.hint(&b, t0), "a new list is asked at once");
+        assert!(asking.failed(&b, t0), "no answer: asked again");
+        assert!(!asking.hint(&b, at(50)), "announced again before the wait is out");
+        assert_eq!(asking.due(at(50)), None);
+        assert_eq!(asking.next(), Some(at(100)));
+        assert_eq!(asking.due(at(100)), Some(b.clone()), "due with no announcement heard");
+        assert!(asking.failed(&b, at(100)));
+        assert_eq!(asking.next(), Some(at(300)), "the wait doubles");
+        assert!(asking.hint(&b, at(300)), "or when it is announced again once due");
+        asking.answered(&b);
+        assert!(!asking.hint(&b, at(400)), "an answered list is not asked again");
+        assert_eq!(asking.due(at(10_000)), None);
+        assert!(asking.hint(&c, at(400)), "another list is");
+        for i in 1..ASK_TRIES {
+            assert!(asking.failed(&c, at(400)), "try {i} of {ASK_TRIES}");
+        }
+        assert!(!asking.failed(&c, at(400)), "given up after {ASK_TRIES} tries");
+        assert_eq!(asking.next(), None);
+        assert!(asking.hint(&c, at(500)), "until the head announces it again");
+    }
+
+    /// A head serving `org/b` that drops the first connection, as a head busy or restarting
+    /// might, and answers the rest.
+    fn head_dropping_the_first_ask(bind: &str, token: &[u8]) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind(bind).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let lease = superfluid_proto::linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+        let manager = Arc::new(FleetManager::with_options(Vec::new(), crate::fleet_manager::PlacementPolicy::LoadAware, lease, 90, 1));
+        let models = HeadModels::fixed(Arc::clone(&manager), vec!["org/b".into()]);
+        models.know_ids(&["org/b".into()], &["org/b:q4".into()]);
+        let token = token.to_vec();
+        std::thread::spawn(move || {
+            drop(listener.accept());
+            accept_nodes(listener, manager, token, models)
+        });
+        addr
+    }
+
+    #[test]
+    fn a_follower_asks_again_a_head_that_refused_its_first_ask_and_follows_its_answer() {
+        let token = b"a fleet token".to_vec();
+        let addr = head_dropping_the_first_ask("127.0.0.1:0", &token).to_string();
+        let (events, heard) = std::sync::mpsc::sync_channel(4);
+        let follower = Arc::new(Follower::new(Serving { name: "org/a".into(), id: "org/a:q4".into() }, events));
+        let target = Target::new(Some(addr), Vec::new(), Search::for_token(&token), Some(Arc::clone(&follower)));
+        let mut asking = Asking::new(Duration::from_millis(50));
+        let announced = list(&["org/b"]);
+
+        assert!(asking.hint(&announced, std::time::Instant::now()));
+        assert!(!ask(&target, &follower, &token, "follower", &mut asking, &announced), "the first ask gets no answer");
+        assert!(heard.try_recv().is_err());
+        assert!(!asking.hint(&announced, std::time::Instant::now()), "not handled, only waiting");
+        std::thread::sleep(Duration::from_millis(60));
+        let again = asking.due(std::time::Instant::now()).expect("asked again with no new announcement");
+        assert!(ask(&target, &follower, &token, "follower", &mut asking, &again), "the head answers the next");
+        assert!(matches!(heard.try_recv(), Ok(Event::Follow(f)) if f == serving("org/b", "org/b:q4")));
+    }
+
+    #[test]
+    #[ignore = "needs multicast on an interface: cargo test -p superfluid --lib fleet_join -- --ignored"]
+    fn a_watching_follower_asks_again_with_no_new_announcement_and_follows() {
+        let token = b"a_watching_follower_asks_again".to_vec();
+        let at = head_dropping_the_first_ask("0.0.0.0:0", &token);
+        let net = crate::fleet_mdns::network_id(&token);
+        let _announced = crate::fleet_mdns::advertise(at.port(), &["org/b".into()], None, Some(&net)).unwrap();
+        let mut search = Search::for_token(&token);
+        let head = crate::fleet_mdns::find_head(&mut search, Duration::from_secs(10), &|_| {}).unwrap();
+        let (events, heard) = std::sync::mpsc::sync_channel(4);
+        let follower = Arc::new(Follower::new(Serving { name: "org/a".into(), id: "org/a:q4".into() }, events));
+        let target = Arc::new(Target::new(None, head.nodes, search, Some(follower)));
+        watch_head(target, token, "follower".into());
+        // The head announces once; the first ask is dropped, the next, 2 s on, answered.
+        match heard.recv_timeout(Duration::from_secs(15)) {
+            Ok(Event::Follow(f)) => assert_eq!(f, serving("org/b", "org/b:q4")),
+            _ => panic!("the follower did not follow the head's answer"),
+        }
     }
 
     #[test]
