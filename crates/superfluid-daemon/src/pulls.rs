@@ -93,7 +93,10 @@ pub fn ensure_installed(catalog: &Catalog, runtime: RuntimeId, offline: bool) ->
         Err(why) => match named_by_the_operator(catalog, runtime) {
             Some(by) => Err(Unready::NotHere(format!("{why} ({by} names the runtime to load, so none was installed)"))),
             None => {
-                install(catalog, runtime).map_err(|e| Unready::InstallFailed(format!("{why}; and installing it failed: {e}")))?;
+                install(catalog, runtime).map_err(|e| {
+                    crate::events::emit("runtime.install.failed", serde_json::json!({"runtime": runtime.base().name(), "error": e}));
+                    Unready::InstallFailed(format!("{why}; and installing it failed: {e}"))
+                })?;
                 // Installed, yet not usable: what it found here, not the install, is why.
                 catalog.require(runtime).map_err(Unready::NotHere)
             }
@@ -109,7 +112,17 @@ pub fn pull_command_args(worker: &crate::runtimes::Worker, request: &Pull) -> Ve
     args
 }
 
+/// The model `id` on disk, pulled by `runtime` (installed first if it never was) unless it is in
+/// the runtime's cache already.
 pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) -> Result<PathBuf, String> {
+    let pulled = pull_by_id(catalog, runtime, id, flags);
+    if let Err(e) = &pulled {
+        crate::events::pull_failed(id, e);
+    }
+    pulled
+}
+
+fn pull_by_id(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) -> Result<PathBuf, String> {
     let rt = ensure_installed(catalog, runtime, flags.offline)?;
     let Some(declared) = &rt.pull else {
         return Err(format!("the {runtime} runtime pulls no model by id: give --model a path to one of its models"));
@@ -119,6 +132,7 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
     let _one_at_a_time = Lock::take(&catalog.home().join("pulls"), id, &format!("pull of {id}"))?;
     eprintln!("superfluid: pulling {id} with the {runtime} runtime{}", if flags.offline { " (offline)" } else { "" });
     let started = std::time::SystemTime::now();
+    crate::events::pull_started(id, runtime.name(), flags.offline);
     let path = if rt.worker.source == Source::BuiltIn {
         let linked = crate::linked::get(runtime.base()).ok_or_else(|| format!("this build does not link the {runtime} runtime"))?;
         linked.pull(&request, &crate::runtime_options::pull_args(runtime.base())?)?
@@ -137,6 +151,10 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
         return Err(format!("pulling {id} gave {}, which is not there", path.display()));
     }
     eprintln!("superfluid: {id} is {}", path.display());
+    if let Err(e) = crate::models::record(catalog.home(), id, runtime, &path) {
+        eprintln!("superfluid: {e}; `superfluid models` lists {id} by its lock alone");
+    }
+    crate::events::pull_done(id, &path);
     if fetched(&path, started, &request) {
         ahead(&rt, &path);
     }
@@ -199,11 +217,22 @@ fn named_by_the_operator(catalog: &Catalog, runtime: RuntimeId) -> Option<String
 fn install(catalog: &Catalog, runtime: RuntimeId) -> Result<(), String> {
     let id = runtime.base();
     eprintln!("superfluid: the {id} runtime is not here: installing it (`superfluid runtime install {id}`)");
+    crate::events::emit("runtime.install.start", serde_json::json!({"runtime": id.name()}));
     let installer = crate::installs::installer(catalog, id)?;
     let plans = crate::installs::plan(&installer, &superfluid_adapter_kit::install::Request::default())?;
     let done = crate::installs::install(catalog, id, &installer, &plans.plans)?;
     eprintln!("superfluid: installed {id} {} ({})", done.install.name, done.version);
+    // The runtime's version string may carry the library's path after the version.
+    let version = done.version.split_whitespace().next().unwrap_or_default();
+    crate::events::emit("runtime.install.done", serde_json::json!({"runtime": id.name(), "install": done.install.name, "version": version}));
     Ok(())
+}
+
+/// The name a pull of `id` keeps its lock under in `$SUPERFLUID_HOME/pulls`, and its record beside it: `id` with
+/// every character outside `[A-Za-z0-9._-]` made `_`. `/`, `:` and `_` all end up `_`, so the name does not give
+/// the id back; the record does.
+pub(crate) fn stem(id: &str) -> String {
+    id.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect()
 }
 
 pub(crate) struct Lock(#[allow(dead_code)] std::fs::File);
@@ -212,8 +241,7 @@ impl Lock {
     pub(crate) fn take(dir: &Path, id: &str, what: &str) -> Result<Lock, String> {
         use std::os::unix::io::AsRawFd;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        let name: String = id.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
-        let path = dir.join(format!("{name}.lock"));
+        let path = dir.join(format!("{}.lock", stem(id)));
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -319,6 +347,9 @@ esac
         let flags = PullFlags { offline: true, options: vec![("target".into(), Some("q8".into()))] };
         assert_eq!(pull(&cat, toy, "org/m:q4", &flags).unwrap(), model);
         assert_eq!(std::fs::read_to_string(dir.join("pull-args")).unwrap().trim(), "org/m:q4 --offline --target q8");
+        let here = crate::models::downloaded(cat.home(), &crate::models::HubCatalog::default());
+        assert_eq!(here.len(), 1, "an offline pull that finds the model records it too");
+        assert_eq!((here[0].id.as_str(), here[0].runtime.as_deref(), here[0].path.as_deref()), ("org/m:q4", Some("toyrt"), Some(model.as_path())));
         let bad = PullFlags { offline: false, options: vec![("force".into(), None)] };
         assert!(pull(&cat, toy, "org/m", &bad).unwrap_err().contains("--pull-force: the toyrt runtime's pull takes no such option"));
         let e = pull(&cat, RuntimeId::new("nowhere"), "org/m", &PullFlags { offline: true, options: Vec::new() }).unwrap_err();

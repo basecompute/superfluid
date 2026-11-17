@@ -40,6 +40,7 @@ fn ackf() -> HelloAckF {
             max_transfer: 1 << 24,
             transfer_budget: 1 << 26,
         },
+        model_ids: Vec::new(),
     }
 }
 
@@ -64,6 +65,7 @@ fn connect() -> (Endpoint, Endpoint) {
                 ),
                 link_role: superfluid_proto::handshake::LinkRole::HeadDaemon,
                 auth: Vec::new(),
+                serves: None,
             },
         )
         .unwrap();

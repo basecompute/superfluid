@@ -26,6 +26,8 @@ const HIST: usize = 160;
 struct NodeStat {
     addr: String,
     host: String,
+    /// What a fleet head's node serves, as the head labels it; empty for a server of its own.
+    model: String,
     reachable: bool,
     unauthorized: bool,
     lanes: u64,
@@ -158,10 +160,14 @@ fn draw(f: &mut Frame, nodes: &[NodeStat], hist: &VecDeque<u64>, total_tps: u64,
             let node_cell = if n.host.is_empty() {
                 Cell::from(n.addr.clone())
             } else {
-                Cell::from(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(n.host.clone(), Style::new().add_modifier(Modifier::BOLD)),
                     Span::styled(format!("  {}", n.addr), Style::new().dim()),
-                ]))
+                ];
+                if !n.model.is_empty() {
+                    spans.push(Span::styled(format!("  {}", n.model), Style::new().fg(ACCENT)));
+                }
+                Cell::from(Line::from(spans))
             };
             Row::new(vec![
                 node_cell,
@@ -245,7 +251,8 @@ fn poll(addr: &str, api_key: Option<&str>, prev: &mut HashMap<String, (u64, Inst
             .map(|(labels, name, node_addr)| {
                 let at = |series: &str| get(&m, &format!("{series}{labels}"));
                 NodeStat {
-                    tps: rate(prev, format!("{addr} {labels}"), at("superfluid_fleet_node_decode_tokens_total"), now),
+                    tps: rate(prev, format!("{addr} {name} {node_addr}"), at("superfluid_fleet_node_decode_tokens_total"), now),
+                    model: label(&labels, "model"),
                     addr: node_addr,
                     host: name,
                     reachable: at("superfluid_fleet_node_up") == 1,
@@ -262,6 +269,7 @@ fn poll(addr: &str, api_key: Option<&str>, prev: &mut HashMap<String, (u64, Inst
         tps: rate(prev, addr.to_string(), get(&m, "superfluid_decode_tokens_total"), now),
         addr: addr.to_string(),
         host: host_of(&m).unwrap_or_default(),
+        model: String::new(),
         reachable: true,
         unauthorized: false,
         lanes: get(&m, "superfluid_lanes_active"),
@@ -414,6 +422,7 @@ mod tests {
 
     fn node(name: &str, addr: &str, up: bool, decode_tokens: u64) -> crate::fleet_manager::NodeStatus {
         crate::fleet_manager::NodeStatus {
+            models: vec!["qwen".to_string()],
             name: name.to_string(),
             addr: addr.to_string(),
             up,
@@ -429,7 +438,7 @@ mod tests {
     #[test]
     fn a_fleet_heads_address_stands_for_each_of_its_nodes() {
         let render = |nodes: &[crate::fleet_manager::NodeStatus]| {
-            crate::fleet_metrics::fleet_metrics(nodes, "head", "qwen")
+            crate::fleet_metrics::fleet_metrics(nodes, "head", &["qwen".to_string()])
         };
         let body = Arc::new(Mutex::new(render(&[node("m3-ultra", "10.0.0.57", true, 100)])));
         let head = head_metrics_server(Arc::clone(&body));
@@ -438,7 +447,7 @@ mod tests {
         let rows = poll(&head, None, &mut prev);
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
-        assert_eq!((r.host.as_str(), r.addr.as_str(), r.reachable), ("m3-ultra", "10.0.0.57", true));
+        assert_eq!((r.host.as_str(), r.addr.as_str(), r.model.as_str(), r.reachable), ("m3-ultra", "10.0.0.57", "qwen", true));
         assert_eq!((r.lanes, r.queue, r.pool_used, r.pool_total, r.tps), (2, 1, 25, 100, 0));
 
         // A node joins and the first one generates: the rows follow without a restart.
@@ -453,7 +462,7 @@ mod tests {
 
     #[test]
     fn a_head_with_no_nodes_yet_shows_no_rows_not_itself() {
-        let head = head_metrics_server(Arc::new(Mutex::new(crate::fleet_metrics::fleet_metrics(&[], "head", "qwen"))));
+        let head = head_metrics_server(Arc::new(Mutex::new(crate::fleet_metrics::fleet_metrics(&[], "head", &["qwen".to_string()]))));
         assert!(poll(&head, None, &mut HashMap::new()).is_empty());
     }
 

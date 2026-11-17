@@ -8,9 +8,12 @@
 | `superfluid launch <agent>` | run a coding agent against a local model, starting a server if none answers |
 | `superfluid stop` | stop the server `launch` started |
 | `superfluid fleet token` | print the fleet token, making it the first time |
+| `superfluid fleet nodes [<head>]` | list a fleet head's nodes; `--json` prints the head's answer |
+| `superfluid fleet remove <name> [<head>]` | remove a node from a fleet head until the head restarts |
 | `superfluid node join [<head>] --model <m>` | serve a model to a fleet head from this machine |
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
+| `superfluid models` | list the models pulled here, or the hub catalog's |
 | `superfluid compat` | what this build was built for: the runtime contracts it checks at load |
 | `superfluid self <subcommand>` | update Superfluid itself, or switch between the versions installed here |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
@@ -37,6 +40,7 @@ Flags of `serve`, `launch`, `runtime`, `session`, `media` and `self` take their 
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
 | 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts Superfluid can tell this from a flag it got wrong (2), and from an install Superfluid tried that failed (1) |
+| 5 | (`node join`) the fleet head removed this node; it refuses the node until the head restarts |
 
 `superfluid node join` exits 2 on every failure, including a model that did not load, a failed pull and a head that refused the token.
 
@@ -53,7 +57,7 @@ superfluid serve basecompute/Qwen3.8-27B                # BaseRT
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M        # llama.cpp
 superfluid serve mlx-community/Qwen3-4B-4bit           # MLX (Apple silicon)
 superfluid serve ./Qwen3-4B-Q4_K_M.gguf                 # runtime picked by format
-superfluid serve ./model.gguf --port 9000 --api-key "$KEY" --max-batch 4
+superfluid serve ./model.gguf --port 9000 --api-key-file ~/.superfluid/key --max-batch 4
 ```
 
 ### Model
@@ -81,7 +85,8 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--host <addr>` / `--port <N>` | `127.0.0.1` / `8453` | The HTTP address as two flags; `--http` wins. |
 | `--socket <path>` | `$SUPERFLUID_HOME/superfluid.sock` | Native session API socket. Falls back to `$TMPDIR/superfluid-<uid>.sock` when the default path is too long for a unix socket. |
 | `--sessions <dir>` | `$SUPERFLUID_HOME/sessions` | Session store: log, parks, media, files, batches. One server per directory. |
-| `--api-key <key>` | none | Require `Authorization: Bearer <key>` or `X-Api-Key` on every route but `/health`. |
+| `--api-key <key>` | none | Require `Authorization: Bearer <key>` or `X-Api-Key` on every route but `/health`. `ps` shows it to every user; prefer `--api-key-file` or `SUPERFLUID_API_KEY`. |
+| `--api-key-file <path>` | | The key, read from this file with the whitespace around it trimmed; a missing or empty file is refused, one group or others can read is warned about. Refused beside `--api-key`. With neither flag, `SUPERFLUID_API_KEY` gives the key. |
 | `--key-policy <file.json>` | none | Per-key class, rate, concurrency and admin rights; turns authentication on. See [Security](../deployment/security.md#key-policy). |
 | `--rate-limit <rpm>` | 0 (off) | Requests per minute per client IP. |
 | `--drain-timeout <sec>` | 60 | On `SIGUSR1`, how long in-flight requests get before exit. |
@@ -187,6 +192,7 @@ See [Speculative decoding](../features/speculative_decoding.md).
 | `-v`, `--verbose` | | Same as `--log-filter debug`. |
 | `--log-dir <dir>` | stderr | JSON log files `superfluid.<n>.jsonl` (64 MiB each, 8 kept). |
 | `--log-file <path>` | none | Redirect stderr to this file (append). |
+| `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event, for a program that runs `serve` ([Start-up events](events.md)). Also `SUPERFLUID_LOG_FORMAT`. |
 | `--tui` / `--no-tui` | on in a terminal | Live monitor in the terminal. |
 | `--otlp-metrics <url>` | off | Push metrics to `<url>/v1/metrics` (`http://` only). |
 | `--otlp-interval-ms <N>` | 15000 | Metrics push interval. |
@@ -220,11 +226,13 @@ Flags from earlier releases are accepted with a notice naming what replaced them
 ## `superfluid launch`
 
 ```sh
-superfluid launch                                   # list the agents and whether each is installed
+superfluid launch [--json]                          # list the agents and whether each is installed
 superfluid launch <agent> [--model <m>] [--http <addr:port>] [--api-key <key>] [--print] [-- <agent args>...]
 ```
 
 Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. That server's log goes to `$SUPERFLUID_HOME/logs/serve.log`. `--http` defaults to `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`; `--api-key` to `$SUPERFLUID_API_KEY`. `--model` defaults to the model `launch` last started a server with. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](../integrations/index.md).
+
+`superfluid launch --json` prints the list as one JSON object: `schema` (1; a key is only added under the same number), `agents` (each with `name`, `aliases`, `title`, `binary`, `installed`, `path`, where on `PATH` it was found or null, and `install`), `server` (`pid` and `address` of the server `launch` started, or null) and `last_model` (the model `launch` starts a server with when none answers, or null). With an agent, `--json` is refused.
 
 ## `superfluid stop`
 
@@ -257,6 +265,30 @@ superfluid runtime options <id> [--json]
 `remove <id>` with no install removes the runtime's only install; when it has more, it names them and removes nothing, and `--all` removes every one. The bare id is also how `superfluid runtimes` lists the default install.
 
 See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](../models/runtimes.md#per-runtime-options).
+
+## `superfluid models`
+
+```sh
+superfluid models [--catalog] [--refresh] [--json]
+```
+
+Lists the models pulled here, with their id, runtime, size and path. A pull that succeeds records the model in `$SUPERFLUID_HOME/pulls/`. A model whose path is gone is listed as `missing: <path>`; `superfluid serve <id>` pulls it again. A model pulled before Superfluid kept these records is marked `*`: its id is read back from its lock's name, with the hub catalog's help, and its runtime, size and path are not known. A last line counts the hub catalog's variants and models, how many of them are downloaded here, and when the copy here was fetched.
+
+| flag | meaning |
+|---|---|
+| `--catalog` | list the hub catalog's models instead (`id:quant`, size, architecture, backend), marking those downloaded here |
+| `--refresh` | fetch the hub catalog now; if that fails, list the copy kept here and exit 1 |
+| `--json` | print one JSON document with both lists, whatever `--catalog` says |
+
+Without `--refresh` the command never fetches the catalog. `serve` refreshes the copy at `$SUPERFLUID_HOME/cache/hub-catalog.json` once a day.
+
+```json
+{"schema": 1, "downloaded": [...], "catalog_updated": "2026-11-06", "catalog_fetched": 1762905600, "catalog": [...]}
+```
+
+Each `downloaded` entry has `id` (as pulled, `:tag` included), `served_name`, `runtime`, `path`, `size` (bytes), `pulled_at` (Unix seconds), `exists` and `id_guessed`. A guessed entry has `null` for what its lock does not say. Each `catalog` entry has the fields the cached catalog has, plus `downloaded`. `catalog_updated` is the catalog's own date and `catalog_fetched` is when the copy here was fetched (Unix seconds).
+
+A size counts each file once and follows links to files wherever they lead, so a Hugging Face snapshot whose weights live in the shared `blobs/` directory is counted in full.
 
 ## `superfluid compat`
 
@@ -298,10 +330,10 @@ superfluid media gc [--socket <path>]            # sweep blobs no session refere
 ## `superfluid top`
 
 ```sh
-superfluid top [--api-key <key>] [<host:port> ...]
+superfluid top [--api-key <key> | --api-key-file <path>] [<host:port> ...]
 ```
 
-Live per-node view over each server's `/metrics`. A [fleet head](distributed_serving.md)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds the fleet head on the local network. A keyed server needs `--api-key`, else it shows as `401`. `q` or `Esc` quits.
+Live per-node view over each server's `/metrics`. A [fleet head](distributed_serving.md)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds a fleet head on the local network: one of this machine's fleet token if a token is here, else one that announces no network, else any. A keyed server needs its key (`--api-key`, `--api-key-file` or `SUPERFLUID_API_KEY`), else it shows as `401`. `q` or `Esc` quits.
 
 ## `superfluid-workerd` and `superfluid-noded`
 

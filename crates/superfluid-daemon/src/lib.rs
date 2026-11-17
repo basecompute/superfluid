@@ -23,11 +23,13 @@ pub mod template_codec;
 pub mod tool_fragment;
 pub mod fleet;
 pub mod fleet_manager;
+pub mod fleet_api;
 pub mod fleet_warm;
 pub(crate) mod fleet_daemon;
 pub mod idempotency;
 pub mod fleet_join;
 pub mod fleet_mdns;
+pub mod fleet_models;
 pub mod fleet_token;
 #[cfg(feature = "tui")]
 pub mod tui;
@@ -51,6 +53,7 @@ pub mod runtime;
 pub mod runtime_options;
 pub mod runtime_pick;
 pub mod installs;
+pub mod models;
 pub mod pulls;
 pub mod runtimes;
 pub mod runtimes_report;
@@ -58,6 +61,7 @@ pub mod versions;
 pub mod selfupdate;
 pub mod linked;
 pub mod dylib_tokenizer;
+pub mod events;
 pub mod export;
 pub mod otlp;
 pub mod media;
@@ -885,6 +889,11 @@ impl Daemon {
     /// For a daemon over a fleet: the nodes up of all the head knows, whatever each serves.
     pub fn fleet_nodes(&self) -> Option<(usize, usize)> {
         self.fleet.as_ref().map(|(fleet, _)| fleet.nodes_up())
+    }
+
+    /// The fleet a daemon over one places its generations on.
+    pub fn fleet_manager(&self) -> Option<std::sync::Arc<fleet_manager::FleetManager>> {
+        self.fleet.as_ref().map(|(fleet, _)| std::sync::Arc::clone(fleet))
     }
 
     fn assemble(
@@ -1973,9 +1982,17 @@ impl Daemon {
     }
 
     pub fn metrics_text(&self) -> String {
+        self.metrics_text_serving(&[])
+    }
+
+    /// As [`Self::metrics_text`]; over a fleet, the head's info names every model in `served`
+    /// after this daemon's own, where a server with several models knows them all.
+    pub fn metrics_text_serving(&self, served: &[String]) -> String {
         let mut out = metrics::render_prometheus(&self.stats);
         if let Some((fleet, model)) = &self.fleet {
-            out.push_str(&fleet_metrics::fleet_metrics(&fleet.status(), &metrics::hostname(), model));
+            let models: Vec<String> =
+                std::iter::once(model.clone()).chain(served.iter().filter(|m| *m != model).cloned()).collect();
+            out.push_str(&fleet_metrics::fleet_metrics(&fleet.status(), &metrics::hostname(), &models));
         }
         out.push_str(&format!(
             "# HELP superfluid_telemetry_dropped_total Telemetry records dropped by the bounded sinks (log lines and OTLP spans).\n# TYPE superfluid_telemetry_dropped_total counter\nsuperfluid_telemetry_dropped_total {}\n",

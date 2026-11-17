@@ -70,11 +70,18 @@ impl Busy {
     }
 }
 
+/// What a node is told of its head's models at each handshake ([`NodeAgent::with_on_head`]).
+pub type HeadHook = Arc<dyn Fn(Option<&superfluid_proto::handshake::Served>) + Send + Sync>;
+
 pub struct NodeAgent {
     daemon: Arc<Daemon>,
     shared: Arc<Mutex<AgentShared>>,
     identity: String,
     model_name: String,
+    /// The id the model is pulled by, told to the head, which announces it to nodes that follow.
+    model_id: Option<String>,
+    /// What the node tells the head of itself ([`superfluid_proto::handshake::FOLLOWS_HEAD`]).
+    feature_flags: u64,
     start: Instant,
     handshake_timeout: Duration,
     idle_timeout: Duration,
@@ -94,6 +101,8 @@ pub struct NodeAgent {
     tokenizer_impl: Option<Arc<dyn superfluid_engine::Tokenizer>>,
     /// Called when a head this node dialed asks for a connection for short calls.
     on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Told, at each handshake, what the head stated it serves over the link.
+    on_head: Option<HeadHook>,
 }
 
 /// The largest blob a node takes from its head.
@@ -130,6 +139,7 @@ impl NodeAgent {
             tokenizer: 0,
             tokenizer_impl: None,
             on_control_ask: None,
+            on_head: None,
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -143,6 +153,8 @@ impl NodeAgent {
             })),
             identity: identity.into(),
             model_name: model_name.into(),
+            model_id: None,
+            feature_flags: 0,
             start: Instant::now(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -161,6 +173,8 @@ impl NodeAgent {
             shared: Arc::clone(&self.shared),
             identity: self.identity.clone(),
             model_name: self.model_name.clone(),
+            model_id: self.model_id.clone(),
+            feature_flags: self.feature_flags,
             start: self.start,
             handshake_timeout: self.handshake_timeout,
             idle_timeout: self.idle_timeout,
@@ -174,6 +188,7 @@ impl NodeAgent {
             tokenizer: self.tokenizer,
             tokenizer_impl: self.tokenizer_impl.clone(),
             on_control_ask: self.on_control_ask.clone(),
+            on_head: self.on_head.clone(),
         }
     }
 
@@ -182,6 +197,19 @@ impl NodeAgent {
     pub fn with_timeouts(mut self, handshake: Duration, idle: Duration) -> NodeAgent {
         self.handshake_timeout = handshake;
         self.idle_timeout = idle;
+        self
+    }
+
+    /// Tells each head the id the model is pulled by, `org/model:tag`.
+    pub fn with_model_id(mut self, id: impl Into<String>) -> NodeAgent {
+        self.model_id = Some(id.into());
+        self
+    }
+
+    /// Tells each head this node follows its first model, so the head does not take on the
+    /// model the node serves.
+    pub fn following(mut self) -> NodeAgent {
+        self.feature_flags |= superfluid_proto::handshake::FOLLOWS_HEAD;
         self
     }
 
@@ -202,6 +230,13 @@ impl NodeAgent {
 
     /// For a node that dials its head: `dial` is called when the head asks for one connection
     /// more, which it keeps for short calls; it may be called more than once.
+    /// Tells `hook`, at each handshake, what the head stated it serves in its hello, over a
+    /// link the token authenticates: `None` from a head that states nothing.
+    pub fn with_on_head(mut self, hook: impl Fn(Option<&superfluid_proto::handshake::Served>) + Send + Sync + 'static) -> NodeAgent {
+        self.on_head = Some(Arc::new(hook));
+        self
+    }
+
     pub fn with_on_control_ask(mut self, dial: impl Fn() + Send + Sync + 'static) -> NodeAgent {
         self.on_control_ask = Some(Arc::new(dial));
         self
@@ -304,7 +339,8 @@ impl NodeAgent {
             node_identity: self.identity.clone(),
             capacity: self.capacity(),
             loadable_models: vec![self.model_name.clone()],
-            feature_flags: 0,
+            feature_flags: self.feature_flags,
+            model_ids: self.model_id.iter().cloned().collect(),
             limits: LinkFLimits {
                 max_frame: superfluid_proto::MAX_FRAME,
                 transfer_window: 8,
@@ -328,6 +364,9 @@ impl NodeAgent {
             }
             Err(LinkFError::Unauthorized) => return Err(LinkFError::Unauthorized.into()),
             Err(e) => return Err(e.into()),
+        }
+        if let Some(hook) = &self.on_head {
+            hook(endpoint.head_serves());
         }
         let heartbeat = match self.idle_timeout {
             t if t.is_zero() => Liveness::DEFAULT.heartbeat,
@@ -527,6 +566,8 @@ impl NodeAgent {
                     dial();
                 }
             }
+            // The head removed this node and closes the link; whoever serves it says so.
+            msg_type::REMOVED => return Err(LinkFError::Removed.into()),
             msg_type::TOKENIZER_EXPORT_REQ => {
                 let m: linkf::TokenizerExportReqMsg = postcard::from_bytes(&frame.payload)?;
                 endpoint.send(msg_type::TOKENIZER_EXPORT, &self.export(m.request_id))?;
