@@ -1399,6 +1399,37 @@ mod embedding_sampling_tests {
     }
 
     #[test]
+    fn echoing_the_advertised_penalties_generates_as_leaving_them_out() {
+        let quiet = ModelSamplingDefaults::default();
+        let published = ModelSamplingDefaults { repetition_penalty: Some(1.1), ..Default::default() };
+        let presence = |op: SamplingOverrides| SamplingOverrides { presence_penalty: Some(1.5), ..op };
+        let ops = [
+            SamplingOverrides::default(),
+            presence(SamplingOverrides::default()),
+            policy(),
+            presence(policy()),
+            presence(SamplingOverrides { repeat_penalty: Some(1.3), ..policy() }),
+            SamplingOverrides { repeat_penalty: Some(1.3), ..Default::default() },
+        ];
+        for m in [&quiet, &published] {
+            for op in ops {
+                let omitted = extras_of(None, None, None, &op, m);
+                let (p, r) = advertised_penalties(m, &op);
+                // /props names the presence penalty only when the operator set one.
+                let echoed = extras_of(op.presence_penalty.map(|_| p), None, Some(r), &op, m);
+                assert_eq!(
+                    (echoed.presence_penalty, echoed.frequency_penalty, echoed.repeat_penalty),
+                    (omitted.presence_penalty, omitted.frequency_penalty, omitted.repeat_penalty),
+                    "{op:?} over {m:?}"
+                );
+            }
+        }
+        // The case the advertised repeat used to miss: the policy's 1.07 is off under a presence default.
+        assert_eq!(advertised_penalties(&quiet, &presence(policy())), (1.5, 1.0));
+        assert_eq!(advertised_penalties(&quiet, &policy()), (0.0, 1.07));
+    }
+
+    #[test]
     fn model_truncation_wins_as_a_set_but_not_model_temperature_or_repeat() {
         for model in [
             ModelSamplingDefaults { top_p: Some(0.95), ..Default::default() },
@@ -1454,6 +1485,16 @@ pub(crate) fn advertised_generation_defaults(
     op: &SamplingOverrides,
 ) -> GenParams {
     params_of_for(None, None, None, None, None, model, op)
+}
+
+/// The presence and repeat penalties a request that names none generates with, as `/props`
+/// advertises them. `extras_of` resolves them, so a client that echoes them back generates as it
+/// would have by leaving them out: under an embedding's fallback policy an operator presence
+/// penalty turns the fallback repeat off, as a request's does. `op` is the model's own
+/// (`for_daemon`).
+pub(crate) fn advertised_penalties(model: &ModelSamplingDefaults, op: &SamplingOverrides) -> (f32, f32) {
+    let e = extras_of(None, None, None, op, model);
+    (e.presence_penalty, if e.repeat_penalty == 0.0 { 1.0 } else { e.repeat_penalty })
 }
 
 pub(crate) fn repeat_penalty_for(

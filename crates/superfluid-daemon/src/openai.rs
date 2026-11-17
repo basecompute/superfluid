@@ -16,7 +16,7 @@ use crate::{Daemon, DaemonError};
 pub use crate::inference::{TokenLimits, SamplingOverrides, SamplingFallback, RequestQos};
 pub use crate::http_state::{HttpQosPolicy, QOS_HEADER, BATCH_INVARIANT_HEADER};
 use crate::inference::{
-    advertised_generation_defaults, repeat_penalty_for, next_id, unix_now,
+    advertised_generation_defaults, advertised_penalties, next_id, unix_now,
     ChatRequest, CompletionRequest, RequestPolicy, DEFAULT_MAX_CONTEXT,
     Kind,
 };
@@ -1878,12 +1878,10 @@ async fn props(
         (None, None)
     };
     let chat_template = if loaded { daemon.chat_template() } else { None };
-    let eff_repeat = (resolved.is_some() || st.sampling.repeat_penalty.is_some() || st.sampling.fallback.is_some()).then(|| {
-        match repeat_penalty_for(None, &st.sampling, &resolved.clone().unwrap_or_default()) {
-            0.0 => 1.0,
-            v => v,
-        }
-    });
+    // What a request that names no penalty generates with, so a client echoing them gets the same.
+    let op = st.sampling.for_daemon(&daemon);
+    let (presence, repeat) = advertised_penalties(&resolved.clone().unwrap_or_default(), &op);
+    let eff_repeat = (resolved.is_some() || op.repeat_penalty.is_some() || op.fallback.is_some()).then_some(repeat);
     let window = match daemon.max_stream_tokens() {
         n if loaded && n > 0 => u32::try_from(n).unwrap_or(u32::MAX),
         _ => st.limits.max_context,
@@ -1892,10 +1890,10 @@ async fn props(
     if let Some(v) = eff_repeat {
         settings["repeat_penalty"] = v.into();
     }
-    if let Some(v) = st.sampling.for_daemon(&daemon).presence_penalty {
-        settings["presence_penalty"] = v.into();
+    if op.presence_penalty.is_some() {
+        settings["presence_penalty"] = presence.into();
     }
-    let eff = advertised_generation_defaults(&resolved.clone().unwrap_or_default(), &st.sampling.for_daemon(&daemon));
+    let eff = advertised_generation_defaults(&resolved.clone().unwrap_or_default(), &op);
     if resolved.is_some() || st.sampling.temperature.is_some() || st.sampling.fallback.is_some() {
         settings["temperature"] = eff.temperature.into();
     }

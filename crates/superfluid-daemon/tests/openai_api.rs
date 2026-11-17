@@ -4923,6 +4923,79 @@ fn an_operator_presence_penalty_is_the_default_where_the_engine_penalizes() {
     }
 }
 
+/// The (presence, repeat) penalties each lane reached the engine with, for the test below alone.
+static PENALTIES_ADMITTED: std::sync::Mutex<Vec<(f32, f32)>> = std::sync::Mutex::new(Vec::new());
+
+#[test]
+fn props_advertises_the_penalties_an_omitted_request_runs_with() {
+    // An embedding's fallback policy drops its repeat penalty under a presence penalty, and the
+    // operator's presence default counts as one: /props advertises what that leaves, so a client
+    // that echoes it generates as one that leaves the penalties out.
+    fn record(a: &superfluid_abi::LaneAdmit) -> bool {
+        PENALTIES_ADMITTED.lock().unwrap().push((a.params.presence_penalty, a.params.repeat_penalty));
+        false
+    }
+    let fallback = openai::SamplingFallback {
+        temperature: 0.0,
+        repeat_penalty: 1.07,
+        top_p: 1.0,
+        top_k: 0,
+        min_p: 0.0,
+        frequency_penalty_as_repeat: true,
+    };
+    let serve_with = |op: openai::SamplingOverrides| {
+        let dir = std::env::temp_dir().join(format!("superfluid-openai-props-penalties-{}-{}", std::process::id(), unique()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = EngineHost::spawn(|| {
+            let engine = MockEngine::new(EngineConfig::default())
+                .with_capability_descriptor(r#"{"descriptor_version":1,"sampling":{"engine_penalties":true}}"#)
+                .refusing_admits(record, superfluid_abi::Status::RejectCertUnmatched);
+            (engine, None)
+        })
+        .expect("spawn");
+        let daemon = Daemon::with_options(store, host, Box::new(MockChatCodec), Default::default()).unwrap();
+        let reg = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock-model", Arc::new(daemon)));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = openai::ServeConfig { sampling: op, ..Default::default() };
+        std::thread::spawn(move || {
+            let _ = openai::serve_blocking_config(listener, reg, cfg);
+        });
+        addr
+    };
+    let admitted = |addr, extra: &str| {
+        PENALTIES_ADMITTED.lock().unwrap().clear();
+        let body = format!(r#"{{"model":"mock-model","messages":[{{"role":"user","content":"hi"}}],"max_tokens":2{extra}}}"#);
+        let (status, _, out) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{extra}: {out}");
+        PENALTIES_ADMITTED.lock().unwrap().last().copied().expect("a lane was admitted")
+    };
+    let advertised = |addr| {
+        let (status, _, body) = http(addr, "GET", "/props", "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let s = &v["default_generation_settings"];
+        (s["presence_penalty"].as_f64(), s["repeat_penalty"].as_f64().expect("a repeat penalty is advertised"))
+    };
+
+    let policy = openai::SamplingOverrides { fallback: Some(fallback), ..Default::default() };
+    let with_presence = openai::SamplingOverrides { presence_penalty: Some(1.5), ..policy };
+    let addr = serve_with(with_presence);
+    let (presence, repeat) = advertised(addr);
+    assert_eq!((presence, repeat), (Some(1.5), 1.0), "the policy's repeat is off under the presence default");
+    assert_eq!(admitted(addr, ""), (1.5, 1.0), "what an omitted request runs with");
+    let echo = format!(r#","presence_penalty":{},"repeat_penalty":{repeat}"#, presence.unwrap());
+    assert_eq!(admitted(addr, &echo), (1.5, 1.0), "echoing /props changes nothing");
+
+    // Without the presence default the policy's repeat stands, advertised and run alike.
+    let addr = serve_with(policy);
+    let (presence, repeat) = advertised(addr);
+    assert_eq!((presence, repeat as f32), (None, 1.07));
+    assert_eq!(admitted(addr, ""), (0.0, 1.07));
+    assert_eq!(admitted(addr, &format!(r#","repeat_penalty":{repeat}"#)), (0.0, 1.07));
+}
+
 struct RefusingTemplateCodec;
 
 const REFUSAL: &str = "Conversation roles must alternate user/assistant/user/assistant/...";
