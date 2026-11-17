@@ -78,7 +78,12 @@ pub fn static_descriptor(id: &str, export_encodings: &[u8], verify_rows: bool) -
             "space_promote": no("no demoted tier: parks are lossless exports"),
             "cache_evict_entries": true,
         },
-        "sampling": {"logit_bias": true, "penalties": true, "top_logprobs_max": MAX_TOP_LOGPROBS},
+        "sampling": {
+            "logit_bias": true,
+            "penalties": true,
+            "engine_penalties": no(format!("a penalized lane leaves the {id} runtime's sampler for the host's, token by token")),
+            "top_logprobs_max": MAX_TOP_LOGPROBS,
+        },
         "determinism": {
             "seed_reproducible": true,
             "batch_invariant": no("a batched round or another prefill chunking moves logits by rounding"),
@@ -152,6 +157,8 @@ mod tests {
         assert_eq!(v["serving"]["park_lossless"], true);
         assert_eq!(v["modalities"]["image_encode"], "the fake runtime has no media path");
         assert_eq!(v["sampling"]["grammar"], "the fake runtime lists no vocabulary to compile grammars against");
+        assert_eq!(v["sampling"]["penalties"], true);
+        assert_eq!(v["sampling"]["engine_penalties"], "a penalized lane leaves the fake runtime's sampler for the host's, token by token");
         assert_eq!(v["state"]["rollback"], true, "the fake cuts anywhere by default");
         assert_eq!(v["state"]["shared_prefix_seed"], true);
         assert!(v.get("sampling_defaults").is_none(), "a checkpoint that claims none carries none");

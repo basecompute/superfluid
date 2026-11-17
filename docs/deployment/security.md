@@ -12,10 +12,10 @@ Superfluid binds to loopback and asks for no credential unless told to. Nothing 
 | fleet node agent | `superfluid-noded --listen` | `0.0.0.0:8454` | the fleet token (`--auth-file`, default `$SUPERFLUID_HOME/fleet/token`); required off loopback |
 | fleet head, for nodes that join | `serve --fleet-listen` | off | the fleet token; without one, only nodes on this machine |
 
-Without `--api-key` or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
+Without a key (`--api-key-file`, `--api-key` or `SUPERFLUID_API_KEY`) or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
 
 ```
-superfluid: WARNING --api-key not set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key.
+superfluid: WARNING no API key set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key-file (or --api-key, $SUPERFLUID_API_KEY).
 ```
 
 ## Requests from web pages
@@ -25,16 +25,19 @@ Every HTTP listener refuses, with `403` and code `origin_refused`, a request who
 ## API key
 
 ```sh
-superfluid serve <model> --api-key "$(cat /etc/superfluid/key)"
+superfluid serve <model> --api-key-file /etc/superfluid/key
 curl -H 'Authorization: Bearer <key>' http://127.0.0.1:8453/v1/models
 curl -H 'x-api-key: <key>' http://127.0.0.1:8453/v1/models
 ```
 
+- The key comes from `--api-key <key>`, else `--api-key-file <path>`, else the `SUPERFLUID_API_KEY` environment variable. `ps` shows a key on the command line to every user of the machine; the file and the variable it does not. The two flags together are refused.
+- `--api-key-file` reads the file with the whitespace around the key trimmed, and refuses a missing or empty one. Like ssh with a private key, it warns when group or others may read the file: `chmod 600` it.
+- `superfluid launch` hands the server it starts the key in `SUPERFLUID_API_KEY`, not on its command line. `superfluid top` takes `--api-key-file` and the variable too.
 - Every route except `GET /health` needs the key, including `/metrics` and the Ollama routes. An unknown path without a key is a 401.
 - Keys are compared in constant time against a SHA-256 digest.
 - A missing or wrong key is 401 with `type: "authentication_error"`, `code: "invalid_api_key"`.
 
-Admin routes change the server for everyone and need the global key or a policy key with `admin: true`: `POST /v1/models/load`, `/v1/models/unload`, `DELETE /v1/models/{id}`, `POST /v1/lora/load`, `/v1/lora/unload`.
+Admin routes change the server for everyone and need the global key or a policy key with `admin: true`: `POST /v1/models/load`, `/v1/models/unload`, `DELETE /v1/models/{id}`, `POST /v1/lora/load`, `/v1/lora/unload`, and on a fleet head `DELETE /v1/fleet/nodes/{name}`. A fleet head with no key takes node removal only from its own machine.
 
 > [!WARNING]
 > `POST /v1/models/load` loads any path the daemon's user can read. Never expose an unauthenticated server beyond the host.
@@ -134,6 +137,12 @@ The fleet token (`superfluid fleet token`: 32 random bytes as hex at `$SUPERFLUI
 - With no token, the links are plain TCP and nothing is checked. A head with `--fleet-listen` and no token takes only nodes on its own machine; `node join` with no token dials only a head on loopback.
 - `superfluid-noded` bound off loopback refuses to start without a token, unless `--insecure-no-auth`, which accepts any peer that reaches it. Use that only behind a transport that already authenticates (WireGuard, Tailscale).
 - `--api-key`, `--key-policy` and `--rate-limit` protect the head's own HTTP listener (a policy's class ceilings do not apply: the head has no scheduler).
+
+## Fleet discovery
+
+A head with `--fleet-listen` announces itself on the local network over mDNS (`_superfluid-fleet._tcp`): its fleet port, its HTTP port, the models it serves and, when it has a token, a network id. The network id is the first 16 hex digits of SHA-256 over a fixed prefix and the token. Nodes use it to join only a head of their own network.
+
+The network id reveals nothing practical about a token made by `superfluid fleet token` (256 random bits). A short or guessable `--token` can be brute-forced from it offline by anyone on the network, so use a generated token. A head with no token announces no network id.
 
 ## Putting it on a network
 

@@ -8,6 +8,7 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 
 | variable | default | meaning |
 |---|---|---|
+| `SUPERFLUID_LOG_FORMAT` | `text` | `json` makes every stderr line of `serve` and `node join` one JSON event, as `--log-format json` does; the flag wins. See [Start-up events](events.md). |
 | `SUPERFLUID_HOME` | `~/.superfluid` | Home directory: the installed Superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
 | `SUPERFLUID_NO_UPDATE_CHECK` | unset | Set to anything but `0` to stop `serve` from checking once a day whether a newer Superfluid is out. See [Updating Superfluid](updating.md). |
 | `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |
@@ -91,6 +92,9 @@ Each `--spec-*` flag, when absent, falls back to a variable, then to a constant.
       pinned                (optional) the install `runtime use` pinned
   pulls/
     <id>.lock               one pull of a model at a time
+    <id>.json               the record of a pull that succeeded: id, runtime, path, size; `superfluid models` reads it
+  cache/
+    hub-catalog.json        the hub catalog, refreshed daily by `serve`
 ```
 
 Models pulled by id are not stored here; each runtime keeps them where its own tool does (llama.cpp and MLX use the Hugging Face cache; `basert` uses `BASERT_MODELS_DIR`).
@@ -138,4 +142,4 @@ A log record that was written completely but fails its checksum stops the start.
 | runtime | `/v1/models/load`'s `runtime`, then `--runtime <model>=<id>`, then `--runtime <id>`, then inferred |
 | context window | `--max-context N`, else sized for the device where the runtime can, else 8192 |
 | HTTP address | `--http`, then `--host`/`--port`, then `127.0.0.1:8453` |
-| authentication | `--key-policy`, then `--api-key`, else off with a warning |
+| authentication | `--key-policy`, then `--api-key`, then `--api-key-file`, then `SUPERFLUID_API_KEY`, else off with a warning |

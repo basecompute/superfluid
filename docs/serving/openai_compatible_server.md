@@ -38,6 +38,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 | `POST`, `GET`, `DELETE` | `/v1/files`, `/v1/files/{id}`, `/v1/files/{id}/content` | upload, list, read, delete files |
 | `POST`, `GET` | `/v1/batches`, `/v1/batches/{id}`, `/v1/batches/{id}/cancel` | batch jobs |
 | `POST`, `GET` | `/v1/lora/load`, `/v1/lora/unload`, `/v1/lora` | activate (admin), clear (admin) or show a LoRA adapter; `basert` bundles only |
+| `GET`, `DELETE` | `/v1/fleet/nodes`, `/v1/fleet/nodes/{name}` | a fleet head's nodes; remove one (admin) ([Distributed serving](distributed_serving.md#list-and-remove-nodes)) |
 | `GET` | `/health` | liveness; never authenticated |
 | `GET` | `/props` | the served model and its effective generation defaults |
 | `GET` | `/slots` | lane and KV-pool snapshot (llama.cpp shape) |
@@ -67,7 +68,7 @@ curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/jso
 | `n` | 1 | 1-128; streaming uses 1 |
 | `temperature`, `top_p` | model default | see [Sampling](../features/sampling.md) |
 | `seed` | fresh per request | |
-| `presence_penalty`, `frequency_penalty` | 0 | -2 to 2; outside is a 400 |
+| `presence_penalty`, `frequency_penalty` | 0 | -2 to 2; outside is a 400. `--presence-penalty` sets the first's default on `basert` |
 | `stop` | none | string or array; excluded from output |
 | `logprobs`, `top_logprobs` | off | `top_logprobs` 0-20 |
 | `logit_bias` | none | `{"<token id>": bias}` |

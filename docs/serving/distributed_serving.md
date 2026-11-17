@@ -25,6 +25,8 @@ superfluid node join --model basecompute/Qwen3.8-27B --token <the token>
 
 The node finds the head on the local network (`_superfluid-fleet._tcp`, which also carries the head's HTTP port for `superfluid top`, or give `<host:port>` as the first argument), pulls the model as `serve` would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as `joined:<identity>` and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; `--model-name` overrides that. A head with no token takes nodes from its own machine only.
 
+Several fleets can share one local network. A head with a token announces a network id derived from that token, and a node joins only a head of its own token's network. A head of another network is never joined; the node says so once and keeps looking. A head that announces no network id (an older release) is joined only when no head of the node's network answers. When a node loses its head it looks again the same way, so it may join another machine of its network that took over. A head given as `<host:port>` is dialed only there, never looked for.
+
 | flag | default | meaning |
 |---|---|---|
 | `--model <path\|id>` | required | the model; an id is pulled first |
@@ -36,6 +38,7 @@ The node finds the head on the local network (`_superfluid-fleet._tcp`, which al
 | `--model-name <id>` | what the head announces, else the model's id | the name the head matches on |
 | `--offline` | off | pull nothing |
 | `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
+| `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event, for a program that runs the node ([Start-up events](events.md)) |
 
 A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed. The head also asks it for one connection more, which no generation takes: a short call (a prompt's encoding, a state operation) goes over it while every lane is generating. A node from before this release opens only its lanes.
 
@@ -105,7 +108,7 @@ superfluid serve /models/qwen.base /models/gemma.base --http 0.0.0.0:8453 --flee
 
 The head loads no engine. A model given by path is still read there for its tokenizer and chat template; one given by id takes them from a node, as above. Its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no `--max-context`. It logs where each session is placed and every move to another node. `--dialect`, `--tool-call-parser` and `--temperature`/`--top-p`/`--top-k`/`--min-p` apply on the head. `--api-key`, `--key-policy` and `--rate-limit` protect its listener; a policy's `class` and `max_class` do not apply, since the head has no scheduler.
 
-Refused on the head (set them on each node's own `superfluid serve`): `--class-lanes`, `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant`, `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--otlp-endpoint`. A batch-invariant lane is refused however it is asked for (a key whose policy grants `batch_invariant`, or `SetQos`) with 400 `unsupported_on_fleet`: a node batches each generation with the others it runs.
+Refused on the head (set them on each node's own `superfluid serve`): `--class-lanes`, `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant`, `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--presence-penalty`, `--otlp-endpoint`. A batch-invariant lane is refused however it is asked for (a key whose policy grants `batch_invariant`, or `SetQos`) with 400 `unsupported_on_fleet`: a node batches each generation with the others it runs.
 
 ## Placement policies
 
@@ -125,14 +128,43 @@ The head runs the same HTTP server as `superfluid serve` on one machine, with th
 
 - Every API format, streaming or not, with tools: OpenAI Chat Completions, Completions and Responses ([OpenAI API](openai_compatible_server.md)), Anthropic Messages, and Ollama `/api/chat` and `/api/generate`.
 - `GET /v1/models`: the model the fleet serves, with the largest window a node serving it has.
-- `GET /metrics`: the server's own series, and each node as the head sees it, labelled `node` and `addr`: `superfluid_fleet_node_up`, `_lanes`, `_lanes_active`, `_queue_depth`, `_pool_blocks_used`, `_pool_blocks_total` and `_decode_tokens_total`. A generation's tokens count as they arrive. The KV pool is the node's latest status, sent every 2 s. `superfluid top` pointed at the head, or run with no address on the head's network, shows every node from it.
+- `GET /metrics`: the server's own series, and each node as the head sees it, labelled `node`, `addr` and `model`: `superfluid_fleet_node_up`, `_lanes`, `_lanes_active`, `_queue_depth`, `_pool_blocks_used`, `_pool_blocks_total` and `_decode_tokens_total`. `model` is what the head places on the node, from its report, several joined by `,`; it is empty until the node has answered. A generation's tokens count as they arrive. The KV pool is the node's latest status, sent every 2 s. `superfluid_fleet_head_info` names the head's default model as `model` and every model it serves as `models`. `superfluid top` pointed at the head, or run with no address on the head's network, shows every node from it, with its model.
 - `GET /health`: 200 with `{"status": "ok"}` while a node that is up serves at least one of the head's models, 503 with `"no_nodes"` while none does. Both carry `nodes_up` and `nodes_known` over every node, and `models`, each model's own `nodes_up`. It needs no API key.
+- `GET /v1/fleet/nodes` and `DELETE /v1/fleet/nodes/{name}`: the head's nodes, and removing one ([List and remove nodes](#list-and-remove-nodes)).
 
 Structured output (`response_format`, tool grammars), `logit_bias`, `logprobs`, presence, frequency and repeat penalties and `ignore_eos` reach the node that runs the generation: the head keeps a grammar or bias and the node compiles it. Embeddings (`/v1/embeddings`, `/api/embed`) run on a node serving the model. A LoRA (`/v1/lora/load`, `/unload`) is loaded on every node serving the model, from a path on each node; load it again after a node joins. These need nodes on this release; an older node refuses them by name.
 
 Image and audio parts, and transcription (`/v1/audio/transcriptions`, `/translations`), reach the node too: the head sends each file once per connection, by its SHA-256, and the node keeps it in its own media pool. A streamed transcription's segments come through as the node has them. The head describes the model as the first node serving it does (`capabilities` in `/v1/models`), so a route refuses what the nodes cannot do as a single server refuses what its engine cannot.
 
 Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has a ten-minute wall-clock ceiling.
+
+## List and remove nodes
+
+`GET /v1/fleet/nodes` lists the nodes the head knows, in the order it learned them. It follows the API's auth, as `/v1/files` does; a server that is not a fleet head answers 404 with `not_a_fleet_head`.
+
+```json
+{"object": "list", "schema": 1, "data": [
+  {"object": "fleet.node", "name": "spark", "addr": "10.0.0.22", "connection": "joined",
+   "up": true, "since": 1763020800, "models": ["qwen"], "sessions": 2,
+   "lanes": 8, "lanes_active": 2, "queue_depth": 0, "kv_blocks_used": 120, "kv_blocks_total": 4096,
+   "decode_tokens": 51234, "max_context_tokens": 32768, "max_lanes": 8}
+]}
+```
+
+`name` is the node's identity, or the address the head dials while it has not answered; `addr` is where a joined node dialed from, or where the head dials it. `connection` is `joined` (`superfluid node join`) or `dialed` (`--fleet`). `since` is when the node last came up or went down, in Unix seconds. `models` is what the head places there, empty until the node has answered. `sessions` counts the generations placed there now, `lanes` the connections open to it and `lanes_active` the generations the head has running there; `max_context_tokens` and `max_lanes` are what the node reported. `schema` grows only by fields added.
+
+`DELETE /v1/fleet/nodes/{name}` removes a node, named as the list names it or by its address, until the head restarts. The head closes the node's connections, telling it on each; a generation running there moves to another node as it does when a node fails, with no token delivered twice. The head no longer places on, lists, counts or dials the node, and refuses its identity when it dials in again. The answer is 200 with the node's entry and `"removed": true`, 404 with `node_not_found` for a name it does not list, and 409 with `node_ambiguous` when several nodes go by the name. The head logs `fleet node '<name>' removed (by <address>)`, and with `--log-format json` writes a `fleet.node.removed` event ([Start-up events](events.md)).
+
+Removal changes the fleet for every client, so it is an admin route: with `--key-policy` it takes a key with `admin: true`. A head with no API key takes it only from its own machine; from elsewhere it answers 403 with `admin_required`, so start the head with `--api-key` to remove nodes from another machine.
+
+A node that joined exits when the head removes it, with code 5 and `the head at <addr> removed this node; it will refuse it until it restarts` (with `--log-format json`, a `node.removed` event and then `error`); a node that follows the head's model does not start again to follow it. Started again with no `--model`, the node is refused when it asks the head what it serves, and exits the same way before it pulls anything. `superfluid-noded` keeps serving other heads and says the head removed it once per head. A node from before this release is not told: it sees its links close and dials again, and the head turns it away each time, logging that once.
+
+```sh
+superfluid fleet nodes [<head>] [--json]   # a line per node: address, link, state, lanes busy, models
+superfluid fleet remove <name> [<head>]    # remove one
+```
+
+`<head>` is the head's HTTP address, `127.0.0.1:8453` by default; the key, when the head has one, is read from `SUPERFLUID_API_KEY`.
 
 ## Failure handling
 
@@ -143,6 +175,7 @@ Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has
 | node restarts | comes back with an empty cache, or with the prefixes it kept under `--park`; the head reconnects, and a conversation's next turn goes back to it |
 | connection idle or busy | each end sends a heartbeat when it has sent nothing for 5 s, during a generation too; a connection a node closed anyway is replaced before it is used |
 | node goes silent | after 30 s with nothing from it, the head gives the connection up and re-places what ran there, as for a node that failed |
+| node removed | its connections close and what ran there is re-placed, as for a node that failed; the head refuses it until the head restarts ([List and remove nodes](#list-and-remove-nodes)) |
 | head restarts | in-flight requests fail; a client that retries with its `Idempotency-Key` gets a finished answer replayed, and one the restart cut short runs again ([Retrying with Idempotency-Key](openai_compatible_server.md#retrying-with-idempotency-key)). The head still knows which node ran each conversation, so the next turn goes where it is warm |
 | head misses a lease renewal | the node fences the session and emits nothing more; the head stops waiting 30 s past the generation's wall-clock budget |
 

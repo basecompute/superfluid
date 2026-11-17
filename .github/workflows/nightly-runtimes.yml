@@ -309,10 +309,15 @@ jobs:
             gh pr create --base "$BASE" --head "$branch" --title "$title" --body "$body" $draft
           fi
 
-      # The walk-back found its build: the issue its failing builds are on says so,
-      # for whoever closes it or looks into the builds above.
-      - name: Passed a walk-back, so note it on the issue
-        if: needs.llamacpp.result == 'success' && inputs.walking_back_from != ''
+      # Every build that passes is noted on the open issue, for whoever closes it or
+      # looks into the builds it names. A hop of the walk-back is older than the build
+      # it walked back from, which failed, so it is only noted. Any other pass closes
+      # the issue when no build the issue names as failing is newer: the recipe is no
+      # longer held at its last tested build, and the next build to fail opens an
+      # issue of its own, titled with that build, instead of going under a title that
+      # names a build since passed. A `workflow_dispatch` of an older build leaves it open.
+      - name: Passed, so note it on the open issue
+        if: needs.llamacpp.result == 'success'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
@@ -322,8 +327,27 @@ jobs:
             echo "no open issue to note $BUILD on"
             exit 0
           fi
-          gh issue comment "$existing" --body "$BUILD, walked back to from $FROM, passes: $RUN. The recipe moves to it; the newer builds this issue names still fail."
-          echo "noted $BUILD on the open issue #$existing"
+          if [ -n "$FROM" ]; then
+            gh issue comment "$existing" --body "$BUILD, walked back to from $FROM, passes: $RUN. The recipe moves to it in the nightly's PR. This run tested $BUILD alone, not the newer builds this issue names."
+            echo "noted $BUILD on the open issue #$existing"
+            exit 0
+          fi
+          # The builds the issue names as failing: its title's, and each "bNNNN fails too" the
+          # failure step comments. A walk-back's note names a build that passed, and is not one.
+          newest=$(gh issue view "$existing" --json title,comments \
+            --jq '[.title, .comments[].body] | .[] | capture("(?<b>b[0-9]+) (breaks the adapter|fails too)") | .b | ltrimstr("b")' \
+            | sort -n | tail -n 1) || { echo "::error::cannot read the open issue #$existing"; exit 1; }
+          passed="$BUILD passes: $RUN. The recipe moves to it in the nightly's PR."
+          if [ -z "$newest" ]; then
+            gh issue comment "$existing" --body "$passed This issue stays open: its title and comments name no failing build to compare $BUILD with."
+            echo "noted $BUILD on the open issue #$existing, which names no failing build"
+          elif [ "${BUILD#b}" -ge "$newest" ]; then
+            gh issue close "$existing" --comment "$passed No build this issue names as failing is newer than $BUILD, so it is closed; a build that fails from here on opens an issue of its own."
+            echo "closed the open issue #$existing: no build it names as failing is newer than $BUILD"
+          else
+            gh issue comment "$existing" --body "$passed This issue stays open: it names b$newest as failing, which is newer than $BUILD."
+            echo "noted $BUILD on the open issue #$existing, which names the newer b$newest as failing"
+          fi
 
       # Only a failure says the build breaks the adapter. A cancelled run, or the macOS
       # leg expiring in the queue with its runner offline (GitHub cancels it after a

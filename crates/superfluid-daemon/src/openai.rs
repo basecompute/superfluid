@@ -16,7 +16,7 @@ use crate::{Daemon, DaemonError};
 pub use crate::inference::{TokenLimits, SamplingOverrides, SamplingFallback, RequestQos};
 pub use crate::http_state::{HttpQosPolicy, QOS_HEADER, BATCH_INVARIANT_HEADER};
 use crate::inference::{
-    advertised_generation_defaults, repeat_penalty_for, next_id, unix_now,
+    advertised_generation_defaults, advertised_penalties, repeat_before_load, next_id, unix_now,
     ChatRequest, CompletionRequest, RequestPolicy, DEFAULT_MAX_CONTEXT,
     Kind,
 };
@@ -171,7 +171,9 @@ async fn auth_layer(
             || (path.starts_with("/v1/files/") && !path.ends_with("/content"))
             || path.starts_with("/v1/responses/")))
         || is_cancel
-        || (m == axum::http::Method::DELETE && (path.starts_with("/v1/files/") || path.starts_with("/v1/responses/")));
+        || (m == axum::http::Method::DELETE && (path.starts_with("/v1/files/") || path.starts_with("/v1/responses/")))
+        || path == "/v1/fleet/nodes"
+        || path.starts_with("/v1/fleet/nodes/");
     let takes_slot = !lightweight;
     let spends_rate = !is_cancel;
     let h = req.headers();
@@ -186,7 +188,8 @@ async fn auth_layer(
         .and_then(|t| bearer.and_then(|v| t.lookup(v)).or_else(|| x_api_key.and_then(|v| t.lookup(v))));
     let admin_route = *req.method() == axum::http::Method::POST
         && matches!(path, "/v1/models/load" | "/v1/models/unload" | "/v1/lora/load" | "/v1/lora/unload")
-        || (*req.method() == axum::http::Method::DELETE && path.starts_with("/v1/models/"));
+        || (*req.method() == axum::http::Method::DELETE
+            && (path.starts_with("/v1/models/") || path.starts_with("/v1/fleet/nodes/")));
     if let Some(key) = keyed {
         if admin_route && !key.admin {
             if key.admit(false, true).is_err() {
@@ -215,8 +218,8 @@ async fn auth_layer(
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"error": {
                     "message": format!(
-                        "API key '{}' may not administer the server (model and LoRA load/unload); \
-                         use the global --api-key or grant \"admin\": true on this key",
+                        "API key '{}' may not administer the server (model and LoRA load/unload, fleet \
+                         node removal); use the global --api-key or grant \"admin\": true on this key",
                         key.name
                     ),
                     "type": "permission_error",
@@ -573,7 +576,9 @@ pub fn serve_blocking_config(
             .route("/v1/responses/{id}/cancel", post(crate::responses::cancel))
             .route("/v1/lora/load", post(lora_load))
             .route("/v1/lora/unload", post(lora_unload))
-            .route("/v1/lora", get(lora_list));
+            .route("/v1/lora", get(lora_list))
+            .route("/v1/fleet/nodes", get(crate::fleet_api::nodes_list))
+            .route("/v1/fleet/nodes/{name}", axum::routing::delete(crate::fleet_api::nodes_remove));
         if cfg.surface.anthropic {
             app = app.route("/v1/messages", post(crate::anthropic::messages));
         }
@@ -698,7 +703,7 @@ async fn metrics(
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         {
-            let mut text = state.default_daemon().metrics_text();
+            let mut text = state.default_daemon().metrics_text_serving(&state.registry.names());
             if let Some(keys) = &state.keys {
                 let only = key.as_ref().map(|k| &*k.0 .0).filter(|k| !k.admin);
                 text.push_str(&keys.metrics_text_for(only));
@@ -1878,12 +1883,20 @@ async fn props(
         (None, None)
     };
     let chat_template = if loaded { daemon.chat_template() } else { None };
-    let eff_repeat = (resolved.is_some() || st.sampling.repeat_penalty.is_some() || st.sampling.fallback.is_some()).then(|| {
-        match repeat_penalty_for(None, &st.sampling, &resolved.clone().unwrap_or_default()) {
-            0.0 => 1.0,
-            v => v,
-        }
-    });
+    // What a request that names no penalty generates with, so a client echoing them gets the same.
+    // The presence default is the model's engine's to take: a model not loaded yet is answered by
+    // the default model's daemon, whose record is not its own, so the default and a repeat penalty
+    // that turns on it wait for the load.
+    let op = st.sampling.for_daemon(&daemon);
+    let model_defaults = resolved.clone().unwrap_or_default();
+    let (presence, repeat) = if loaded {
+        let (presence, repeat) = advertised_penalties(&model_defaults, &op);
+        (op.presence_penalty.map(|_| presence), Some(repeat))
+    } else {
+        (None, repeat_before_load(&model_defaults, &st.sampling))
+    };
+    let eff_repeat =
+        repeat.filter(|_| resolved.is_some() || st.sampling.repeat_penalty.is_some() || st.sampling.fallback.is_some());
     let window = match daemon.max_stream_tokens() {
         n if loaded && n > 0 => u32::try_from(n).unwrap_or(u32::MAX),
         _ => st.limits.max_context,
@@ -1892,7 +1905,10 @@ async fn props(
     if let Some(v) = eff_repeat {
         settings["repeat_penalty"] = v.into();
     }
-    let eff = advertised_generation_defaults(&resolved.clone().unwrap_or_default(), &st.sampling.for_daemon(&daemon));
+    if let Some(v) = presence {
+        settings["presence_penalty"] = v.into();
+    }
+    let eff = advertised_generation_defaults(&resolved.clone().unwrap_or_default(), &op);
     if resolved.is_some() || st.sampling.temperature.is_some() || st.sampling.fallback.is_some() {
         settings["temperature"] = eff.temperature.into();
     }
@@ -1900,6 +1916,14 @@ async fn props(
         settings["top_p"] = eff.top_p.into();
         settings["top_k"] = eff.top_k.into();
         settings["min_p"] = eff.min_p.into();
+    }
+    // A model not loaded yet is answered by the default model's daemon, whose speculation is not
+    // its own: a temperature the speculation cap would change waits for the model's own. Where the
+    // cap cannot change it, the one advertised above is the model's either way.
+    if !loaded && crate::inference::temperature_before_load(&resolved.clone().unwrap_or_default(), &st.sampling).is_none() {
+        if let Some(s) = settings.as_object_mut() {
+            s.remove("temperature");
+        }
     }
     let advertised = st.limits.default_max_tokens.unwrap_or(st.limits.max_context);
     settings["n_predict"] = advertised.into();

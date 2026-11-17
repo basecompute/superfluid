@@ -223,6 +223,10 @@ pub struct FleetHead {
     blobs_sent: std::collections::HashSet<String>,
     /// The node's tokenizer digest (0: not known, as from a node on version 2).
     tokenizer: u64,
+    /// Set when the head removes the node ([`FleetHead::removed_when`]).
+    removed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Whether the node was told it was removed, which is said once.
+    told_removed: bool,
 }
 
 /// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
@@ -241,6 +245,13 @@ pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 pub const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long the head waits, once it has told a node it was removed, for the node to close the
+/// link before the head does: closed at once, the link could be reset before the node read it.
+const REMOVED_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Why a removed node's calls fail.
+pub const REMOVED_WHY: &str = "removed from the fleet";
+
 fn closed_at_handshake() -> String {
     "closed the connection at the handshake; check that --fleet-auth holds the token in the node's --auth-file".into()
 }
@@ -254,13 +265,19 @@ fn handshake(addr: &str, auth: Vec<u8>) -> Result<(Endpoint, HelloAckF), DaemonE
     } else {
         Endpoint::from_tcp_secure(stream, &auth, superfluid_linkf::Role::Initiator, HANDSHAKE_TIMEOUT)
     };
-    hello(opened, addr, auth, "--fleet-auth and the node's --auth-file differ")
+    hello(opened, addr, auth, None, "--fleet-auth and the node's --auth-file differ")
 }
 
 /// The head's side of the handshake on a stream just opened to `peer`, dialed or accepted,
 /// with each way it can fail named for the operator; `mismatch` says what differs when the
 /// token is refused.
-fn hello(opened: Result<Endpoint, superfluid_linkf::LinkFError>, peer: &str, auth: Vec<u8>, mismatch: &str) -> Result<(Endpoint, HelloAckF), DaemonError> {
+fn hello(
+    opened: Result<Endpoint, superfluid_linkf::LinkFError>,
+    peer: &str,
+    auth: Vec<u8>,
+    serves: Option<superfluid_proto::handshake::Served>,
+    mismatch: &str,
+) -> Result<(Endpoint, HelloAckF), DaemonError> {
     use superfluid_linkf::LinkFError;
     let node = |why: String| DaemonError::FleetNode { addr: peer.to_string(), why };
     let mut endpoint = match opened {
@@ -272,7 +289,11 @@ fn hello(opened: Result<Endpoint, superfluid_linkf::LinkFError>, peer: &str, aut
         Err(LinkFError::Closed | LinkFError::Io(_)) if !auth.is_empty() => return Err(node(closed_at_handshake())),
         Err(e) => return Err(node(e.to_string())),
     };
-    match endpoint.hello_as_head_within(auth, HANDSHAKE_TIMEOUT) {
+    let answered = match serves {
+        Some(serves) => endpoint.hello_as_head_serving_within(auth, serves, HANDSHAKE_TIMEOUT),
+        None => endpoint.hello_as_head_within(auth, HANDSHAKE_TIMEOUT),
+    };
+    match answered {
         Ok(ack) => Ok((endpoint, ack)),
         Err(LinkFError::Unauthorized) => Err(node(format!("refused the fleet token: {mismatch}"))),
         Err(LinkFError::Closed | LinkFError::Io(_)) => Err(node(closed_at_handshake())),
@@ -282,6 +303,16 @@ fn hello(opened: Result<Endpoint, superfluid_linkf::LinkFError>, peer: &str, aut
         ))),
         Err(e) => Err(node(e.to_string())),
     }
+}
+
+/// Tells the node at the other end of `endpoint` the head removed it ([`msg_type::REMOVED`]),
+/// and closes the link once the node has closed its end, or after [`REMOVED_GRACE`].
+fn tell_removed(endpoint: &mut Endpoint) {
+    if endpoint.send(msg_type::REMOVED, &()).is_ok() {
+        let by = std::time::Instant::now() + REMOVED_GRACE;
+        while std::time::Instant::now() < by && endpoint.pump().is_ok() {}
+    }
+    let _ = endpoint.shutdown();
 }
 
 fn is_transient(e: &DaemonError) -> bool {
@@ -304,15 +335,46 @@ impl FleetHead {
     /// A node that dialed in; the head still opens the handshake, encrypted when it has a token.
     pub fn accept(sock: std::net::TcpStream, auth: Vec<u8>) -> Result<FleetHead, DaemonError> {
         let peer = sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        Self::accept_stating(sock, auth, None, &|_| false)?
+            .ok_or_else(|| DaemonError::FleetNode { addr: peer, why: "it only asked what this head serves".into() })
+    }
+
+    /// As [`Self::accept`], stating in the hello what the head serves; `None` for a node that
+    /// only asked that ([`superfluid_proto::handshake::ASKS_ONLY`]) and hung up, which is not
+    /// taken in, and for one `refused` names by its identity, a node the head removed: it is told
+    /// so ([`msg_type::REMOVED`]) whether it came to serve or only to ask.
+    pub fn accept_serving(
+        sock: std::net::TcpStream,
+        auth: Vec<u8>,
+        serves: superfluid_proto::handshake::Served,
+        refused: &dyn Fn(&str) -> bool,
+    ) -> Result<Option<FleetHead>, DaemonError> {
+        Self::accept_stating(sock, auth, Some(serves), refused)
+    }
+
+    fn accept_stating(
+        sock: std::net::TcpStream,
+        auth: Vec<u8>,
+        serves: Option<superfluid_proto::handshake::Served>,
+        refused: &dyn Fn(&str) -> bool,
+    ) -> Result<Option<FleetHead>, DaemonError> {
+        let peer = sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
         let opened = if auth.is_empty() {
             Endpoint::from_tcp(sock)
         } else {
             Endpoint::from_tcp_secure(sock, &auth, superfluid_linkf::Role::Initiator, HANDSHAKE_TIMEOUT)
         };
-        let (endpoint, node) = hello(opened, &peer, auth.clone(), "its token differs from this head's")?;
+        let (mut endpoint, node) = hello(opened, &peer, auth.clone(), serves, "its token differs from this head's")?;
+        if refused(&node.node_identity) {
+            tell_removed(&mut endpoint);
+            return Ok(None);
+        }
+        if node.feature_flags & superfluid_proto::handshake::ASKS_ONLY != 0 {
+            return Ok(None);
+        }
         let mut head = FleetHead::from_parts(endpoint, node, String::new(), auth);
         head.read_tokenizer()?;
-        Ok(head)
+        Ok(Some(head))
     }
 
     fn from_parts(mut endpoint: Endpoint, node: HelloAckF, addr: String, auth: Vec<u8>) -> FleetHead {
@@ -329,6 +391,8 @@ impl FleetHead {
             liveness: Liveness::DEFAULT,
             blobs_sent: std::collections::HashSet::new(),
             tokenizer: 0,
+            removed: None,
+            told_removed: false,
         }
     }
 
@@ -344,7 +408,7 @@ impl FleetHead {
         }
         let by = std::time::Instant::now() + HANDSHAKE_TIMEOUT;
         loop {
-            for frame in self.endpoint.pump()? {
+            for frame in self.pump()? {
                 if frame.msg_type == msg_type::TOKENIZER {
                     self.tokenizer = postcard::from_bytes::<linkf::TokenizerMsg>(&frame.payload)?.digest;
                     return Ok(());
@@ -404,7 +468,7 @@ impl FleetHead {
     fn frames_within(&mut self, within: std::time::Duration) -> Result<Vec<superfluid_proto::Frame>, DaemonError> {
         let by = std::time::Instant::now() + within;
         loop {
-            let frames = self.endpoint.pump()?;
+            let frames = self.pump()?;
             if !frames.is_empty() {
                 return Ok(frames);
             }
@@ -436,6 +500,40 @@ impl FleetHead {
         &self.node
     }
 
+    /// Ends this connection's calls once `removed` is set, as the head sets it when it removes
+    /// the node: the next read tells the node so and fails as a lost node's does, and the
+    /// connection is not dialed again.
+    pub fn removed_when(&mut self, removed: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.removed = Some(removed);
+    }
+
+    fn is_removed(&self) -> bool {
+        self.removed.as_ref().is_some_and(|r| r.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn removed_error(&self) -> DaemonError {
+        DaemonError::FleetNode { addr: self.node.node_identity.clone(), why: REMOVED_WHY.into() }
+    }
+
+    /// The frames the node sent since the last read; once the node is removed, it is told so and
+    /// the read fails.
+    fn pump(&mut self) -> Result<Vec<superfluid_proto::Frame>, DaemonError> {
+        if self.is_removed() {
+            self.say_removed();
+            return Err(self.removed_error());
+        }
+        Ok(self.endpoint.pump()?)
+    }
+
+    /// Tells the node the head removed it ([`msg_type::REMOVED`]) and closes the link once the
+    /// node has closed its end, or after [`REMOVED_GRACE`]. A node that predates the message sees
+    /// only the link close.
+    pub fn say_removed(&mut self) {
+        if !std::mem::replace(&mut self.told_removed, true) {
+            tell_removed(&mut self.endpoint);
+        }
+    }
+
     /// Reads what the node sent while the connection sat idle, which also sends it a heartbeat
     /// when one is due; an error means it is gone.
     /// Asks a node that dialed in for a connection for short calls ([`msg_type::CONTROL_ASK`]).
@@ -445,7 +543,7 @@ impl FleetHead {
     }
 
     pub fn drain_status(&mut self) -> Result<(), DaemonError> {
-        for frame in self.endpoint.pump()? {
+        for frame in self.pump()? {
             self.absorb(frame)?;
         }
         Ok(())
@@ -484,6 +582,10 @@ impl FleetHead {
 
 
     pub fn reconnect(&mut self, addr: &str, auth: Vec<u8>) -> Result<Vec<u64>, DaemonError> {
+        if self.is_removed() {
+            self.say_removed();
+            return Err(self.removed_error());
+        }
         let _ = self.endpoint.shutdown();
         if addr.is_empty() {
             return Err(DaemonError::FleetNode {
@@ -885,7 +987,7 @@ impl FleetHead {
             }
             // One read at a time, not a wait for frames: a version 2 node is never given up for
             // silence, so the deadline above is what ends a wait on one that went quiet.
-            for frame in self.endpoint.pump()? {
+            for frame in self.pump()? {
                 let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKEN_EVENTS) else {
                     continue;
                 };
@@ -1051,7 +1153,7 @@ impl FleetHead {
             }
             // One read at a time, not a wait for frames: a version 2 node is never given up for
             // silence, so the deadline above is what ends a wait on one that went quiet.
-            for frame in self.endpoint.pump()? {
+            for frame in self.pump()? {
                 let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKEN_EVENTS) else {
                     continue;
                 };

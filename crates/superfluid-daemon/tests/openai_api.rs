@@ -3398,6 +3398,83 @@ fn props_describes_an_unloaded_model_and_autoload_loads_it() {
     assert_eq!(v["chat_template"], "template-a", "{v}");
 }
 
+/// The temperature each lane reached the engine with, for the test below alone.
+static TEMPERATURES_ADMITTED: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+
+#[test]
+fn props_for_a_model_not_loaded_yet_does_not_borrow_the_default_models_speculation() {
+    // `--spec-max-temperature` caps the temperature of a model that speculates. The default model
+    // speculates, model-b does not, model-c does: before a load /props is answered from the default
+    // model's daemon, so a temperature the cap would change waits for the model's own.
+    use superfluid_daemon::registry::{ModelLoader, ModelRegistry};
+    fn record(a: &superfluid_abi::LaneAdmit) -> bool {
+        TEMPERATURES_ADMITTED.lock().unwrap().push(a.params.temperature);
+        false
+    }
+    fn daemon(speculate: bool) -> Arc<Daemon> {
+        let dir = std::env::temp_dir().join(format!("superfluid-props-spec-unloaded-{}-{}", std::process::id(), unique()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let mut cfg = EngineConfig::default();
+        cfg.spaces.retain(|s| s.kind == superfluid_abi::space_kind::PAGED_TOKEN_KV);
+        let host = EngineHost::spawn(move || {
+            (MockEngine::new(cfg).refusing_admits(record, superfluid_abi::Status::RejectCertUnmatched), None)
+        })
+        .expect("spawn");
+        let opts = superfluid_daemon::DaemonOptions {
+            speculate: speculate.then(|| "prompt-lookup".to_string()),
+            ..Default::default()
+        };
+        let d = Arc::new(Daemon::with_options(store, host, Box::new(MockChatCodec), opts).unwrap());
+        assert_eq!(d.speculation().is_some(), speculate);
+        d
+    }
+    // The loader gets the model's source, its path here.
+    let loader: ModelLoader = Box::new(|source: &str, _runtime| Ok(daemon(source.contains("model-c"))));
+    let registry = Arc::new(ModelRegistry::with_initial("model-a", daemon(true), loader));
+    registry.register_known("model-b", std::path::Path::new("/models/model-b.base"));
+    registry.register_known("model-c", std::path::Path::new("/models/model-c.base"));
+    let fallback = openai::SamplingFallback {
+        temperature: 1.0,
+        repeat_penalty: 1.0,
+        top_p: 1.0,
+        top_k: 0,
+        min_p: 0.0,
+        frequency_penalty_as_repeat: false,
+    };
+    let op = openai::SamplingOverrides { spec_max_temperature: Some(0.6), fallback: Some(fallback), ..Default::default() };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = openai::ServeConfig { sampling: op, ..Default::default() };
+    std::thread::spawn(move || {
+        let _ = openai::serve_blocking_config(listener, registry, cfg);
+    });
+
+    let props = |query: &str| {
+        let (status, _, body) = http(addr, "GET", &format!("/props{query}"), "");
+        assert_eq!(status, 200, "{query}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        (v["loaded"].as_bool().unwrap(), v["default_generation_settings"]["temperature"].as_f64().map(|t| t as f32))
+    };
+    let admitted = |model: &str, extra: &str| {
+        TEMPERATURES_ADMITTED.lock().unwrap().clear();
+        let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"max_tokens":2{extra}}}"#);
+        let (status, _, out) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{model}{extra}: {out}");
+        TEMPERATURES_ADMITTED.lock().unwrap().last().copied().expect("a lane was admitted")
+    };
+
+    assert_eq!(props("?model=model-a"), (true, Some(0.6)), "the default model speculates: capped");
+    assert_eq!(props("?model=model-b"), (false, None), "not the default model's speculation to say");
+    assert_eq!(admitted("model-b", ""), 1.0, "model-b does not speculate: no cap");
+    assert_eq!(props("?model=model-b"), (true, Some(1.0)), "loaded: its own speculation answers");
+    assert_eq!(admitted("model-b", r#","temperature":1.0"#), 1.0, "echoing /props changes nothing");
+
+    assert_eq!(props("?model=model-c"), (false, None));
+    assert_eq!(props("?model=model-c&autoload=1"), (true, Some(0.6)), "loaded to answer: it speculates");
+    assert_eq!(admitted("model-c", ""), 0.6);
+}
+
 #[test]
 fn startup_multi_model_keys_by_stem_and_keeps_the_first_default() {
     use superfluid_daemon::registry::{ModelLoader, ModelRegistry};
@@ -4864,6 +4941,211 @@ fn spec_max_temperature_follows_the_routed_models_speculation() {
     assert!((t_spec - 0.6).abs() < 1e-6, "speculating model capped: {t_spec}");
     let t_plain = props_temp(serve(Arc::clone(&plain))).expect("temperature advertised");
     assert!((t_plain - 1.0).abs() < 1e-6, "plain model left alone: {t_plain}");
+}
+
+#[test]
+fn an_operator_presence_penalty_is_the_default_where_the_engine_penalizes() {
+    // The model's capability record decides whether the operator's default applies to it.
+    let serve_on = |record: Option<&'static str>, op: openai::SamplingOverrides| {
+        let dir = std::env::temp_dir().join(format!(
+            "superfluid-openai-presence-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = EngineHost::spawn(move || {
+            let engine = MockEngine::new(EngineConfig::default());
+            (match record {
+                Some(r) => engine.with_capability_descriptor(r),
+                None => engine,
+            }, None)
+        })
+        .expect("spawn");
+        let daemon = Daemon::with_options(store, host, Box::new(MockChatCodec), Default::default()).unwrap();
+        let reg = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock-model", Arc::new(daemon)));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = openai::ServeConfig { sampling: op, ..Default::default() };
+        std::thread::spawn(move || {
+            let _ = openai::serve_blocking_config(listener, reg, cfg);
+        });
+        addr
+    };
+    let props_presence = |addr| {
+        let (status, _, body) = http(addr, "GET", "/props", "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        v["default_generation_settings"]["presence_penalty"].as_f64()
+    };
+    let op = openai::SamplingOverrides { presence_penalty: Some(1.5), ..Default::default() };
+    let none = openai::SamplingOverrides::default();
+
+    const PENALIZES: &str = r#"{"descriptor_version":1,"sampling":{"engine_penalties":true}}"#;
+    assert_eq!(props_presence(serve_on(Some(PENALIZES), none)), None, "no flag, nothing to advertise");
+    for other in [Some(r#"{"descriptor_version":1,"sampling":{"engine_penalties":"on the host"}}"#), Some(r#"{"descriptor_version":1}"#), None] {
+        assert_eq!(props_presence(serve_on(other, op)), None, "{other:?}: served without the default");
+    }
+
+    let addr = serve_on(Some(PENALIZES), op);
+    assert_eq!(props_presence(addr), Some(1.5));
+    for extra in ["", r#","presence_penalty":0"#, r#","presence_penalty":-0.5"#] {
+        let body = format!(
+            r#"{{"model":"mock-model","messages":[{{"role":"user","content":"hi"}}],"max_tokens":4{extra}}}"#
+        );
+        let (status, _, out) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{extra}: {out}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["usage"]["completion_tokens"], 4, "{extra}: {v}");
+    }
+}
+
+/// The (presence, repeat) penalties each lane reached the engine with, for the test below alone.
+static PENALTIES_ADMITTED: std::sync::Mutex<Vec<(f32, f32)>> = std::sync::Mutex::new(Vec::new());
+
+#[test]
+fn props_advertises_the_penalties_an_omitted_request_runs_with() {
+    // An embedding's fallback policy drops its repeat penalty under a presence penalty, and the
+    // operator's presence default counts as one: /props advertises what that leaves, so a client
+    // that echoes it generates as one that leaves the penalties out.
+    fn record(a: &superfluid_abi::LaneAdmit) -> bool {
+        PENALTIES_ADMITTED.lock().unwrap().push((a.params.presence_penalty, a.params.repeat_penalty));
+        false
+    }
+    let fallback = openai::SamplingFallback {
+        temperature: 0.0,
+        repeat_penalty: 1.07,
+        top_p: 1.0,
+        top_k: 0,
+        min_p: 0.0,
+        frequency_penalty_as_repeat: true,
+    };
+    let serve_with = |op: openai::SamplingOverrides| {
+        let dir = std::env::temp_dir().join(format!("superfluid-openai-props-penalties-{}-{}", std::process::id(), unique()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = EngineHost::spawn(|| {
+            let engine = MockEngine::new(EngineConfig::default())
+                .with_capability_descriptor(r#"{"descriptor_version":1,"sampling":{"engine_penalties":true}}"#)
+                .refusing_admits(record, superfluid_abi::Status::RejectCertUnmatched);
+            (engine, None)
+        })
+        .expect("spawn");
+        let daemon = Daemon::with_options(store, host, Box::new(MockChatCodec), Default::default()).unwrap();
+        let reg = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock-model", Arc::new(daemon)));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cfg = openai::ServeConfig { sampling: op, ..Default::default() };
+        std::thread::spawn(move || {
+            let _ = openai::serve_blocking_config(listener, reg, cfg);
+        });
+        addr
+    };
+    let admitted = |addr, extra: &str| {
+        PENALTIES_ADMITTED.lock().unwrap().clear();
+        let body = format!(r#"{{"model":"mock-model","messages":[{{"role":"user","content":"hi"}}],"max_tokens":2{extra}}}"#);
+        let (status, _, out) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{extra}: {out}");
+        PENALTIES_ADMITTED.lock().unwrap().last().copied().expect("a lane was admitted")
+    };
+    let advertised = |addr| {
+        let (status, _, body) = http(addr, "GET", "/props", "");
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let s = &v["default_generation_settings"];
+        (s["presence_penalty"].as_f64(), s["repeat_penalty"].as_f64().expect("a repeat penalty is advertised"))
+    };
+
+    let policy = openai::SamplingOverrides { fallback: Some(fallback), ..Default::default() };
+    let with_presence = openai::SamplingOverrides { presence_penalty: Some(1.5), ..policy };
+    let addr = serve_with(with_presence);
+    let (presence, repeat) = advertised(addr);
+    assert_eq!((presence, repeat), (Some(1.5), 1.0), "the policy's repeat is off under the presence default");
+    assert_eq!(admitted(addr, ""), (1.5, 1.0), "what an omitted request runs with");
+    let echo = format!(r#","presence_penalty":{},"repeat_penalty":{repeat}"#, presence.unwrap());
+    assert_eq!(admitted(addr, &echo), (1.5, 1.0), "echoing /props changes nothing");
+
+    // Without the presence default the policy's repeat stands, advertised and run alike.
+    let addr = serve_with(policy);
+    let (presence, repeat) = advertised(addr);
+    assert_eq!((presence, repeat as f32), (None, 1.07));
+    assert_eq!(admitted(addr, ""), (0.0, 1.07));
+    assert_eq!(admitted(addr, &format!(r#","repeat_penalty":{repeat}"#)), (0.0, 1.07));
+}
+
+/// The (presence, repeat) penalties each lane reached the engine with, for the test below alone.
+static UNLOADED_PENALTIES_ADMITTED: std::sync::Mutex<Vec<(f32, f32)>> = std::sync::Mutex::new(Vec::new());
+
+#[test]
+fn props_for_a_model_not_loaded_yet_waits_for_its_own_capability_record() {
+    // The default model's engine applies the penalties; model-b's does not, model-c's does. /props for
+    // a model not loaded yet answers from the default model's daemon, so the presence default (and the
+    // policy's repeat it turns off) is not advertised until the model's own record says.
+    use superfluid_daemon::registry::{ModelLoader, ModelRegistry};
+    const YES: &str = r#"{"descriptor_version":1,"sampling":{"engine_penalties":true}}"#;
+    const NO: &str = r#"{"descriptor_version":1,"sampling":{"engine_penalties":"on the host"}}"#;
+    fn record(a: &superfluid_abi::LaneAdmit) -> bool {
+        UNLOADED_PENALTIES_ADMITTED.lock().unwrap().push((a.params.presence_penalty, a.params.repeat_penalty));
+        false
+    }
+    fn daemon_saying(capabilities: &'static str) -> Arc<Daemon> {
+        let dir = std::env::temp_dir().join(format!("superfluid-openai-props-unloaded-{}-{}", std::process::id(), unique()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = EngineHost::spawn(move || {
+            let engine = MockEngine::new(EngineConfig::default())
+                .with_capability_descriptor(capabilities)
+                .refusing_admits(record, superfluid_abi::Status::RejectCertUnmatched);
+            (engine, None)
+        })
+        .expect("spawn");
+        Arc::new(Daemon::with_options(store, host, Box::new(MockChatCodec), Default::default()).unwrap())
+    }
+    // The loader gets the model's source, its path here.
+    let loader: ModelLoader = Box::new(|source: &str, _runtime| Ok(daemon_saying(if source.contains("model-c") { YES } else { NO })));
+    let registry = Arc::new(ModelRegistry::with_initial("model-a", daemon_saying(YES), loader));
+    registry.register_known("model-b", std::path::Path::new("/models/model-b.base"));
+    registry.register_known("model-c", std::path::Path::new("/models/model-c.base"));
+    let fallback = openai::SamplingFallback {
+        temperature: 0.0,
+        repeat_penalty: 1.07,
+        top_p: 1.0,
+        top_k: 0,
+        min_p: 0.0,
+        frequency_penalty_as_repeat: true,
+    };
+    let op = openai::SamplingOverrides { presence_penalty: Some(1.5), fallback: Some(fallback), ..Default::default() };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = openai::ServeConfig { sampling: op, ..Default::default() };
+    std::thread::spawn(move || {
+        let _ = openai::serve_blocking_config(listener, registry, cfg);
+    });
+
+    let props = |query: &str| {
+        let (status, _, body) = http(addr, "GET", &format!("/props{query}"), "");
+        assert_eq!(status, 200, "{query}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let s = &v["default_generation_settings"];
+        (v["loaded"].as_bool().unwrap(), s["presence_penalty"].as_f64(), s["repeat_penalty"].as_f64().map(|r| r as f32))
+    };
+    let admitted = |model: &str, extra: &str| {
+        UNLOADED_PENALTIES_ADMITTED.lock().unwrap().clear();
+        let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"max_tokens":2{extra}}}"#);
+        let (status, _, out) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{model}{extra}: {out}");
+        UNLOADED_PENALTIES_ADMITTED.lock().unwrap().last().copied().expect("a lane was admitted")
+    };
+
+    assert_eq!(props("?model=model-a"), (true, Some(1.5), Some(1.0)), "the default model takes the presence default");
+    assert_eq!(props("?model=model-b"), (false, None, None), "not the default model's to say");
+    assert_eq!(admitted("model-b", ""), (0.0, 1.07), "its own engine leaves the default off");
+    assert_eq!(props("?model=model-b"), (true, None, Some(1.07)), "loaded: its own record answers");
+    assert_eq!(admitted("model-b", r#","repeat_penalty":1.07"#), (0.0, 1.07), "echoing /props changes nothing");
+
+    assert_eq!(props("?model=model-c"), (false, None, None));
+    assert_eq!(props("?model=model-c&autoload=1"), (true, Some(1.5), Some(1.0)), "loaded to answer: its own record");
+    assert_eq!(admitted("model-c", ""), (1.5, 1.0));
 }
 
 struct RefusingTemplateCodec;
