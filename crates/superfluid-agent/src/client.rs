@@ -66,6 +66,7 @@ impl WorkerClient {
             proto_versions: (PROTO_VERSION, PROTO_VERSION),
             link_role: LinkRole::NodeAgent,
             auth: Vec::new(),
+            serves: None,
         };
         let ack: HelloAckW = client.request(msg_type::HELLO, &hello, msg_type::HELLO_ACK_W)?;
         client.hello = ack;

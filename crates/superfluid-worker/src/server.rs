@@ -315,7 +315,7 @@ impl<E: Engine> WorkerServer<E> {
         }
         match frame.msg_type {
             msg_type::HELLO => {
-                let hello: Hello = postcard::from_bytes(&frame.payload)?;
+                let hello = Hello::decode(&frame.payload)?;
                 let chosen = negotiate(hello.proto_versions, (PROTO_VERSION, PROTO_VERSION))
                     .ok_or(WorkerError::Protocol("no common proto version"))?;
                 let descs: Vec<_> = self.engine.state_spaces().iter().map(desc_to_msg).collect();

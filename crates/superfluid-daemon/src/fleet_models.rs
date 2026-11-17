@@ -10,9 +10,10 @@
 //! An unloaded model stays unloaded when a node that serves it joins, or joins again: the head
 //! says so and does not serve it. `/v1/models/load` serves it again.
 //!
-//! The head announces the id a node pulls each model by, where it knows one: the id it was
-//! given at start, else the first a node serving the model reported. A node that follows its
-//! head pulls the head's first model by it.
+//! The head states in its hello to each node what it serves, with the id a node pulls each
+//! model by where it knows one: the id it was given at start, else the first a node serving
+//! the model reported. A node that follows its head pulls the head's first model by it, as the
+//! head states it over the link; the ids announced on the local network are not followed.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -73,6 +74,12 @@ impl HeadModels {
     pub fn ids(&self) -> Vec<String> {
         let listed = self.listed.lock().expect("head models");
         listed.order.iter().map(|m| listed.ids.get(m).cloned().unwrap_or_default()).collect()
+    }
+
+    /// What the head states it serves in its hello to each node: its models, in order, with
+    /// the id a node pulls each by.
+    pub fn served(&self) -> superfluid_proto::handshake::Served {
+        superfluid_proto::handshake::Served { models: self.names(), ids: self.ids() }
     }
 
     /// Notes the id each of `models` is pulled by, as far as `ids` gives them, for a model the

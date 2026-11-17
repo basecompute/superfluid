@@ -18,6 +18,42 @@ pub struct Hello {
     pub proto_versions: (u16, u16),
     pub link_role: LinkRole,
     pub auth: Vec<u8>,
+    /// What a fleet head serves, stated to the node over the link the token authenticates;
+    /// `None` from a peer that states nothing (a worker's link, a head dialing a node, a head
+    /// released before it). Last, so a peer from before reads the hello and leaves it;
+    /// [`Hello::decode`] reads a hello from before it.
+    pub serves: Option<Served>,
+}
+
+/// The models a fleet head serves, as it states them in its [`Hello`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Served {
+    /// The models, the head's first first.
+    pub models: Vec<String>,
+    /// The id a node pulls each of `models` by (`org/model:tag`), in the same order: empty, or
+    /// shorter, where the head has a model by path only.
+    pub ids: Vec<String>,
+}
+
+/// A hello from a peer released before [`Hello::serves`].
+#[derive(Deserialize)]
+struct HelloBefore {
+    proto_versions: (u16, u16),
+    link_role: LinkRole,
+    auth: Vec<u8>,
+}
+
+impl Hello {
+    /// A hello from a peer of any release; one from before `serves` states nothing.
+    pub fn decode(bytes: &[u8]) -> Result<Hello, postcard::Error> {
+        match postcard::from_bytes::<Hello>(bytes) {
+            Ok(hello) => Ok(hello),
+            Err(e) => match postcard::from_bytes::<HelloBefore>(bytes) {
+                Ok(h) => Ok(Hello { proto_versions: h.proto_versions, link_role: h.link_role, auth: h.auth, serves: None }),
+                Err(_) => Err(e),
+            },
+        }
+    }
 }
 
 pub fn negotiate(offered: (u16, u16), supported: (u16, u16)) -> Option<u16> {
@@ -66,7 +102,7 @@ pub struct HelloAckW {
     pub kv_bits: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapacitySummary {
     pub gpu_memory_bytes: u64,
     pub gpu_memory_free_bytes: u64,
@@ -103,6 +139,11 @@ pub struct HelloAckF {
 /// follows it to another, so a head does not take on the model such a node brings. A head from
 /// before it reads no flags.
 pub const FOLLOWS_HEAD: u64 = 1;
+
+/// [`HelloAckF::feature_flags`]: the node only asks what the head serves, as its hello states
+/// it, and hangs up; a head that knows the flag neither takes it in nor reports a failed join.
+/// A head from before it takes the ack for a node's and reports that it left at the handshake.
+pub const ASKS_ONLY: u64 = 2;
 
 /// An ack from a node released before [`HelloAckF::model_ids`].
 #[derive(Deserialize)]
@@ -193,6 +234,36 @@ mod tests {
         loadable_models: Vec<String>,
         feature_flags: u64,
         limits: LinkFLimits,
+    }
+
+    #[derive(Serialize)]
+    struct HelloFrom {
+        proto_versions: (u16, u16),
+        link_role: LinkRole,
+        auth: Vec<u8>,
+    }
+
+    #[test]
+    fn a_node_from_before_serves_reads_a_hello_that_states_it() {
+        let hello = Hello {
+            proto_versions: (1, 4),
+            link_role: LinkRole::HeadDaemon,
+            auth: b"token".to_vec(),
+            serves: Some(Served { models: vec!["org/a".into(), "b".into()], ids: vec!["org/a:q4".into()] }),
+        };
+        let bytes = postcard::to_stdvec(&hello).unwrap();
+        let before: HelloBefore = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!((before.proto_versions, before.link_role, before.auth), ((1, 4), LinkRole::HeadDaemon, b"token".to_vec()));
+        assert_eq!(Hello::decode(&bytes).unwrap(), hello);
+    }
+
+    #[test]
+    fn a_hello_from_before_serves_states_nothing() {
+        let old = HelloFrom { proto_versions: (1, 4), link_role: LinkRole::HeadDaemon, auth: b"token".to_vec() };
+        let bytes = postcard::to_stdvec(&old).unwrap();
+        let hello = Hello::decode(&bytes).unwrap();
+        assert_eq!((hello.auth.as_slice(), hello.serves), (&b"token"[..], None));
+        assert!(Hello::decode(&bytes[..bytes.len() - 2]).is_err(), "a cut hello is still refused");
     }
 
     #[test]

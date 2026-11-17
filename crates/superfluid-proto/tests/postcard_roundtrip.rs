@@ -488,6 +488,7 @@ fn handshake_hello_and_acks_roundtrip() {
         proto_versions: (1, 3),
         link_role: LinkRole::NodeAgent,
         auth: vec![1, 2, 3],
+        serves: Some(Served { models: vec!["org/a".into()], ids: vec!["org/a:q4".into()] }),
     };
     assert_eq!(roundtrip(&hello), hello);
 

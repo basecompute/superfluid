@@ -12,6 +12,7 @@ use crate::fleet::FleetHead;
 use crate::fleet_manager::FleetManager;
 use crate::fleet_mdns::Search;
 use crate::fleet_models::HeadModels;
+use superfluid_proto::handshake::Served;
 use crate::nodeagent::NodeAgent;
 use crate::runtime_pick::RuntimeId;
 use crate::runtimes::Catalog;
@@ -27,13 +28,16 @@ Usage: superfluid node join [<head-host:port>] [--model <path|org/model[:tag]>] 
   only when no head of this network answers. When the head is lost, the node looks
   again and joins whichever head of its network answers, which may be another machine
   that took over; a head given by address is dialed again there, never looked for.
-  With no --model, the node serves the model its network's head serves first, pulled
-  by the id the head announces and served under the head's name, and follows it: when
-  the head serves another model first (a head that took over, or one restarted with
-  another model), the node lets what it runs finish, closes its links and engine, and
-  starts again with the same arguments to serve the new one. A head that announces no
-  id for its model (one it has by path) is waited on until it does. Such a node finds
-  its head on the local network, so it takes no head address.
+  With no --model, the node asks the head (found on the local network, or at the
+  address given) what it serves, over the link the token authenticates: an announcement
+  on the network only says where to ask, and nothing is pulled on its word. It serves the
+  head's first model, pulled by the id the head states and served under the head's name,
+  and follows it: when the head states another first model (a head that took over, one
+  restarted with another model, or one whose announcement changed and that is asked
+  again), the node lets what it runs finish, closes its links and engine, and starts again
+  with the same arguments to serve the new one. A head that states no id for its model
+  (one it has by path) is waited on; a head that states nothing over the link (released
+  before heads did) is not followed: give --model.
   With --model, the model never changes: the node joins any head of its network, and a
   head that does not serve the model takes it on.
   A model given by id is served under its own name, org/model without the tag, and a
@@ -111,9 +115,6 @@ fn join(args: &[String]) {
             s => fail(format!("unexpected argument {s}")),
         }
     }
-    if model.is_none() && head.is_some() {
-        fail("a node with no --model serves the model its network's head announces on the local network; give --model to join a head by address");
-    }
     if model.is_none() && model_name.is_some() {
         fail("--model-name goes with --model; a node with no --model serves the head's model under the head's name");
     }
@@ -122,18 +123,20 @@ fn join(args: &[String]) {
         crate::fleet_token::write(&home, t.trim().as_bytes()).unwrap_or_else(|e| fail(e));
     }
     let token = crate::fleet_token::read(&home).unwrap_or_default();
+    let identity = identity.unwrap_or_else(crate::metrics::hostname);
     let (events, heard) = std::sync::mpsc::sync_channel::<Event>(8);
     let mut search = Search::for_token(&token);
     let (target, announced, follows) = match (head, &model) {
-        (Some(h), _) => (Target::new(Some(h), Vec::new(), search, None), None, None),
+        (given, None) => {
+            let (found, serving) = learn_head(given.as_deref(), &mut search, &token, &identity);
+            let follower = Arc::new(Follower::new(serving.clone(), events.clone()));
+            let found = if given.is_some() { Vec::new() } else { found };
+            (Target::new(given, found, search, Some(follower)), None, Some(serving))
+        }
+        (Some(h), Some(_)) => (Target::new(Some(h), Vec::new(), search, None), None, None),
         (None, Some(_)) => {
             let found = discover(&mut search);
             (Target::new(None, found.nodes, search, None), Some(found.models), None)
-        }
-        (None, None) => {
-            let (found, serving) = discover_model(&mut search);
-            let follower = Follower { serving: serving.clone(), events: events.clone() };
-            (Target::new(None, found.nodes, search, Some(follower)), None, Some(serving))
         }
     };
     let addrs = target.addrs();
@@ -143,7 +146,6 @@ fn join(args: &[String]) {
     if token.is_empty() && !addrs.iter().all(|a| a.ip().is_loopback()) {
         fail("no fleet token: run `superfluid fleet token` on the head and pass --token <value> here");
     }
-    let identity = identity.unwrap_or_else(crate::metrics::hostname);
     let max_batch = max_batch.max(1);
     let state = NodeState::open(&home, &identity, park).unwrap_or_else(|e| fail(e));
     let source = match (&follows, &model) {
@@ -166,8 +168,10 @@ fn join(args: &[String]) {
     if let Some(id) = loaded.id {
         node = node.with_model_id(id);
     }
-    if follows.is_some() {
-        node = node.following();
+    if let Some(follower) = target.follower.clone() {
+        node = node.following().with_on_head(move |serves| {
+            follower.hear(serves);
+        });
     }
     // A head that keeps a connection for short calls asks for it; one connection more, once.
     let ask = events.clone();
@@ -179,7 +183,7 @@ fn join(args: &[String]) {
     // One connection per lane, each its own generation at a time on the head.
     let (target, links) = (Arc::new(target), Arc::new(Links::default()));
     if follows.is_some() {
-        watch_head(Arc::clone(&target));
+        watch_head(Arc::clone(&target), token.clone(), identity.clone());
     }
     let dial = |lane: u32| {
         let (target, token, node, links) = (Arc::clone(&target), token.clone(), node.connection(), Arc::clone(&links));
@@ -225,7 +229,7 @@ enum Event {
     Follow(Follow),
 }
 
-/// What a node that follows its head serves: the head's first model, by the id it announces.
+/// What a node that follows its head serves: the head's first model, by the id it states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Serving {
     /// The name the head serves the model under, which the node serves it under too.
@@ -234,22 +238,22 @@ pub struct Serving {
     pub id: String,
 }
 
-/// What a node that follows its head makes of the head's announcement.
+/// What a node that follows its head makes of what the head states it serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Follow {
     Serve(Serving),
-    /// The head serves this model first with no id announced, so a node cannot pull it: it
-    /// serves a model by path, or was released before heads announced ids.
+    /// The head serves this model first with no id stated, so a node cannot pull it: the head
+    /// has it by path.
     Unpullable(String),
     /// The head serves no model.
     Nothing,
 }
 
 impl Follow {
-    /// What a node that follows `head` serves: the head's first model, the one it announces as
-    /// `model`, by the first of its ids.
-    pub fn of(head: &crate::fleet_mdns::Head) -> Follow {
-        match (head.models.first(), head.ids.first().filter(|id| !id.is_empty())) {
+    /// What a node that follows a head serves, from what the head stated it serves over a link
+    /// the token authenticates: the head's first model, by the first of its ids.
+    pub fn of(serves: &Served) -> Follow {
+        match (serves.models.first(), serves.ids.first().filter(|id| !id.is_empty())) {
             (None, _) => Follow::Nothing,
             (Some(name), Some(id)) => Follow::Serve(Serving { name: name.clone(), id: id.clone() }),
             (Some(name), None) => Follow::Unpullable(name.clone()),
@@ -272,7 +276,7 @@ impl Follow {
         match self {
             Follow::Serve(s) => format!("the head serves {}", s.name),
             Follow::Unpullable(name) => format!(
-                "the head serves {name} with no id to pull it by (it has it by path, or predates announcing ids); \
+                "the head serves {name} with no id to pull it by (it has it by path); \
                  waiting for it to serve a model by id, or give this node --model"
             ),
             Follow::Nothing => "the head serves no model yet; waiting".to_string(),
@@ -293,13 +297,30 @@ const DRAIN: Duration = Duration::from_secs(30);
 struct Follower {
     serving: Serving,
     events: std::sync::mpsc::SyncSender<Event>,
+    /// Whether the node said its head states nothing over the link.
+    told_unstated: std::sync::atomic::AtomicBool,
 }
 
 impl Follower {
-    /// Tells the node when `head` serves another model first than the one it serves; `true`
-    /// when it did.
-    fn hear(&self, head: &crate::fleet_mdns::Head) -> bool {
-        let wanted = Follow::of(head);
+    fn new(serving: Serving, events: std::sync::mpsc::SyncSender<Event>) -> Follower {
+        Follower { serving, events, told_unstated: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// Tells the node when its head stated, over a link the token authenticates, that it serves
+    /// another model first than the one this node serves; `true` when it did. A head that states
+    /// nothing is not followed.
+    fn hear(&self, serves: Option<&Served>) -> bool {
+        let Some(serves) = serves else {
+            if !self.told_unstated.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "superfluid: the head states nothing over the link of what it serves (it was released before heads did); \
+                     this node keeps serving {} and follows it no further",
+                    self.serving.name
+                );
+            }
+            return false;
+        };
+        let wanted = Follow::of(serves);
         if wanted == Follow::Serve(self.serving.clone()) {
             return false;
         }
@@ -317,11 +338,11 @@ struct Target {
     search: Mutex<Search>,
     /// The network looked for, as the search has it.
     net: Option<String>,
-    follower: Option<Follower>,
+    follower: Option<Arc<Follower>>,
 }
 
 impl Target {
-    fn new(given: Option<String>, found: Vec<SocketAddr>, search: Search, follower: Option<Follower>) -> Target {
+    fn new(given: Option<String>, found: Vec<SocketAddr>, search: Search, follower: Option<Arc<Follower>>) -> Target {
         let net = search.net().map(str::to_string);
         Target { given, found: Mutex::new(found), search: Mutex::new(search), net, follower }
     }
@@ -336,8 +357,8 @@ impl Target {
     /// After every address in `tried` failed: looks on the network again for a head of this
     /// node's network, unless another lane already found one anew. Lanes wait on the one that is
     /// looking. A head given by address is not looked for: that address is the head asked for,
-    /// and it is dialed again until it answers. A node that follows its head's model follows
-    /// the model of the head it finds.
+    /// and it is dialed again until it answers. What the head found serves is learned when a
+    /// lane joins it, from its hello, not from its announcement.
     fn refind(&self, tried: &[SocketAddr]) {
         if self.given.is_some() {
             return;
@@ -355,10 +376,7 @@ impl Target {
                 if head.nodes != *found {
                     eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.models.join(", "));
                 }
-                *found = head.nodes.clone();
-                if let Some(f) = &self.follower {
-                    f.hear(&head);
-                }
+                *found = head.nodes;
             }
             Err(e) => eprintln!("superfluid: {e}"),
         }
@@ -384,17 +402,37 @@ impl std::fmt::Display for Target {
     }
 }
 
-/// Watches the announcement of the head a following node dials, and tells the node when it
-/// serves another model first.
-fn watch_head(target: Arc<Target>) {
-    std::thread::spawn(move || loop {
-        let Some(follower) = &target.follower else { return };
-        match crate::fleet_mdns::watch(WATCH, |head| (target.is(&head) && follower.hear(&head)).then_some(())) {
-            Ok(Some(())) => return,
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!("superfluid: cannot watch the head's announcement ({e}); looking again in {} s", LOOK_AGAIN.as_secs());
-                std::thread::sleep(LOOK_AGAIN);
+/// Watches the announcement of the head a following node dials. Anyone on the network can
+/// announce, so a change there only has the node ask the head it dials, over a link the token
+/// authenticates, what it serves; it follows what the head states.
+fn watch_head(target: Arc<Target>, token: Vec<u8>, identity: String) {
+    std::thread::spawn(move || {
+        let Some(follower) = target.follower.clone() else { return };
+        let mut asked: Option<Vec<String>> = None;
+        loop {
+            let heard = crate::fleet_mdns::watch(WATCH, |head| {
+                let hint = target.is(&head)
+                    && head.models.first() != Some(&follower.serving.name)
+                    && asked.as_ref() != Some(&head.models);
+                if !hint {
+                    return None;
+                }
+                asked = Some(head.models.clone());
+                match ask_head(&target.addrs(), &token, &identity) {
+                    Ok(serves) => follower.hear(serves.as_ref()).then_some(()),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "could not ask the head what it serves after its announcement changed");
+                        None
+                    }
+                }
+            });
+            match heard {
+                Ok(Some(())) => return,
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("superfluid: cannot watch the head's announcement ({e}); looking again in {} s", LOOK_AGAIN.as_secs());
+                    std::thread::sleep(LOOK_AGAIN);
+                }
             }
         }
     });
@@ -414,25 +452,83 @@ fn discover(search: &mut Search) -> crate::fleet_mdns::Head {
     }
 }
 
-/// The head of this node's network and its first model, once that is a model a node can pull.
-fn discover_model(search: &mut Search) -> (crate::fleet_mdns::Head, Serving) {
-    let mut head = discover(search);
-    let mut said = None;
+/// The head a node with no `--model` follows, and the model it states it serves first, once
+/// that is one a node can pull: the head at `given`, or the one of this node's network found on
+/// the local network, where an announcement only says where to ask. Nothing is pulled or loaded
+/// on an announcement's word: the head is asked over a link the token authenticates. A head that
+/// states nothing there (released before heads did) is not followed.
+fn learn_head(given: Option<&str>, search: &mut Search, token: &[u8], identity: &str) -> (Vec<SocketAddr>, Serving) {
+    let mut said: Option<String> = None;
+    let mut say_once = |msg: String| {
+        if said.as_ref() != Some(&msg) {
+            eprintln!("superfluid: {msg}");
+            said = Some(msg);
+        }
+    };
+    let mut rounds = 0u32;
     loop {
-        match Follow::of(&head) {
-            Follow::Serve(serving) => return (head, serving),
-            other => {
-                if said.as_ref() != Some(&other) {
-                    eprintln!("superfluid: {}", other.waiting());
-                    said = Some(other);
-                }
-                std::thread::sleep(LOOK_AGAIN);
-                if let Ok(found) = crate::fleet_mdns::find_head(search, DISCOVER, &|msg| eprintln!("superfluid: {msg}")) {
-                    head = found;
-                }
-            }
+        if rounds > 0 {
+            std::thread::sleep(LOOK_AGAIN);
+        }
+        rounds += 1;
+        let addrs = match given {
+            Some(h) => h.to_socket_addrs().map(|a| a.collect::<Vec<_>>()).unwrap_or_default(),
+            None if rounds == 1 => discover(search).nodes,
+            None => match crate::fleet_mdns::find_head(search, DISCOVER, &|msg| eprintln!("superfluid: {msg}")) {
+                Ok(head) => head.nodes,
+                Err(_) => Vec::new(),
+            },
+        };
+        let Some(at) = addrs.first().copied() else {
+            say_once(format!("cannot find {}; looking again", given.unwrap_or("a fleet head of this network")));
+            continue;
+        };
+        if token.is_empty() && !addrs.iter().all(|a| a.ip().is_loopback()) {
+            fail("no fleet token: run `superfluid fleet token` on the head and pass --token <value> here");
+        }
+        match ask_head(&addrs, token, identity) {
+            Ok(Some(serves)) => match Follow::of(&serves) {
+                Follow::Serve(serving) => return (addrs, serving),
+                other => say_once(other.waiting()),
+            },
+            Ok(None) => fail(format!(
+                "the head at {at} states nothing over the link of what it serves (it was released before heads did), \
+                 so a node with no --model does not follow it; give this node --model"
+            )),
+            Err(LinkFError::Unauthorized) if given.is_some() => fail(REFUSED),
+            Err(LinkFError::Unauthorized) => say_once(format!(
+                "the head announced at {at} does not hold this network's token, so it is not followed \
+                 (anyone on the network can copy an announcement)"
+            )),
+            Err(e) => say_once(format!("cannot ask the head at {at} what it serves: {e}; asking again")),
         }
     }
+}
+
+/// What the head at `addrs` states it serves in its hello, read over a link `token`
+/// authenticates and answered as a node that only asks ([`superfluid_proto::handshake::ASKS_ONLY`]),
+/// which the head does not take in; `None` from a head that states nothing (one released before
+/// heads did), which is left unanswered.
+pub fn ask_head(addrs: &[SocketAddr], token: &[u8], identity: &str) -> Result<Option<Served>, LinkFError> {
+    let (mut ep, _sock) = dial(addrs, token)?;
+    let hello = ep.read_hello_within(HANDSHAKE)?;
+    let Some(serves) = hello.serves.clone() else { return Ok(None) };
+    let ack = superfluid_proto::handshake::HelloAckF {
+        chosen_version: superfluid_linkf::driver::PROTO_VERSION,
+        node_identity: identity.to_string(),
+        capacity: Default::default(),
+        loadable_models: Vec::new(),
+        feature_flags: superfluid_proto::handshake::ASKS_ONLY,
+        limits: superfluid_proto::linkf::LinkFLimits {
+            max_frame: superfluid_proto::MAX_FRAME,
+            transfer_window: 8,
+            max_transfer: 1 << 26,
+            transfer_budget: 1 << 28,
+        },
+        model_ids: Vec::new(),
+    };
+    ep.answer_hello(&hello, &ack, token)?;
+    Ok(Some(serves))
 }
 
 /// Whether the node runs or holds a generation.
@@ -767,10 +863,11 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
         in_handshake.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let (manager, auth, models, in_handshake) = (Arc::clone(&manager), auth.clone(), Arc::clone(&models), Arc::clone(&in_handshake));
         std::thread::spawn(move || {
-            let opened = FleetHead::accept(sock, auth);
+            let opened = FleetHead::accept_serving(sock, auth, models.served());
             in_handshake.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             match opened {
-                Ok(head) => {
+                Ok(None) => tracing::debug!(%peer, "a node asked what this head serves"),
+                Ok(Some(head)) => {
                     let node = head.node();
                     let (identity, serves, ctx) = (node.node_identity.clone(), node.loadable_models.clone(), node.capacity.max_context_tokens);
                     let (ids, follows) = (node.model_ids.clone(), node.feature_flags & superfluid_proto::handshake::FOLLOWS_HEAD != 0);
@@ -803,17 +900,9 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet_mdns::Head;
 
-    fn head(models: &[&str], ids: &[&str]) -> Head {
-        Head {
-            instance: "superfluid on box-a".into(),
-            nodes: vec![SocketAddr::from(([192, 168, 1, 20], 48456))],
-            models: models.iter().map(|m| m.to_string()).collect(),
-            ids: ids.iter().map(|m| m.to_string()).collect(),
-            http: Vec::new(),
-            net: None,
-        }
+    fn head(models: &[&str], ids: &[&str]) -> Served {
+        Served { models: models.iter().map(|m| m.to_string()).collect(), ids: ids.iter().map(|m| m.to_string()).collect() }
     }
 
     fn serving(name: &str, id: &str) -> Follow {
@@ -821,25 +910,28 @@ mod tests {
     }
 
     #[test]
-    fn a_following_node_serves_the_heads_first_model_by_its_announced_id() {
+    fn a_following_node_serves_the_heads_first_model_by_its_stated_id() {
         assert_eq!(Follow::of(&head(&["org/a", "org/b"], &["org/a:q4", "org/b:q8"])), serving("org/a", "org/a:q4"));
         assert_eq!(Follow::of(&head(&["local-a", "org/b"], &["", "org/b:q8"])), Follow::Unpullable("local-a".into()), "the first, even when another could be pulled");
-        assert_eq!(Follow::of(&head(&["org/a"], &[])), Follow::Unpullable("org/a".into()), "a head from before ids");
+        assert_eq!(Follow::of(&head(&["org/a"], &[])), Follow::Unpullable("org/a".into()), "no id stated");
         assert_eq!(Follow::of(&head(&[], &[])), Follow::Nothing);
     }
 
     #[test]
     fn a_follower_is_told_only_when_the_head_serves_another_model_first() {
         let (events, heard) = std::sync::mpsc::sync_channel(4);
-        let follower = Follower { serving: Serving { name: "org/a".into(), id: "org/a:q4".into() }, events };
-        assert!(!follower.hear(&head(&["org/a", "org/b"], &["org/a:q4", "org/b:q8"])), "the head took on another model: no change");
+        let follower = Follower::new(Serving { name: "org/a".into(), id: "org/a:q4".into() }, events);
+        assert!(!follower.hear(Some(&head(&["org/a", "org/b"], &["org/a:q4", "org/b:q8"]))), "the head took on another model: no change");
         assert!(heard.try_recv().is_err());
-        assert!(follower.hear(&head(&["org/a"], &["org/a:q8"])), "another tag of the same model");
+        assert!(follower.hear(Some(&head(&["org/a"], &["org/a:q8"]))), "another tag of the same model");
         assert!(matches!(heard.try_recv(), Ok(Event::Follow(f)) if f == serving("org/a", "org/a:q8")));
-        assert!(follower.hear(&head(&["org/b", "org/a"], &["org/b:q8", "org/a:q4"])));
+        assert!(follower.hear(Some(&head(&["org/b", "org/a"], &["org/b:q8", "org/a:q4"]))));
         assert!(matches!(heard.try_recv(), Ok(Event::Follow(f)) if f == serving("org/b", "org/b:q8")));
-        assert!(follower.hear(&head(&["local-c"], &[])));
+        assert!(follower.hear(Some(&head(&["local-c"], &[]))));
         assert!(matches!(heard.try_recv(), Ok(Event::Follow(Follow::Unpullable(n))) if n == "local-c"));
+        assert!(!follower.hear(None), "a head that states nothing is not followed");
+        assert!(!follower.hear(None));
+        assert!(heard.try_recv().is_err());
     }
 
     #[test]

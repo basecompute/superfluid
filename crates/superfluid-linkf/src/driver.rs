@@ -6,7 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use superfluid_proto::envelope::FrameClass;
-use superfluid_proto::handshake::{negotiate, Hello, HelloAckF, LinkRole};
+use superfluid_proto::handshake::{negotiate, Hello, HelloAckF, LinkRole, Served};
 use superfluid_proto::linkf::{self, msg_type};
 use superfluid_proto::{encode_frame, Frame, FrameDecoder};
 
@@ -96,6 +96,8 @@ pub struct Endpoint {
     last_heard: Instant,
     /// Frames read with the hello's answer, handed out by the next `pump`.
     held: Vec<Frame>,
+    /// What the head stated it serves in the hello this end answered.
+    head_serves: Option<Served>,
 }
 
 impl Endpoint {
@@ -166,6 +168,7 @@ impl Endpoint {
             last_sent: now,
             last_heard: now,
             held: Vec::new(),
+            head_serves: None,
         })
     }
 
@@ -248,20 +251,26 @@ impl Endpoint {
     }
 
     pub fn hello_as_head(&mut self, auth: Vec<u8>) -> Result<HelloAckF, LinkFError> {
-        self.hello(auth, None)
+        self.hello(auth, None, None)
     }
 
     pub fn hello_as_head_within(&mut self, auth: Vec<u8>, timeout: Duration) -> Result<HelloAckF, LinkFError> {
-        self.hello(auth, Some(Instant::now() + timeout))
+        self.hello(auth, None, Some(Instant::now() + timeout))
     }
 
-    fn hello(&mut self, auth: Vec<u8>, deadline: Option<Instant>) -> Result<HelloAckF, LinkFError> {
+    /// As [`Self::hello_as_head_within`], stating in the hello what the head serves.
+    pub fn hello_as_head_serving_within(&mut self, auth: Vec<u8>, serves: Served, timeout: Duration) -> Result<HelloAckF, LinkFError> {
+        self.hello(auth, Some(serves), Some(Instant::now() + timeout))
+    }
+
+    fn hello(&mut self, auth: Vec<u8>, serves: Option<Served>, deadline: Option<Instant>) -> Result<HelloAckF, LinkFError> {
         self.send(
             msg_type::HELLO,
             &Hello {
                 proto_versions: (OLDEST_VERSION, PROTO_VERSION),
                 link_role: LinkRole::HeadDaemon,
                 auth,
+                serves,
             },
         )?;
         loop {
@@ -299,12 +308,19 @@ impl Endpoint {
             .iter()
             .find(|f| f.msg_type == msg_type::HELLO)
             .ok_or(LinkFError::Protocol("expected Hello"))?;
-        let hello: Hello = postcard::from_bytes(&hello_frame.payload)?;
-        self.answer(&hello, ack, expected_auth)
+        let hello = Hello::decode(&hello_frame.payload)?;
+        self.answer_hello(&hello, ack, expected_auth)
     }
 
-    /// Checks the head's hello and answers it with `ack`, at the version the two share.
-    fn answer(&mut self, hello: &Hello, ack: &HelloAckF, expected_auth: &[u8]) -> Result<(), LinkFError> {
+    /// What the head stated it serves in the hello this end answered: `None` before an answer,
+    /// and from a head that states nothing (one released before it).
+    pub fn head_serves(&self) -> Option<&Served> {
+        self.head_serves.as_ref()
+    }
+
+    /// Checks the head's hello and answers it with `ack`, at the version the two share; what the
+    /// hello states the head serves is kept ([`Self::head_serves`]).
+    pub fn answer_hello(&mut self, hello: &Hello, ack: &HelloAckF, expected_auth: &[u8]) -> Result<(), LinkFError> {
         let version = negotiate(hello.proto_versions, (OLDEST_VERSION, PROTO_VERSION))
             .ok_or(LinkFError::Protocol("no common proto version"))?;
         if hello.link_role != LinkRole::HeadDaemon {
@@ -314,6 +330,7 @@ impl Endpoint {
             return Err(LinkFError::Unauthorized);
         }
         self.version = version;
+        self.head_serves = hello.serves.clone();
         self.send(msg_type::HELLO_ACK_F, &HelloAckF { chosen_version: version, ..ack.clone() })?;
         Ok(())
     }
@@ -324,6 +341,13 @@ impl Endpoint {
         timeout: Duration,
         expected_auth: &[u8],
     ) -> Result<(), LinkFError> {
+        let hello = self.read_hello_within(timeout)?;
+        self.answer_hello(&hello, ack, expected_auth)
+    }
+
+    /// The head's hello, read within `timeout` and not answered yet: a node that only asks what
+    /// the head serves reads it, and answers ([`Self::answer_hello`]) only a head that states it.
+    pub fn read_hello_within(&mut self, timeout: Duration) -> Result<Hello, LinkFError> {
         let deadline = Instant::now() + timeout;
         let hello_frame = loop {
             if let Some(f) = self
@@ -337,8 +361,7 @@ impl Endpoint {
                 return Err(LinkFError::TimedOut);
             }
         };
-        let hello: Hello = postcard::from_bytes(&hello_frame.payload)?;
-        self.answer(&hello, ack, expected_auth)
+        Ok(Hello::decode(&hello_frame.payload)?)
     }
 }
 
@@ -389,7 +412,7 @@ mod tests {
     fn answered(versions: (u16, u16)) -> (Endpoint, Endpoint) {
         let (a, b) = UnixStream::pair().unwrap();
         let (mut head, mut node) = (Endpoint::new(a).unwrap(), Endpoint::new(b).unwrap());
-        let hello = Hello { proto_versions: versions, link_role: LinkRole::HeadDaemon, auth: Vec::new() };
+        let hello = Hello { proto_versions: versions, link_role: LinkRole::HeadDaemon, auth: Vec::new(), serves: None };
         head.send(msg_type::HELLO, &hello).unwrap();
         node.answer_hello_as_agent(&ack(), b"").unwrap();
         let sent = head.wait_frames().unwrap();

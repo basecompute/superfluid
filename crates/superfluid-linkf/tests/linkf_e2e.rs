@@ -55,6 +55,7 @@ fn connect() -> (Endpoint, Endpoint) {
                 ),
                 link_role: superfluid_proto::handshake::LinkRole::HeadDaemon,
                 auth: Vec::new(),
+                serves: None,
             },
         )
         .unwrap();

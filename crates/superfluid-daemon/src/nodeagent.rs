@@ -70,6 +70,9 @@ impl Busy {
     }
 }
 
+/// What a node is told of its head's models at each handshake ([`NodeAgent::with_on_head`]).
+pub type HeadHook = Arc<dyn Fn(Option<&superfluid_proto::handshake::Served>) + Send + Sync>;
+
 pub struct NodeAgent {
     daemon: Arc<Daemon>,
     shared: Arc<Mutex<AgentShared>>,
@@ -98,6 +101,8 @@ pub struct NodeAgent {
     tokenizer_impl: Option<Arc<dyn superfluid_engine::Tokenizer>>,
     /// Called when a head this node dialed asks for a connection for short calls.
     on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Told, at each handshake, what the head stated it serves over the link.
+    on_head: Option<HeadHook>,
 }
 
 /// The largest blob a node takes from its head.
@@ -134,6 +139,7 @@ impl NodeAgent {
             tokenizer: 0,
             tokenizer_impl: None,
             on_control_ask: None,
+            on_head: None,
             daemon,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
@@ -182,6 +188,7 @@ impl NodeAgent {
             tokenizer: self.tokenizer,
             tokenizer_impl: self.tokenizer_impl.clone(),
             on_control_ask: self.on_control_ask.clone(),
+            on_head: self.on_head.clone(),
         }
     }
 
@@ -223,6 +230,13 @@ impl NodeAgent {
 
     /// For a node that dials its head: `dial` is called when the head asks for one connection
     /// more, which it keeps for short calls; it may be called more than once.
+    /// Tells `hook`, at each handshake, what the head stated it serves in its hello, over a
+    /// link the token authenticates: `None` from a head that states nothing.
+    pub fn with_on_head(mut self, hook: impl Fn(Option<&superfluid_proto::handshake::Served>) + Send + Sync + 'static) -> NodeAgent {
+        self.on_head = Some(Arc::new(hook));
+        self
+    }
+
     pub fn with_on_control_ask(mut self, dial: impl Fn() + Send + Sync + 'static) -> NodeAgent {
         self.on_control_ask = Some(Arc::new(dial));
         self
@@ -350,6 +364,9 @@ impl NodeAgent {
             }
             Err(LinkFError::Unauthorized) => return Err(LinkFError::Unauthorized.into()),
             Err(e) => return Err(e.into()),
+        }
+        if let Some(hook) = &self.on_head {
+            hook(endpoint.head_serves());
         }
         let heartbeat = match self.idle_timeout {
             t if t.is_zero() => Liveness::DEFAULT.heartbeat,
