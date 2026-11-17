@@ -3398,6 +3398,83 @@ fn props_describes_an_unloaded_model_and_autoload_loads_it() {
     assert_eq!(v["chat_template"], "template-a", "{v}");
 }
 
+/// The temperature each lane reached the engine with, for the test below alone.
+static TEMPERATURES_ADMITTED: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
+
+#[test]
+fn props_for_a_model_not_loaded_yet_does_not_borrow_the_default_models_speculation() {
+    // `--spec-max-temperature` caps the temperature of a model that speculates. The default model
+    // speculates, model-b does not, model-c does: before a load /props is answered from the default
+    // model's daemon, so a temperature the cap would change waits for the model's own.
+    use superfluid_daemon::registry::{ModelLoader, ModelRegistry};
+    fn record(a: &superfluid_abi::LaneAdmit) -> bool {
+        TEMPERATURES_ADMITTED.lock().unwrap().push(a.params.temperature);
+        false
+    }
+    fn daemon(speculate: bool) -> Arc<Daemon> {
+        let dir = std::env::temp_dir().join(format!("superfluid-props-spec-unloaded-{}-{}", std::process::id(), unique()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let mut cfg = EngineConfig::default();
+        cfg.spaces.retain(|s| s.kind == superfluid_abi::space_kind::PAGED_TOKEN_KV);
+        let host = EngineHost::spawn(move || {
+            (MockEngine::new(cfg).refusing_admits(record, superfluid_abi::Status::RejectCertUnmatched), None)
+        })
+        .expect("spawn");
+        let opts = superfluid_daemon::DaemonOptions {
+            speculate: speculate.then(|| "prompt-lookup".to_string()),
+            ..Default::default()
+        };
+        let d = Arc::new(Daemon::with_options(store, host, Box::new(MockChatCodec), opts).unwrap());
+        assert_eq!(d.speculation().is_some(), speculate);
+        d
+    }
+    // The loader gets the model's source, its path here.
+    let loader: ModelLoader = Box::new(|source: &str, _runtime| Ok(daemon(source.contains("model-c"))));
+    let registry = Arc::new(ModelRegistry::with_initial("model-a", daemon(true), loader));
+    registry.register_known("model-b", std::path::Path::new("/models/model-b.base"));
+    registry.register_known("model-c", std::path::Path::new("/models/model-c.base"));
+    let fallback = openai::SamplingFallback {
+        temperature: 1.0,
+        repeat_penalty: 1.0,
+        top_p: 1.0,
+        top_k: 0,
+        min_p: 0.0,
+        frequency_penalty_as_repeat: false,
+    };
+    let op = openai::SamplingOverrides { spec_max_temperature: Some(0.6), fallback: Some(fallback), ..Default::default() };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = openai::ServeConfig { sampling: op, ..Default::default() };
+    std::thread::spawn(move || {
+        let _ = openai::serve_blocking_config(listener, registry, cfg);
+    });
+
+    let props = |query: &str| {
+        let (status, _, body) = http(addr, "GET", &format!("/props{query}"), "");
+        assert_eq!(status, 200, "{query}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        (v["loaded"].as_bool().unwrap(), v["default_generation_settings"]["temperature"].as_f64().map(|t| t as f32))
+    };
+    let admitted = |model: &str, extra: &str| {
+        TEMPERATURES_ADMITTED.lock().unwrap().clear();
+        let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"max_tokens":2{extra}}}"#);
+        let (status, _, out) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{model}{extra}: {out}");
+        TEMPERATURES_ADMITTED.lock().unwrap().last().copied().expect("a lane was admitted")
+    };
+
+    assert_eq!(props("?model=model-a"), (true, Some(0.6)), "the default model speculates: capped");
+    assert_eq!(props("?model=model-b"), (false, None), "not the default model's speculation to say");
+    assert_eq!(admitted("model-b", ""), 1.0, "model-b does not speculate: no cap");
+    assert_eq!(props("?model=model-b"), (true, Some(1.0)), "loaded: its own speculation answers");
+    assert_eq!(admitted("model-b", r#","temperature":1.0"#), 1.0, "echoing /props changes nothing");
+
+    assert_eq!(props("?model=model-c"), (false, None));
+    assert_eq!(props("?model=model-c&autoload=1"), (true, Some(0.6)), "loaded to answer: it speculates");
+    assert_eq!(admitted("model-c", ""), 0.6);
+}
+
 #[test]
 fn startup_multi_model_keys_by_stem_and_keeps_the_first_default() {
     use superfluid_daemon::registry::{ModelLoader, ModelRegistry};
