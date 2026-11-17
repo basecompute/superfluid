@@ -53,6 +53,24 @@ fn status_of(raw: i32) -> Status {
     Status::from_raw(raw).unwrap_or(Status::Fatal)
 }
 
+/// The engine's capability record, stating `sampling.engine_penalties` where the engine does not: baseRT's tick
+/// applies a lane's repeat, presence and frequency penalties in its own sampler, in every engine this crate drives
+/// (0.3.0 on), and its record carries no `sampling` section of its own. A record that is not a JSON object is kept
+/// as it is.
+fn with_engine_penalties(record: String) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&record) else {
+        return record;
+    };
+    if !v.is_object() || !v["sampling"]["engine_penalties"].is_null() {
+        return record;
+    }
+    if !v["sampling"].is_object() {
+        v["sampling"] = serde_json::json!({});
+    }
+    v["sampling"]["engine_penalties"] = serde_json::Value::Bool(true);
+    v.to_string()
+}
+
 fn check(raw: i32) -> Result<(), Status> {
     if raw == 0 {
         Ok(())
@@ -446,7 +464,7 @@ impl Engine for NativeEngine {
         // SAFETY: p is a non-null NUL-terminated engine-owned C string,
         // valid until free_model; we copy it out immediately.
         let s = unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned();
-        if s.is_empty() { None } else { Some(s) }
+        if s.is_empty() { None } else { Some(with_engine_penalties(s)) }
     }
 
     fn transcribe(
@@ -817,5 +835,25 @@ impl Engine for NativeEngine {
         // SAFETY: policy is a live local; freed is a live out-pointer.
         check(unsafe { baseRT_cache_evict(self.model, &policy, bytes_target, &mut freed) })?;
         Ok(freed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_engine_penalties;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn the_record_says_the_engine_applies_the_penalties() {
+        let said = |record: &str| -> Value { serde_json::from_str(&with_engine_penalties(record.to_string())).unwrap() };
+        let v = said(r#"{"descriptor_version":1,"ops":{"seq_fork":true}}"#);
+        assert_eq!(v["sampling"], json!({"engine_penalties": true}));
+        assert_eq!(v["ops"]["seq_fork"], true, "the rest is kept");
+        let v = said(r#"{"sampling":{"grammar":true}}"#);
+        assert_eq!(v["sampling"], json!({"grammar": true, "engine_penalties": true}));
+        let v = said(r#"{"sampling":{"engine_penalties":"not on this device"}}"#);
+        assert_eq!(v["sampling"]["engine_penalties"], "not on this device", "what the engine states wins");
+        assert_eq!(with_engine_penalties("not json".into()), "not json");
+        assert_eq!(with_engine_penalties("[1]".into()), "[1]");
     }
 }

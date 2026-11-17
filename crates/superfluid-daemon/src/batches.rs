@@ -10,6 +10,7 @@ const BATCH_POLICY: crate::inference::RequestPolicy = crate::inference::RequestP
         top_k: None,
         min_p: None,
         repeat_penalty: None,
+        presence_penalty: None,
         spec_max_temperature: None,
         fallback: None,
     },

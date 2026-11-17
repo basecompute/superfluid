@@ -16,7 +16,7 @@ use crate::{Daemon, DaemonError};
 pub use crate::inference::{TokenLimits, SamplingOverrides, SamplingFallback, RequestQos};
 pub use crate::http_state::{HttpQosPolicy, QOS_HEADER, BATCH_INVARIANT_HEADER};
 use crate::inference::{
-    advertised_generation_defaults, repeat_penalty_for, next_id, unix_now,
+    advertised_generation_defaults, advertised_penalties, repeat_before_load, next_id, unix_now,
     ChatRequest, CompletionRequest, RequestPolicy, DEFAULT_MAX_CONTEXT,
     Kind,
 };
@@ -1883,12 +1883,20 @@ async fn props(
         (None, None)
     };
     let chat_template = if loaded { daemon.chat_template() } else { None };
-    let eff_repeat = (resolved.is_some() || st.sampling.repeat_penalty.is_some() || st.sampling.fallback.is_some()).then(|| {
-        match repeat_penalty_for(None, &st.sampling, &resolved.clone().unwrap_or_default()) {
-            0.0 => 1.0,
-            v => v,
-        }
-    });
+    // What a request that names no penalty generates with, so a client echoing them gets the same.
+    // The presence default is the model's engine's to take: a model not loaded yet is answered by
+    // the default model's daemon, whose record is not its own, so the default and a repeat penalty
+    // that turns on it wait for the load.
+    let op = st.sampling.for_daemon(&daemon);
+    let model_defaults = resolved.clone().unwrap_or_default();
+    let (presence, repeat) = if loaded {
+        let (presence, repeat) = advertised_penalties(&model_defaults, &op);
+        (op.presence_penalty.map(|_| presence), Some(repeat))
+    } else {
+        (None, repeat_before_load(&model_defaults, &st.sampling))
+    };
+    let eff_repeat =
+        repeat.filter(|_| resolved.is_some() || st.sampling.repeat_penalty.is_some() || st.sampling.fallback.is_some());
     let window = match daemon.max_stream_tokens() {
         n if loaded && n > 0 => u32::try_from(n).unwrap_or(u32::MAX),
         _ => st.limits.max_context,
@@ -1897,7 +1905,10 @@ async fn props(
     if let Some(v) = eff_repeat {
         settings["repeat_penalty"] = v.into();
     }
-    let eff = advertised_generation_defaults(&resolved.clone().unwrap_or_default(), &st.sampling.for_daemon(&daemon));
+    if let Some(v) = presence {
+        settings["presence_penalty"] = v.into();
+    }
+    let eff = advertised_generation_defaults(&resolved.clone().unwrap_or_default(), &op);
     if resolved.is_some() || st.sampling.temperature.is_some() || st.sampling.fallback.is_some() {
         settings["temperature"] = eff.temperature.into();
     }
