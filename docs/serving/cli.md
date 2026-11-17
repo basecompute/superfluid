@@ -220,11 +220,13 @@ Flags from earlier releases are accepted with a notice naming what replaced them
 ## `superfluid launch`
 
 ```sh
-superfluid launch                                   # list the agents and whether each is installed
+superfluid launch [--json]                          # list the agents and whether each is installed
 superfluid launch <agent> [--model <m>] [--http <addr:port>] [--api-key <key>] [--print] [-- <agent args>...]
 ```
 
 Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. That server's log goes to `$SUPERFLUID_HOME/logs/serve.log`. `--http` defaults to `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`; `--api-key` to `$SUPERFLUID_API_KEY`. `--model` defaults to the model `launch` last started a server with. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](../integrations/index.md).
+
+`superfluid launch --json` prints the list as one JSON object: `schema` (1; a key is only added under the same number), `agents` (each with `name`, `aliases`, `title`, `binary`, `installed`, `path`, where on `PATH` it was found or null, and `install`), `server` (`pid` and `address` of the server `launch` started, or null) and `last_model` (the model `launch` starts a server with when none answers, or null). With an agent, `--json` is refused.
 
 ## `superfluid stop`
 
