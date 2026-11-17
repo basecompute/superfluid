@@ -731,6 +731,46 @@ mod penalty_alias_tests {
     }
 
     #[test]
+    fn before_a_load_a_temperature_the_speculation_cap_would_change_is_not_advertised() {
+        use super::{temperature_before_load, SamplingFallback};
+        let fallback = |temperature: f32| SamplingFallback {
+            temperature,
+            repeat_penalty: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            min_p: 0.0,
+            frequency_penalty_as_repeat: false,
+        };
+        let cap = SamplingOverrides { spec_max_temperature: Some(0.6), ..Default::default() };
+        let ops = [
+            SamplingOverrides { fallback: Some(fallback(1.0)), ..cap },
+            SamplingOverrides { fallback: Some(fallback(0.5)), ..cap },
+            SamplingOverrides { temperature: Some(0.9), ..cap },
+            SamplingOverrides { fallback: Some(fallback(1.0)), ..Default::default() },
+            cap,
+        ];
+        let quiet = ModelSamplingDefaults::default();
+        let warm = ModelSamplingDefaults { temperature: Some(1.0), ..Default::default() };
+        for m in [&quiet, &warm] {
+            for op in ops {
+                let advertised = temperature_before_load(m, &op);
+                // Whether the model turns out to speculate or not, echoing what was advertised
+                // generates as leaving the temperature out.
+                for speculates in [true, false] {
+                    let own = if speculates { op } else { SamplingOverrides { spec_max_temperature: None, ..op } };
+                    let omitted = params_of_for(None, None, None, None, None, m, &own).temperature;
+                    let echoed = params_of_for(advertised, None, None, None, None, m, &own).temperature;
+                    assert_eq!(echoed, omitted, "{op:?} over {m:?}, speculates: {speculates}");
+                }
+            }
+        }
+        assert_eq!(temperature_before_load(&quiet, &ops[0]), None, "0.6 or 1.0, as the model speculates");
+        assert_eq!(temperature_before_load(&quiet, &ops[1]), Some(0.5), "under the cap either way");
+        assert_eq!(temperature_before_load(&quiet, &ops[2]), Some(0.9), "the operator's temperature is never capped");
+        assert_eq!(temperature_before_load(&quiet, &ops[3]), Some(1.0), "no cap to apply");
+    }
+
+    #[test]
     fn do_sample_false_means_greedy() {
         let m = ModelSamplingDefaults {
             do_sample: Some(false),
@@ -1512,6 +1552,16 @@ mod embedding_sampling_tests {
         let e = extras_of(None, Some(0.2), None, &op, &m);
         assert_eq!((e.presence_penalty, e.frequency_penalty, e.repeat_penalty), (0.3, 0.2, 1.0));
     }
+}
+
+/// The temperature `/props` advertises for a model not loaded yet, whose speculation is not known:
+/// the one a request that names none generates with either way, or None where the speculation cap
+/// (`spec_max_temperature`, which `for_daemon` keeps only for a model that speculates) changes it.
+/// `op` is the operator's own, not taken through another model's `for_daemon`.
+pub(crate) fn temperature_before_load(model: &ModelSamplingDefaults, op: &SamplingOverrides) -> Option<f32> {
+    let capped = advertised_generation_defaults(model, op).temperature;
+    let plain = advertised_generation_defaults(model, &SamplingOverrides { spec_max_temperature: None, ..*op }).temperature;
+    (capped == plain).then_some(capped)
 }
 
 pub(crate) fn advertised_generation_defaults(

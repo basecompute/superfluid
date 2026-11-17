@@ -1917,6 +1917,14 @@ async fn props(
         settings["top_k"] = eff.top_k.into();
         settings["min_p"] = eff.min_p.into();
     }
+    // A model not loaded yet is answered by the default model's daemon, whose speculation is not
+    // its own: a temperature the speculation cap would change waits for the model's own. Where the
+    // cap cannot change it, the one advertised above is the model's either way.
+    if !loaded && crate::inference::temperature_before_load(&resolved.clone().unwrap_or_default(), &st.sampling).is_none() {
+        if let Some(s) = settings.as_object_mut() {
+            s.remove("temperature");
+        }
+    }
     let advertised = st.limits.default_max_tokens.unwrap_or(st.limits.max_context);
     settings["n_predict"] = advertised.into();
     settings["max_tokens"] = advertised.into();
