@@ -72,14 +72,16 @@ impl HeadModels {
     /// The id a node pulls each of [`Self::names`] by, in the same order; empty for one the
     /// head knows by path only.
     pub fn ids(&self) -> Vec<String> {
-        let listed = self.listed.lock().expect("head models");
-        listed.order.iter().map(|m| listed.ids.get(m).cloned().unwrap_or_default()).collect()
+        self.served().ids
     }
 
     /// What the head states it serves in its hello to each node: its models, in order, with
-    /// the id a node pulls each by.
+    /// the id a node pulls each by, read together, so a load or unload meanwhile never pairs one
+    /// model with another's id.
     pub fn served(&self) -> superfluid_proto::handshake::Served {
-        superfluid_proto::handshake::Served { models: self.names(), ids: self.ids() }
+        let listed = self.listed.lock().expect("head models");
+        let ids = listed.order.iter().map(|m| listed.ids.get(m).cloned().unwrap_or_default()).collect();
+        superfluid_proto::handshake::Served { models: listed.order.clone(), ids }
     }
 
     /// Notes the id each of `models` is pulled by, as far as `ids` gives them, for a model the
@@ -197,5 +199,42 @@ fn adopt(registry: &ModelRegistry, node: &str, name: &str) {
         Ok(true) => eprintln!("superfluid: {name}: served from now on, as fleet node '{node}' serves it"),
         Ok(false) => {}
         Err(e) => eprintln!("superfluid: {name}: fleet node '{node}' serves it, and this head cannot: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_a_head_states_pairs_each_model_with_its_own_id_while_its_models_change() {
+        let lease = superfluid_proto::linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+        let manager = Arc::new(FleetManager::with_options(Vec::new(), crate::fleet_manager::PlacementPolicy::LoadAware, lease, 90, 1));
+        let models = HeadModels::fixed(manager, vec!["a".into()]);
+        models.know_ids(&["a".into(), "b".into()], &["org/a:q4".into(), "org/b:q4".into()]);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The registry's change hook, as a load of b and an unload of a, and back, would call it.
+        let churn = {
+            let (models, stop) = (Arc::clone(&models), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    models.changed(&["b".into()]);
+                    models.changed(&["a".into()]);
+                }
+            })
+        };
+        let by = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut read = 0;
+        while std::time::Instant::now() < by {
+            let served = models.served();
+            assert_eq!(served.models.len(), served.ids.len(), "{served:?}");
+            for (m, id) in served.models.iter().zip(&served.ids) {
+                assert_eq!(id, &format!("org/{m}:q4"), "a model stated with another's id: {served:?}");
+            }
+            read += 1;
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        churn.join().unwrap();
+        assert!(read > 1000, "{read} reads");
     }
 }
