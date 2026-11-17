@@ -2,7 +2,7 @@
 2:"/dev/_next/static/chunks/2ngzwwqeitkk7.js"
 3:I[39756,["$2"],"default"]
 4:I[37457,["$2"],"default"]
-6:"/dev/_next/static/chunks/3_zcwfmbdj4b5.js"
+6:"/dev/_next/static/chunks/0k-rzv44us4-t.js"
 7:I[24025,["$2","$6"],"DocsShell"]
 c:I[97367,["$2"],"OutletBoundary"]
 d:"$Sreact.suspense"
@@ -16,12 +16,12 @@ f:"ViewportBoundary"
 9:X
 a:[["children",{"s":"__PAGE__","h":512,"d":{"r":["$","$1","c",{"children":["$Lb",[["$","script","script-0",{"src":"/dev/_next/static/chunks/2stmo1fl2_ko-.js","async":true,"nonce":"$undefined"}]],["$","$Lc",null,{"children":["$","$d",null,{"name":"Next.MetadataOutlet","children":"$@e"}]}]]}],"p":false,"v":null}}]]
 8:[["children",{"s":{"n":"slug","t":"d","k":"security","s":[]},"h":512,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],"p":false,"v":"$9"},"c":"$Qa"}]]
-5:[["children",{"s":"(docs)","h":512,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/3_zcwfmbdj4b5.js","async":true,"nonce":"$undefined"}]],["$","$L7",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],"p":false,"v":null},"c":"$Q8"}]]
-0:{"P":null,"c":["","security",""],"q":"","i":false,"t":{"t":{"s":"","h":528,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/2ngzwwqeitkk7.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],"p":false,"v":null},"c":"$Q5"},"h":{"r":["$","$1","h",{"children":[null,["$","$L10",null,{"children":"$L11"}],["$","$L13",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$d",null,{"name":"Next.Metadata","children":"$L14"}]}],null]}],null]}],"p":false,"v":null}},"m":"$undefined","G":["$15",[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"r":"$undefined","s":"$undefined","a":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"xBghazGDaLvsa-XjnTXtG"}
+5:[["children",{"s":"(docs)","h":512,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/0k-rzv44us4-t.js","async":true,"nonce":"$undefined"}]],["$","$L7",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],"p":false,"v":null},"c":"$Q8"}]]
+0:{"P":null,"c":["","security",""],"q":"","i":false,"t":{"t":{"s":"","h":528,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/2ngzwwqeitkk7.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],"p":false,"v":null},"c":"$Q5"},"h":{"r":["$","$1","h",{"children":[null,["$","$L10",null,{"children":"$L11"}],["$","$L13",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$d",null,{"name":"Next.Metadata","children":"$L14"}]}],null]}],null]}],"p":false,"v":null}},"m":"$undefined","G":["$15",[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"r":"$undefined","s":"$undefined","a":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"1KD5VD2d2uljIhzaJzvTM"}
 16:"/dev/_next/static/chunks/2stmo1fl2_ko-.js"
 17:I[73435,["$2","$6","$16"],"Markdown"]
 9:C
-18:T2810,# Security
+18:T2ddb,# Security
 
 Superfluid binds to loopback and asks for no credential unless told to. Nothing in it speaks TLS: the HTTP API is meant for a trusted network or a reverse proxy, the unix socket trusts whoever can open it, and the session log holds every prompt and completion in plain text. To report a vulnerability, see the [security policy](https://github.com/basecompute/superfluid/blob/main/SECURITY.md).
 
@@ -35,10 +35,10 @@ Superfluid binds to loopback and asks for no credential unless told to. Nothing 
 | fleet node agent | `superfluid-noded --listen` | `0.0.0.0:8454` | the fleet token (`--auth-file`, default `$SUPERFLUID_HOME/fleet/token`); required off loopback |
 | fleet head, for nodes that join | `serve --fleet-listen` | off | the fleet token; without one, only nodes on this machine |
 
-Without `--api-key` or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
+Without a key (`--api-key-file`, `--api-key` or `SUPERFLUID_API_KEY`) or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
 
 ```
-superfluid: WARNING --api-key not set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key.
+superfluid: WARNING no API key set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key-file (or --api-key, $SUPERFLUID_API_KEY).
 ```
 
 ## Requests from web pages
@@ -48,16 +48,19 @@ Every HTTP listener refuses, with `403` and code `origin_refused`, a request who
 ## API key
 
 ```sh
-superfluid serve <model> --api-key "$(cat /etc/superfluid/key)"
+superfluid serve <model> --api-key-file /etc/superfluid/key
 curl -H 'Authorization: Bearer <key>' http://127.0.0.1:8453/v1/models
 curl -H 'x-api-key: <key>' http://127.0.0.1:8453/v1/models
 ```
 
+- The key comes from `--api-key <key>`, else `--api-key-file <path>`, else the `SUPERFLUID_API_KEY` environment variable. `ps` shows a key on the command line to every user of the machine; the file and the variable it does not. The two flags together are refused.
+- `--api-key-file` reads the file with the whitespace around the key trimmed, and refuses a missing or empty one. Like ssh with a private key, it warns when group or others may read the file: `chmod 600` it.
+- `superfluid launch` hands the server it starts the key in `SUPERFLUID_API_KEY`, not on its command line. `superfluid top` takes `--api-key-file` and the variable too.
 - Every route except `GET /health` needs the key, including `/metrics` and the Ollama routes. An unknown path without a key is a 401.
 - Keys are compared in constant time against a SHA-256 digest.
 - A missing or wrong key is 401 with `type: "authentication_error"`, `code: "invalid_api_key"`.
 
-Admin routes change the server for everyone and need the global key or a policy key with `admin: true`: `POST /v1/models/load`, `/v1/models/unload`, `DELETE /v1/models/{id}`, `POST /v1/lora/load`, `/v1/lora/unload`.
+Admin routes change the server for everyone and need the global key or a policy key with `admin: true`: `POST /v1/models/load`, `/v1/models/unload`, `DELETE /v1/models/{id}`, `POST /v1/lora/load`, `/v1/lora/unload`, and on a fleet head `DELETE /v1/fleet/nodes/{name}`. A fleet head with no key takes node removal only from its own machine.
 
 > [!WARNING]
 > `POST /v1/models/load` loads any path the daemon's user can read. Never expose an unauthenticated server beyond the host.
@@ -157,6 +160,12 @@ The fleet token (`superfluid fleet token`: 32 random bytes as hex at `$SUPERFLUI
 - With no token, the links are plain TCP and nothing is checked. A head with `--fleet-listen` and no token takes only nodes on its own machine; `node join` with no token dials only a head on loopback.
 - `superfluid-noded` bound off loopback refuses to start without a token, unless `--insecure-no-auth`, which accepts any peer that reaches it. Use that only behind a transport that already authenticates (WireGuard, Tailscale).
 - `--api-key`, `--key-policy` and `--rate-limit` protect the head's own HTTP listener (a policy's class ceilings do not apply: the head has no scheduler).
+
+## Fleet discovery
+
+A head with `--fleet-listen` announces itself on the local network over mDNS (`_superfluid-fleet._tcp`): its fleet port, its HTTP port, the models it serves and, when it has a token, a network id. The network id is the first 16 hex digits of SHA-256 over a fixed prefix and the token. Nodes use it to join only a head of their own network.
+
+The network id reveals nothing practical about a token made by `superfluid fleet token` (256 random bits). A short or guessable `--token` can be brute-forced from it offline by anyone on the network, so use a generated token. A head with no token announces no network id.
 
 ## Putting it on a network
 

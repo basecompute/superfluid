@@ -2,7 +2,7 @@
 2:"/dev/_next/static/chunks/2ngzwwqeitkk7.js"
 3:I[39756,["$2"],"default"]
 4:I[37457,["$2"],"default"]
-8:"/dev/_next/static/chunks/3_zcwfmbdj4b5.js"
+8:"/dev/_next/static/chunks/0k-rzv44us4-t.js"
 9:I[24025,["$2","$8"],"DocsShell"]
 f:"/dev/_next/static/chunks/2stmo1fl2_ko-.js"
 10:I[73435,["$2","$8","$f"],"Markdown"]
@@ -16,7 +16,7 @@ f:"/dev/_next/static/chunks/2stmo1fl2_ko-.js"
 6:X
 d:X
 d:C
-11:T5c55,# Command-line reference
+11:T6a04,# Command-line reference
 
 `superfluid` is one binary with a few subcommands. Environment variables and the on-disk layout are in [Configuration](/configuration).
 
@@ -26,9 +26,12 @@ d:C
 | `superfluid launch <agent>` | run a coding agent against a local model, starting a server if none answers |
 | `superfluid stop` | stop the server `launch` started |
 | `superfluid fleet token` | print the fleet token, making it the first time |
+| `superfluid fleet nodes [<head>]` | list a fleet head's nodes; `--json` prints the head's answer |
+| `superfluid fleet remove <name> [<head>]` | remove a node from a fleet head until the head restarts |
 | `superfluid node join [<head>] --model <m>` | serve a model to a fleet head from this machine |
 | `superfluid runtimes [<model>]` | list runtimes, or say which one serves a model |
 | `superfluid runtime <subcommand>` | install, update, repair, remove or pin a runtime |
+| `superfluid models` | list the models pulled here, or the hub catalog's |
 | `superfluid compat` | what this build was built for: the runtime contracts it checks at load |
 | `superfluid self <subcommand>` | update Superfluid itself, or switch between the versions installed here |
 | `superfluid session <subcommand>` | inspect or export a session from a running server |
@@ -55,6 +58,7 @@ Flags of `serve`, `launch`, `runtime`, `session`, `media` and `self` take their 
 | 2 | usage or configuration refusal, before anything loads. An unknown flag names the closest valid one; a bad value names the flag and what it expected |
 | 3 | (`superfluid-workerd`, `superfluid-noded`) the model did not load |
 | 4 | (`serve`) the runtime for the model is not installed or cannot run here: its engine library is missing or of another ABI. A host that starts Superfluid can tell this from a flag it got wrong (2), and from an install Superfluid tried that failed (1) |
+| 5 | (`node join`) the fleet head removed this node; it refuses the node until the head restarts |
 
 `superfluid node join` exits 2 on every failure, including a model that did not load, a failed pull and a head that refused the token.
 
@@ -71,7 +75,7 @@ superfluid serve basecompute/Qwen3.8-27B                # BaseRT
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M        # llama.cpp
 superfluid serve mlx-community/Qwen3-4B-4bit           # MLX (Apple silicon)
 superfluid serve ./Qwen3-4B-Q4_K_M.gguf                 # runtime picked by format
-superfluid serve ./model.gguf --port 9000 --api-key "$KEY" --max-batch 4
+superfluid serve ./model.gguf --port 9000 --api-key-file ~/.superfluid/key --max-batch 4
 ```
 
 ### Model
@@ -99,7 +103,8 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--host <addr>` / `--port <N>` | `127.0.0.1` / `8453` | The HTTP address as two flags; `--http` wins. |
 | `--socket <path>` | `$SUPERFLUID_HOME/superfluid.sock` | Native session API socket. Falls back to `$TMPDIR/superfluid-<uid>.sock` when the default path is too long for a unix socket. |
 | `--sessions <dir>` | `$SUPERFLUID_HOME/sessions` | Session store: log, parks, media, files, batches. One server per directory. |
-| `--api-key <key>` | none | Require `Authorization: Bearer <key>` or `X-Api-Key` on every route but `/health`. |
+| `--api-key <key>` | none | Require `Authorization: Bearer <key>` or `X-Api-Key` on every route but `/health`. `ps` shows it to every user; prefer `--api-key-file` or `SUPERFLUID_API_KEY`. |
+| `--api-key-file <path>` | | The key, read from this file with the whitespace around it trimmed; a missing or empty file is refused, one group or others can read is warned about. Refused beside `--api-key`. With neither flag, `SUPERFLUID_API_KEY` gives the key. |
 | `--key-policy <file.json>` | none | Per-key class, rate, concurrency and admin rights; turns authentication on. See [Security](/security#key-policy). |
 | `--rate-limit <rpm>` | 0 (off) | Requests per minute per client IP. |
 | `--drain-timeout <sec>` | 60 | On `SIGUSR1`, how long in-flight requests get before exit. |
@@ -122,6 +127,7 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--top-k <N>` | model default | Default top-k truncation. |
 | `--min-p <F>` | model default | Default min-p truncation, 0-1. |
 | `--repeat-penalty <F>` | model default, else 1.0 | Default repetition penalty, 0-2; 1.0 disables. |
+| `--presence-penalty <F>` | 0 (off) | Default presence penalty, -2 to 2, for models on the `basert` runtime. |
 
 Sampling flags apply only to requests that name no value of their own. See [Sampling](/sampling).
 
@@ -205,6 +211,7 @@ See [Speculative decoding](/speculative-decoding).
 | `-v`, `--verbose` | | Same as `--log-filter debug`. |
 | `--log-dir <dir>` | stderr | JSON log files `superfluid.<n>.jsonl` (64 MiB each, 8 kept). |
 | `--log-file <path>` | none | Redirect stderr to this file (append). |
+| `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event, for a program that runs `serve` ([Start-up events](/events)). Also `SUPERFLUID_LOG_FORMAT`. |
 | `--tui` / `--no-tui` | on in a terminal | Live monitor in the terminal. |
 | `--otlp-metrics <url>` | off | Push metrics to `<url>/v1/metrics` (`http://` only). |
 | `--otlp-interval-ms <N>` | 15000 | Metrics push interval. |
@@ -238,11 +245,13 @@ Flags from earlier releases are accepted with a notice naming what replaced them
 ## `superfluid launch`
 
 ```sh
-superfluid launch                                   # list the agents and whether each is installed
+superfluid launch [--json]                          # list the agents and whether each is installed
 superfluid launch <agent> [--model <m>] [--http <addr:port>] [--api-key <key>] [--print] [-- <agent args>...]
 ```
 
 Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. That server's log goes to `$SUPERFLUID_HOME/logs/serve.log`. `--http` defaults to `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`; `--api-key` to `$SUPERFLUID_API_KEY`. `--model` defaults to the model `launch` last started a server with. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](/launch).
+
+`superfluid launch --json` prints the list as one JSON object: `schema` (1; a key is only added under the same number), `agents` (each with `name`, `aliases`, `title`, `binary`, `installed`, `path`, where on `PATH` it was found or null, and `install`), `server` (`pid` and `address` of the server `launch` started, or null) and `last_model` (the model `launch` starts a server with when none answers, or null). With an agent, `--json` is refused.
 
 ## `superfluid stop`
 
@@ -275,6 +284,30 @@ superfluid runtime options <id> [--json]
 `remove <id>` with no install removes the runtime's only install; when it has more, it names them and removes nothing, and `--all` removes every one. The bare id is also how `superfluid runtimes` lists the default install.
 
 See [Runtimes](/runtimes#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](/runtimes#per-runtime-options).
+
+## `superfluid models`
+
+```sh
+superfluid models [--catalog] [--refresh] [--json]
+```
+
+Lists the models pulled here, with their id, runtime, size and path. A pull that succeeds records the model in `$SUPERFLUID_HOME/pulls/`. A model whose path is gone is listed as `missing: <path>`; `superfluid serve <id>` pulls it again. A model pulled before Superfluid kept these records is marked `*`: its id is read back from its lock's name, with the hub catalog's help, and its runtime, size and path are not known. A last line counts the hub catalog's variants and models, how many of them are downloaded here, and when the copy here was fetched.
+
+| flag | meaning |
+|---|---|
+| `--catalog` | list the hub catalog's models instead (`id:quant`, size, architecture, backend), marking those downloaded here |
+| `--refresh` | fetch the hub catalog now; if that fails, list the copy kept here and exit 1 |
+| `--json` | print one JSON document with both lists, whatever `--catalog` says |
+
+Without `--refresh` the command never fetches the catalog. `serve` refreshes the copy at `$SUPERFLUID_HOME/cache/hub-catalog.json` once a day.
+
+```json
+{"schema": 1, "downloaded": [...], "catalog_updated": "2026-11-06", "catalog_fetched": 1762905600, "catalog": [...]}
+```
+
+Each `downloaded` entry has `id` (as pulled, `:tag` included), `served_name`, `runtime`, `path`, `size` (bytes), `pulled_at` (Unix seconds), `exists` and `id_guessed`. A guessed entry has `null` for what its lock does not say. Each `catalog` entry has the fields the cached catalog has, plus `downloaded`. `catalog_updated` is the catalog's own date and `catalog_fetched` is when the copy here was fetched (Unix seconds).
+
+A size counts each file once and follows links to files wherever they lead, so a Hugging Face snapshot whose weights live in the shared `blobs/` directory is counted in full.
 
 ## `superfluid compat`
 
@@ -316,10 +349,10 @@ superfluid media gc [--socket <path>]            # sweep blobs no session refere
 ## `superfluid top`
 
 ```sh
-superfluid top [--api-key <key>] [<host:port> ...]
+superfluid top [--api-key <key> | --api-key-file <path>] [<host:port> ...]
 ```
 
-Live per-node view over each server's `/metrics`. A [fleet head](/distributed-serving)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds the fleet head on the local network. A keyed server needs `--api-key`, else it shows as `401`. `q` or `Esc` quits.
+Live per-node view over each server's `/metrics`. A [fleet head](/distributed-serving)'s address stands for every node joined to it, and rows appear and go as nodes join and leave. With no address, `top` finds a fleet head on the local network: one of this machine's fleet token if a token is here, else one that announces no network, else any. A keyed server needs its key (`--api-key`, `--api-key-file` or `SUPERFLUID_API_KEY`), else it shows as `401`. `q` or `Esc` quits.
 
 ## `superfluid-workerd` and `superfluid-noded`
 
@@ -328,8 +361,8 @@ Live per-node view over each server's `/metrics`. A [fleet head](/distributed-se
 `superfluid-noded` is the fleet node agent; its flags are in [Distributed serving](/distributed-serving#run-a-node).
 e:[["children",{"s":"__PAGE__","h":160,"d":{"r":["$","$1","c",{"children":[["$","$L10",null,{"children":"$11"}],["$L12"],"$L13"]}],"p":"$@14","v":null,"s":"$6"}}]]
 b:[["children",{"s":{"n":"slug","t":"d","k":"cli","s":[]},"h":96,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}]}]]}],"p":"$@c","v":"$d","s":"$6"},"c":"$Qe"}]]
-7:[["children",{"s":"(docs)","h":96,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/3_zcwfmbdj4b5.js","async":true}]],["$","$L9",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]]}]}]]}],"p":"$@a","v":null,"s":"$6"},"c":"$Qb"}]]
-0:{"t":{"t":{"s":"","h":80,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/2ngzwwqeitkk7.js","async":true}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]]}]}]}]]}],"p":"$@5","v":null,"s":"$6"},"c":"$Q7"},"h":{"r":["$","$1","h",{"children":[null,["$","$L16",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]}],["$","$L18",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$19",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"Command-line reference · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L1a","11",{}]]}]}],null]}],null]}],"p":"$@1b","v":null,"s":"$6"}},"a":"$@1c","u":"$@1d","b":"xBghazGDaLvsa-XjnTXtG"}
+7:[["children",{"s":"(docs)","h":96,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/dev/_next/static/chunks/0k-rzv44us4-t.js","async":true}]],["$","$L9",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]]}]}]]}],"p":"$@a","v":null,"s":"$6"},"c":"$Qb"}]]
+0:{"t":{"t":{"s":"","h":80,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/dev/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next"}],["$","script","script-0",{"src":"/dev/_next/static/chunks/2ngzwwqeitkk7.js","async":true}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]]}]}]}]]}],"p":"$@5","v":null,"s":"$6"},"c":"$Q7"},"h":{"r":["$","$1","h",{"children":[null,["$","$L16",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]}],["$","$L18",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$19",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"Command-line reference · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","link","10",{"rel":"icon","href":"/dev/favicon.png"}],["$","$L1a","11",{}]]}]}],null]}],null]}],"p":"$@1b","v":null,"s":"$6"}},"a":"$@1c","u":"$@1d","b":"1KD5VD2d2uljIhzaJzvTM"}
 1e:I[97367,["$2"],"OutletBoundary"]
 12:["$","script","script-0",{"src":"/dev/_next/static/chunks/2stmo1fl2_ko-.js","async":true}]
 13:["$","$L1e",null,{"children":["$","$19",null,{"name":"Next.MetadataOutlet","children":"$@1f"}]}]
