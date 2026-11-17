@@ -118,6 +118,7 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
     let request = Pull { id: id.to_string(), offline: flags.offline, options: flags.options.clone() };
     let _one_at_a_time = Lock::take(&catalog.home().join("pulls"), id, &format!("pull of {id}"))?;
     eprintln!("superfluid: pulling {id} with the {runtime} runtime{}", if flags.offline { " (offline)" } else { "" });
+    let started = std::time::SystemTime::now();
     let path = if rt.worker.source == Source::BuiltIn {
         let linked = crate::linked::get(runtime.base()).ok_or_else(|| format!("this build does not link the {runtime} runtime"))?;
         linked.pull(&request, &crate::runtime_options::pull_args(runtime.base())?)?
@@ -136,8 +137,23 @@ pub fn pull(catalog: &Catalog, runtime: RuntimeId, id: &str, flags: &PullFlags) 
         return Err(format!("pulling {id} gave {}, which is not there", path.display()));
     }
     eprintln!("superfluid: {id} is {}", path.display());
-    ahead(&rt, &path);
+    if fetched(&path, started, &request) {
+        ahead(&rt, &path);
+    }
     Ok(path)
+}
+
+/// Slack for a file system that keeps coarse modification times.
+const MTIME_SLACK: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether this pull fetched the model (or was told to fetch it again, `--pull-force`): a model already here was
+/// written before the pull started. Only such a model is prepared `ahead`. Every serve of a model by id pulls it, so
+/// `ahead` there held the server back for the whole compile each time the ANE service had no compilation for the
+/// worker: after every superfluid or engine update and every macOS upgrade (Qwen3.8-27B on an M5 Max: ready in ~48 s,
+/// ~17 s without it). A model already here leaves the compile to its first load, which runs it in the background
+/// while the GPU prefills alone. A modification time that cannot be read counts as fetched (prepared ahead, as before).
+fn fetched(model: &Path, started: std::time::SystemTime, request: &Pull) -> bool {
+    request.option("force").is_some() || model.metadata().and_then(|m| m.modified()).map_or(true, |t| t + MTIME_SLACK >= started)
 }
 
 /// The work the runtime's worker does for a pulled model ahead of its first load, in the worker executable that will
@@ -237,6 +253,24 @@ mod tests {
         assert!(!looks_like_id(&on_disk.to_string_lossy()), "a path on disk is a path");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(served_name("unsloth/Qwen3-0.6B-GGUF:Q4_K_M"), "unsloth/Qwen3-0.6B-GGUF");
+    }
+
+    #[test]
+    fn only_a_model_the_pull_fetched_is_prepared_ahead() {
+        use std::time::{Duration, SystemTime};
+        let dir = std::env::temp_dir().join(format!("superfluid-fetched-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("model.base");
+        std::fs::write(&model, b"").unwrap();
+        let plain = Pull { id: "org/m".into(), offline: false, options: Vec::new() };
+        let before = SystemTime::now() - Duration::from_secs(60);
+        let after = SystemTime::now() + Duration::from_secs(60);
+        assert!(fetched(&model, before, &plain), "written since the pull started");
+        assert!(!fetched(&model, after, &plain), "here already: its first load compiles in the background");
+        assert!(!fetched(&model, after, &Pull { offline: true, ..plain.clone() }), "an offline serve of a model here");
+        assert!(fetched(&model, after, &Pull { options: vec![("force".into(), None)], ..plain.clone() }), "--pull-force fetches it again");
+        assert!(fetched(&dir.join("gone.base"), after, &plain), "no time to tell by: prepared ahead, as before");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
