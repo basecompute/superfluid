@@ -254,13 +254,19 @@ fn handshake(addr: &str, auth: Vec<u8>) -> Result<(Endpoint, HelloAckF), DaemonE
     } else {
         Endpoint::from_tcp_secure(stream, &auth, superfluid_linkf::Role::Initiator, HANDSHAKE_TIMEOUT)
     };
-    hello(opened, addr, auth, "--fleet-auth and the node's --auth-file differ")
+    hello(opened, addr, auth, None, "--fleet-auth and the node's --auth-file differ")
 }
 
 /// The head's side of the handshake on a stream just opened to `peer`, dialed or accepted,
 /// with each way it can fail named for the operator; `mismatch` says what differs when the
 /// token is refused.
-fn hello(opened: Result<Endpoint, superfluid_linkf::LinkFError>, peer: &str, auth: Vec<u8>, mismatch: &str) -> Result<(Endpoint, HelloAckF), DaemonError> {
+fn hello(
+    opened: Result<Endpoint, superfluid_linkf::LinkFError>,
+    peer: &str,
+    auth: Vec<u8>,
+    serves: Option<superfluid_proto::handshake::Served>,
+    mismatch: &str,
+) -> Result<(Endpoint, HelloAckF), DaemonError> {
     use superfluid_linkf::LinkFError;
     let node = |why: String| DaemonError::FleetNode { addr: peer.to_string(), why };
     let mut endpoint = match opened {
@@ -272,7 +278,11 @@ fn hello(opened: Result<Endpoint, superfluid_linkf::LinkFError>, peer: &str, aut
         Err(LinkFError::Closed | LinkFError::Io(_)) if !auth.is_empty() => return Err(node(closed_at_handshake())),
         Err(e) => return Err(node(e.to_string())),
     };
-    match endpoint.hello_as_head_within(auth, HANDSHAKE_TIMEOUT) {
+    let answered = match serves {
+        Some(serves) => endpoint.hello_as_head_serving_within(auth, serves, HANDSHAKE_TIMEOUT),
+        None => endpoint.hello_as_head_within(auth, HANDSHAKE_TIMEOUT),
+    };
+    match answered {
         Ok(ack) => Ok((endpoint, ack)),
         Err(LinkFError::Unauthorized) => Err(node(format!("refused the fleet token: {mismatch}"))),
         Err(LinkFError::Closed | LinkFError::Io(_)) => Err(node(closed_at_handshake())),
@@ -304,15 +314,38 @@ impl FleetHead {
     /// A node that dialed in; the head still opens the handshake, encrypted when it has a token.
     pub fn accept(sock: std::net::TcpStream, auth: Vec<u8>) -> Result<FleetHead, DaemonError> {
         let peer = sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        Self::accept_stating(sock, auth, None)?.ok_or_else(|| DaemonError::FleetNode { addr: peer, why: "it only asked what this head serves".into() })
+    }
+
+    /// As [`Self::accept`], stating in the hello what the head serves; `None` for a node that
+    /// only asked that ([`superfluid_proto::handshake::ASKS_ONLY`]) and hung up, which is not
+    /// taken in.
+    pub fn accept_serving(
+        sock: std::net::TcpStream,
+        auth: Vec<u8>,
+        serves: superfluid_proto::handshake::Served,
+    ) -> Result<Option<FleetHead>, DaemonError> {
+        Self::accept_stating(sock, auth, Some(serves))
+    }
+
+    fn accept_stating(
+        sock: std::net::TcpStream,
+        auth: Vec<u8>,
+        serves: Option<superfluid_proto::handshake::Served>,
+    ) -> Result<Option<FleetHead>, DaemonError> {
+        let peer = sock.peer_addr().map(|a| a.to_string()).unwrap_or_default();
         let opened = if auth.is_empty() {
             Endpoint::from_tcp(sock)
         } else {
             Endpoint::from_tcp_secure(sock, &auth, superfluid_linkf::Role::Initiator, HANDSHAKE_TIMEOUT)
         };
-        let (endpoint, node) = hello(opened, &peer, auth.clone(), "its token differs from this head's")?;
+        let (endpoint, node) = hello(opened, &peer, auth.clone(), serves, "its token differs from this head's")?;
+        if node.feature_flags & superfluid_proto::handshake::ASKS_ONLY != 0 {
+            return Ok(None);
+        }
         let mut head = FleetHead::from_parts(endpoint, node, String::new(), auth);
         head.read_tokenizer()?;
-        Ok(head)
+        Ok(Some(head))
     }
 
     fn from_parts(mut endpoint: Endpoint, node: HelloAckF, addr: String, auth: Vec<u8>) -> FleetHead {

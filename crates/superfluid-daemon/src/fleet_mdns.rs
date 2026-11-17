@@ -2,9 +2,12 @@
 //! address given.
 //!
 //! The announcement's TXT properties: `model`, the head's first model (a node from before
-//! `models` reads only it); `models`, every model it serves, comma-separated; `http`, the port
-//! of its HTTP API when that is off loopback; and `net`, the id of its fleet token's network
-//! ([`network_id`]), when it has a token.
+//! `models` reads only it); `models`, then `models.1`, `models.2`, …, the models it serves,
+//! comma-separated, split so no property passes DNS-SD's 255 bytes ([`models_props`]); `http`,
+//! the port of its HTTP API when that is off loopback; and `net`, the id of its fleet token's
+//! network ([`network_id`]), when it has a token. An announcement only tells a node where a head
+//! is: what the head serves, a node acts on only as the head states it over a link the token
+//! authenticates (its hello).
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -81,12 +84,7 @@ impl Announcement {
     }
 
     fn info(&self, models: &[String]) -> Result<ServiceInfo, String> {
-        // `model` is the first, as a node from before `models` reads it.
-        let mut props: HashMap<String, String> = [
-            ("model".to_string(), models.first().cloned().unwrap_or_default()),
-            ("models".to_string(), models.join(",")),
-        ]
-        .into();
+        let mut props: HashMap<String, String> = models_props(models).into_iter().collect();
         if let Some(http) = self.http {
             props.insert("http".to_string(), http.to_string());
         }
@@ -100,6 +98,74 @@ impl Announcement {
     }
 }
 
+/// The longest a TXT property may be, `key=value`, in DNS-SD (RFC 6763, 6.1); mdns-sd refuses
+/// the whole announcement for one longer.
+const TXT_PROPERTY_MAX: usize = 255;
+
+/// The most properties the model list is split across, so a head with very many models still
+/// announces in one packet.
+const MODELS_PROPERTIES_MAX: usize = 16;
+
+fn models_key(i: usize) -> String {
+    if i == 0 {
+        "models".to_string()
+    } else {
+        format!("models.{i}")
+    }
+}
+
+/// The TXT properties that list `models`, none longer than DNS-SD allows: `model`, the first,
+/// when it fits, for a node from before `models`; `models`, as many as fit, comma-separated; and
+/// `models.1`, `models.2`, … the rest, in order, which [`models_of`] reads back. A node from
+/// before the split reads `models` alone, the first of the list. A name that fits no property,
+/// or that holds a comma, is left out of the announcement, and so are models past the last
+/// property; the head serves them all the same.
+fn models_props(models: &[String]) -> Vec<(String, String)> {
+    let mut props = Vec::new();
+    if let Some(first) = models.first().filter(|m| "model=".len() + m.len() <= TXT_PROPERTY_MAX) {
+        props.push(("model".to_string(), first.clone()));
+    }
+    let (mut i, mut part) = (0, String::new());
+    for m in models.iter().filter(|m| !m.is_empty() && !m.contains(',')) {
+        let fits = |part: &str, i: usize| models_key(i).len() + 1 + part.len() + usize::from(!part.is_empty()) + m.len() <= TXT_PROPERTY_MAX;
+        if !fits(&part, i) && !part.is_empty() {
+            props.push((models_key(i), std::mem::take(&mut part)));
+            i += 1;
+            if i == MODELS_PROPERTIES_MAX {
+                return props;
+            }
+        }
+        if !fits(&part, i) {
+            continue;
+        }
+        if !part.is_empty() {
+            part.push(',');
+        }
+        part.push_str(m);
+    }
+    if !part.is_empty() {
+        props.push((models_key(i), part));
+    }
+    props
+}
+
+/// The models an announcement lists: `models` and the properties that continue it, else
+/// `model` alone, from a head released before `models`.
+fn models_of(txt: impl Fn(&str) -> String) -> Vec<String> {
+    let mut all = Vec::new();
+    for i in 0.. {
+        let part = txt(&models_key(i));
+        if part.is_empty() {
+            break;
+        }
+        all.extend(part.split(',').map(str::to_string));
+    }
+    if all.is_empty() {
+        all.extend(Some(txt("model")).filter(|m| !m.is_empty()));
+    }
+    all
+}
+
 /// The host as one DNS label: macOS's host name already ends in `.local`, and a host named in
 /// another domain is announced in `.local` by its first label.
 fn host_label(host: &str) -> &str {
@@ -109,9 +175,13 @@ fn host_label(host: &str) -> &str {
 /// A head announced on the local network.
 #[derive(Debug, Clone)]
 pub struct Head {
+    /// Its service instance, `superfluid on <host>`, one name however many addresses it has.
+    pub instance: String,
     /// Where its node listener answers, IPv4 first.
     pub nodes: Vec<SocketAddr>,
-    /// The models it serves.
+    /// The models it announces, its first first: for showing, and for a node with `--model` to
+    /// name its model by; a node that follows its head acts on what the head states over the
+    /// link instead.
     pub models: Vec<String>,
     /// Where its HTTP API answers, IPv4 first; empty when it announced none.
     pub http: Vec<SocketAddr>,
@@ -150,7 +220,7 @@ pub struct Search {
     others: bool,
     fallback: Option<Head>,
     foreign: Option<Head>,
-    said: HashSet<SocketAddr>,
+    said: HashSet<String>,
 }
 
 /// What a [`Search`] makes of a head it hears.
@@ -198,8 +268,7 @@ impl Search {
                 if self.others && self.foreign.is_none() {
                     self.foreign = Some(head.clone());
                 }
-                let first = head.nodes.first().is_some_and(|a| self.said.insert(*a));
-                if first {
+                if self.said.insert(head.instance.clone()) {
                     Heard::Foreign
                 } else {
                     Heard::Nothing
@@ -222,7 +291,7 @@ impl Search {
 /// unmarked one heard in the wait. `say` is told of a head of another network the first time
 /// the search hears it, and of an unmarked head taken.
 pub fn find_head(search: &mut Search, wait: Duration, say: &dyn Fn(String)) -> Result<Head, String> {
-    let found = browse(wait, |head| match search.hear(&head) {
+    let found = watch(wait, |head| match search.hear(&head) {
         Heard::Take => Some(head),
         Heard::Foreign => {
             let then = if search.others { "taken only if no other answers" } else { "not joining it" };
@@ -249,8 +318,9 @@ pub fn find_head(search: &mut Search, wait: Duration, say: &dyn Fn(String)) -> R
     }
 }
 
-/// Browses for heads for `wait`, handing each one resolved to `take` until it takes one.
-fn browse(wait: Duration, mut take: impl FnMut(Head) -> Option<Head>) -> Result<Option<Head>, String> {
+/// Watches the heads announced on the local network for `wait`, handing each to `take` as it
+/// resolves, and again when its announcement changes, until `take` returns something.
+pub fn watch<T>(wait: Duration, mut take: impl FnMut(Head) -> Option<T>) -> Result<Option<T>, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let events = daemon.browse(SERVICE).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + wait;
@@ -264,9 +334,9 @@ fn browse(wait: Duration, mut take: impl FnMut(Head) -> Option<Head>) -> Result<
                 let mut ips: Vec<_> = s.addresses.iter().map(|a| a.to_ip_addr()).filter(reachable).collect();
                 ips.sort_by_key(|ip| !ip.is_ipv4());
                 let txt = |k: &str| s.txt_properties.get_property_val_str(k).unwrap_or_default().to_string();
-                if let Some(head) = head_of(&ips, s.port, txt) {
-                    if let Some(head) = take(head) {
-                        break Some(head);
+                if let Some(head) = head_of(&s.fullname, &ips, s.port, txt) {
+                    if let Some(taken) = take(head) {
+                        break Some(taken);
                     }
                 }
             }
@@ -284,17 +354,15 @@ fn browse(wait: Duration, mut take: impl FnMut(Head) -> Option<Head>) -> Result<
 
 /// The head an announcement describes, from its addresses, port and TXT properties; none when
 /// no address can be dialed.
-fn head_of(ips: &[std::net::IpAddr], port: u16, txt: impl Fn(&str) -> String) -> Option<Head> {
+fn head_of(instance: &str, ips: &[std::net::IpAddr], port: u16, txt: impl Fn(&str) -> String) -> Option<Head> {
     if ips.is_empty() {
         return None;
     }
     let http: Option<u16> = txt("http").parse().ok();
     Some(Head {
+        instance: instance.to_string(),
         nodes: ips.iter().map(|&ip| SocketAddr::new(ip, port)).collect(),
-        models: match txt("models").as_str() {
-            "" => Some(txt("model")).filter(|m| !m.is_empty()).into_iter().collect(),
-            all => all.split(',').map(str::to_string).collect(),
-        },
+        models: models_of(&txt),
         http: http.map(|p| ips.iter().map(|&ip| SocketAddr::new(ip, p)).collect()).unwrap_or_default(),
         net: Some(txt("net")).filter(|n| !n.is_empty()),
     })
@@ -338,6 +406,7 @@ mod tests {
 
     fn head(port: u16, net: Option<&str>) -> Head {
         Head {
+            instance: format!("superfluid on box-{port}"),
             nodes: vec![SocketAddr::from(([192, 168, 1, 20], port))],
             models: vec!["m".into()],
             http: Vec::new(),
@@ -372,6 +441,9 @@ mod tests {
         assert_eq!(search.net(), Some(ours.as_str()));
         assert_eq!(search.hear(&head(1, Some("0000000000000000"))), Heard::Foreign);
         assert_eq!(search.hear(&head(1, Some("0000000000000000"))), Heard::Nothing, "said once");
+        let mut elsewhere = head(1, Some("0000000000000000"));
+        elsewhere.nodes = vec!["127.0.0.1:48456".parse().unwrap()];
+        assert_eq!(search.hear(&elsewhere), Heard::Nothing, "said once for the head, whichever address it is heard at");
         assert_eq!(search.hear(&head(2, None)), Heard::Kept);
         assert_eq!(search.hear(&head(3, None)), Heard::Kept);
         assert_eq!(search.hear(&head(4, Some(&ours))), Heard::Take);
@@ -399,15 +471,67 @@ mod tests {
     #[test]
     fn an_announcement_reads_back_as_a_head() {
         let ips = ["192.168.1.20".parse().unwrap(), "fd7a::1".parse().unwrap()];
-        let props: HashMap<&str, &str> = [("model", "a"), ("models", "a,b"), ("http", "8453"), ("net", "00112233aabbccdd")].into();
-        let head = head_of(&ips, 48456, |k| props.get(k).copied().unwrap_or_default().to_string()).unwrap();
-        assert_eq!(head.models, ["a", "b"]);
+        let props: HashMap<&str, &str> =
+            [("model", "a"), ("models", "a,b"), ("models.1", "c"), ("http", "8453"), ("net", "00112233aabbccdd")].into();
+        let head = head_of("superfluid on box-a", &ips, 48456, |k| props.get(k).copied().unwrap_or_default().to_string()).unwrap();
+        assert_eq!(head.models, ["a", "b", "c"]);
         assert_eq!(head.net.as_deref(), Some("00112233aabbccdd"));
         assert_eq!(head.http[0], "192.168.1.20:8453".parse().unwrap());
         let old: HashMap<&str, &str> = [("model", "a")].into();
-        let head = head_of(&ips, 48456, |k| old.get(k).copied().unwrap_or_default().to_string()).unwrap();
+        let head = head_of("superfluid on box-a", &ips, 48456, |k| old.get(k).copied().unwrap_or_default().to_string()).unwrap();
         assert_eq!((head.models, head.net, head.http.len()), (vec!["a".to_string()], None, 0), "a head from before");
-        assert!(head_of(&[], 48456, |_| String::new()).is_none());
+        assert!(head_of("superfluid on box-a", &[], 48456, |_| String::new()).is_none());
+    }
+
+    /// Five model ids, 314 bytes comma-separated: as one property, mdns-sd refuses it and the
+    /// whole announcement with it.
+    fn five_ids() -> Vec<String> {
+        [
+            "basecompute/Qwen3.6-35B-A3B-Instruct-2607-DFlash2-MTP:default-q4",
+            "basecompute/gemma-4-26B-A4B-it-assistant-vision-128k:default-q8",
+            "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-DWQ-v2:default",
+            "unsloth/Llama-3.3-70B-Instruct-GGUF:UD-Q4_K_XL-00001-of-0002",
+            "basecompute/whisper-large-v3-turbo-multilingual-ct2:default-q4",
+        ]
+        .map(str::to_string)
+        .to_vec()
+    }
+
+    fn info_of(props: HashMap<String, String>) -> Result<ServiceInfo, mdns_sd::Error> {
+        ServiceInfo::new(SERVICE, "superfluid on box-a", "box-a.local.", (), 48456, props)
+    }
+
+    #[test]
+    fn a_long_model_list_is_announced_in_properties_dns_sd_takes() {
+        let five = five_ids();
+        assert_eq!(five.join(",").len(), 314);
+        assert!(info_of([("models".to_string(), five.join(","))].into()).is_err(), "one property is refused");
+        let props = models_props(&five);
+        assert!(props.iter().all(|(k, v)| k.len() + 1 + v.len() <= TXT_PROPERTY_MAX), "{props:?}");
+        assert!(props.len() > 2, "split across more than `models`: {props:?}");
+        let map: HashMap<String, String> = props.into_iter().collect();
+        assert_eq!(map["model"], five[0], "a node from before reads the first");
+        assert_eq!(models_of(|k| map.get(k).cloned().unwrap_or_default()), five);
+        info_of(map).expect("the announcement is taken");
+    }
+
+    #[test]
+    fn a_model_no_property_holds_is_left_out_and_the_rest_announced() {
+        let long = format!("org/{}", "x".repeat(260));
+        let many: Vec<String> = (0..2000).map(|i| format!("org/model-{i:04}")).collect();
+        let with_long = vec![long.clone(), "org/a".into(), "b,c".into(), "org/d".into()];
+        let props = models_props(&with_long);
+        let map: HashMap<String, String> = props.clone().into_iter().collect();
+        assert!(!map.contains_key("model"), "the first does not fit `model`");
+        assert_eq!(models_of(|k| map.get(k).cloned().unwrap_or_default()), ["org/a", "org/d"]);
+        info_of(map).expect("the announcement is taken");
+        let props = models_props(&many);
+        assert!(props.iter().all(|(k, v)| k.len() + 1 + v.len() <= TXT_PROPERTY_MAX));
+        assert_eq!(props.iter().filter(|(k, _)| k.starts_with("models")).count(), MODELS_PROPERTIES_MAX);
+        let map: HashMap<String, String> = props.into_iter().collect();
+        let listed = models_of(|k| map.get(k).cloned().unwrap_or_default());
+        assert_eq!(listed[..], many[..listed.len()], "the first ones, in order");
+        info_of(map).expect("the announcement is taken");
     }
 
     #[test]
@@ -431,12 +555,12 @@ mod tests {
         let net = network_id(token);
         let head = advertise(48457, &["first".into()], None, Some(&net)).unwrap();
         let ours = move |h: &Head| h.net.as_deref() == Some(net.as_str());
-        let seen = browse(Duration::from_secs(10), |h| ours(&h).then_some(h)).unwrap().expect("the head answers");
+        let seen = watch(Duration::from_secs(10), |h| ours(&h).then_some(h)).unwrap().expect("the head answers");
         assert_eq!(seen.models, ["first"]);
         // One browse that already resolved the head hears it again with the new models.
         let (tx, rx) = std::sync::mpsc::channel();
         let watcher = std::thread::spawn(move || {
-            browse(Duration::from_secs(15), |h| {
+            watch(Duration::from_secs(15), |h| {
                 if !ours(&h) {
                     return None;
                 }

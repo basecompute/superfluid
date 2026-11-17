@@ -9,8 +9,13 @@
 //!
 //! An unloaded model stays unloaded when a node that serves it joins, or joins again: the head
 //! says so and does not serve it. `/v1/models/load` serves it again.
+//!
+//! The head states in its hello to each node what it serves, with the id a node pulls each
+//! model by where it knows one: the id it was given at start, else the first a node serving
+//! the model reported. A node that follows its head pulls the head's first model by it. The
+//! ids are not announced on the local network, where anyone can announce.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::fleet_manager::FleetManager;
@@ -38,6 +43,8 @@ struct Listed {
     unloaded: HashSet<String>,
     /// Brought by a node, with its name, before the head's registry was in place.
     pending: Vec<(String, String)>,
+    /// The id a node pulls each model by, `org/model:tag`, where the head knows one.
+    ids: HashMap<String, String>,
 }
 
 impl HeadModels {
@@ -60,6 +67,30 @@ impl HeadModels {
     /// The models served, in the order they are announced.
     pub fn names(&self) -> Vec<String> {
         self.listed.lock().expect("head models").order.clone()
+    }
+
+    /// The id a node pulls each of [`Self::names`] by, in the same order; empty for one the
+    /// head knows by path only.
+    pub fn ids(&self) -> Vec<String> {
+        self.served().ids
+    }
+
+    /// What the head states it serves in its hello to each node: its models, in order, with
+    /// the id a node pulls each by, read together, so a load or unload meanwhile never pairs one
+    /// model with another's id.
+    pub fn served(&self) -> superfluid_proto::handshake::Served {
+        let listed = self.listed.lock().expect("head models");
+        let ids = listed.order.iter().map(|m| listed.ids.get(m).cloned().unwrap_or_default()).collect();
+        superfluid_proto::handshake::Served { models: listed.order.clone(), ids }
+    }
+
+    /// Notes the id each of `models` is pulled by, as far as `ids` gives them, for a model the
+    /// head knows no id for yet.
+    pub fn know_ids(&self, models: &[String], ids: &[String]) {
+        let mut listed = self.listed.lock().expect("head models");
+        for (m, id) in models.iter().zip(ids).filter(|(_, id)| !id.is_empty()) {
+            listed.ids.entry(m.clone()).or_insert_with(|| id.clone());
+        }
     }
 
     /// The loader for the head's registry: a model a node that is up serves is served; any other
@@ -139,7 +170,7 @@ impl HeadModels {
     }
 
     fn changed(&self, names: &[String]) {
-        let order = {
+        {
             let mut listed = self.listed.lock().expect("head models");
             let gone: Vec<String> = listed.order.iter().filter(|m| !names.contains(m)).cloned().collect();
             listed.unloaded.extend(gone);
@@ -149,10 +180,14 @@ impl HeadModels {
                     listed.order.push(n.clone());
                 }
             }
-            listed.order.clone()
-        };
+        }
+        self.announce();
+    }
+
+    fn announce(&self) {
+        let names = self.names();
         if let Some(a) = self.announcement.lock().expect("head announcement").as_ref() {
-            if let Err(e) = a.update(&order) {
+            if let Err(e) = a.update(&names) {
                 eprintln!("superfluid: the local network was not told of the models served now ({e})");
             }
         }
@@ -164,5 +199,42 @@ fn adopt(registry: &ModelRegistry, node: &str, name: &str) {
         Ok(true) => eprintln!("superfluid: {name}: served from now on, as fleet node '{node}' serves it"),
         Ok(false) => {}
         Err(e) => eprintln!("superfluid: {name}: fleet node '{node}' serves it, and this head cannot: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_a_head_states_pairs_each_model_with_its_own_id_while_its_models_change() {
+        let lease = superfluid_proto::linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+        let manager = Arc::new(FleetManager::with_options(Vec::new(), crate::fleet_manager::PlacementPolicy::LoadAware, lease, 90, 1));
+        let models = HeadModels::fixed(manager, vec!["a".into()]);
+        models.know_ids(&["a".into(), "b".into()], &["org/a:q4".into(), "org/b:q4".into()]);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // The registry's change hook, as a load of b and an unload of a, and back, would call it.
+        let churn = {
+            let (models, stop) = (Arc::clone(&models), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    models.changed(&["b".into()]);
+                    models.changed(&["a".into()]);
+                }
+            })
+        };
+        let by = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut read = 0;
+        while std::time::Instant::now() < by {
+            let served = models.served();
+            assert_eq!(served.models.len(), served.ids.len(), "{served:?}");
+            for (m, id) in served.models.iter().zip(&served.ids) {
+                assert_eq!(id, &format!("org/{m}:q4"), "a model stated with another's id: {served:?}");
+            }
+            read += 1;
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        churn.join().unwrap();
+        assert!(read > 1000, "{read} reads");
     }
 }
