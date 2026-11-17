@@ -24,7 +24,7 @@ fn state(f: &Found) -> &'static str {
 }
 
 /// `text` with `~` for the home directory where it names a path in it.
-fn tilde(text: &str, home: Option<&Path>) -> String {
+pub(crate) fn tilde(text: &str, home: Option<&Path>) -> String {
     match home.filter(|h| h.is_absolute() && h.parent().is_some()).and_then(Path::to_str) {
         Some(h) if text == h => "~".into(),
         Some(h) => text.replace(&format!("{h}/"), "~/"),

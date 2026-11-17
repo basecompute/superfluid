@@ -51,6 +51,7 @@ pub mod runtime;
 pub mod runtime_options;
 pub mod runtime_pick;
 pub mod installs;
+pub mod models;
 pub mod pulls;
 pub mod runtimes;
 pub mod runtimes_report;
