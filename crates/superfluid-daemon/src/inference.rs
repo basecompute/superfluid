@@ -1430,6 +1430,40 @@ mod embedding_sampling_tests {
     }
 
     #[test]
+    fn before_a_load_only_a_repeat_the_engine_cannot_change_is_advertised() {
+        let quiet = ModelSamplingDefaults::default();
+        let published = ModelSamplingDefaults { repetition_penalty: Some(1.1), ..Default::default() };
+        let presence = |op: SamplingOverrides| SamplingOverrides { presence_penalty: Some(1.5), ..op };
+        let ops = [
+            SamplingOverrides::default(),
+            presence(SamplingOverrides::default()),
+            policy(),
+            presence(policy()),
+            presence(SamplingOverrides { repeat_penalty: Some(1.3), ..policy() }),
+        ];
+        for m in [&quiet, &published] {
+            for op in ops {
+                let advertised = repeat_before_load(m, &op);
+                // Whichever way the model's engine answers once loaded, echoing what was advertised
+                // (no presence penalty, the repeat where one is) generates as leaving it out.
+                for takes_presence in [true, false] {
+                    let own = if takes_presence { op } else { SamplingOverrides { presence_penalty: None, ..op } };
+                    let omitted = extras_of(None, None, None, &own, m);
+                    let echoed = extras_of(None, None, advertised, &own, m);
+                    assert_eq!(
+                        (echoed.presence_penalty, echoed.frequency_penalty, echoed.repeat_penalty),
+                        (omitted.presence_penalty, omitted.frequency_penalty, omitted.repeat_penalty),
+                        "{op:?} over {m:?}, presence default taken: {takes_presence}"
+                    );
+                }
+            }
+        }
+        assert_eq!(repeat_before_load(&quiet, &presence(policy())), None, "1.0 or 1.07, as the engine answers");
+        assert_eq!(repeat_before_load(&quiet, &policy()), Some(1.07));
+        assert_eq!(repeat_before_load(&quiet, &presence(SamplingOverrides::default())), Some(1.0));
+    }
+
+    #[test]
     fn model_truncation_wins_as_a_set_but_not_model_temperature_or_repeat() {
         for model in [
             ModelSamplingDefaults { top_p: Some(0.95), ..Default::default() },
@@ -1495,6 +1529,16 @@ pub(crate) fn advertised_generation_defaults(
 pub(crate) fn advertised_penalties(model: &ModelSamplingDefaults, op: &SamplingOverrides) -> (f32, f32) {
     let e = extras_of(None, None, None, op, model);
     (e.presence_penalty, if e.repeat_penalty == 0.0 { 1.0 } else { e.repeat_penalty })
+}
+
+/// The repeat penalty `/props` advertises for a model not loaded yet, whose engine has not said
+/// whether the presence default is its to take (`for_daemon`): the one a request that names none
+/// generates with either way, or None where the two differ (an embedding's fallback policy drops
+/// its repeat under a presence penalty). The presence default itself waits for the load.
+pub(crate) fn repeat_before_load(model: &ModelSamplingDefaults, op: &SamplingOverrides) -> Option<f32> {
+    let with = advertised_penalties(model, op).1;
+    let without = advertised_penalties(model, &SamplingOverrides { presence_penalty: None, ..*op }).1;
+    (with == without).then_some(with)
 }
 
 pub(crate) fn repeat_penalty_for(

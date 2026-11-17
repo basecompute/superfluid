@@ -4996,6 +4996,81 @@ fn props_advertises_the_penalties_an_omitted_request_runs_with() {
     assert_eq!(admitted(addr, &format!(r#","repeat_penalty":{repeat}"#)), (0.0, 1.07));
 }
 
+/// The (presence, repeat) penalties each lane reached the engine with, for the test below alone.
+static UNLOADED_PENALTIES_ADMITTED: std::sync::Mutex<Vec<(f32, f32)>> = std::sync::Mutex::new(Vec::new());
+
+#[test]
+fn props_for_a_model_not_loaded_yet_waits_for_its_own_capability_record() {
+    // The default model's engine applies the penalties; model-b's does not, model-c's does. /props for
+    // a model not loaded yet answers from the default model's daemon, so the presence default (and the
+    // policy's repeat it turns off) is not advertised until the model's own record says.
+    use superfluid_daemon::registry::{ModelLoader, ModelRegistry};
+    const YES: &str = r#"{"descriptor_version":1,"sampling":{"engine_penalties":true}}"#;
+    const NO: &str = r#"{"descriptor_version":1,"sampling":{"engine_penalties":"on the host"}}"#;
+    fn record(a: &superfluid_abi::LaneAdmit) -> bool {
+        UNLOADED_PENALTIES_ADMITTED.lock().unwrap().push((a.params.presence_penalty, a.params.repeat_penalty));
+        false
+    }
+    fn daemon_saying(capabilities: &'static str) -> Arc<Daemon> {
+        let dir = std::env::temp_dir().join(format!("superfluid-openai-props-unloaded-{}-{}", std::process::id(), unique()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = EngineHost::spawn(move || {
+            let engine = MockEngine::new(EngineConfig::default())
+                .with_capability_descriptor(capabilities)
+                .refusing_admits(record, superfluid_abi::Status::RejectCertUnmatched);
+            (engine, None)
+        })
+        .expect("spawn");
+        Arc::new(Daemon::with_options(store, host, Box::new(MockChatCodec), Default::default()).unwrap())
+    }
+    // The loader gets the model's source, its path here.
+    let loader: ModelLoader = Box::new(|source: &str, _runtime| Ok(daemon_saying(if source.contains("model-c") { YES } else { NO })));
+    let registry = Arc::new(ModelRegistry::with_initial("model-a", daemon_saying(YES), loader));
+    registry.register_known("model-b", std::path::Path::new("/models/model-b.base"));
+    registry.register_known("model-c", std::path::Path::new("/models/model-c.base"));
+    let fallback = openai::SamplingFallback {
+        temperature: 0.0,
+        repeat_penalty: 1.07,
+        top_p: 1.0,
+        top_k: 0,
+        min_p: 0.0,
+        frequency_penalty_as_repeat: true,
+    };
+    let op = openai::SamplingOverrides { presence_penalty: Some(1.5), fallback: Some(fallback), ..Default::default() };
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let cfg = openai::ServeConfig { sampling: op, ..Default::default() };
+    std::thread::spawn(move || {
+        let _ = openai::serve_blocking_config(listener, registry, cfg);
+    });
+
+    let props = |query: &str| {
+        let (status, _, body) = http(addr, "GET", &format!("/props{query}"), "");
+        assert_eq!(status, 200, "{query}: {body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let s = &v["default_generation_settings"];
+        (v["loaded"].as_bool().unwrap(), s["presence_penalty"].as_f64(), s["repeat_penalty"].as_f64().map(|r| r as f32))
+    };
+    let admitted = |model: &str, extra: &str| {
+        UNLOADED_PENALTIES_ADMITTED.lock().unwrap().clear();
+        let body = format!(r#"{{"model":"{model}","messages":[{{"role":"user","content":"hi"}}],"max_tokens":2{extra}}}"#);
+        let (status, _, out) = http(addr, "POST", "/v1/chat/completions", &body);
+        assert_eq!(status, 200, "{model}{extra}: {out}");
+        UNLOADED_PENALTIES_ADMITTED.lock().unwrap().last().copied().expect("a lane was admitted")
+    };
+
+    assert_eq!(props("?model=model-a"), (true, Some(1.5), Some(1.0)), "the default model takes the presence default");
+    assert_eq!(props("?model=model-b"), (false, None, None), "not the default model's to say");
+    assert_eq!(admitted("model-b", ""), (0.0, 1.07), "its own engine leaves the default off");
+    assert_eq!(props("?model=model-b"), (true, None, Some(1.07)), "loaded: its own record answers");
+    assert_eq!(admitted("model-b", r#","repeat_penalty":1.07"#), (0.0, 1.07), "echoing /props changes nothing");
+
+    assert_eq!(props("?model=model-c"), (false, None, None));
+    assert_eq!(props("?model=model-c&autoload=1"), (true, Some(1.5), Some(1.0)), "loaded to answer: its own record");
+    assert_eq!(admitted("model-c", ""), (1.5, 1.0));
+}
+
 struct RefusingTemplateCodec;
 
 const REFUSAL: &str = "Conversation roles must alternate user/assistant/user/assistant/...";
