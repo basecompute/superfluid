@@ -11,6 +11,7 @@ use superfluid_linkf::{Endpoint, LinkFError, Role};
 use crate::fleet::FleetHead;
 use crate::fleet_manager::FleetManager;
 use crate::fleet_mdns::Search;
+use crate::fleet_models::HeadModels;
 use crate::nodeagent::NodeAgent;
 use crate::runtime_pick::RuntimeId;
 use crate::runtimes::Catalog;
@@ -26,6 +27,11 @@ Usage: superfluid node join [<head-host:port>] --model <path|org/model[:tag]> [o
   only when no head of this network answers. When the head is lost, the node looks
   again and joins whichever head of its network answers, which may be another machine
   that took over; a head given by address is dialed again there, never looked for.
+  A model given by id is served under its own name, org/model without the tag, and a
+  head that does not serve it takes it on when the node joins. A model given by path
+  is served under its file's name when the head serves a model by that name, and
+  otherwise under the head's one model when it serves one, as the same model under
+  another file name; --model-name names it otherwise.
 Options:
   --model <m>             The model; an id is pulled first, as `serve` pulls it
   --token <value>         The head's fleet token, kept at $SUPERFLUID_HOME/fleet/token
@@ -33,8 +39,8 @@ Options:
   --max-context <N>       This node's context window [default: sized for this device]
   --max-batch <N>         This node's lanes [default: 8]
   --identity <name>       The name the head shows for this node [default: the host name]
-  --model-name <id>       The name the head matches on [default: what the head announces,
-                          else the model's id]
+  --model-name <id>       The name the head matches on [default: an id's own name; a
+                          path's own name, or the head's one model when it serves one]
   --offline               Pull nothing; the model must be in the runtime's cache
   --park                  Keep each prompt's prefix on disk, under
                           $SUPERFLUID_HOME/fleet/nodes/<identity>/park, so a restarted node
@@ -121,7 +127,7 @@ fn join(args: &[String]) {
     let state = NodeState::open(&home, &identity, park).unwrap_or_else(|e| fail(e));
     let loaded = load_node(&model, runtime.as_deref(), max_context, max_batch, offline, &state).unwrap_or_else(|e| fail(e));
     eprintln!("superfluid: {}", loaded.summary);
-    let model_name = model_name.unwrap_or_else(|| name_among(announced.as_deref().unwrap_or_default(), loaded.model_name));
+    let model_name = model_name.unwrap_or_else(|| name_among(announced.as_deref().unwrap_or_default(), loaded.model_name, loaded.id.is_some()));
     let mut node = NodeAgent::new(Arc::new(loaded.daemon), identity.clone(), model_name.clone()).with_max_lanes(max_batch);
     if let Some(tok) = loaded.tokenizer {
         node = node.with_tokenizer_of(tok);
@@ -208,21 +214,16 @@ fn discover(search: &mut Search) -> (Vec<SocketAddr>, Vec<String>) {
     }
 }
 
-/// The name a node serves its model under: its own when the head serves a model by that name,
-/// the head's one model when it serves one (the same model under another id or path), and its
-/// own, said, when the head serves several and none is it.
-fn name_among(served: &[String], own: String) -> String {
+/// The name a node serves its model under when `--model-name` does not give it. A model given by
+/// id keeps its own name, `org/model` without the tag: the head serves it under that name, or
+/// takes it on when the node joins. A model given by path keeps its own name when the head
+/// serves a model by it, and otherwise takes the head's one model when the head serves one,
+/// as the same model under another file name; the head holds it to that model's tokenizer.
+fn name_among(served: &[String], own: String, by_id: bool) -> String {
     match served {
-        _ if served.contains(&own) => own,
+        _ if by_id || served.contains(&own) => own,
         [only] => only.clone(),
-        [] => own,
-        _ => {
-            eprintln!(
-                "superfluid: the head serves {}, and none is '{own}'; give this node --model-name <one of them>",
-                served.join(", ")
-            );
-            own
-        }
+        _ => own,
     }
 }
 
@@ -269,6 +270,8 @@ pub struct LoadedNode {
     pub daemon: Daemon,
     /// The name the head sees the model under.
     pub model_name: String,
+    /// The id the model was pulled by, `org/model:tag`; none for one given by path.
+    pub id: Option<String>,
     /// The runtime, model, window and lanes, for the node's start line.
     pub summary: String,
     /// The model's tokenizer, for the head to check and, with no copy of the model, to use.
@@ -291,6 +294,7 @@ pub fn load_node(
     let runtime = runtime.map(|r| if r == "native" { "basert" } else { r });
     let (path, model_name, id) = resolve_model(&catalog, model, runtime, offline)?;
     let runtime = catalog.require(id).or_else(|_| crate::pulls::ensure_installed(&catalog, id, offline).map_err(String::from))?;
+    let pulled = crate::pulls::looks_like_id(model).then(|| model.to_string());
     let (ctx, sized) = match max_context {
         Some(n) => (n, format!("--max-context {n}")),
         None => match device_window(&runtime, &path, lanes) {
@@ -319,6 +323,7 @@ pub fn load_node(
     );
     let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, state)?;
     node.tokenizer = crate::serve::open_tokenizer(&runtime, &path).ok();
+    node.id = pulled;
     Ok(node)
 }
 
@@ -345,7 +350,7 @@ fn loaded(
 ) -> Result<LoadedNode, String> {
     let store = SessionStore::open(&state.wal).map_err(|e| format!("node store: {e}"))?;
     let daemon = Daemon::with_park(store, host, codec, lanes as usize, state.park.clone());
-    Ok(LoadedNode { daemon, model_name, summary, tokenizer: None })
+    Ok(LoadedNode { daemon, model_name, id: None, summary, tokenizer: None })
 }
 
 /// The window this device holds for `lanes` lanes of the model, as `superfluid serve` sizes it.
@@ -440,9 +445,10 @@ fn resolve_model(catalog: &Catalog, model: &str, runtime: Option<&str>, offline:
 }
 
 /// The head's end: every node that dials in with the token is taken into the fleet. With no
-/// token, only nodes on this machine are; `model` is what the head serves, and a node that
-/// serves something else is taken but warned about, since no session will go to it.
-pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec<u8>, models: Vec<String>) {
+/// token, only nodes on this machine are. A node that serves a model the head does not serve
+/// brings it ([`HeadModels::bring`]), and the first node to bring a model sets the tokenizer
+/// the head holds the others serving it to.
+pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec<u8>, models: Arc<HeadModels>) {
     let in_handshake = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for sock in listener.incoming() {
         let Ok(sock) = sock else { continue };
@@ -455,28 +461,29 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
             std::thread::sleep(Duration::from_millis(20));
         }
         in_handshake.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let (manager, auth, served, in_handshake) = (Arc::clone(&manager), auth.clone(), models.clone(), Arc::clone(&in_handshake));
+        let (manager, auth, models, in_handshake) = (Arc::clone(&manager), auth.clone(), Arc::clone(&models), Arc::clone(&in_handshake));
         std::thread::spawn(move || {
             let opened = FleetHead::accept(sock, auth);
             in_handshake.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             match opened {
                 Ok(head) => {
                     let node = head.node();
-                    let (identity, models, ctx) = (node.node_identity.clone(), node.loadable_models.join(", "), node.capacity.max_context_tokens);
-                    let serves_one = node.loadable_models.iter().any(|m| served.contains(m));
-                    match manager.adopt(head, peer.ip()) {
-                        Ok((_, true, _)) => {
-                            eprintln!("superfluid: fleet node '{identity}' joined from {peer}: {models}, context window {ctx} tokens");
-                            if !serves_one {
-                                eprintln!(
-                                    "superfluid: fleet node '{identity}' serves {models}, none of {}; no session will go to it (set --model-name there)",
-                                    served.join(", ")
-                                );
-                            }
-                        }
+                    let (identity, serves, ctx) = (node.node_identity.clone(), node.loadable_models.clone(), node.capacity.max_context_tokens);
+                    for m in &serves {
+                        manager.expect_tokenizer_first(m, head.tokenizer());
+                    }
+                    let joined = manager.adopt(head, peer.ip());
+                    match &joined {
+                        Ok((_, true, _)) => eprintln!(
+                            "superfluid: fleet node '{identity}' joined from {peer}: {}, context window {ctx} tokens",
+                            serves.join(", ")
+                        ),
                         Ok((_, false, 1)) => eprintln!("superfluid: fleet node '{identity}' rejoined from {peer}"),
                         Ok(_) => {}
                         Err(why) => eprintln!("superfluid: a node at {peer} did not join: {why}"),
+                    }
+                    if joined.is_ok() {
+                        models.bring(&identity, &serves);
                     }
                 }
                 Err(e) => eprintln!("superfluid: a node at {peer} did not join: {e}"),
@@ -490,11 +497,19 @@ mod tests {
     use super::name_among;
 
     #[test]
-    fn a_node_takes_its_own_name_when_served_else_the_heads_only_one() {
+    fn a_node_given_a_path_takes_its_own_name_when_served_else_the_heads_only_one() {
         let own = || "qwen".to_string();
-        assert_eq!(name_among(&["llama".into(), "qwen".into()], own()), "qwen");
-        assert_eq!(name_among(&["Qwen3-0.6B".into()], own()), "Qwen3-0.6B", "the same model under another id");
-        assert_eq!(name_among(&["llama".into(), "gemma".into()], own()), "qwen", "several, none it: its own");
-        assert_eq!(name_among(&[], own()), "qwen");
+        assert_eq!(name_among(&["llama".into(), "qwen".into()], own(), false), "qwen");
+        assert_eq!(name_among(&["Qwen3-0.6B".into()], own(), false), "Qwen3-0.6B", "the same model under another file name");
+        assert_eq!(name_among(&["llama".into(), "gemma".into()], own(), false), "qwen", "several, none it: its own");
+        assert_eq!(name_among(&[], own(), false), "qwen");
+    }
+
+    #[test]
+    fn a_node_given_an_id_keeps_its_name_for_the_head_to_take_on() {
+        let own = || "Qwen/Qwen3-0.6B-GGUF".to_string();
+        assert_eq!(name_among(&["llama".into()], own(), true), "Qwen/Qwen3-0.6B-GGUF", "not renamed to the head's one model");
+        assert_eq!(name_among(&["Qwen/Qwen3-0.6B-GGUF".into()], own(), true), "Qwen/Qwen3-0.6B-GGUF");
+        assert_eq!(name_among(&[], own(), true), "Qwen/Qwen3-0.6B-GGUF");
     }
 }

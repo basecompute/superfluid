@@ -28,6 +28,7 @@ pub(crate) mod fleet_daemon;
 pub mod idempotency;
 pub mod fleet_join;
 pub mod fleet_mdns;
+pub mod fleet_models;
 pub mod fleet_token;
 #[cfg(feature = "tui")]
 pub mod tui;
