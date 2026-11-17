@@ -1,0 +1,112 @@
+1:"$Sreact.fragment"
+2:"/latest/_next/static/chunks/2ngzwwqeitkk7.js"
+3:I[39756,["$2"],"default"]
+4:I[37457,["$2"],"default"]
+6:"/latest/_next/static/chunks/1eecha4y93t94.js"
+7:I[24025,["$2","$6"],"DocsShell"]
+c:I[97367,["$2"],"OutletBoundary"]
+d:"$Sreact.suspense"
+f:"ViewportBoundary"
+10:I[97367,["$2"],"$f"]
+12:"MetadataBoundary"
+13:I[97367,["$2"],"$12"]
+15:I[68027,["$2"],"default",1]
+:HL["/latest/_next/static/chunks/2utmj7drmfv5o.css","style"]
+:HC["/",""]
+9:X
+a:[["children",{"s":"__PAGE__","h":512,"d":{"r":["$","$1","c",{"children":["$Lb",[["$","script","script-0",{"src":"/latest/_next/static/chunks/2stmo1fl2_ko-.js","async":true,"nonce":"$undefined"}]],["$","$Lc",null,{"children":["$","$d",null,{"name":"Next.MetadataOutlet","children":"$@e"}]}]]}],"p":false,"v":null}}]]
+8:[["children",{"s":{"n":"slug","t":"d","k":"events","s":[]},"h":512,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],"p":false,"v":"$9"},"c":"$Qa"}]]
+5:[["children",{"s":"(docs)","h":512,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/latest/_next/static/chunks/1eecha4y93t94.js","async":true,"nonce":"$undefined"}]],["$","$L7",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],"p":false,"v":null},"c":"$Q8"}]]
+0:{"P":null,"c":["","events",""],"q":"","i":false,"t":{"t":{"s":"","h":528,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/latest/_next/static/chunks/2ngzwwqeitkk7.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],"p":false,"v":null},"c":"$Q5"},"h":{"r":["$","$1","h",{"children":[null,["$","$L10",null,{"children":"$L11"}],["$","$L13",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$d",null,{"name":"Next.Metadata","children":"$L14"}]}],null]}],null]}],"p":false,"v":null}},"m":"$undefined","G":["$15",[["$","link","0",{"rel":"stylesheet","href":"/latest/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"r":"$undefined","s":"$undefined","a":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"61gJXLeQJLt2a8utJiwWm"}
+16:"/latest/_next/static/chunks/2stmo1fl2_ko-.js"
+17:I[73435,["$2","$6","$16"],"Markdown"]
+9:C
+18:T2804,# Start-up events
+
+A program that runs `superfluid serve` or `superfluid node join` (a desktop app, a supervisor, a test harness) can follow the start from stderr without reading prose. With `--log-format json`, every line Superfluid writes on stderr is one JSON object, and each step of a start (a runtime installed, a model pulled and loaded, the server ready, a node joined) is an event with a name and fields of its own. Without the flag, stderr is the prose it always was.
+
+```sh
+superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M --http 127.0.0.1:0 --log-format json
+```
+
+```json
+{"timestamp":"2026-11-13T09:41:07.112406Z","event":"start","schema":1,"version":"0.1.13","command":"serve","pid":41230}
+{"timestamp":"2026-11-13T09:41:07.118930Z","event":"log","level":"INFO","message":"superfluid: pulling unsloth/Qwen3-0.6B-GGUF:Q4_K_M with the llamacpp runtime"}
+{"timestamp":"2026-11-13T09:41:07.119002Z","event":"pull.start","id":"unsloth/Qwen3-0.6B-GGUF:Q4_K_M","runtime":"llamacpp","offline":false}
+{"timestamp":"2026-11-13T09:41:08.371551Z","event":"pull.progress","done_bytes":104857600,"total_bytes":396705472,"bytes_per_sec":83886080,"secs_left":4,"id":"unsloth/Qwen3-0.6B-GGUF:Q4_K_M"}
+{"timestamp":"2026-11-13T09:41:11.620417Z","event":"pull.done","id":"unsloth/Qwen3-0.6B-GGUF:Q4_K_M","path":"/Users/me/.cache/huggingface/hub/models--unsloth--Qwen3-0.6B-GGUF/snapshots/1f0c/Qwen3-0.6B-Q4_K_M.gguf","bytes":396705472}
+{"timestamp":"2026-11-13T09:41:11.702113Z","event":"model.load.start","model":"unsloth/Qwen3-0.6B-GGUF","runtime":"llamacpp","path":"/Users/me/.cache/huggingface/hub/models--unsloth--Qwen3-0.6B-GGUF/snapshots/1f0c/Qwen3-0.6B-Q4_K_M.gguf"}
+{"timestamp":"2026-11-13T09:41:12.954870Z","event":"model.load.done","model":"unsloth/Qwen3-0.6B-GGUF","runtime":"llamacpp","context":40960,"lanes":8}
+{"timestamp":"2026-11-13T09:41:12.955391Z","event":"serve.ready","http":"127.0.0.1:52318","socket":"/Users/me/.superfluid/superfluid.sock","models":["unsloth/Qwen3-0.6B-GGUF"]}
+```
+
+(Most of its `log` lines are left out here.)
+
+## Turning it on
+
+- `--log-format json` on `serve` or `node join` (`--log-format text`, the default, is the prose).
+- `SUPERFLUID_LOG_FORMAT=json` in the environment, for a host that sets it once for every command it runs. A `--log-format` on the command line wins over it. Only `serve` and `node join` read it; the other commands write what they always did.
+
+In JSON mode the terminal monitor is off (`--tui` included), and the bar a pull draws on a terminal is never drawn: the pull is `pull.progress` events instead. `--log-file <path>` sends the events to that file in place of stderr. `--log-dir <dir>` still sends the tracing logs to their own files, in the shape [Observability](/observability#logs) describes; stderr then carries the events and the prose.
+
+## The stream
+
+Every line is one JSON object with at least:
+
+| field | meaning |
+|---|---|
+| `timestamp` | When the line was written out, RFC 3339 in UTC to the microsecond (`2026-11-13T09:41:07.112406Z`), the format of the `--log-dir` logs. The timestamps rise down the stream. |
+| `event` | The event's name: `start`, `log`, `error`, or a dotted name from the table below. |
+
+The first line is a `start` event, which states the stream's `schema`. Every line that is not one of the named events is a `log` event that carries the line: Superfluid's own prose, a worker's output, a runtime's, and Superfluid's tracing logs, each as it was written. A worker started by `serve` or `node join` writes to the same stream, so what it says is a `log` event too, in the order it was said. Only Superfluid writes the named events: a line a runtime or a tool writes is a `log` event even when it is JSON that names an event.
+
+When a start fails, the last line is an `error` event, and its `exit_code` is the process's exit status ([exit codes](/cli#exit-codes)). A node the head removed ends the same way, with `node.removed` and then `error` with `exit_code` 5. A panic is a `log` event at level `ERROR`; when it ends the process, the exit status is 101.
+
+A node with no `--model` follows its head's model: when the head serves another model first, the node says `node.head.changed`, lets what it runs finish, and starts again as the same process (same `pid`). The stream goes on: a second `start`, then the new model's pull, `model.load.*` and `node.dialing`. A host reads a `start` it did not launch as that restart, not as the end of the stream.
+
+## Events
+
+| event | fields | when |
+|---|---|---|
+| `start` | `schema` (1), `version` (Superfluid's), `command` (`serve` or `node join`), `pid` | the first line; again, with the same `pid`, when a following node starts again for its head's new model |
+| `log` | `level`, `message`; from tracing also `target` and the log's own fields | every line that is not another event. `level` is `INFO`, or `WARN` for a line that says `WARNING`; a tracing log keeps its own (`ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`) |
+| `error` | `message`, `exit_code` | the last line before the process exits on a failure |
+| `runtime.install.start` | `runtime` | the runtime a model needs was never installed here, and is being installed (as `superfluid runtime install <runtime>` would) |
+| `runtime.install.done` | `runtime`, `install` (the install's name, e.g. `b6123-metal`), `version` | it is installed |
+| `runtime.install.failed` | `runtime`, `error` | installing it failed; an `error` (exit 1) follows |
+| `pull.start` | `id`, `runtime`, `offline` | a model given by id is looked for in its runtime's cache and, unless `offline`, fetched |
+| `pull.progress` | `id`, `done_bytes`, `total_bytes`, `bytes_per_sec`, `secs_left` | while bytes land: at most four a second while they grow, one every 10 seconds while they do not, and the last as the fetch ends. `total_bytes` and `secs_left` are null when not known; `done_bytes` counts a part fetched by an earlier, interrupted pull. A model already in the cache has none |
+| `pull.done` | `id`, `path`, `bytes` (the model's size on disk) | the model is on disk at `path` |
+| `pull.failed` | `id`, `error` | the pull failed |
+| `model.load.start` | `model` (the name the API serves it under), `runtime`, `path` | a model given at start-up begins loading |
+| `model.load.done` | `model`, `runtime`, `context` (its window, in tokens), `lanes` | it is loaded |
+| `model.load.failed` | `model`, `error` | it did not load: its engine, its tokenizer or its chat template failed; an `error` follows |
+| `serve.ready` | `http` (the address the HTTP API is bound to, or null with `--no-http`), `socket` (the session socket, or null), `models` (the models loaded, the default first) | `serve` answers on every listener; a fleet head, once its nodes have shared their models' tokenizers |
+| `node.discover.start` | | `node join` with no head address looks for one on the local network: at start, and again after `node.head.lost` |
+| `node.head.found` | `addr`, `models` | it found one; after `node.head.lost`, only a head at another address (the same head back where it was has none) |
+| `node.head.lost` | `head` | the head found on the local network does not answer; the node looks for a head of its network (a head given by address is dialed again there: `node.dial.failed` and `node.retry`) |
+| `node.dialing` | `head`, `node` (this node's identity), `model` (the name the head matches on), `lanes` | the model is loaded and the node dials the head |
+| `node.joined` | `head` | the head took the node |
+| `node.dial.failed` | `head`, `error` | the head did not answer |
+| `node.link.ended` | `reason` | the link to the head ended |
+| `node.retry` | `in_secs` | the node dials again after this many seconds |
+| `node.refused` | `reason` | the head refused the node's token; an `error` (exit 2) follows |
+| `node.removed` | `head` | the head removed this node and refuses it until the head restarts; an `error` (exit 5) follows. Said once, however many lanes the head told |
+| `node.head.changed` | `model` (what the node serves next, or null), `id` (the id it pulls it by, or null), `from` (what it served) | a node with no `--model` heard its head serve another model first; it starts again to serve `model`. With `id` null the head serves `model` by path, or nothing, and the node, started again, waits for a model it can pull |
+| `fleet.node.joined` | `node`, `addr`, `models`, `context` | on a head: a node joined |
+| `fleet.node.rejoined` | `node`, `addr` | on a head: a node that had joined came back |
+| `fleet.node.refused` | `addr`, `reason`; `node` for one it removed | on a head: a node that dialed in was not taken. A node it removed is refused each time it dials back; this event comes the first time |
+| `fleet.node.removed` | `node`, `addr` (the node's), `by` (the address that asked), `key` (the `--key-policy` key that asked, or null) | on a head: a node was removed through `DELETE /v1/fleet/nodes/{name}` ([List and remove nodes](/distributed-serving#list-and-remove-nodes)) |
+
+`model.load.*` cover the models a start loads: each `--model`, by path or by id. A start can also stop between `model.load.start` and `model.load.done` for a reason of its own (a session socket that cannot be bound, a damaged session log): it then ends with `error` alone, so a host takes `error` as the end whatever came before it. A model a running server loads later, when a request names it (one from `--model-dir`, or one unloaded while idle), the `--fim-model` satellite, and a fleet head's models (it loads no engine; `serve.ready` lists them) have none. A node dials once per lane; its `node.*` link events speak for the first lane, as its prose does.
+
+## What is kept
+
+The names of the events and their fields, and what they mean, are kept across releases. A release may add an event, or a field to one, and the `schema` stays; removing or renaming one, or changing what it means, raises `schema`, and the changelog says so. A host reads the events it knows, ignores the others and any field it does not know, and checks `schema` on the first line.
+
+The `message` of a `log` event is not kept: it is the prose a person reads, and it changes as the prose does. A host that needs to know something a `log` line says asks for an event instead of matching the text.
+b:["$","$L17",null,{"children":"$18"}]
+11:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+19:I[27201,["$2"],"IconMark"]
+e:null
+14:[["$","title","0",{"children":"Start-up events · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","link","10",{"rel":"icon","href":"/latest/favicon.png"}],["$","$L19","11",{}]]
