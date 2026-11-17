@@ -1581,12 +1581,26 @@ pub fn run(args: &[String], embedding: &Embedding) {
             eprintln!("superfluid: --prefix-blob-budget-mb has no effect on runtime {}: {why}", runtime.id.name());
         }
     }
-    if op_presence_penalty.is_some() && !superfluid_daemon::openai::presence_default_runtime(Some(runtime.id.name())) {
-        eprintln!(
-            "superfluid: --presence-penalty has no effect on runtime {}: it sets the default on the \
-             basert runtime only (a request's own presence_penalty still applies)",
-            runtime.id.name()
-        );
+    if op_presence_penalty.is_some() {
+        use superfluid_daemon::capabilities::Cap;
+        let why = match caps.get("sampling", "engine_penalties") {
+            Cap::Yes => None,
+            Cap::No(why) => Some(why.to_string()),
+            Cap::Unknown if runtime.worker.source == superfluid_daemon::runtimes::Source::Installed => Some(format!(
+                "its worker, as installed, does not say whether its engine applies the penalties itself \
+                 (`superfluid runtime repair {}` installs it again with this superfluid's worker)",
+                runtime.id
+            )),
+            Cap::Unknown => Some("its engine does not say whether it applies the penalties itself".to_string()),
+        };
+        if let Some(why) = why {
+            eprintln!(
+                "superfluid: --presence-penalty has no effect on runtime {}: {why}; the default is for an \
+                 engine that applies the penalty itself, as basert's does (a request's own presence_penalty \
+                 still applies)",
+                runtime.id.name()
+            );
+        }
     }
 
     let listener = socket.as_ref().map(|socket| {

@@ -103,9 +103,10 @@ impl SamplingOverrides {
         if o.spec_max_temperature.is_some() && daemon.speculation().is_none() {
             o.spec_max_temperature = None;
         }
-        // The presence default is the basert runtime's: its engine applies the penalty itself,
-        // where another runtime's lane would leave the runtime's sampler for the host's.
-        if o.presence_penalty.is_some() && !presence_default_runtime(daemon.runtime_id()) {
+        // The presence default is for an engine that applies the penalty itself, as its capability
+        // record says (basert's); on another a penalized lane leaves the runtime's sampler for the
+        // host's.
+        if o.presence_penalty.is_some() && !daemon.capable("sampling", "engine_penalties") {
             o.presence_penalty = None;
         }
         o
@@ -114,12 +115,6 @@ impl SamplingOverrides {
     pub fn truncates(&self) -> bool {
         self.top_p.is_some() || self.top_k.is_some() || self.min_p.is_some()
     }
-}
-
-/// Whether `--presence-penalty` applies to a model on this runtime: basert only, a pinned
-/// installation (`basert@<install>`) included.
-pub fn presence_default_runtime(runtime: Option<&str>) -> bool {
-    runtime.is_some_and(|r| r.split('@').next() == Some("basert"))
 }
 
 #[derive(Deserialize, Default)]
@@ -1075,16 +1070,6 @@ mod penalty_alias_tests {
             (1.5, 0.2, DEFAULT_REPEAT_PENALTY),
             "the other penalties are left as they resolve"
         );
-    }
-
-    #[test]
-    fn the_presence_default_is_for_the_basert_runtime() {
-        use super::presence_default_runtime;
-        assert!(presence_default_runtime(Some("basert")));
-        assert!(presence_default_runtime(Some("basert@0.5.0-metal")), "a pinned installation");
-        for other in [Some("llamacpp"), Some("mlx"), Some("llamacpp@b12435"), Some("basert-x"), None] {
-            assert!(!presence_default_runtime(other), "{other:?}");
-        }
     }
 
     #[test]

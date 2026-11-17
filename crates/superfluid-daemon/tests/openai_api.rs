@@ -4867,9 +4867,9 @@ fn spec_max_temperature_follows_the_routed_models_speculation() {
 }
 
 #[test]
-fn an_operator_presence_penalty_is_the_basert_runtimes_default() {
-    // The model's runtime decides whether the operator's default applies to it.
-    let serve_on = |runtime_id: Option<&'static str>, op: openai::SamplingOverrides| {
+fn an_operator_presence_penalty_is_the_default_where_the_engine_penalizes() {
+    // The model's capability record decides whether the operator's default applies to it.
+    let serve_on = |record: Option<&'static str>, op: openai::SamplingOverrides| {
         let dir = std::env::temp_dir().join(format!(
             "superfluid-openai-presence-{}-{}",
             std::process::id(),
@@ -4877,14 +4877,15 @@ fn an_operator_presence_penalty_is_the_basert_runtimes_default() {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let store = SessionStore::open(&dir.join("wal.log")).unwrap();
-        let host = EngineHost::spawn(|| (MockEngine::new(EngineConfig::default()), None)).expect("spawn");
-        let daemon = Daemon::with_options(
-            store,
-            host,
-            Box::new(MockChatCodec),
-            superfluid_daemon::DaemonOptions { runtime_id, ..Default::default() },
-        )
-        .unwrap();
+        let host = EngineHost::spawn(move || {
+            let engine = MockEngine::new(EngineConfig::default());
+            (match record {
+                Some(r) => engine.with_capability_descriptor(r),
+                None => engine,
+            }, None)
+        })
+        .expect("spawn");
+        let daemon = Daemon::with_options(store, host, Box::new(MockChatCodec), Default::default()).unwrap();
         let reg = Arc::new(superfluid_daemon::registry::ModelRegistry::single("mock-model", Arc::new(daemon)));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4903,13 +4904,13 @@ fn an_operator_presence_penalty_is_the_basert_runtimes_default() {
     let op = openai::SamplingOverrides { presence_penalty: Some(1.5), ..Default::default() };
     let none = openai::SamplingOverrides::default();
 
-    assert_eq!(props_presence(serve_on(Some("basert"), none)), None, "no flag, nothing to advertise");
-    assert_eq!(props_presence(serve_on(Some("basert@0.5.0-metal"), op)), Some(1.5), "a pinned installation is basert");
-    for other in [Some("llamacpp"), Some("mlx"), None] {
-        assert_eq!(props_presence(serve_on(other, op)), None, "{other:?} is served without the default");
+    const PENALIZES: &str = r#"{"descriptor_version":1,"sampling":{"engine_penalties":true}}"#;
+    assert_eq!(props_presence(serve_on(Some(PENALIZES), none)), None, "no flag, nothing to advertise");
+    for other in [Some(r#"{"descriptor_version":1,"sampling":{"engine_penalties":"on the host"}}"#), Some(r#"{"descriptor_version":1}"#), None] {
+        assert_eq!(props_presence(serve_on(other, op)), None, "{other:?}: served without the default");
     }
 
-    let addr = serve_on(Some("basert"), op);
+    let addr = serve_on(Some(PENALIZES), op);
     assert_eq!(props_presence(addr), Some(1.5));
     for extra in ["", r#","presence_penalty":0"#, r#","presence_penalty":-0.5"#] {
         let body = format!(

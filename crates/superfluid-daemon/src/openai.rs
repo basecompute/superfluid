@@ -13,7 +13,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::{Daemon, DaemonError};
-pub use crate::inference::{presence_default_runtime, TokenLimits, SamplingOverrides, SamplingFallback, RequestQos};
+pub use crate::inference::{TokenLimits, SamplingOverrides, SamplingFallback, RequestQos};
 pub use crate::http_state::{HttpQosPolicy, QOS_HEADER, BATCH_INVARIANT_HEADER};
 use crate::inference::{
     advertised_generation_defaults, repeat_penalty_for, next_id, unix_now,
