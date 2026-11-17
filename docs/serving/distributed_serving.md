@@ -25,6 +25,8 @@ superfluid node join --model basecompute/Qwen3.8-27B --token <the token>
 
 The node finds the head on the local network (`_superfluid-fleet._tcp`, which also carries the head's HTTP port for `superfluid top`, or give `<host:port>` as the first argument), pulls the model as `serve` would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as `joined:<identity>` and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; `--model-name` overrides that. A head with no token takes nodes from its own machine only.
 
+Several fleets can share one local network. A head with a token announces a network id derived from that token, and a node joins only a head of its own token's network. A head of another network is never joined; the node says so once and keeps looking. A head that announces no network id (an older release) is joined only when no head of the node's network answers. When a node loses its head it looks again the same way, so it may join another machine of its network that took over. A head given as `<host:port>` is dialed only there, never looked for.
+
 | flag | default | meaning |
 |---|---|---|
 | `--model <path\|id>` | required | the model; an id is pulled first |
