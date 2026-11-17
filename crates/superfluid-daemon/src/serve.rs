@@ -178,6 +178,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut pull_flags = superfluid_daemon::pulls::PullFlags::default();
     let mut runtime_pick = RuntimePick::default();
     let mut api_key: Option<String> = None;
+    let mut api_key_file: Option<PathBuf> = None;
     let mut rate_limit: u32 = 0;
     let mut host: Option<String> = None;
     let mut port: Option<u16> = None;
@@ -283,6 +284,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 }
             }
             "--api-key" => api_key = Some(val()),
+            "--api-key-file" => api_key_file = Some(PathBuf::from(val())),
             "--rate-limit" => rate_limit = num(a, val()),
             "--files-max-bytes" => {
                 files_max_bytes = Some(num(a, val()))
@@ -364,10 +366,9 @@ pub fn run(args: &[String], embedding: &Embedding) {
             "--pin-budget-pct" => pin_budget_pct = num(a, val()),
             "--log-dir" => log_dir = Some(PathBuf::from(val())),
             "--basert-lib" => std::env::set_var("BASERT_LIB", val()),
-            "--speculate" => {
-                let v = val();
-                speculate = if v == "off" { None } else { Some(v) };
-            }
+            // Kept as named, `off` included: no `--speculate` is the default, `auto` on the baseRT
+            // runtime (speculate_directive).
+            "--speculate" => speculate = Some(val()),
             "--spec-draft-tokens" => {
                 let n: u32 = num(a, val());
                 if !(1..=15).contains(&n) {
@@ -567,6 +568,15 @@ pub fn run(args: &[String], embedding: &Embedding) {
             }
         }
         // SERVE-FLAGS-END
+    }
+    let env_key = std::env::var(superfluid_daemon::keypolicy::API_KEY_ENV).ok().filter(|k| !k.is_empty());
+    let key_from_env = api_key.is_none() && api_key_file.is_none() && env_key.is_some();
+    let api_key = superfluid_daemon::keypolicy::global_key(api_key, api_key_file.as_deref(), env_key, |w| {
+        eprintln!("superfluid: WARNING {w}")
+    })
+    .unwrap_or_else(|e| usage_error(&e, "serve"));
+    if key_from_env {
+        eprintln!("superfluid: authentication on, with the key in ${}", superfluid_daemon::keypolicy::API_KEY_ENV);
     }
     if models.is_empty() {
         usage_error(
@@ -1025,6 +1035,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
         std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });
     }
     let directive = speculation_for(speculate.as_deref(), &runtime.static_capabilities(), &model, runtime.id.name());
+    let speculate_auto = directive.map(str::trim) == Some("auto");
     let resolved = directive.map(|d| {
         let pull = auto_drafter_pull(&catalog, runtime.id, &model);
         let pull = (!pull_flags.offline).then_some(&pull as &dyn Fn(&str));
@@ -1052,7 +1063,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             std::process::exit(2);
         }
     };
-    if op_spec_max_temperature.is_some() && speculate.is_none() {
+    if op_spec_max_temperature.is_some() && speculate_directive(speculate.as_deref(), runtime.id.name()).is_none() {
         eprintln!("superfluid: --spec-max-temperature ignored: no --speculate strategy is configured");
     }
     if tui_flag && !cfg!(feature = "tui") {
@@ -1120,11 +1131,15 @@ pub fn run(args: &[String], embedding: &Embedding) {
             addr.starts_with("localhost:") || addr.parse::<std::net::SocketAddr>().is_ok_and(|a| a.ip().is_loopback())
         };
         if http.as_deref().is_none_or(loopback) && web.as_deref().is_none_or(loopback) {
-            eprintln!("superfluid: no --api-key: the HTTP API is open to every process on this machine");
+            eprintln!(
+                "superfluid: no API key (--api-key-file, --api-key or $SUPERFLUID_API_KEY): \
+                 the HTTP API is open to every process on this machine"
+            );
         } else {
             eprintln!(
-                "superfluid: WARNING --api-key not set. Authentication is OFF — anyone \
-                 who can reach this port can use the API. Bind loopback or set --api-key."
+                "superfluid: WARNING no API key set. Authentication is OFF — anyone who can reach \
+                 this port can use the API. Bind loopback or set --api-key-file (or --api-key, \
+                 $SUPERFLUID_API_KEY)."
             );
         }
     }
@@ -1360,14 +1375,13 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 } else {
                     // Another model given at startup: its marked drafter is pulled before the sizing
                     // counts it, by the runtime that serves it, where that runtime drafts under `auto`.
-                    let serves = runtime_pick
-                        .resolve(m, &catalog)
-                        .and_then(|rt| catalog.require(rt))
-                        .ok()
-                        .filter(|rt| rt.static_capabilities().declines_auto_speculation().is_none());
+                    // With no `--speculate` named, that runtime's default decides (speculate_directive).
+                    let rt = runtime_pick.resolve(m, &catalog).and_then(|rt| catalog.require(rt)).ok();
+                    let directive = speculate_directive(speculate.as_deref(), rt.as_ref().map_or("", |rt| rt.id.name()));
+                    let serves = rt.filter(|rt| rt.static_capabilities().declines_auto_speculation().is_none());
                     let pull = serves.map(|rt| auto_drafter_pull(&catalog, rt.id, m));
                     let pull = pull.as_ref().filter(|_| !pull_flags.offline).map(|f| f as &dyn Fn(&str));
-                    speculate.as_deref().and_then(|d| resolve_all(d, m, pull).ok()).unwrap_or_default()
+                    directive.and_then(|d| resolve_all(d, m, pull).ok()).unwrap_or_default()
                 }
             })
             .collect();
@@ -1627,7 +1641,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     superfluid_daemon::pressure::PressureConfig::None
                 },
                 speculate: speculate_primary.clone(),
-                speculate_auto: speculate.as_deref().map(str::trim) == Some("auto"),
+                speculate_auto,
                 speculate_fallbacks: speculate_fallbacks.clone(),
                 speculation: speculation.clone(),
                 media_dir: Some(sessions.join("media")),
@@ -2181,7 +2195,8 @@ fn codec_for_dialect(
 
 /// `--speculate auto`'s pull (speculate_resolve::resolve_all) of the drafter the hub catalog marks
 /// for `target` when no copy is installed, by `runtime`, the one that serves the target, as a drafter
-/// given by id is pulled. A pull that fails is said, and `auto` settles among what is installed.
+/// given by id is pulled. A pull that fails is said, and `auto` settles among what is installed. The
+/// default `auto` (no `--speculate`, speculate_directive) pulls as a named one does.
 fn auto_drafter_pull<'a>(
     catalog: &'a superfluid_daemon::runtimes::Catalog,
     runtime: RuntimeId,
@@ -2195,13 +2210,32 @@ fn auto_drafter_pull<'a>(
     }
 }
 
+/// The `--speculate` a model on `runtime` serves under: the one the command line names (`off` is
+/// none), else `auto` on the baseRT runtime, where speculative decoding is on by default, and none on
+/// the other runtimes, whose `auto` is prompt-lookup. A pinned installation (`basert@<install>`) is
+/// its base runtime here (is_basert).
+fn speculate_directive<'a>(named: Option<&'a str>, runtime: &str) -> Option<&'a str> {
+    match named {
+        Some(d) if d.trim() == "off" => None,
+        Some(d) => Some(d),
+        None => is_basert(runtime).then_some("auto"),
+    }
+}
+
+/// Whether `runtime` (a runtime id, pinned to an installation or not) is the baseRT runtime.
+fn is_basert(runtime: &str) -> bool {
+    RuntimeId::new(runtime).base().name() == "basert"
+}
+
+/// The strategy a model serves with, from the `--speculate` the command line names (None: not named;
+/// see speculate_directive): `auto` settled for the runtime and the engine's capabilities.
 fn speculation_for<'a>(
-    directive: Option<&'a str>,
+    named: Option<&'a str>,
     caps: &superfluid_daemon::capabilities::Capabilities,
     model: &std::path::Path,
     runtime: &str,
 ) -> Option<&'a str> {
-    let d = directive?;
+    let d = speculate_directive(named, runtime)?;
     if d.trim() != "auto" {
         return Some(d);
     }
@@ -2212,7 +2246,7 @@ fn speculation_for<'a>(
         }
         // The other runtimes draft from the prompt alone: there is no
         // drafter artifact for `auto` to look for.
-        None if runtime != "basert" => {
+        None if !is_basert(runtime) => {
             eprintln!("superfluid: speculation: auto: prompt-lookup on the {runtime} runtime");
             Some("prompt-lookup")
         }
@@ -2296,7 +2330,8 @@ fn build_loaded_daemon(
     // drafter here, as the first model does before it starts.
     let pull = auto_drafter_pull(&cfg.catalog, runtime.id, model_path);
     let pull = (!cfg.offline).then_some(&pull as &dyn Fn(&str));
-    let mut speculate_ranked = match speculation_for(cfg.speculate.as_deref(), &caps, model_path, runtime.id.name()) {
+    let directive = speculation_for(cfg.speculate.as_deref(), &caps, model_path, runtime.id.name());
+    let mut speculate_ranked = match directive {
         Some(d) => superfluid_daemon::speculate_resolve::resolve_all(d, model_path, pull).map_err(DaemonError::Generation)?,
         None => Vec::new(),
     };
@@ -2325,7 +2360,7 @@ fn build_loaded_daemon(
                 superfluid_daemon::pressure::PressureConfig::None
             },
             speculate: speculate_first,
-            speculate_auto: cfg.speculate.as_deref().map(str::trim) == Some("auto"),
+            speculate_auto: directive.map(str::trim) == Some("auto"),
             speculate_fallbacks: speculate_ranked,
             speculation: cfg.speculation.clone(),
             media_dir: Some(mdir.join("media")),
@@ -2418,6 +2453,44 @@ mod tests {
     fn reads(id: &'static str, format: Format) -> Found {
         let info = Info { aliases: Vec::new(), formats: vec![format], tokenizer: None, named: None };
         Found { id: RuntimeId::new(id), worker: None, info: Some(info), usable: Err("not started".into()) }
+    }
+
+    /// Speculative decoding is on by default on the basert runtime only: no `--speculate` is `auto`
+    /// there and plain decoding elsewhere (where `auto` would be prompt-lookup); a directive named on
+    /// the command line, `off` included, is the user's on every runtime, and an engine that verifies no
+    /// drafts declines the default as it declines a named `auto`.
+    #[test]
+    fn speculation_is_auto_by_default_on_basert_only() {
+        assert_eq!(speculate_directive(None, "basert"), Some("auto"));
+        assert_eq!(speculate_directive(None, "llamacpp"), None);
+        assert_eq!(speculate_directive(None, "mlx"), None);
+        assert_eq!(speculate_directive(None, ""), None, "a runtime not resolved");
+        assert_eq!(speculate_directive(Some("off"), "basert"), None);
+        assert_eq!(speculate_directive(Some(" off"), "basert"), None);
+        assert_eq!(speculate_directive(Some("mtp-head"), "basert"), Some("mtp-head"));
+        assert_eq!(speculate_directive(Some("auto"), "llamacpp"), Some("auto"));
+
+        let m = std::path::Path::new("m.base");
+        let caps = superfluid_daemon::capabilities::Capabilities::default();
+        assert_eq!(speculation_for(None, &caps, m, "basert"), Some("auto"));
+        assert_eq!(speculation_for(None, &caps, m, "llamacpp"), None);
+        assert_eq!(speculation_for(Some("off"), &caps, m, "basert"), None);
+        assert_eq!(speculation_for(Some("auto"), &caps, m, "basert"), Some("auto"));
+        assert_eq!(speculation_for(Some("auto"), &caps, m, "llamacpp"), Some("prompt-lookup"));
+        let hybrid = superfluid_daemon::capabilities::Capabilities::parse(
+            r#"{"serving":{"multi_row_verification":"Mamba-2 hybrid: no speculative verification"}}"#,
+        );
+        assert_eq!(speculation_for(None, &hybrid, m, "basert"), None);
+        assert_eq!(speculation_for(Some("auto"), &hybrid, m, "basert"), None);
+
+        // A pinned installation (`--runtime basert@<install>`) is the runtime it pins: its id keeps the
+        // suffix, and the policy goes by the base runtime.
+        let pinned = |id: &str| RuntimeId::parse(id).expect("a valid runtime id").name();
+        assert_eq!(speculate_directive(None, pinned("basert@0.5.0-metal")), Some("auto"));
+        assert_eq!(speculate_directive(None, pinned("llamacpp@b12408")), None);
+        assert_eq!(speculation_for(None, &caps, m, pinned("basert@0.5.0-metal")), Some("auto"));
+        assert_eq!(speculation_for(Some("auto"), &caps, m, pinned("basert@0.5.0-metal")), Some("auto"));
+        assert_eq!(speculation_for(Some("auto"), &caps, m, pinned("llamacpp@b12408")), Some("prompt-lookup"));
     }
 
     #[test]

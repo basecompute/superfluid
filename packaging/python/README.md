@@ -1,10 +1,10 @@
 # superfluid
 
-One serving daemon for local LLM inference, across runtimes and machines. superfluid puts one scheduler, one durable session log and one set of APIs (OpenAI, Anthropic, Ollama) in front of llama.cpp, MLX and baseRT.
+Superfluid is an open-source server that runs LLMs on your own hardware. It serves a model from one machine, or from several machines that act as one server. It supports llama.cpp, MLX, and BaseRT, and exposes OpenAI-, Anthropic-, and Ollama-compatible API endpoints.
 
 ```sh
 pip install superfluid-cli            # or: pipx install superfluid-cli, uv tool install superfluid-cli
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid serve basecompute/Qwen3.8-27B
 ```
 
 This package is the prebuilt superfluid release for macOS on Apple silicon (macOS 15 or later) and Linux on x86-64 or arm64 (glibc 2.28 or later), with the `superfluid` command. It has no Python API and needs nothing from your Python beyond running the command. The runtimes themselves (llama.cpp, MLX, baseRT) are installed by superfluid on first use, under `~/.superfluid`, never into your Python environment.

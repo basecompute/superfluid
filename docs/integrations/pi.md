@@ -4,7 +4,7 @@ pi speaks Chat Completions through a provider that an extension registers for th
 
 ```sh
 npm install -g @earendil-works/pi-coding-agent     # install
-superfluid launch pi --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch pi --model basecompute/Qwen3.8-27B
 ```
 
 Aliases: `pi-coding-agent`.

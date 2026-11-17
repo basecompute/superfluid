@@ -4,7 +4,7 @@ OpenCode speaks Chat Completions through an OpenAI-compatible provider passed in
 
 ```sh
 curl -fsSL https://opencode.ai/install | bash      # install
-superfluid launch opencode --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch opencode --model basecompute/Qwen3.8-27B
 ```
 
 ## What launch gives it

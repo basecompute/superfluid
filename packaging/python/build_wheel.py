@@ -35,7 +35,7 @@ import release  # noqa: E402
 DIST = "superfluid-cli"
 PACKAGE = "superfluid_cli"
 INSTALLED_BY = f"pip: pip install --upgrade {DIST}"
-SUMMARY = "One serving daemon for local LLM inference, across runtimes and machines"
+SUMMARY = "Open-source server that runs LLMs on your own hardware, from one machine or several that act as one server"
 URLS = {
     "Homepage": "https://superfluid.sh",
     "Documentation": "https://superfluid.sh",

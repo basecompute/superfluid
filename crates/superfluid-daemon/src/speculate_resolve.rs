@@ -55,8 +55,9 @@ pub struct Pairings {
 
 impl Pairings {
     pub fn load(hub: Option<&Path>) -> Self {
-        let cache = crate::runtimes::default_home().join("cache");
-        let mut p = Self::from_json(&catalog_json(&cache.join("hub-catalog.json"), FETCH_CATALOG.load(Ordering::Relaxed)));
+        let home = crate::runtimes::default_home();
+        let cache = home.join("cache");
+        let mut p = Self::from_json(&catalog_json(&catalog_file(&home), FETCH_CATALOG.load(Ordering::Relaxed)));
         if let Some(theirs) = hub.and_then(|h| std::fs::read_to_string(h.join(".catalog-cache.json")).ok()) {
             p.rows.extend(Self::from_json(&theirs).rows);
         }
@@ -135,18 +136,35 @@ fn follows_auto_pairings() -> bool {
     cfg!(target_os = "macos")
 }
 
+/// Where the hub catalog is kept under `home` (`$SUPERFLUID_HOME`): `cache/hub-catalog.json`.
+pub fn catalog_file(home: &Path) -> PathBuf {
+    home.join("cache").join("hub-catalog.json")
+}
+
 /// The hub catalog kept at `own`, refreshed from `CATALOG_URL` once a day when `fetch` allows.
 fn catalog_json(own: &Path, fetch: bool) -> String {
     let age = std::fs::metadata(own).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
     if fetch && age.is_none_or(|a| a.as_secs() >= CATALOG_MAX_AGE_SECS) {
-        if let Ok(v) = superfluid_adapter_kit::install::fetch_json(CATALOG_URL) {
-            let body = v.to_string();
-            if own.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::write(own, &body).is_ok() {
-                return body;
-            }
+        if let Ok(body) = refresh_catalog(own) {
+            return body;
         }
     }
     std::fs::read_to_string(own).unwrap_or_default()
+}
+
+/// The hub catalog fetched from `CATALOG_URL` now, whatever the age of the copy at `own`, and kept there. The copy
+/// is written beside it and renamed over it, so a reader sees the old catalog or the new one, never part of one.
+pub fn refresh_catalog(own: &Path) -> Result<String, String> {
+    let body = superfluid_adapter_kit::install::fetch_json(CATALOG_URL)?.to_string();
+    let dir = own.parent().ok_or_else(|| format!("{}: not a file in a directory", own.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let name = own.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}", std::process::id()));
+    std::fs::write(&tmp, &body).and_then(|()| std::fs::rename(&tmp, own)).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", own.display())
+    })?;
+    Ok(body)
 }
 
 /// The file's sha256, remembered under `cache` against its device, inode, size, mtime and ctime

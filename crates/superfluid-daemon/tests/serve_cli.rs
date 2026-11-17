@@ -128,3 +128,65 @@ fn removing_a_runtime_with_more_than_one_install_needs_all() {
     assert!(!home.join("runtimes/basert").exists());
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `serve` with its key from a file or the environment, on a model that is not there: the key is
+/// read before anything loads. The environment's own key is cleared, so the developer's is not used.
+fn serve_keyed(tag: &str, args: &[&str], env_key: Option<&str>) -> (Option<i32>, String) {
+    let dir = std::env::temp_dir().join(format!("superfluid-serve-cli-{tag}-{}", std::process::id()));
+    let sock = std::env::temp_dir().join(format!("bsc-{tag}-{}.sock", std::process::id()));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_superfluid"));
+    cmd.args(["serve", "--model", "/nonexistent/model.base", "--no-http", "--sessions"])
+        .arg(dir.join("sessions"))
+        .arg("--socket")
+        .arg(&sock)
+        .args(args)
+        .env_remove("SUPERFLUID_API_KEY");
+    if let Some(key) = env_key {
+        cmd.env("SUPERFLUID_API_KEY", key);
+    }
+    let out = cmd.output().expect("run superfluid");
+    let _ = std::fs::remove_dir_all(&dir);
+    (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+fn key_file(tag: &str, text: &str, mode: u32) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("superfluid-serve-cli-keyfile-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("key");
+    std::fs::write(&path, text).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    path
+}
+
+#[test]
+fn a_key_file_that_is_missing_or_empty_or_beside_api_key_is_refused_before_loading() {
+    let empty = key_file("empty", " \n", 0o600);
+    let missing = empty.with_file_name("nope");
+    let (code, err) = serve_keyed("key-missing", &["--api-key-file", missing.to_str().unwrap()], Some("from-env"));
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains(&format!("--api-key-file {}: ", missing.display())), "{err}");
+    let (code, err) = serve_keyed("key-empty", &["--api-key-file", empty.to_str().unwrap()], None);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("is empty"), "{err}");
+    let (code, err) = serve_keyed("key-both", &["--api-key", "k", &format!("--api-key-file={}", empty.display())], None);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("--api-key and --api-key-file both give the key"), "{err}");
+    assert!(!err.contains("panicked"), "{err}");
+    let _ = std::fs::remove_dir_all(empty.parent().unwrap());
+}
+
+#[test]
+fn a_key_file_open_to_others_is_warned_about_and_a_key_from_the_environment_is_said_so() {
+    let open = key_file("open", "sk-cli-open\n", 0o644);
+    let (_, err) = serve_keyed("key-open", &["--api-key-file", open.to_str().unwrap()], None);
+    assert!(err.contains(&format!("WARNING --api-key-file {} is open to group or others (mode 644)", open.display())), "{err}");
+    assert!(!err.contains("sk-cli-open"), "the key is not printed: {err}");
+    assert!(!err.contains("no API key"), "{err}");
+    let (_, err) = serve_keyed("key-env", &[], Some("sk-cli-env"));
+    assert!(err.contains("authentication on, with the key in $SUPERFLUID_API_KEY"), "{err}");
+    assert!(!err.contains("sk-cli-env"), "the key is not printed: {err}");
+    let (_, err) = serve_keyed("key-flag", &["--api-key", "sk-cli-flag"], Some("sk-cli-env"));
+    assert!(!err.contains("SUPERFLUID_API_KEY"), "the flag wins, quietly: {err}");
+    let _ = std::fs::remove_dir_all(open.parent().unwrap());
+}

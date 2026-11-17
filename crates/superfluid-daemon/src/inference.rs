@@ -192,9 +192,17 @@ pub(crate) fn schema_of(rf: &Option<serde_json::Value>) -> Option<String> {
     let rf = rf.as_ref()?;
     match rf.get("type").and_then(|t| t.as_str()) {
         Some("json_object") => Some(r#"{"type":"object"}"#.to_string()),
+        // `json_schema.schema`, or a schema given in place of the wrapper. A wrapper of only
+        // OpenAI's own fields names no schema, and is refused rather than served unconstrained.
         Some("json_schema") => rf
             .get("json_schema")
-            .and_then(|js| js.get("schema").or(Some(js)))
+            .and_then(|js| match js.get("schema") {
+                Some(s) => Some(s),
+                None => js
+                    .as_object()
+                    .filter(|o| o.keys().any(|k| !matches!(k.as_str(), "name" | "description" | "strict")))
+                    .map(|_| js),
+            })
             .map(|s| s.to_string()),
         _ => None,
     }

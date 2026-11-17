@@ -46,7 +46,8 @@ pub const SERVE: &[Group] = &[
             f("--port", Some("<N>"), "8453", "...and a port; either fills the other from its default."),
             f("--socket", Some("<path>"), "$SUPERFLUID_HOME/superfluid.sock", "The unix socket for the native session API."),
             f("--sessions", Some("<dir>"), "$SUPERFLUID_HOME/sessions", "The session store (write-ahead log, parks, media, files). One server per directory."),
-            f("--api-key", Some("<key>"), "none", "Require `Authorization: Bearer <key>` (or `X-Api-Key`) on HTTP requests."),
+            f("--api-key", Some("<key>"), "none", "Require `Authorization: Bearer <key>` (or `X-Api-Key`) on HTTP requests. `ps` shows it; the file and $SUPERFLUID_API_KEY do not."),
+            f("--api-key-file", Some("<path>"), "", "The key, read from this file (whitespace trimmed). With neither flag, $SUPERFLUID_API_KEY gives the key."),
             f("--key-policy", Some("<file.json>"), "", "Per-key classes, rate and concurrency limits; turns authentication on."),
             f("--rate-limit", Some("<rpm>"), "0 (off)", "Requests per minute per client IP."),
             f("--drain-timeout", Some("<sec>"), "60", "On SIGUSR1, stop accepting and give in-flight requests this long."),
@@ -111,7 +112,7 @@ pub const SERVE: &[Group] = &[
     Group {
         title: "Speculative decoding",
         flags: &[
-            f("--speculate", Some("<auto|prompt-lookup|mtp-head|<drafter>|off>"), "off", "Draft tokens and verify them; also dflash:, dspark:, eagle3:, draft-model: <path>."),
+            f("--speculate", Some("<auto|prompt-lookup|mtp-head|<drafter>|off>"), "auto on basert, else off", "Draft tokens and verify them; also dflash:, dspark:, eagle3:, draft-model: <path>."),
             f("--spec-draft-tokens", Some("<N>"), "per strategy", "Draft depth, 1..15."),
             f("--spec-adaptive", None, "on", "Adapt the depth to the acceptance rate. --no-spec-adaptive pins it."),
             f("--spec-min-yield", Some("<F>"), "0.75", "The yield below which a lane stops drafting."),
@@ -272,8 +273,8 @@ pub fn version() -> String {
 pub fn overview() -> String {
     format!(
         "{}
-A serving daemon for local LLM inference: one scheduler, one session log and one set of APIs
-over llama.cpp, MLX and baseRT.
+An open-source server that runs LLMs on your own hardware, from one machine or several that
+act as one server, over llama.cpp, MLX and BaseRT.
 
 Usage: superfluid <command> [options]
 
@@ -283,6 +284,7 @@ Commands:
   stop                 Stop the server `launch` started
   fleet token          Print the fleet token, making it the first time
   node join [<head>]   Serve a model to a fleet head from this machine
+  models [--json]      List the models pulled here and the hub catalog's
   runtimes [<model>]   List the inference runtimes here, or which one serves a model
   runtime <action>     Install, update, repair, remove or pin a runtime
   compat               What this build was built for: the runtime contracts it checks at load
@@ -322,7 +324,7 @@ Usage: superfluid serve <model> [options]
 
 Examples:
   superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
-  superfluid serve ./Qwen3-4B-Q4_K_M.gguf --port 8000 --api-key secret
+  superfluid serve ./Qwen3-4B-Q4_K_M.gguf --port 8000 --api-key-file ~/.superfluid/key
   superfluid serve --model a.gguf --model b.gguf --max-batch 16
 
 Every option that takes a value accepts --flag value and --flag=value. A runtime's own knobs are
@@ -482,6 +484,29 @@ fn version_and_backend(install: &str) -> Option<(&str, &str)> {
         .filter(|(version, _)| *version != "custom")
 }
 
+pub const MODELS_HELP: &str = "List the models pulled here, and the hub catalog's.
+
+Usage: superfluid models [--catalog] [--refresh] [--json]
+
+  A pull that succeeds records the model in $SUPERFLUID_HOME/pulls (~/.superfluid): the id as it
+  was pulled, the runtime that pulled it, where it is and its size. One whose path is gone is
+  listed as missing. One pulled before superfluid kept records is listed by the id its lock's
+  name gives back, marked as guessed, with no path.
+  The hub catalog lists the models baseRT has converted, each quant of each. `serve` keeps a copy
+  in $SUPERFLUID_HOME/cache and fetches it again once a day; this command fetches it only when
+  --refresh asks.
+
+Options:
+  --catalog    List the hub catalog's models instead, marking those downloaded here
+  --refresh    Fetch the hub catalog now; exit 1, after listing the copy kept here, if it cannot be
+  --json       Print one JSON document with both lists, whatever --catalog says. \"schema\" is 1.
+               \"downloaded\": each model's id, served_name, runtime, path, size (bytes),
+               pulled_at (seconds since the Unix epoch), exists and id_guessed, with null for
+               what a guessed one's lock does not say. \"catalog\": each entry with the fields the
+               cache has, and downloaded. \"catalog_updated\": the catalog's own date.
+               \"catalog_fetched\": when the copy here was fetched (seconds since the Unix epoch).
+";
+
 pub const SESSION_HELP: &str = "Inspect or export a session of a running server.
 
 Usage:
@@ -511,14 +536,16 @@ Options:
 
 pub const TOP_HELP: &str = "Monitor running servers in the terminal.
 
-Usage: superfluid top [--api-key <key>] [<host:port> ...]
+Usage: superfluid top [--api-key <key> | --api-key-file <path>] [<host:port> ...]
 
   Each address is a `superfluid serve` HTTP endpoint; a fleet head's shows every node joined to
   it, as they come and go. With no address, the fleet head on the local network is found and
   shown. q or Esc quits.
 
 Options:
-  --api-key <key>    Sent on every scrape, for servers behind --api-key
+  --api-key <key>          Sent on every scrape, for servers behind a key
+  --api-key-file <path>    The key, read from this file; with neither flag,
+                           $SUPERFLUID_API_KEY gives it
 ";
 
 /// The help for a subcommand, by name.
@@ -536,12 +563,13 @@ pub fn command_help(command: &str) -> Option<String> {
         "fleet" => crate::fleet_token::HELP.to_string(),
         "node" => crate::fleet_join::HELP.to_string(),
         "stop" => crate::launch::STOP_HELP.to_string(),
+        "models" => MODELS_HELP.to_string(),
         _ => return None,
     })
 }
 
 pub const COMMANDS: &[&str] =
-    &["serve", "launch", "stop", "runtimes", "runtime", "compat", "self", "session", "media", "top", "fleet", "node", "help", "version"];
+    &["serve", "launch", "stop", "models", "runtimes", "runtime", "compat", "self", "session", "media", "top", "fleet", "node", "help", "version"];
 
 pub const COMPAT_HELP: &str = "What this build was built and tested for, per runtime.
 

@@ -37,7 +37,7 @@ MAIN = f"{SCOPE}/superfluid"
 INSTALLED_BY = f"npm: npm install --global {MAIN}@latest"
 REPOSITORY = {"type": "git", "url": "git+https://github.com/basecompute/superfluid.git"}
 HOMEPAGE = "https://superfluid.sh"
-DESCRIPTION = "One serving daemon for local LLM inference, across runtimes and machines"
+DESCRIPTION = "Open-source server that runs LLMs on your own hardware, from one machine or several that act as one server"
 # Release target -> the npm package for it. Keep in step with PACKAGES in launch.js.
 TARGETS = {
     "aarch64-apple-darwin": {"name": f"{SCOPE}/superfluid-darwin-arm64", "os": ["darwin"], "cpu": ["arm64"], "what": "macOS on Apple silicon"},

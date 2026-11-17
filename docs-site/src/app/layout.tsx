@@ -10,12 +10,12 @@ export const metadata: Metadata = {
     template: "%s · Superfluid Docs",
   },
   description:
-    "Documentation for Superfluid — one serving daemon for local LLM inference, across runtimes and machines.",
+    "Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server.",
   authors: [{ name: "Base Compute" }],
   icons: { icon: asset("/favicon.png") },
   openGraph: {
     title: "Superfluid Docs",
-    description: "One serving daemon for local LLM inference — across runtimes and machines.",
+    description: "An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server.",
     type: "website",
   },
   twitter: { card: "summary", site: "@basecmpt" },

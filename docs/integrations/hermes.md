@@ -4,7 +4,7 @@ Hermes speaks Chat Completions to its `custom` provider.
 
 ```sh
 curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash     # install
-superfluid launch hermes --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch hermes --model basecompute/Qwen3.8-27B
 ```
 
 Aliases: `hermes-agent`.

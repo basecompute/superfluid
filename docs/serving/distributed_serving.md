@@ -1,9 +1,9 @@
 # Distributed serving (fleet mode)
 
-Fleet mode runs one Superfluid as a **head** that owns the HTTP API and the chat template, and one or more **node agents** (`superfluid-noded`) that each own a model and sample its tokens. Each request is placed as a whole session on one node; only sampled tokens cross the network.
+Fleet mode runs one Superfluid as a **head** that owns the HTTP API and the chat template, and one or more **node agents** (`superfluid-noded`) that each own a model and sample its tokens. Each request is placed as a whole session on one node. Prompt tokens, sampled tokens and what a request carries (its grammar, media files, and its text when a node encodes it) cross the network; weights and KV caches do not.
 
 > [!WARNING]
-> Fleet mode is early. The head keeps no durable session log and serves two routes.
+> Fleet mode is early. No KV moves between nodes, so a failover re-prefills; `/slots` does not reach the nodes; and no QoS class crosses to a node.
 
 <!-- source: docs/assets/diagrams/fleet.excalidraw; edit it in excalidraw.com and export the SVG over fleet.svg -->
 ![fleet mode: the head serves the HTTP API and places each session on a node over Link F; nodes run the worker and sample](../assets/diagrams/fleet.svg)
@@ -14,13 +14,13 @@ On the head, make the token once and start serving with a listener for nodes:
 
 ```sh
 superfluid fleet token                     # prints the token; kept at ~/.superfluid/fleet/token
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
+superfluid serve basecompute/Qwen3.8-27B --http 0.0.0.0:8453 --fleet-listen 0.0.0.0:8454
 ```
 
 On each node:
 
 ```sh
-superfluid node join --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --token <the token>
+superfluid node join --model basecompute/Qwen3.8-27B --token <the token>
 ```
 
 The node finds the head on the local network (`_superfluid-fleet._tcp`, which also carries the head's HTTP port for `superfluid top`, or give `<host:port>` as the first argument), pulls the model as `serve` would, serves it over an encrypted link, and dials again whenever the link drops, looking for the head anew when it moved. The head lists a node that joined as `joined:<identity>` and places sessions on it like any other; a node that leaves is waited for, not dialed. The head matches nodes by model name: a node names its model as the head announced it, so the same model under another id or path still matches; `--model-name` overrides that. A head with no token takes nodes from its own machine only.
@@ -44,14 +44,14 @@ A node that joins opens one connection per lane, and the head runs one generatio
 ## Run a node by hand
 
 ```sh
-superfluid-noded --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M --listen 100.64.0.2:8454
+superfluid-noded --model basecompute/Qwen3.8-27B --listen 100.64.0.2:8454
 ```
 
 The node loads the model as `superfluid serve` does: an id is pulled, the runtime that reads it is installed if it never was, and the window is sized for the device. It checks its token and binds its port first, so a node that would be refused stops before it downloads anything. It then prints what it serves:
 
 ```text
-superfluid-noded: runtime llamacpp serves /…/Qwen3.8-27B-UD-Q4_K_M.gguf: context window 40960 tokens (sized for this device), 8 lanes
-superfluid-noded: node 'box-a' serving 'unsloth/Qwen3.8-27B-GGUF' on 100.64.0.2:8454 (Link F/TCP)
+superfluid-noded: runtime basert serves /…/Qwen3.8-27B-Q4.base: context window 40960 tokens (sized for this device), 8 lanes
+superfluid-noded: node 'box-a' serving 'basecompute/Qwen3.8-27B' on 100.64.0.2:8454 (Link F/TCP)
 ```
 
 | flag | default | meaning |
@@ -105,7 +105,7 @@ superfluid serve /models/qwen.base /models/gemma.base --http 0.0.0.0:8453 --flee
 | `--fleet-pool-high <pct>` | 90 | `load-aware` avoids nodes at or above this KV occupancy |
 | `--fleet-conns-per-node <N>` | the node's lanes | connections to each node in `--fleet`, and so concurrent generations there |
 
-The head loads no engine but still reads the model for its tokenizer and chat template; its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no `--max-context`. It logs where each session is placed and every move to another node. `--dialect`, `--tool-call-parser` and `--temperature`/`--top-p`/`--top-k`/`--min-p` apply on the head. `--api-key`, `--key-policy` and `--rate-limit` protect its listener; a policy's `class` and `max_class` do not apply, since the head has no scheduler.
+The head loads no engine. A model given by path is still read there for its tokenizer and chat template; one given by id takes them from a node, as above. Its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no `--max-context`. It logs where each session is placed and every move to another node. `--dialect`, `--tool-call-parser` and `--temperature`/`--top-p`/`--top-k`/`--min-p` apply on the head. `--api-key`, `--key-policy` and `--rate-limit` protect its listener; a policy's `class` and `max_class` do not apply, since the head has no scheduler.
 
 Refused on the head (set them on each node's own `superfluid serve`): `--class-lanes`, `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant`, `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--otlp-endpoint`. A batch-invariant lane is refused however it is asked for (a key whose policy grants `batch_invariant`, or `SetQos`) with 400 `unsupported_on_fleet`: a node batches each generation with the others it runs.
 
@@ -153,7 +153,7 @@ Slots (`/slots`) answer that they do not reach fleet nodes yet. A generation has
 The head keeps every conversation; a node keeps only what makes the next turn fast, its cache of prompt prefixes. Two things make that survive a restart:
 
 - The head remembers which node ran each prompt prefix and sends a conversation's next turn there (see [Placement policies](#placement-policies)), across a head restart too.
-- A node started with `--park` writes each prompt's prefix of 1024 tokens or more to disk under `$SUPERFLUID_HOME/fleet/nodes/<identity>/park`, up to 20 GB, the oldest swept first. After the node restarts, a turn whose prompt one covers starts from it instead of prefilling the whole conversation again. Writing a new prefix copies its cache at the end of that generation, which delays that response's finish and holds up the lanes beside it, so it is off by default; a prefix that one kept already mostly covers is not written again. Prompts with images or audio, and models whose cache holds more than one kind of state (hybrid or sliding-window attention), are not kept.
+- A node started with `--park` writes each prompt's prefix of 1024 tokens or more to disk under `$SUPERFLUID_HOME/fleet/nodes/<identity>/park`, up to 20 GiB, the oldest swept first. After the node restarts, a turn whose prompt one covers starts from it instead of prefilling the whole conversation again. Writing a new prefix copies its cache at the end of that generation, which delays that response's finish and holds up the lanes beside it, so it is off by default; a prefix that one kept already mostly covers is not written again. Prompts with images or audio, and models whose cache holds more than one kind of state (hybrid or sliding-window attention), are not kept.
 
 It pays off where prefilling is slower than reading the prefix back. With Qwen3 4B (baseRT, 4-bit) and a 9.3k-token conversation:
 

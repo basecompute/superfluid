@@ -9,12 +9,13 @@ Superfluid binds to loopback and asks for no credential unless told to. Nothing 
 | OpenAI / Anthropic / Ollama HTTP | `--http`, `--host`/`--port` | `127.0.0.1:8453` | `--api-key` or `--key-policy`, optional |
 | native session API | `--socket` | `~/.superfluid/superfluid.sock` | none: file permissions |
 | browser transport | `--web` | off; loopback only | a minted bearer token |
-| fleet node agent | `superfluid-noded --listen` | `0.0.0.0:8454` | `--auth-file`; required off loopback |
+| fleet node agent | `superfluid-noded --listen` | `0.0.0.0:8454` | the fleet token (`--auth-file`, default `$SUPERFLUID_HOME/fleet/token`); required off loopback |
+| fleet head, for nodes that join | `serve --fleet-listen` | off | the fleet token; without one, only nodes on this machine |
 
-Without `--api-key` or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
+Without a key (`--api-key-file`, `--api-key` or `SUPERFLUID_API_KEY`) or `--key-policy`, a server on loopback says so in one line; one bound anywhere else warns:
 
 ```
-superfluid: WARNING --api-key not set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key.
+superfluid: WARNING no API key set. Authentication is OFF — anyone who can reach this port can use the API. Bind loopback or set --api-key-file (or --api-key, $SUPERFLUID_API_KEY).
 ```
 
 ## Requests from web pages
@@ -24,11 +25,14 @@ Every HTTP listener refuses, with `403` and code `origin_refused`, a request who
 ## API key
 
 ```sh
-superfluid serve <model> --api-key "$(cat /etc/superfluid/key)"
+superfluid serve <model> --api-key-file /etc/superfluid/key
 curl -H 'Authorization: Bearer <key>' http://127.0.0.1:8453/v1/models
 curl -H 'x-api-key: <key>' http://127.0.0.1:8453/v1/models
 ```
 
+- The key comes from `--api-key <key>`, else `--api-key-file <path>`, else the `SUPERFLUID_API_KEY` environment variable. `ps` shows a key on the command line to every user of the machine; the file and the variable it does not. The two flags together are refused.
+- `--api-key-file` reads the file with the whitespace around the key trimmed, and refuses a missing or empty one. Like ssh with a private key, it warns when group or others may read the file: `chmod 600` it.
+- `superfluid launch` hands the server it starts the key in `SUPERFLUID_API_KEY`, not on its command line. `superfluid top` takes `--api-key-file` and the variable too.
 - Every route except `GET /health` needs the key, including `/metrics` and the Ollama routes. An unknown path without a key is a 401.
 - Keys are compared in constant time against a SHA-256 digest.
 - A missing or wrong key is 401 with `type: "authentication_error"`, `code: "invalid_api_key"`.
@@ -123,13 +127,15 @@ Logs, metrics and OTLP traces carry ids, counts, timings and codes, never conten
 - An MLX directory that ships its own Python is refused unless `SUPERFLUID_MLX_TRUST_MODEL_CODE=1`. Models pulled by id are fetched without `*.py` files.
 - `serve <id>` downloads from the Hugging Face Hub; `--offline` forbids it. `runtime install` downloads over HTTPS with pinned digests.
 - OTLP exports and `session export --endpoint` use plain HTTP to the collector you name.
+- `superfluid serve` reads GitHub's release listing for Superfluid (`api.github.com`) once a day, after the server is up, to say when a newer release is out. `SUPERFLUID_NO_UPDATE_CHECK=1` or `--offline` turns it off; see [Updating](../serving/updating.md).
 
 ## Fleet links
 
-Head-to-node traffic is unencrypted TCP; prompts and generated tokens cross it in the clear. Run it on a private or already-encrypted network (WireGuard, Tailscale).
+The fleet token (`superfluid fleet token`: 32 random bytes as hex at `$SUPERFLUID_HOME/fleet/token`, mode 0600) keys the link between head and node. With a token, every connection is a Noise handshake (`Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`, its pre-shared key the SHA-256 of the token), and everything after it, prompts and tokens included, is encrypted and authenticated. A peer with another token fails the handshake and is refused. The token never crosses the network in the clear; the head repeats it inside the encrypted hello, and the node compares it in constant time.
 
-- The head sends the bytes of `--fleet-auth <file>`; a node with `--auth-file <path>` compares them in constant time.
-- A node bound off loopback refuses to start without `--auth-file`, unless `--insecure-no-auth`.
+- The head reads the token from `--fleet-auth <path>`, else `$SUPERFLUID_HOME/fleet/token`. `superfluid-noded` reads it from `--auth-file <path>`, else the same path. `superfluid node join --token <value>` keeps the value at that path.
+- With no token, the links are plain TCP and nothing is checked. A head with `--fleet-listen` and no token takes only nodes on its own machine; `node join` with no token dials only a head on loopback.
+- `superfluid-noded` bound off loopback refuses to start without a token, unless `--insecure-no-auth`, which accepts any peer that reaches it. Use that only behind a transport that already authenticates (WireGuard, Tailscale).
 - `--api-key`, `--key-policy` and `--rate-limit` protect the head's own HTTP listener (a policy's class ceilings do not apply: the head has no scheduler).
 
 ## Fleet discovery

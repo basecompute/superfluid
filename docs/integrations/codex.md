@@ -4,7 +4,7 @@ Codex speaks the Responses API, which the server answers at `/v1/responses`.
 
 ```sh
 npm install -g @openai/codex                       # install
-superfluid launch codex --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid launch codex --model basecompute/Qwen3.8-27B
 superfluid launch codex -- exec "fix the failing test"
 ```
 

@@ -3,7 +3,7 @@
 `superfluid serve` exposes an OpenAI-compatible HTTP API at `http://127.0.0.1:8453` by default, on the same listener as the [Anthropic](anthropic_api.md) and [Ollama](ollama_api.md) APIs. Every request runs as a fresh durable session, so a later request that repeats a conversation prefix is served warm from the prefix cache with no client-side session handling.
 
 ```sh
-superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+superfluid serve basecompute/Qwen3.8-27B
 ```
 
 ```python
@@ -11,14 +11,14 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8453/v1", api_key="unused")
 reply = client.chat.completions.create(
-    model="unsloth/Qwen3.8-27B-GGUF",
+    model="basecompute/Qwen3.8-27B",
     messages=[{"role": "user", "content": "Say hello."}],
     max_tokens=32,
 )
 print(reply.choices[0].message.content)
 ```
 
-The `model` field names an id from `GET /v1/models`. Unknown fields are ignored. The request body limit is 100 MiB (413 above it).
+The `model` field names an id from `GET /v1/models`. Unknown fields are ignored. The request body limit is 100 MiB (413 above it; the multipart routes answer with code `payload_too_large`, the JSON routes with a plain-text body).
 
 ## Endpoints
 
@@ -26,7 +26,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 |---|---|---|
 | `POST` | `/v1/chat/completions` | chat completion, streaming or not |
 | `POST` | `/v1/completions` | raw-text completion; with `suffix`, fill-in-the-middle |
-| `POST`, `GET`, `DELETE` | `/v1/responses`, `/v1/responses/{id}`, `/v1/responses/{id}/input_items` | [Responses API](responses_api.md), with `previous_response_id` |
+| `POST`, `GET`, `DELETE` | `/v1/responses`, `/v1/responses/{id}`, `/v1/responses/{id}/input_items`, `/v1/responses/{id}/cancel` | [Responses API](responses_api.md), with `previous_response_id` |
 | `POST` | `/v1/embeddings` | text embeddings (embedding models only) |
 | `POST` | `/v1/rerank` | cosine rerank of documents against a query |
 | `POST` | `/v1/audio/transcriptions`, `/v1/audio/translations` | speech to text (Whisper models only) |
@@ -35,7 +35,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 | `POST` | `/v1/models/load`, `/v1/models/unload` | load / unload a model (admin) |
 | `DELETE` | `/v1/models/{model}` | unload a model (admin) |
 | `POST` | `/v1/tokenize` | token ids of a text, no chat scaffold |
-| `POST`, `GET` | `/v1/files`, `/v1/files/{id}`, `/v1/files/{id}/content` | upload, list, read, delete files |
+| `POST`, `GET`, `DELETE` | `/v1/files`, `/v1/files/{id}`, `/v1/files/{id}/content` | upload, list, read, delete files |
 | `POST`, `GET` | `/v1/batches`, `/v1/batches/{id}`, `/v1/batches/{id}/cancel` | batch jobs |
 | `POST`, `GET` | `/v1/lora/load`, `/v1/lora/unload`, `/v1/lora` | activate (admin), clear (admin) or show a LoRA adapter; `basert` bundles only |
 | `GET` | `/health` | liveness; never authenticated |
@@ -48,7 +48,7 @@ The `model` field names an id from `GET /v1/models`. Unknown fields are ignored.
 
 ```sh
 curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/json' -d '{
-  "model": "unsloth/Qwen3.8-27B-GGUF",
+  "model": "basecompute/Qwen3.8-27B",
   "messages": [{"role": "user", "content": "Three facts about Oslo."}],
   "stream": true,
   "chat_template_kwargs": {"enable_thinking": false}
@@ -66,8 +66,8 @@ curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/jso
 | `stream_options` | | `include_usage` is always on |
 | `n` | 1 | 1-128; streaming uses 1 |
 | `temperature`, `top_p` | model default | see [Sampling](../features/sampling.md) |
-| `seed` | fresh per request | do not send `0` (read as unseeded) |
-| `presence_penalty`, `frequency_penalty` | 0 | |
+| `seed` | fresh per request | |
+| `presence_penalty`, `frequency_penalty` | 0 | -2 to 2; outside is a 400 |
 | `stop` | none | string or array; excluded from output |
 | `logprobs`, `top_logprobs` | off | `top_logprobs` 0-20 |
 | `logit_bias` | none | `{"<token id>": bias}` |
@@ -209,14 +209,23 @@ Use a new key for each new request: a retry loop that sends the same request wit
 | 400 | `unsupported_input` | an image or audio part the model cannot take |
 | 400 | `unsupported_model` | embeddings, rerank or audio on a model that does not serve them |
 | 400 | `unsupported_runtime` | `/v1/models/load` on a runtime that is missing or does not read the model |
-| 400 | | malformed body; `constraint unsatisfiable: ...` (a grammar that cannot compile) |
+| 400 | `unsupported_parameter`, `invalid_value` | `fim_mode` without `suffix`, or not `psm`/`spm` |
+| 400 | `idempotency_key` | an `Idempotency-Key` that is empty or over 255 characters |
+| 400 | | malformed body; `constraint unsatisfiable: ...` (a grammar that cannot compile); a penalty outside -2 to 2 |
 | 401 | `invalid_api_key` | missing or wrong key |
-| 403 | `admin_required` | a non-admin key on an admin route; also a QoS header above the key's ceiling |
+| 403 | `admin_required` | a non-admin key on an admin route |
+| 403 | `origin_refused` | an `Origin` or `Host` from off this machine; see [Security](../deployment/security.md#requests-from-web-pages) |
+| 403 | | a QoS header above the key's ceiling, or a batch-invariant lane not allowed |
 | 404 | | unknown model |
-| 413 | `payload_too_large`, `files_quota_exceeded` | body over 100 MiB; file store full |
+| 404 | `model_not_found` | `/props?model=` names an unknown model |
+| 413 | `payload_too_large`, `files_quota_exceeded` | multipart body over 100 MiB; file store full |
+| 413 | | JSON body over 100 MiB (plain-text body) |
+| 422 | `idempotency_key` | an `Idempotency-Key` reused with another body or route |
 | 429 | `rate_limit_exceeded`, `concurrency_limit_exceeded`, `completion_rate_limited` | per-IP, per-key, FIM limits |
 | 500 | | engine or worker failure |
 | 501 | `route_retired` | `/slots/{id}/save`, `/restore` |
+| 503 | | the model failed to load |
+| 503 | `no_node_up` | a fleet head with no node up for the model |
 
 ## Browser transport (`--web`)
 

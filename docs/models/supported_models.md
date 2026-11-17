@@ -20,7 +20,7 @@ What each runtime supports beyond plain generation:
 | park and resume (`--park`) | yes | yes (lossless) | yes (lossless) |
 | lossy park (`--park-lossy`) | per bundle | no | no |
 | `--kv-bits` | yes | no | no |
-| speculative decoding | per bundle | no | no |
+| speculative decoding | per bundle | `prompt-lookup` only | `prompt-lookup` only |
 | images and audio in chat | per bundle | no | no |
 | embeddings, speech to text, LoRA | per bundle | no | no |
 | `--max-context auto` | yes | on Metal, and on CUDA with a dedicated GPU; else 8192 | yes |
@@ -34,7 +34,7 @@ superfluid serve ./Qwen3-4B-Q4_K_M.gguf                  # a path; format picks 
 superfluid serve ~/models/Qwen3-4B-4bit                   # an MLX directory
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M           # an id, pulled by llama.cpp
 superfluid serve mlx-community/Qwen3-4B-4bit              # an id, pulled by MLX
-superfluid serve basecompute/Qwen3-1.7B                   # an id, pulled by basert
+superfluid serve basecompute/Qwen3.8-27B                  # an id, pulled by basert
 ```
 
 A token is an **id** when nothing exists on disk by that name, it does not start with `.`, `/` or `~`, it does not end in `.base` or `.gguf`, and the part before an optional `:tag` contains a `/`. Anything else is a path, so a missing file is reported as missing rather than looked up on a hub.
@@ -50,7 +50,7 @@ Runtime inference for ids: a repo name containing `gguf` (any case) goes to `lla
 
 ## Pulling models by id
 
-Pulling happens during `superfluid serve`; there is no separate `pull` command.
+Pulling happens during `superfluid serve`; there is no separate `pull` command. `superfluid models` lists the models pulled here; see the [Command-line reference](../serving/cli.md#superfluid-models).
 
 | runtime | tool | `:tag` means | `--pull-<name>` options | cache |
 |---|---|---|---|---|
