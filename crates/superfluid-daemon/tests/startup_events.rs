@@ -260,6 +260,66 @@ fn a_pulls_progress_keeps_its_id_however_far_behind_the_relay_is() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// Which side of the exec the test's own program is on, in
+/// `a_process_that_starts_itself_again_keeps_its_events_on_the_real_stderr`.
+const EXEC_SIDE: &str = "SUPERFLUID_EVENTS_TEST_EXEC_SIDE";
+
+#[test]
+fn a_process_that_starts_itself_again_keeps_its_events_on_the_real_stderr() {
+    use std::os::unix::process::CommandExt;
+    let json_mode = ["--log-format".to_string(), "json".to_string()];
+    match std::env::var(EXEC_SIDE).as_deref() {
+        // The test's program as a node that follows its head: it says something, then starts
+        // itself again, as `fleet_join::restart` does.
+        Ok("before") => {
+            superfluid_daemon::events::init("node join", &json_mode).unwrap();
+            superfluid_daemon::events::emit("before.exec", json!({}));
+            eprintln!("superfluid: starting again");
+            superfluid_daemon::events::prepare_exec();
+            superfluid_daemon::events::emit("between.exec", json!({}));
+            let e = Command::new(std::env::current_exe().unwrap()).args(std::env::args_os().skip(1)).env(EXEC_SIDE, "after").exec();
+            panic!("cannot start again: {e}");
+        }
+        Ok("after") => {
+            superfluid_daemon::events::init("node join", &json_mode).unwrap();
+            superfluid_daemon::events::emit("after.exec", json!({}));
+            return;
+        }
+        // An exec that fails after it was prepared: the reason still comes out as an event.
+        Ok("fails") => {
+            superfluid_daemon::events::init("node join", &json_mode).unwrap();
+            superfluid_daemon::events::prepare_exec();
+            superfluid_daemon::events::fail(1, "cannot start again: no such file");
+        }
+        _ => {}
+    }
+    let side = |side: &str| {
+        let began = Instant::now();
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["a_process_that_starts_itself_again_keeps_its_events_on_the_real_stderr", "--exact", "--nocapture", "--test-threads=1"])
+            .env(EXEC_SIDE, side)
+            .env_remove("SUPERFLUID_LOG_FORMAT")
+            .stdout(Stdio::null())
+            .output()
+            .unwrap();
+        (out, began.elapsed())
+    };
+    let (out, _) = side("before");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let both = events(&out.stderr);
+    let names: Vec<&str> = both.iter().map(|e| e["event"].as_str().unwrap()).collect();
+    assert_eq!(names, ["start", "before.exec", "log", "between.exec", "start", "after.exec"], "{both:?}");
+    assert_eq!(both[2]["message"], "superfluid: starting again");
+    assert_eq!(both[0]["pid"], both[4]["pid"], "one process, two images");
+
+    let (out, took) = side("fails");
+    assert_eq!(out.status.code(), Some(1));
+    let failed = events(&out.stderr);
+    assert_eq!(steps(&failed), ["start", "error"], "{failed:?}");
+    assert_eq!(failed[1]["message"], "cannot start again: no such file");
+    assert!(took < Duration::from_secs(2), "the exit does not wait on a relay it no longer writes through: {took:?}");
+}
+
 #[test]
 fn a_panic_reaches_the_stream_as_one_log_event() {
     let home = scratch("panic");

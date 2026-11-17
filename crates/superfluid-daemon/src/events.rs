@@ -14,7 +14,8 @@
 //! worker inherits fd 2, so what it writes is relayed as well, and an event is written into
 //! the same pipe, so it comes out in the order it was written beside the prose. A process exit
 //! waits for the relay to write out what was written before it, and a panic is a `log` event of
-//! its own.
+//! its own. A process that execs another program, as a node that follows its head starts itself
+//! again, calls [`prepare_exec`] first, which gives fd 2 back to the real stderr.
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -56,6 +57,8 @@ static OUT: AtomicI32 = AtomicI32::new(-1);
 static DRAIN_ASKED: AtomicU64 = AtomicU64::new(0);
 static DRAIN_SEEN: AtomicU64 = AtomicU64::new(0);
 static DRAINER: OnceLock<Mutex<Sender<u64>>> = OnceLock::new();
+/// Whether fd 2 is the relay's pipe: from [`init`] in JSON mode until [`prepare_exec`].
+static RELAYED: AtomicBool = AtomicBool::new(false);
 /// The pull that has said `pull.start` and not yet how it ended, so that `pull.failed` is said
 /// only after a start. The relay keeps its own, in the order of the stream, for the progress
 /// lines the gauge writes without the id.
@@ -140,11 +143,18 @@ pub fn emit(name: &str, fields: Value) {
     if !json() {
         return;
     }
-    // The relay stamps it as it writes it out, as it stamps every line: the timestamps rise down
-    // the stream. One write under the lock: no other thread's line lands inside it.
-    let mut marked = vec![EVENT_MARK];
-    marked.extend_from_slice(line(name, fields, None).as_bytes());
-    let _ = std::io::stderr().lock().write_all(&marked);
+    // One write under the lock: no other thread's line lands inside it.
+    let mut err = std::io::stderr().lock();
+    if RELAYED.load(Ordering::SeqCst) {
+        // The relay stamps it as it writes it out, as it stamps every line: the timestamps rise
+        // down the stream.
+        let mut marked = vec![EVENT_MARK];
+        marked.extend_from_slice(line(name, fields, None).as_bytes());
+        let _ = err.write_all(&marked);
+    } else {
+        // After prepare_exec fd 2 is the real stderr: stamped here, as the relay would.
+        let _ = err.write_all(line(name, fields, Some(now())).as_bytes());
+    }
 }
 
 /// Says why this process stops and exits with `code`: `superfluid: <message>` in text mode, an
@@ -170,7 +180,7 @@ pub fn output_fd() -> RawFd {
 /// Waits, up to `within`, until the relay has written out everything this process wrote to
 /// stderr before the call; at once in text mode.
 pub fn drain(within: Duration) {
-    let Some(drainer) = DRAINER.get() else { return };
+    let Some(drainer) = DRAINER.get().filter(|_| RELAYED.load(Ordering::SeqCst)) else { return };
     let seq = DRAIN_ASKED.fetch_add(1, Ordering::SeqCst) + 1;
     // The mark goes into the pipe from a thread of its own: a writer that holds stderr while the
     // pipe is full holds that thread, not this one, which gives up at `within`.
@@ -180,6 +190,31 @@ pub fn drain(within: Duration) {
     let deadline = Instant::now() + within;
     while DRAIN_SEEN.load(Ordering::SeqCst) < seq && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Gives fd 2 back to the real stderr before this process execs another program, once the relay
+/// has written out what was written before. The relay's pipe is close-on-exec, and so is the real
+/// stderr the relay holds, so without this the next image's stderr is a pipe that nobody reads,
+/// and all it says is lost. From here to the exec an event is written to the real stderr
+/// directly, stamped as the relay would; a worker's line still goes through the relay, and a line
+/// of prose this process writes goes out as it is. Nothing in text mode.
+///
+/// `fleet_join::restart`, which starts a node again to follow its head's model, calls it just
+/// before its exec; that call comes with the rebase over the branch that adds `restart`.
+pub fn prepare_exec() {
+    if !RELAYED.load(Ordering::SeqCst) {
+        return;
+    }
+    drain(EXIT_DRAIN);
+    // Under the lock no line of this process is half written into the pipe, and none goes in
+    // after: emit and the drain mark both check RELAYED under it.
+    let _err = std::io::stderr().lock();
+    RELAYED.store(false, Ordering::SeqCst);
+    // SAFETY: dup2 of the real stderr, which the relay holds open for as long as this process
+    // lives, onto fd 2; dup2 clears close-on-exec on fd 2, so the next image inherits it.
+    if unsafe { libc::dup2(OUT.load(Ordering::SeqCst), libc::STDERR_FILENO) } < 0 {
+        RELAYED.store(true, Ordering::SeqCst);
     }
 }
 
@@ -386,7 +421,13 @@ fn start_relay() -> std::io::Result<()> {
         for seq in rx {
             let mut mark = DRAIN_MARK.to_vec();
             mark.extend_from_slice(format!("{seq}\n").as_bytes());
-            let _ = std::io::stderr().lock().write_all(&mark);
+            let mut err = std::io::stderr().lock();
+            if RELAYED.load(Ordering::SeqCst) {
+                let _ = err.write_all(&mark);
+            } else {
+                // fd 2 is the real stderr again (prepare_exec): there is nothing to wait for.
+                DRAIN_SEEN.fetch_max(seq, Ordering::SeqCst);
+            }
         }
     })?;
     // SAFETY: dup2 of the pipe's write end, which this process owns, onto fd 2; dup2 clears
@@ -396,6 +437,7 @@ fn start_relay() -> std::io::Result<()> {
     }
     drop(write);
     OUT.store(out_fd, Ordering::SeqCst);
+    RELAYED.store(true, Ordering::SeqCst);
     let _ = DRAINER.set(Mutex::new(tx));
     extern "C" fn at_exit() {
         drain(EXIT_DRAIN);
