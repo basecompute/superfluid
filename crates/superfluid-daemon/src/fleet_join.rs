@@ -444,11 +444,17 @@ fn watch_head(target: Arc<Target>, token: Vec<u8>, identity: String) {
 
 /// Asks the head a following node dials what it serves, after its announcement changed to list
 /// `models`, and tells the follower; `true` once the node is told to follow. A query with no
-/// answer is noted in `asking`, to be asked again; only the last try that fails says so.
+/// answer, or with an answer that does not settle the announcement ([`settles`]), is noted in
+/// `asking`, to be asked again; only the last try that gets no answer says so.
 fn ask(target: &Target, follower: &Follower, token: &[u8], identity: &str, asking: &mut Asking, models: &[String]) -> bool {
     match ask_head(&target.addrs(), token, identity) {
         Ok(serves) => {
-            asking.answered(models);
+            if settles(serves.as_ref(), models) {
+                asking.answered(models);
+            } else {
+                let again = asking.failed(models, std::time::Instant::now());
+                tracing::debug!(again, "the head's answer does not bear out its announcement; asking again");
+            }
             follower.hear(serves.as_ref())
         }
         Err(e) => {
@@ -466,8 +472,19 @@ fn ask(target: &Target, follower: &Follower, token: &[u8], identity: &str, askin
     }
 }
 
+/// Whether the head's answer settles an announcement listing `models`: it states the same first
+/// model. The first model is what a node follows, and an announcement may list fewer models
+/// than the head states (a name too long for a TXT property is left out), so the rest is not
+/// compared. An answer naming another first model leaves the announcement unsettled: it may be
+/// a stale one, and a real change behind it is still to be caught, so it is asked again, a
+/// bounded number of times ([`ASK_TRIES`]). A head that states nothing settles it: it will
+/// never state more.
+fn settles(answer: Option<&Served>, models: &[String]) -> bool {
+    answer.is_none_or(|served| served.models.first() == models.first())
+}
+
 /// How many times a following node asks its head what it serves, for one announcement change
-/// the head does not answer for.
+/// the head does not answer for, or does not bear out.
 const ASK_TRIES: u32 = 5;
 /// The wait before a following node asks its head again, doubling with each try.
 const ASK_BACKOFF: Duration = Duration::from_secs(2);
@@ -1098,6 +1115,60 @@ mod tests {
         let again = asking.due(std::time::Instant::now()).expect("asked again with no new announcement");
         assert!(ask(&target, &follower, &token, "follower", &mut asking, &again), "the head answers the next");
         assert!(matches!(heard.try_recv(), Ok(Event::Follow(f)) if f == serving("org/b", "org/b:q4")));
+    }
+
+    #[test]
+    fn an_answer_settles_an_announcement_only_with_the_same_first_model() {
+        let b = list(&["org/b"]);
+        assert!(!settles(Some(&head(&["org/a"], &["org/a:q4"])), &b), "a stale announcement");
+        assert!(settles(Some(&head(&["org/b"], &["org/b:q4"])), &b));
+        assert!(settles(Some(&head(&["org/b", "org/very-long-name"], &[])), &b), "a name the announcement left out");
+        assert!(!settles(Some(&head(&["org/c", "org/b"], &[])), &b), "the first is what a node follows");
+        assert!(settles(None, &b), "a head that states nothing never will");
+    }
+
+    #[test]
+    fn a_stale_announcement_the_head_contradicts_does_not_hide_its_later_real_change() {
+        let token = b"a fleet token".to_vec();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let lease = superfluid_proto::linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+        let manager = Arc::new(FleetManager::with_options(Vec::new(), crate::fleet_manager::PlacementPolicy::LoadAware, lease, 90, 1));
+        let models = HeadModels::fixed(Arc::clone(&manager), vec!["org/a".into()]);
+        models.know_ids(&["org/a".into(), "org/b".into()], &["org/a:q4".into(), "org/b:q4".into()]);
+        let daemon = || {
+            let dir = std::env::temp_dir().join(format!("superfluid-stale-{}-{}", std::process::id(), rand_tag()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let host = crate::EngineHost::spawn(|| (superfluid_engine::MockEngine::new(superfluid_engine::EngineConfig::default()), None)).unwrap();
+            Arc::new(crate::Daemon::new(crate::SessionStore::open(&dir.join("wal.log")).unwrap(), host, Box::new(crate::MockCodec), 1))
+        };
+        let registry = Arc::new(crate::registry::ModelRegistry::with_initial("org/a", daemon(), models.loader()));
+        models.attach(&registry);
+        let (m, t, served) = (Arc::clone(&manager), token.clone(), Arc::clone(&models));
+        std::thread::spawn(move || accept_nodes(listener, m, t, served));
+        let (events, heard) = std::sync::mpsc::sync_channel(4);
+        let follower = Arc::new(Follower::new(Serving { name: "org/a".into(), id: "org/a:q4".into() }, events));
+        let target = Target::new(Some(addr), Vec::new(), Search::for_token(&token), Some(Arc::clone(&follower)));
+        let mut asking = Asking::new(Duration::from_millis(50));
+        let b = list(&["org/b"]);
+
+        // A late announcement of org/b, heard while the head serves org/a again.
+        assert!(asking.hint(&b, std::time::Instant::now()));
+        assert!(!ask(&target, &follower, &token, "follower", &mut asking, &b), "the head states org/a: nothing to follow");
+        assert!(heard.try_recv().is_err());
+        // The same head now serves org/b first; no lane reconnects and the list announced is the same.
+        registry.insert_loaded("org/b", daemon());
+        registry.unload("org/a").unwrap();
+        assert_eq!(models.served().models, ["org/b"]);
+        std::thread::sleep(Duration::from_millis(60));
+        let again = asking.due(std::time::Instant::now()).expect("the unsettled announcement is asked again");
+        assert!(ask(&target, &follower, &token, "follower", &mut asking, &again));
+        assert!(matches!(heard.try_recv(), Ok(Event::Follow(f)) if f == serving("org/b", "org/b:q4")));
+    }
+
+    fn rand_tag() -> u64 {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     #[test]
