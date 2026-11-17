@@ -73,6 +73,9 @@ pub struct SamplingOverrides {
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
     pub repeat_penalty: Option<f32>,
+    /// The presence penalty of a request that names none, on the basert runtime (see
+    /// `for_daemon`).
+    pub presence_penalty: Option<f32>,
     pub spec_max_temperature: Option<f32>,
     /// Optional policy for an embedding whose omitted request parameters
     /// predate model-published defaults. None preserves superfluid's policy.
@@ -99,6 +102,12 @@ impl SamplingOverrides {
         let mut o = *self;
         if o.spec_max_temperature.is_some() && daemon.speculation().is_none() {
             o.spec_max_temperature = None;
+        }
+        // The presence default is for an engine that applies the penalty itself, as its capability
+        // record says (basert's); on another a penalized lane leaves the runtime's sampler for the
+        // host's.
+        if o.presence_penalty.is_some() && !daemon.capable("sampling", "engine_penalties") {
+            o.presence_penalty = None;
         }
         o
     }
@@ -445,8 +454,8 @@ pub(crate) fn truncate_at_stop(text: &str, stops: &[String]) -> (String, bool) {
 #[cfg(test)]
 mod penalty_alias_tests {
     use super::{
-        advertised_generation_defaults, draw_seed_if_unseeded, params_of_for, repeat_penalty_for,
-        ChatRequest, CompletionRequest, SamplingOverrides, DEFAULT_REPEAT_PENALTY, DEFAULT_TOP_K,
+        advertised_generation_defaults, draw_seed_if_unseeded, extras_of, params_of_for,
+        repeat_penalty_for, ChatRequest, CompletionRequest, SamplingOverrides, DEFAULT_REPEAT_PENALTY, DEFAULT_TOP_K,
     };
     use crate::GenParams;
     use crate::ModelSamplingDefaults;
@@ -1038,6 +1047,32 @@ mod penalty_alias_tests {
     }
 
     #[test]
+    fn presence_penalty_resolves_caller_then_operator_then_off() {
+        let model = ModelSamplingDefaults::default();
+        let presence = |caller: Option<f32>, op: &SamplingOverrides| {
+            extras_of(caller, None, None, op, &model).presence_penalty
+        };
+        let none = SamplingOverrides::default();
+        assert_eq!(presence(None, &none), 0.0, "off unless someone names it");
+        assert_eq!(presence(Some(0.5), &none), 0.5);
+
+        let op = SamplingOverrides {
+            presence_penalty: Some(1.5),
+            ..Default::default()
+        };
+        assert_eq!(presence(None, &op), 1.5, "the flag stands in for a silent request");
+        assert_eq!(presence(Some(0.5), &op), 0.5, "the request beats the flag");
+        assert_eq!(presence(Some(0.0), &op), 0.0, "the caller's 0 opts out");
+
+        let e = extras_of(None, Some(0.2), None, &op, &model);
+        assert_eq!(
+            (e.presence_penalty, e.frequency_penalty, e.repeat_penalty),
+            (1.5, 0.2, DEFAULT_REPEAT_PENALTY),
+            "the other penalties are left as they resolve"
+        );
+    }
+
+    #[test]
     fn echoing_advertised_min_p_is_stable() {
         let model = ModelSamplingDefaults {
             top_p: Some(0.95),
@@ -1237,6 +1272,9 @@ pub(crate) fn extras_of(
     op: &SamplingOverrides,
     model: &ModelSamplingDefaults,
 ) -> crate::scheduler::GenExtras {
+    // The operator's default stands in for a request that names no presence penalty, and
+    // counts as named from here on.
+    let presence = presence.or(op.presence_penalty);
     let mut frequency_penalty = frequency.unwrap_or(0.0);
     let mut repeat_penalty = repeat_penalty_for(repeat, op, model);
     if op.fallback.is_some_and(|f| f.frequency_penalty_as_repeat)
@@ -1361,6 +1399,71 @@ mod embedding_sampling_tests {
     }
 
     #[test]
+    fn echoing_the_advertised_penalties_generates_as_leaving_them_out() {
+        let quiet = ModelSamplingDefaults::default();
+        let published = ModelSamplingDefaults { repetition_penalty: Some(1.1), ..Default::default() };
+        let presence = |op: SamplingOverrides| SamplingOverrides { presence_penalty: Some(1.5), ..op };
+        let ops = [
+            SamplingOverrides::default(),
+            presence(SamplingOverrides::default()),
+            policy(),
+            presence(policy()),
+            presence(SamplingOverrides { repeat_penalty: Some(1.3), ..policy() }),
+            SamplingOverrides { repeat_penalty: Some(1.3), ..Default::default() },
+        ];
+        for m in [&quiet, &published] {
+            for op in ops {
+                let omitted = extras_of(None, None, None, &op, m);
+                let (p, r) = advertised_penalties(m, &op);
+                // /props names the presence penalty only when the operator set one.
+                let echoed = extras_of(op.presence_penalty.map(|_| p), None, Some(r), &op, m);
+                assert_eq!(
+                    (echoed.presence_penalty, echoed.frequency_penalty, echoed.repeat_penalty),
+                    (omitted.presence_penalty, omitted.frequency_penalty, omitted.repeat_penalty),
+                    "{op:?} over {m:?}"
+                );
+            }
+        }
+        // The case the advertised repeat used to miss: the policy's 1.07 is off under a presence default.
+        assert_eq!(advertised_penalties(&quiet, &presence(policy())), (1.5, 1.0));
+        assert_eq!(advertised_penalties(&quiet, &policy()), (0.0, 1.07));
+    }
+
+    #[test]
+    fn before_a_load_only_a_repeat_the_engine_cannot_change_is_advertised() {
+        let quiet = ModelSamplingDefaults::default();
+        let published = ModelSamplingDefaults { repetition_penalty: Some(1.1), ..Default::default() };
+        let presence = |op: SamplingOverrides| SamplingOverrides { presence_penalty: Some(1.5), ..op };
+        let ops = [
+            SamplingOverrides::default(),
+            presence(SamplingOverrides::default()),
+            policy(),
+            presence(policy()),
+            presence(SamplingOverrides { repeat_penalty: Some(1.3), ..policy() }),
+        ];
+        for m in [&quiet, &published] {
+            for op in ops {
+                let advertised = repeat_before_load(m, &op);
+                // Whichever way the model's engine answers once loaded, echoing what was advertised
+                // (no presence penalty, the repeat where one is) generates as leaving it out.
+                for takes_presence in [true, false] {
+                    let own = if takes_presence { op } else { SamplingOverrides { presence_penalty: None, ..op } };
+                    let omitted = extras_of(None, None, None, &own, m);
+                    let echoed = extras_of(None, None, advertised, &own, m);
+                    assert_eq!(
+                        (echoed.presence_penalty, echoed.frequency_penalty, echoed.repeat_penalty),
+                        (omitted.presence_penalty, omitted.frequency_penalty, omitted.repeat_penalty),
+                        "{op:?} over {m:?}, presence default taken: {takes_presence}"
+                    );
+                }
+            }
+        }
+        assert_eq!(repeat_before_load(&quiet, &presence(policy())), None, "1.0 or 1.07, as the engine answers");
+        assert_eq!(repeat_before_load(&quiet, &policy()), Some(1.07));
+        assert_eq!(repeat_before_load(&quiet, &presence(SamplingOverrides::default())), Some(1.0));
+    }
+
+    #[test]
     fn model_truncation_wins_as_a_set_but_not_model_temperature_or_repeat() {
         for model in [
             ModelSamplingDefaults { top_p: Some(0.95), ..Default::default() },
@@ -1403,6 +1506,11 @@ mod embedding_sampling_tests {
         }
         let e = extras_of(None, Some(0.2), None, &SamplingOverrides::default(), &m);
         assert_eq!((e.frequency_penalty, e.repeat_penalty), (0.2, 1.0));
+        // An operator's presence penalty is a named one: it turns the embedding's repeat off
+        // and keeps a frequency penalty additive, as a request's does.
+        let op = SamplingOverrides { presence_penalty: Some(0.3), ..policy() };
+        let e = extras_of(None, Some(0.2), None, &op, &m);
+        assert_eq!((e.presence_penalty, e.frequency_penalty, e.repeat_penalty), (0.3, 0.2, 1.0));
     }
 }
 
@@ -1411,6 +1519,26 @@ pub(crate) fn advertised_generation_defaults(
     op: &SamplingOverrides,
 ) -> GenParams {
     params_of_for(None, None, None, None, None, model, op)
+}
+
+/// The presence and repeat penalties a request that names none generates with, as `/props`
+/// advertises them. `extras_of` resolves them, so a client that echoes them back generates as it
+/// would have by leaving them out: under an embedding's fallback policy an operator presence
+/// penalty turns the fallback repeat off, as a request's does. `op` is the model's own
+/// (`for_daemon`).
+pub(crate) fn advertised_penalties(model: &ModelSamplingDefaults, op: &SamplingOverrides) -> (f32, f32) {
+    let e = extras_of(None, None, None, op, model);
+    (e.presence_penalty, if e.repeat_penalty == 0.0 { 1.0 } else { e.repeat_penalty })
+}
+
+/// The repeat penalty `/props` advertises for a model not loaded yet, whose engine has not said
+/// whether the presence default is its to take (`for_daemon`): the one a request that names none
+/// generates with either way, or None where the two differ (an embedding's fallback policy drops
+/// its repeat under a presence penalty). The presence default itself waits for the load.
+pub(crate) fn repeat_before_load(model: &ModelSamplingDefaults, op: &SamplingOverrides) -> Option<f32> {
+    let with = advertised_penalties(model, op).1;
+    let without = advertised_penalties(model, &SamplingOverrides { presence_penalty: None, ..*op }).1;
+    (with == without).then_some(with)
 }
 
 pub(crate) fn repeat_penalty_for(
@@ -2285,7 +2413,7 @@ pub(crate) async fn completions(
         req.presence_penalty,
         req.frequency_penalty,
         req.repeat_penalty,
-        &policy.sampling,
+        &policy.sampling.for_daemon(&daemon),
         &model_defaults,
     );
     extras.seed_drawn = seed_drawn;
@@ -2595,7 +2723,7 @@ pub(crate) async fn chat(
             req.presence_penalty,
             req.frequency_penalty,
             req.repeat_penalty,
-            &policy.sampling,
+            &policy.sampling.for_daemon(&daemon),
             &model_defaults,
         );
         let choice = ToolChoice::parse(&req.tool_choice);
@@ -2788,7 +2916,7 @@ async fn chat_stream(
                 req.presence_penalty,
                 req.frequency_penalty,
                 req.repeat_penalty,
-                &op,
+                &op.for_daemon(&daemon),
                 &model_defaults,
             );
             extras.seed_drawn = seed_drawn;
@@ -3449,7 +3577,7 @@ pub(crate) fn chat_once(
         req.presence_penalty,
         req.frequency_penalty,
         req.repeat_penalty,
-        &op,
+        &op.for_daemon(daemon),
         &model_defaults,
     );
     let choice = ToolChoice::parse(&req.tool_choice);

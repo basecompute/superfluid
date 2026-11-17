@@ -1796,6 +1796,11 @@ impl Daemon {
         self.serving().capabilities.read().expect("capability record").clone()
     }
 
+    /// Whether this model's capability record says yes to `section.key` (not only refuses no to it).
+    pub fn capable(&self, section: &str, key: &str) -> bool {
+        matches!(self.serving().capabilities.read().expect("capability record").get(section, key), capabilities::Cap::Yes)
+    }
+
     pub fn require(&self, section: &str, key: &str, code: &'static str, param: Option<&str>, what: &str) -> Result<(), DaemonError> {
         let why = match self.serving().capabilities.read().expect("capability record").get(section, key) {
             capabilities::Cap::No(why) => why.to_string(),
