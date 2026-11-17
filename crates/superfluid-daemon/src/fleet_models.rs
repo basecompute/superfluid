@@ -12,8 +12,8 @@
 //!
 //! The head states in its hello to each node what it serves, with the id a node pulls each
 //! model by where it knows one: the id it was given at start, else the first a node serving
-//! the model reported. A node that follows its head pulls the head's first model by it, as the
-//! head states it over the link; the ids announced on the local network are not followed.
+//! the model reported. A node that follows its head pulls the head's first model by it. The
+//! ids are not announced on the local network, where anyone can announce.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -83,20 +83,11 @@ impl HeadModels {
     }
 
     /// Notes the id each of `models` is pulled by, as far as `ids` gives them, for a model the
-    /// head knows no id for yet, and announces an id that is new for a model served.
+    /// head knows no id for yet.
     pub fn know_ids(&self, models: &[String], ids: &[String]) {
-        let mut announce = false;
-        {
-            let mut listed = self.listed.lock().expect("head models");
-            for (m, id) in models.iter().zip(ids).filter(|(_, id)| !id.is_empty()) {
-                if !listed.ids.contains_key(m) {
-                    listed.ids.insert(m.clone(), id.clone());
-                    announce |= listed.order.contains(m);
-                }
-            }
-        }
-        if announce {
-            self.announce();
+        let mut listed = self.listed.lock().expect("head models");
+        for (m, id) in models.iter().zip(ids).filter(|(_, id)| !id.is_empty()) {
+            listed.ids.entry(m.clone()).or_insert_with(|| id.clone());
         }
     }
 
@@ -192,9 +183,9 @@ impl HeadModels {
     }
 
     fn announce(&self) {
-        let (names, ids) = (self.names(), self.ids());
+        let names = self.names();
         if let Some(a) = self.announcement.lock().expect("head announcement").as_ref() {
-            if let Err(e) = a.update(&names, &ids) {
+            if let Err(e) = a.update(&names) {
                 eprintln!("superfluid: the local network was not told of the models served now ({e})");
             }
         }
