@@ -57,10 +57,15 @@ fn toy_runtime(dir: &Path) -> (PathBuf, PathBuf) {
         "available": true,
         "formats": [{"id": "toy", "describe": "a toy file", "file": {"extensions": ["toy"]}}],
         "tokenizer": {"from": "huggingface"},
+        "pull": {"options": []},
     });
     let worker = dir.join("superfluid-worker-toyrt");
+    // A pull says a great deal before its last progress line, which it marks as Superfluid's own,
+    // then fails: the relay is still behind when serve hears of the failure.
+    let pull = r#"i=0; while [ $i -lt 2000 ]; do echo "fetching part $i" >&2; i=$((i+1)); done
+  printf '\036{"event":"pull.progress","done_bytes":7,"total_bytes":10,"bytes_per_sec":1,"secs_left":3}\n' >&2; exit 1"#;
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = check ]; then echo '{report}'; exit 0; fi\nexec '{}' --engine mock \"$@\"\n",
+        "#!/bin/sh\ncase \"$1\" in\n check) echo '{report}'; exit 0;;\n pull) {pull};;\nesac\nexec '{}' --engine mock \"$@\"\n",
         env!("CARGO_BIN_EXE_superfluid-workerd")
     );
     std::fs::write(&worker, script).unwrap();
@@ -232,6 +237,26 @@ fn a_model_that_does_not_load_says_so_before_the_error() {
     assert_eq!(failed["model"], "model");
     assert!(failed["error"].as_str().unwrap().contains("no EOS token"), "{failed}");
     assert_eq!(events.last().unwrap()["message"], failed["error"]);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_pulls_progress_keeps_its_id_however_far_behind_the_relay_is() {
+    let home = scratch("pull-id");
+    let (worker, _) = toy_runtime(&home);
+    let out = superfluid(&home)
+        .env("SUPERFLUID_WORKER_TOYRT", worker)
+        .args(["serve", "review/m", "--runtime", "toyrt", "--http", "127.0.0.1:0", "--sessions", "sessions", "--socket", "s.sock"])
+        .args(["--offline", "--log-format", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let events = events(&out.stderr);
+    assert_eq!(steps(&events), ["start", "pull.start", "pull.progress", "pull.failed", "error"]);
+    assert_eq!(events.iter().filter(|e| e["event"] == "log").count(), 2001, "the worker's lines and serve's own");
+    for pull in events.iter().filter(|e| e["event"].as_str().is_some_and(|n| n.starts_with("pull."))) {
+        assert_eq!(pull["id"], "review/m", "{pull}");
+    }
     let _ = std::fs::remove_dir_all(&home);
 }
 

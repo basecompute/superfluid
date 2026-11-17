@@ -56,8 +56,10 @@ static OUT: AtomicI32 = AtomicI32::new(-1);
 static DRAIN_ASKED: AtomicU64 = AtomicU64::new(0);
 static DRAIN_SEEN: AtomicU64 = AtomicU64::new(0);
 static DRAINER: OnceLock<Mutex<Sender<u64>>> = OnceLock::new();
-/// The pull in flight. Its gauge writes `pull.progress` without the id, and the relay adds it.
-static PULLING: Mutex<Option<String>> = Mutex::new(None);
+/// The pull that has said `pull.start` and not yet how it ended, so that `pull.failed` is said
+/// only after a start. The relay keeps its own, in the order of the stream, for the progress
+/// lines the gauge writes without the id.
+static OPEN_PULL: Mutex<Option<String>> = Mutex::new(None);
 
 /// How stderr is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,12 +183,12 @@ pub fn drain(within: Duration) {
     }
 }
 
-/// A pull of `id` begins: `pull.start`, and its progress lines get its id.
+/// A pull of `id` begins: `pull.start`.
 pub(crate) fn pull_started(id: &str, runtime: &str, offline: bool) {
     if !json() {
         return;
     }
-    *PULLING.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
+    *OPEN_PULL.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());
     emit("pull.start", json!({"id": id, "runtime": runtime, "offline": offline}));
 }
 
@@ -195,7 +197,7 @@ pub(crate) fn pull_done(id: &str, path: &Path) {
     if !json() {
         return;
     }
-    PULLING.lock().unwrap_or_else(|e| e.into_inner()).take();
+    OPEN_PULL.lock().unwrap_or_else(|e| e.into_inner()).take();
     emit("pull.done", json!({"id": id, "path": path.to_string_lossy(), "bytes": bytes_on_disk(path)}));
 }
 
@@ -204,10 +206,10 @@ pub(crate) fn pull_failed(id: &str, error: &str) {
     if !json() {
         return;
     }
-    let mut pulling = PULLING.lock().unwrap_or_else(|e| e.into_inner());
-    if pulling.as_deref() == Some(id) {
-        pulling.take();
-        drop(pulling);
+    let mut open = OPEN_PULL.lock().unwrap_or_else(|e| e.into_inner());
+    if open.as_deref() == Some(id) {
+        open.take();
+        drop(open);
         emit("pull.failed", json!({"id": id, "error": error}));
     }
 }
@@ -243,10 +245,14 @@ fn now() -> Value {
 /// The JSON line the relay writes for one line read from the pipe, or none for a blank one,
 /// stamped with `timestamp` (the relay's now: the stream's timestamps rise line by line, and a
 /// timestamp a line came with is not kept). An event (a line marked with [`EVENT_MARK`]) passes
-/// as it is, a pull's progress with the id of `pulling` when it came without one; a line of
-/// tracing's JSON is a `log` event with its level and fields; anything else is a `log` event that
-/// carries the line.
-fn relayed(raw: &[u8], pulling: Option<&str>, timestamp: impl FnOnce() -> Value) -> Option<String> {
+/// as it is; a line of tracing's JSON is a `log` event with its level and fields; anything else
+/// is a `log` event that carries the line.
+///
+/// `pulling` is the pull the stream is in: the `pull.start` it has passed that no `pull.done` or
+/// `pull.failed` has ended yet. It is kept here, from the lines in the order they come, because a
+/// worker's last progress line can still be in the pipe after serve has heard that the pull
+/// ended; a `pull.progress` that came without an id gets that pull's.
+fn relayed(raw: &[u8], pulling: &mut Option<String>, timestamp: impl FnOnce() -> Value) -> Option<String> {
     let (marked, raw) = match raw.split_first() {
         Some((&EVENT_MARK, rest)) => (true, rest),
         _ => (false, raw),
@@ -263,10 +269,16 @@ fn relayed(raw: &[u8], pulling: Option<&str>, timestamp: impl FnOnce() -> Value)
                 _ => None,
             };
             if let Some(event) = event {
-                if event == "pull.progress" && !fields.contains_key("id") {
-                    if let Some(id) = pulling {
-                        fields.insert("id".into(), Value::String(id.to_string()));
+                let id = fields.get("id").and_then(Value::as_str);
+                match event.as_str() {
+                    "pull.start" => *pulling = id.map(str::to_string),
+                    "pull.done" | "pull.failed" if id.is_some() && id == pulling.as_deref() => *pulling = None,
+                    "pull.progress" if id.is_none() => {
+                        if let Some(id) = pulling {
+                            fields.insert("id".into(), Value::String(id.clone()));
+                        }
                     }
+                    _ => {}
                 }
                 return Some(line(&event, Value::Object(fields), Some(timestamp())));
             }
@@ -319,10 +331,10 @@ fn drain_mark(raw: &[u8]) -> Option<(&[u8], Option<u64>)> {
 
 /// Reads the pipe until every writer has closed it, writing what each line stands for to `out`.
 fn relay(mut from: std::fs::File, mut out: std::fs::File) {
+    let mut pulling = None;
     let mut write = |raw: &[u8]| {
         let (raw, drained) = drain_mark(raw).unwrap_or((raw, None));
-        let pulling = PULLING.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(line) = relayed(raw, pulling.as_deref(), now) {
+        if let Some(line) = relayed(raw, &mut pulling, now) {
             // A host that stopped reading is no reason to stop: the line is dropped.
             let _ = out.write_all(line.as_bytes());
         }
@@ -450,7 +462,7 @@ mod tests {
         let l = line("pull.done", json!({"id": "org/m:q4", "path": "/m.gguf", "bytes": 17, "event": "spoofed", "timestamp": 0}), Some(at()));
         assert_eq!(l, "{\"timestamp\":\"2026-11-13T10:00:00.000000Z\",\"event\":\"pull.done\",\"id\":\"org/m:q4\",\"path\":\"/m.gguf\",\"bytes\":17}\n");
         assert_eq!(line("start", Value::Null, None), "{\"event\":\"start\"}\n", "emitted unstamped, for the relay to stamp");
-        assert_eq!(relayed(b"\x1e{\"event\":7}\n", None, at).map(|l| parsed(&l)["event"].clone()), Some(json!("log")), "a marked line that names no event is a line");
+        assert_eq!(relayed(b"\x1e{\"event\":7}\n", &mut None, at).map(|l| parsed(&l)["event"].clone()), Some(json!("log")), "a marked line that names no event is a line");
     }
 
     #[test]
@@ -462,42 +474,61 @@ mod tests {
 
     #[test]
     fn a_line_of_prose_is_a_log_event_that_carries_it() {
-        let l = relayed(b"superfluid: pulling org/m with the llamacpp runtime\n", None, at).unwrap();
+        let l = relayed(b"superfluid: pulling org/m with the llamacpp runtime\n", &mut None, at).unwrap();
         assert_eq!(parsed(&l), json!({"timestamp": at(), "event": "log", "level": "INFO", "message": "superfluid: pulling org/m with the llamacpp runtime"}));
-        let l = relayed(b"superfluid: WARNING --api-key not set\n", None, at).unwrap();
+        let l = relayed(b"superfluid: WARNING --api-key not set\n", &mut None, at).unwrap();
         assert_eq!(parsed(&l)["level"], "WARN");
         // a bar redrawn in place leaves its last drawing; escapes and blank lines go
-        let l = relayed(b"\x1b[1m 10%\r 55%\r100% done\x1b[0m\r\n", None, at).unwrap();
+        let l = relayed(b"\x1b[1m 10%\r 55%\r100% done\x1b[0m\r\n", &mut None, at).unwrap();
         assert_eq!(parsed(&l)["message"], "100% done");
-        assert_eq!(relayed(b"   \n", None, at), None);
-        assert_eq!(relayed(b"\x1b[0m\n", None, at), None);
-        let l = relayed(b"bytes \xff that are not utf-8\n", None, at).unwrap();
+        assert_eq!(relayed(b"   \n", &mut None, at), None);
+        assert_eq!(relayed(b"\x1b[0m\n", &mut None, at), None);
+        let l = relayed(b"bytes \xff that are not utf-8\n", &mut None, at).unwrap();
         assert_eq!(parsed(&l)["message"], "bytes \u{fffd} that are not utf-8");
     }
 
     #[test]
     fn an_event_passes_through_stamped_as_it_is_relayed() {
-        let l = relayed(b"\x1e{\"event\":\"serve.ready\",\"http\":\"127.0.0.1:8453\"}\n", None, at).unwrap();
+        let l = relayed(b"\x1e{\"event\":\"serve.ready\",\"http\":\"127.0.0.1:8453\"}\n", &mut None, at).unwrap();
         assert_eq!(l, "{\"timestamp\":\"2026-11-13T10:00:00.000000Z\",\"event\":\"serve.ready\",\"http\":\"127.0.0.1:8453\"}\n");
-        let l = relayed(b"\x1e{\"timestamp\":\"2026-01-01T00:00:00.000000Z\",\"event\":\"serve.ready\"}\n", None, at).unwrap();
+        let l = relayed(b"\x1e{\"timestamp\":\"2026-01-01T00:00:00.000000Z\",\"event\":\"serve.ready\"}\n", &mut None, at).unwrap();
         assert_eq!(parsed(&l)["timestamp"], at(), "the relay's, so the stream's timestamps rise");
+    }
+
+    #[test]
+    fn a_pulls_progress_gets_the_id_of_the_pull_the_stream_is_in() {
+        let mut pulling = None;
+        let mut relay = |raw: &[u8]| parsed(&relayed(raw, &mut pulling, at).unwrap());
         // the gauge in a worker writes progress with no timestamp and no id
-        let l = relayed(b"\x1e{\"event\":\"pull.progress\",\"done_bytes\":5,\"total_bytes\":null}\n", Some("org/m:q4"), at).unwrap();
-        assert_eq!(parsed(&l), json!({"timestamp": at(), "event": "pull.progress", "done_bytes": 5, "total_bytes": null, "id": "org/m:q4"}));
-        let l = relayed(b"\x1e{\"event\":\"pull.progress\",\"id\":\"own\",\"done_bytes\":5}\n", Some("org/m:q4"), at).unwrap();
-        assert_eq!(parsed(&l)["id"], "own");
+        let progress = b"\x1e{\"event\":\"pull.progress\",\"done_bytes\":5,\"total_bytes\":null}\n";
+        assert_eq!(relay(progress).get("id"), None, "no pull has started");
+        relay(b"\x1e{\"event\":\"pull.start\",\"id\":\"org/m:q4\",\"runtime\":\"llamacpp\",\"offline\":false}\n");
+        relay(b"fetching part 1\n");
+        assert_eq!(relay(progress), json!({"timestamp": at(), "event": "pull.progress", "done_bytes": 5, "total_bytes": null, "id": "org/m:q4"}));
+        assert_eq!(relay(b"\x1e{\"event\":\"pull.progress\",\"id\":\"own\",\"done_bytes\":5}\n")["id"], "own");
+        // another pull's end leaves this one open; its own end closes it
+        relay(b"\x1e{\"event\":\"pull.done\",\"id\":\"other/m\"}\n");
+        assert_eq!(relay(progress)["id"], "org/m:q4");
+        relay(b"\x1e{\"event\":\"pull.failed\",\"id\":\"org/m:q4\",\"error\":\"no\"}\n");
+        assert_eq!(relay(progress).get("id"), None);
+        // a pull that starts after another takes its progress over
+        relay(b"\x1e{\"event\":\"pull.start\",\"id\":\"next/m\"}\n");
+        assert_eq!(relay(progress)["id"], "next/m");
+        // prose that names a pull is not the stream saying one began
+        relay(b"{\"event\":\"pull.start\",\"id\":\"a tool's\"}\n");
+        assert_eq!(relay(progress)["id"], "next/m");
     }
 
     #[test]
     fn tracings_json_is_a_log_event_and_other_json_is_prose() {
-        let l = relayed(b"{\"timestamp\":\"2026-01-01T00:00:00.000000Z\",\"level\":\"WARN\",\"message\":\"the head is silent\",\"lane\":0,\"target\":\"superfluid_daemon::nodeagent\"}\n", None, at).unwrap();
+        let l = relayed(b"{\"timestamp\":\"2026-01-01T00:00:00.000000Z\",\"level\":\"WARN\",\"message\":\"the head is silent\",\"lane\":0,\"target\":\"superfluid_daemon::nodeagent\"}\n", &mut None, at).unwrap();
         assert_eq!(
             l,
             "{\"timestamp\":\"2026-11-13T10:00:00.000000Z\",\"event\":\"log\",\"level\":\"WARN\",\"message\":\"the head is silent\",\"lane\":0,\"target\":\"superfluid_daemon::nodeagent\"}\n"
         );
         // JSON a tool writes is a line like any other, even one that names an event of ours
         for other in [&b"{\"error\":\"from a tool\"}\n"[..], b"{\"event\":\"error\",\"exit_code\":0}\n", b"{\"event\":7}\n", b"{not json\n", b"[1,2]\n"] {
-            let l = relayed(other, None, at).unwrap();
+            let l = relayed(other, &mut None, at).unwrap();
             let v = parsed(&l);
             assert_eq!(v["event"], "log", "{l}");
             assert_eq!(v["message"], String::from_utf8_lossy(other).trim_end(), "{l}");
@@ -559,3 +590,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
