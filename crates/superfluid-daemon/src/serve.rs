@@ -203,6 +203,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut op_top_k: Option<u32> = None;
     let mut op_min_p: Option<f32> = None;
     let mut op_repeat_penalty: Option<f32> = None;
+    let mut op_presence_penalty: Option<f32> = None;
     let mut op_spec_max_temperature: Option<f32> = None;
     let mut park = false;
     let mut sessions_cache = false;
@@ -340,6 +341,9 @@ pub fn run(args: &[String], embedding: &Embedding) {
             "--min-p" => op_min_p = Some(sampling_f32("--min-p", &val(), 0.0, 1.0)),
             "--repeat-penalty" => {
                 op_repeat_penalty = Some(sampling_f32("--repeat-penalty", &val(), 0.0, 2.0))
+            }
+            "--presence-penalty" => {
+                op_presence_penalty = Some(sampling_f32("--presence-penalty", &val(), -2.0, 2.0))
             }
             "--park" => park = true,
             "--no-park" => park = false,
@@ -872,6 +876,14 @@ pub fn run(args: &[String], embedding: &Embedding) {
             );
             std::process::exit(2);
         }
+        if op_presence_penalty.is_some() {
+            eprintln!(
+                "superfluid: --presence-penalty is not supported in fleet-head mode (it sets the \
+                 default of a model on the basert runtime, and the head hosts no engine); \
+                 send presence_penalty in the request instead"
+            );
+            std::process::exit(2);
+        }
         let http_listener = listen_or_exit("--http", &addr);
         eprintln!(
             "superfluid: fleet-head openai api on http://{addr} over {n_nodes} node(s), {reached} reachable"
@@ -963,6 +975,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     top_k: op_top_k,
                     min_p: op_min_p,
                     repeat_penalty: op_repeat_penalty,
+                    presence_penalty: None,
                     spec_max_temperature: None,
                     fallback: embedding.sampling_fallback,
                 },
@@ -1568,6 +1581,13 @@ pub fn run(args: &[String], embedding: &Embedding) {
             eprintln!("superfluid: --prefix-blob-budget-mb has no effect on runtime {}: {why}", runtime.id.name());
         }
     }
+    if op_presence_penalty.is_some() && !superfluid_daemon::openai::presence_default_runtime(Some(runtime.id.name())) {
+        eprintln!(
+            "superfluid: --presence-penalty has no effect on runtime {}: it sets the default on the \
+             basert runtime only (a request's own presence_penalty still applies)",
+            runtime.id.name()
+        );
+    }
 
     let listener = socket.as_ref().map(|socket| {
         let _ = std::fs::remove_file(socket);
@@ -1883,6 +1903,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 top_k: op_top_k,
                 min_p: op_min_p,
                 repeat_penalty: op_repeat_penalty,
+                presence_penalty: op_presence_penalty,
                 spec_max_temperature: op_spec_max_temperature,
                 fallback: embedding.sampling_fallback,
             },

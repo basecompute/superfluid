@@ -73,6 +73,9 @@ pub struct SamplingOverrides {
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
     pub repeat_penalty: Option<f32>,
+    /// The presence penalty of a request that names none, on the basert runtime (see
+    /// `for_daemon`).
+    pub presence_penalty: Option<f32>,
     pub spec_max_temperature: Option<f32>,
     /// Optional policy for an embedding whose omitted request parameters
     /// predate model-published defaults. None preserves superfluid's policy.
@@ -100,12 +103,23 @@ impl SamplingOverrides {
         if o.spec_max_temperature.is_some() && daemon.speculation().is_none() {
             o.spec_max_temperature = None;
         }
+        // The presence default is the basert runtime's: its engine applies the penalty itself,
+        // where another runtime's lane would leave the runtime's sampler for the host's.
+        if o.presence_penalty.is_some() && !presence_default_runtime(daemon.runtime_id()) {
+            o.presence_penalty = None;
+        }
         o
     }
 
     pub fn truncates(&self) -> bool {
         self.top_p.is_some() || self.top_k.is_some() || self.min_p.is_some()
     }
+}
+
+/// Whether `--presence-penalty` applies to a model on this runtime: basert only, a pinned
+/// installation (`basert@<install>`) included.
+pub fn presence_default_runtime(runtime: Option<&str>) -> bool {
+    runtime.is_some_and(|r| r.split('@').next() == Some("basert"))
 }
 
 #[derive(Deserialize, Default)]
@@ -445,8 +459,8 @@ pub(crate) fn truncate_at_stop(text: &str, stops: &[String]) -> (String, bool) {
 #[cfg(test)]
 mod penalty_alias_tests {
     use super::{
-        advertised_generation_defaults, draw_seed_if_unseeded, params_of_for, repeat_penalty_for,
-        ChatRequest, CompletionRequest, SamplingOverrides, DEFAULT_REPEAT_PENALTY, DEFAULT_TOP_K,
+        advertised_generation_defaults, draw_seed_if_unseeded, extras_of, params_of_for,
+        repeat_penalty_for, ChatRequest, CompletionRequest, SamplingOverrides, DEFAULT_REPEAT_PENALTY, DEFAULT_TOP_K,
     };
     use crate::GenParams;
     use crate::ModelSamplingDefaults;
@@ -1038,6 +1052,42 @@ mod penalty_alias_tests {
     }
 
     #[test]
+    fn presence_penalty_resolves_caller_then_operator_then_off() {
+        let model = ModelSamplingDefaults::default();
+        let presence = |caller: Option<f32>, op: &SamplingOverrides| {
+            extras_of(caller, None, None, op, &model).presence_penalty
+        };
+        let none = SamplingOverrides::default();
+        assert_eq!(presence(None, &none), 0.0, "off unless someone names it");
+        assert_eq!(presence(Some(0.5), &none), 0.5);
+
+        let op = SamplingOverrides {
+            presence_penalty: Some(1.5),
+            ..Default::default()
+        };
+        assert_eq!(presence(None, &op), 1.5, "the flag stands in for a silent request");
+        assert_eq!(presence(Some(0.5), &op), 0.5, "the request beats the flag");
+        assert_eq!(presence(Some(0.0), &op), 0.0, "the caller's 0 opts out");
+
+        let e = extras_of(None, Some(0.2), None, &op, &model);
+        assert_eq!(
+            (e.presence_penalty, e.frequency_penalty, e.repeat_penalty),
+            (1.5, 0.2, DEFAULT_REPEAT_PENALTY),
+            "the other penalties are left as they resolve"
+        );
+    }
+
+    #[test]
+    fn the_presence_default_is_for_the_basert_runtime() {
+        use super::presence_default_runtime;
+        assert!(presence_default_runtime(Some("basert")));
+        assert!(presence_default_runtime(Some("basert@0.5.0-metal")), "a pinned installation");
+        for other in [Some("llamacpp"), Some("mlx"), Some("llamacpp@b12435"), Some("basert-x"), None] {
+            assert!(!presence_default_runtime(other), "{other:?}");
+        }
+    }
+
+    #[test]
     fn echoing_advertised_min_p_is_stable() {
         let model = ModelSamplingDefaults {
             top_p: Some(0.95),
@@ -1237,6 +1287,9 @@ pub(crate) fn extras_of(
     op: &SamplingOverrides,
     model: &ModelSamplingDefaults,
 ) -> crate::scheduler::GenExtras {
+    // The operator's default stands in for a request that names no presence penalty, and
+    // counts as named from here on.
+    let presence = presence.or(op.presence_penalty);
     let mut frequency_penalty = frequency.unwrap_or(0.0);
     let mut repeat_penalty = repeat_penalty_for(repeat, op, model);
     if op.fallback.is_some_and(|f| f.frequency_penalty_as_repeat)
@@ -1403,6 +1456,11 @@ mod embedding_sampling_tests {
         }
         let e = extras_of(None, Some(0.2), None, &SamplingOverrides::default(), &m);
         assert_eq!((e.frequency_penalty, e.repeat_penalty), (0.2, 1.0));
+        // An operator's presence penalty is a named one: it turns the embedding's repeat off
+        // and keeps a frequency penalty additive, as a request's does.
+        let op = SamplingOverrides { presence_penalty: Some(0.3), ..policy() };
+        let e = extras_of(None, Some(0.2), None, &op, &m);
+        assert_eq!((e.presence_penalty, e.frequency_penalty, e.repeat_penalty), (0.3, 0.2, 1.0));
     }
 }
 
@@ -2285,7 +2343,7 @@ pub(crate) async fn completions(
         req.presence_penalty,
         req.frequency_penalty,
         req.repeat_penalty,
-        &policy.sampling,
+        &policy.sampling.for_daemon(&daemon),
         &model_defaults,
     );
     extras.seed_drawn = seed_drawn;
@@ -2595,7 +2653,7 @@ pub(crate) async fn chat(
             req.presence_penalty,
             req.frequency_penalty,
             req.repeat_penalty,
-            &policy.sampling,
+            &policy.sampling.for_daemon(&daemon),
             &model_defaults,
         );
         let choice = ToolChoice::parse(&req.tool_choice);
@@ -2788,7 +2846,7 @@ async fn chat_stream(
                 req.presence_penalty,
                 req.frequency_penalty,
                 req.repeat_penalty,
-                &op,
+                &op.for_daemon(&daemon),
                 &model_defaults,
             );
             extras.seed_drawn = seed_drawn;
@@ -3449,7 +3507,7 @@ pub(crate) fn chat_once(
         req.presence_penalty,
         req.frequency_penalty,
         req.repeat_penalty,
-        &op,
+        &op.for_daemon(daemon),
         &model_defaults,
     );
     let choice = ToolChoice::parse(&req.tool_choice);

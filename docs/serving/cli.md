@@ -104,6 +104,7 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--top-k <N>` | model default | Default top-k truncation. |
 | `--min-p <F>` | model default | Default min-p truncation, 0-1. |
 | `--repeat-penalty <F>` | model default, else 1.0 | Default repetition penalty, 0-2; 1.0 disables. |
+| `--presence-penalty <F>` | 0 (off) | Default presence penalty, -2 to 2, for models on the `basert` runtime. |
 
 Sampling flags apply only to requests that name no value of their own. See [Sampling](../features/sampling.md).
 

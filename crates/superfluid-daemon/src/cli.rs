@@ -69,6 +69,7 @@ pub const SERVE: &[Group] = &[
             f("--top-k", Some("<N>"), "model's", "Default top-k truncation."),
             f("--min-p", Some("<F>"), "model's", "Default min-p truncation (0..1)."),
             f("--repeat-penalty", Some("<F>"), "model's", "Default repetition penalty (0..2); 1.0 disables it."),
+            f("--presence-penalty", Some("<F>"), "0 (off)", "Default presence penalty (-2..2) for requests that set none; basert runtime only."),
         ],
     },
     Group {

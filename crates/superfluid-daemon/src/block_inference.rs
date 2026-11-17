@@ -378,7 +378,7 @@ pub(crate) fn generate(
 ) -> Result<Outcome, DaemonError> {
     pin_breakpoints(daemon, built);
     let _unanchor = Unanchor::new(daemon, built);
-    let mut extras = inference::extras_of(None, None, None, op, model);
+    let mut extras = inference::extras_of(None, None, None, &op.for_daemon(daemon), model);
     extras.seed_drawn = built.seed_drawn;
     extras.tool_schemas = built.tool_schemas.clone();
     let generated =
@@ -416,7 +416,7 @@ pub(crate) fn stream(
         pin_breakpoints(&daemon, &built);
         let _unanchor = Unanchor::new(&daemon, &built);
         send(Event::Start)?;
-        let mut extras = inference::extras_of(None, None, None, &op, &model);
+        let mut extras = inference::extras_of(None, None, None, &op.for_daemon(&daemon), &model);
         extras.seed_drawn = built.seed_drawn;
         extras.tool_schemas = built.tool_schemas.clone();
         let generated =

@@ -67,7 +67,7 @@ curl http://127.0.0.1:8453/v1/chat/completions -H 'content-type: application/jso
 | `n` | 1 | 1-128; streaming uses 1 |
 | `temperature`, `top_p` | model default | see [Sampling](../features/sampling.md) |
 | `seed` | fresh per request | |
-| `presence_penalty`, `frequency_penalty` | 0 | -2 to 2; outside is a 400 |
+| `presence_penalty`, `frequency_penalty` | 0 | -2 to 2; outside is a 400. `--presence-penalty` sets the first's default on `basert` |
 | `stop` | none | string or array; excluded from output |
 | `logprobs`, `top_logprobs` | off | `top_logprobs` 0-20 |
 | `logit_bias` | none | `{"<token id>": bias}` |

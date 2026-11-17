@@ -11,7 +11,8 @@ Every route resolves sampling parameters the same way: what the request names, t
 | `top_k` | model default, else 40 when sampling | extension; `0` disables |
 | `min_p` | model default, else 0.0 | extension |
 | `seed` | fresh per request | honoured when given |
-| `presence_penalty`, `frequency_penalty` | 0.0 | |
+| `presence_penalty` | `--presence-penalty` on `basert`, else 0.0 | -2 to 2 |
+| `frequency_penalty` | 0.0 | -2 to 2 |
 | `repeat_penalty` (alias `repetition_penalty`) | model default, else 1.0 | extension; 1.0 disables |
 | `logit_bias` | none | `{"<token id>": bias}` |
 | `logprobs`, `top_logprobs` | off | up to 20 alternatives |
@@ -25,7 +26,7 @@ The Anthropic route takes `temperature`, `top_p` and `top_k`. The Ollama route m
 | rung | source |
 |---|---|
 | 1 | the request |
-| 2 | operator flags: `--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty` |
+| 2 | operator flags: `--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--presence-penalty` (`basert` only) |
 | 3 | the model's published defaults: GGUF `general.sampling.*`, MLX `generation_config.json`, the `.base` header |
 | 4 | constants: temperature 1.0, `top_k` 40 for sampled requests nobody truncated, repeat penalty 1.0 |
 
@@ -41,6 +42,12 @@ The Anthropic route takes `temperature`, `top_p` and `top_k`. The Ollama route m
 The default is 1.0 (off). `--repeat-penalty 1.15` restores loop-breaking: in a measurement continuing a prompt that already held eight copies of one word at temperature 0, penalties of 1.0 to 1.10 never escaped in 80 tokens, 1.15 escaped after 14 tokens and 1.20 after 6. It is not the default because a penalty costs decode throughput on the baseRT engine and lowers speculative acceptance (by roughly a third where measured). A checkpoint's own `repetition_penalty` outranks the constant.
 
 The penalty window is the last 64 tokens, prompt included. Penalties skip the model's special tokens and stop set.
+
+### Presence penalty
+
+The default is 0 (off), and no model publishes one. `--presence-penalty 1.5` gives every request that names no `presence_penalty` that value on a model served by the `basert` runtime, on every route (a `/v1/batches` job runs with no operator flag); a request's own value wins, and `"presence_penalty": 0` turns it off for that request. Use it for a model whose card recommends a presence penalty that clients do not send.
+
+The flag is the `basert` runtime's because its engine applies the penalty itself. On llama.cpp and MLX a penalized request leaves the runtime's own sampler for superfluid's, token by token, so the server does not turn that on for every request: a model on another runtime is served without the default (the start says so, and `/props` omits the field), and a request that sends `presence_penalty` is penalized on any runtime, as before. A fleet head refuses the flag. Like the repetition penalty, it lowers speculative acceptance, so a model that recommends it only for some modes (thinking off, say) is better served by the client sending it for those requests.
 
 ## Order of operations
 

@@ -13,7 +13,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::{Daemon, DaemonError};
-pub use crate::inference::{TokenLimits, SamplingOverrides, SamplingFallback, RequestQos};
+pub use crate::inference::{presence_default_runtime, TokenLimits, SamplingOverrides, SamplingFallback, RequestQos};
 pub use crate::http_state::{HttpQosPolicy, QOS_HEADER, BATCH_INVARIANT_HEADER};
 use crate::inference::{
     advertised_generation_defaults, repeat_penalty_for, next_id, unix_now,
@@ -1891,6 +1891,9 @@ async fn props(
     let mut settings = serde_json::json!({ "max_context": window });
     if let Some(v) = eff_repeat {
         settings["repeat_penalty"] = v.into();
+    }
+    if let Some(v) = st.sampling.for_daemon(&daemon).presence_penalty {
+        settings["presence_penalty"] = v.into();
     }
     let eff = advertised_generation_defaults(&resolved.clone().unwrap_or_default(), &st.sampling.for_daemon(&daemon));
     if resolved.is_some() || st.sampling.temperature.is_some() || st.sampling.fallback.is_some() {
