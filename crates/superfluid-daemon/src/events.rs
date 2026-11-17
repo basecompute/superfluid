@@ -201,7 +201,7 @@ pub fn drain(within: Duration) {
 /// of prose this process writes goes out as it is. Nothing in text mode.
 ///
 /// `fleet_join::restart`, which starts a node again to follow its head's model, calls it just
-/// before its exec; that call comes with the rebase over the branch that adds `restart`.
+/// before its exec.
 pub fn prepare_exec() {
     if !RELAYED.load(Ordering::SeqCst) {
         return;

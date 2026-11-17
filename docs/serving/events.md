@@ -37,13 +37,15 @@ Every line is one JSON object with at least:
 
 The first line is a `start` event, which states the stream's `schema`. Every line that is not one of the named events is a `log` event that carries the line: Superfluid's own prose, a worker's output, a runtime's, and Superfluid's tracing logs, each as it was written. A worker started by `serve` or `node join` writes to the same stream, so what it says is a `log` event too, in the order it was said. Only Superfluid writes the named events: a line a runtime or a tool writes is a `log` event even when it is JSON that names an event.
 
-When a start fails, the last line is an `error` event, and its `exit_code` is the process's exit status ([exit codes](cli.md#exit-codes)). A panic is a `log` event at level `ERROR`; when it ends the process, the exit status is 101.
+When a start fails, the last line is an `error` event, and its `exit_code` is the process's exit status ([exit codes](cli.md#exit-codes)). A node the head removed ends the same way, with `node.removed` and then `error` with `exit_code` 5. A panic is a `log` event at level `ERROR`; when it ends the process, the exit status is 101.
+
+A node with no `--model` follows its head's model: when the head serves another model first, the node says `node.head.changed`, lets what it runs finish, and starts again as the same process (same `pid`). The stream goes on: a second `start`, then the new model's pull, `model.load.*` and `node.dialing`. A host reads a `start` it did not launch as that restart, not as the end of the stream.
 
 ## Events
 
 | event | fields | when |
 |---|---|---|
-| `start` | `schema` (1), `version` (Superfluid's), `command` (`serve` or `node join`), `pid` | the first line |
+| `start` | `schema` (1), `version` (Superfluid's), `command` (`serve` or `node join`), `pid` | the first line; again, with the same `pid`, when a following node starts again for its head's new model |
 | `log` | `level`, `message`; from tracing also `target` and the log's own fields | every line that is not another event. `level` is `INFO`, or `WARN` for a line that says `WARNING`; a tracing log keeps its own (`ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`) |
 | `error` | `message`, `exit_code` | the last line before the process exits on a failure |
 | `runtime.install.start` | `runtime` | the runtime a model needs was never installed here, and is being installed (as `superfluid runtime install <runtime>` would) |
@@ -57,26 +59,26 @@ When a start fails, the last line is an `error` event, and its `exit_code` is th
 | `model.load.done` | `model`, `runtime`, `context` (its window, in tokens), `lanes` | it is loaded |
 | `model.load.failed` | `model`, `error` | it did not load: its engine, its tokenizer or its chat template failed; an `error` follows |
 | `serve.ready` | `http` (the address the HTTP API is bound to, or null with `--no-http`), `socket` (the session socket, or null), `models` (the models loaded, the default first) | `serve` answers on every listener; a fleet head, once its nodes have shared their models' tokenizers |
-| `node.discover.start` | | `node join` with no head address looks for one on the local network |
-| `node.head.found` | `addr`, `models` | it found one |
+| `node.discover.start` | | `node join` with no head address looks for one on the local network: at start, and again after `node.head.lost` |
+| `node.head.found` | `addr`, `models` | it found one; after `node.head.lost`, only a head at another address (the same head back where it was has none) |
+| `node.head.lost` | `head` | the head found on the local network does not answer; the node looks for a head of its network (a head given by address is dialed again there: `node.dial.failed` and `node.retry`) |
 | `node.dialing` | `head`, `node` (this node's identity), `model` (the name the head matches on), `lanes` | the model is loaded and the node dials the head |
 | `node.joined` | `head` | the head took the node |
 | `node.dial.failed` | `head`, `error` | the head did not answer |
 | `node.link.ended` | `reason` | the link to the head ended |
 | `node.retry` | `in_secs` | the node dials again after this many seconds |
 | `node.refused` | `reason` | the head refused the node's token; an `error` (exit 2) follows |
+| `node.removed` | `head` | the head removed this node and refuses it until the head restarts; an `error` (exit 5) follows. Said once, however many lanes the head told |
+| `node.head.changed` | `model` (what the node serves next, or null), `id` (the id it pulls it by, or null), `from` (what it served) | a node with no `--model` heard its head serve another model first; it starts again to serve `model`. With `id` null the head serves `model` by path, or nothing, and the node, started again, waits for a model it can pull |
 | `fleet.node.joined` | `node`, `addr`, `models`, `context` | on a head: a node joined |
 | `fleet.node.rejoined` | `node`, `addr` | on a head: a node that had joined came back |
-| `fleet.node.refused` | `addr`, `reason` | on a head: a node that dialed in was not taken |
+| `fleet.node.refused` | `addr`, `reason`; `node` for one it removed | on a head: a node that dialed in was not taken. A node it removed is refused each time it dials back; this event comes the first time |
+| `fleet.node.removed` | `node`, `addr` (the node's), `by` (the address that asked), `key` (the `--key-policy` key that asked, or null) | on a head: a node was removed through `DELETE /v1/fleet/nodes/{name}` ([List and remove nodes](distributed_serving.md#list-and-remove-nodes)) |
 
-`model.load.*` cover the models a start loads: each `--model`, by path or by id. A start can also stop between `model.load.start` and `model.load.done` for a reason of its own (a session socket that cannot be bound, a damaged session log): it then ends with `error` alone, so a host takes `error` as the end whatever came before it. A model a running server loads later, when a request names it (one from `--model-dir`, or one unloaded while idle), and the `--fim-model` satellite have none. A node dials once per lane; its `node.*` link events speak for the first lane, as its prose does.
-
-These names are reserved for events still to come: `node.removed` (the head removed this node), `node.head.changed` with `models` (the node follows its head to another model) and `fleet.node.removed` with `node`.
+`model.load.*` cover the models a start loads: each `--model`, by path or by id. A start can also stop between `model.load.start` and `model.load.done` for a reason of its own (a session socket that cannot be bound, a damaged session log): it then ends with `error` alone, so a host takes `error` as the end whatever came before it. A model a running server loads later, when a request names it (one from `--model-dir`, or one unloaded while idle), the `--fim-model` satellite, and a fleet head's models (it loads no engine; `serve.ready` lists them) have none. A node dials once per lane; its `node.*` link events speak for the first lane, as its prose does.
 
 ## What is kept
 
 The names of the events and their fields, and what they mean, are kept across releases. A release may add an event, or a field to one, and the `schema` stays; removing or renaming one, or changing what it means, raises `schema`, and the changelog says so. A host reads the events it knows, ignores the others and any field it does not know, and checks `schema` on the first line.
 
 The `message` of a `log` event is not kept: it is the prose a person reads, and it changes as the prose does. A host that needs to know something a `log` line says asks for an event instead of matching the text.
-
-A start that fails in a fleet head's own checks (its `--fleet-*` flags, its token file, the flags a head does not take) writes its reason as a `log` line before it exits, not yet as an `error` event; the exit status is still the code.

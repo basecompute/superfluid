@@ -89,8 +89,9 @@ pub fn run(args: &[String]) {
 /// Ends a node the head at `head` removed, with [`REMOVED_EXIT`]: it neither dials that head
 /// again nor starts again to follow it.
 fn removed(head: impl std::fmt::Display) -> ! {
-    eprintln!("superfluid: the head at {head} removed this node; it will refuse it until it restarts");
-    std::process::exit(REMOVED_EXIT);
+    ending();
+    crate::events::emit("node.removed", serde_json::json!({"head": head.to_string()}));
+    crate::events::fail(REMOVED_EXIT, format!("the head at {head} removed this node; it will refuse it until it restarts"))
 }
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -99,8 +100,20 @@ fn fail(msg: impl std::fmt::Display) -> ! {
 
 /// The head refused this node's token: no dialing again will change that.
 fn refused() -> ! {
+    ending();
     crate::events::emit("node.refused", serde_json::json!({"reason": REFUSED}));
     fail(REFUSED)
+}
+
+/// Lets the first of the node's threads that ends it say why: the head tells every lane, and the
+/// others wait for the exit, so the node says it once.
+fn ending() {
+    static ENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        loop {
+            std::thread::park();
+        }
+    }
 }
 
 fn join(args: &[String]) {
@@ -228,6 +241,12 @@ fn join(args: &[String]) {
     };
     let Some(wanted) = followed else { return };
     eprintln!("superfluid: {}", wanted.change_from(&model_name));
+    let (next, id) = match &wanted {
+        Follow::Serve(s) => (Some(&s.name), Some(&s.id)),
+        Follow::Unpullable(name) => (Some(name), None),
+        Follow::Nothing => (None, None),
+    };
+    crate::events::emit("node.head.changed", serde_json::json!({"model": next, "id": id, "from": model_name}));
     // What the node runs ends, then its links, then its engine; it starts again as it was
     // started, and pulls and loads the head's model as it did at first.
     let by = std::time::Instant::now() + DRAIN;
@@ -392,12 +411,15 @@ impl Target {
         }
         if let Some(at) = tried.first() {
             eprintln!("superfluid: the head at {at} does not answer; looking for a head of this network");
+            crate::events::emit("node.head.lost", serde_json::json!({"head": at.to_string()}));
+            crate::events::emit("node.discover.start", serde_json::json!({}));
         }
         let mut search = self.search.lock().expect("head search");
         match crate::fleet_mdns::find_head(&mut search, DISCOVER, &|msg| eprintln!("superfluid: {msg}")) {
             Ok(head) => {
                 if head.nodes != *found {
                     eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.models.join(", "));
+                    crate::events::emit("node.head.found", serde_json::json!({"addr": head.nodes[0].to_string(), "models": head.models}));
                 }
                 *found = head.nodes;
             }
@@ -636,7 +658,7 @@ fn learn_head(given: Option<&str>, search: &mut Search, token: &[u8], identity: 
                 "the head at {at} states nothing over the link of what it serves (it was released before heads did), \
                  so a node with no --model does not follow it; give this node --model"
             )),
-            Err(LinkFError::Unauthorized) if given.is_some() => fail(REFUSED),
+            Err(LinkFError::Unauthorized) if given.is_some() => refused(),
             Err(LinkFError::Removed) => removed(at),
             Err(LinkFError::Unauthorized) => say_once(format!(
                 "the head announced at {at} does not hold this network's token, so it is not followed \
@@ -703,6 +725,8 @@ fn restart() -> ! {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("cannot find this program to start it again: {e}")));
     eprintln!("superfluid: starting again to serve the head's model");
+    // The next image writes its events to the stream this one wrote to, from its `start` on.
+    crate::events::prepare_exec();
     let e = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
     fail(format!("cannot start again: {e}"))
 }

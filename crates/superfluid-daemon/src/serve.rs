@@ -687,11 +687,11 @@ pub fn run(args: &[String], embedding: &Embedding) {
     });
     if fleet_mode {
         if otlp_endpoint.is_some() {
-            eprintln!(
-                "superfluid: --otlp-endpoint is not supported in fleet-head mode (the fleet head \
-                 has no scheduler to trace); set it on each node's superfluid instead"
+            superfluid_daemon::events::fail(
+                2,
+                "--otlp-endpoint is not supported in fleet-head mode (the fleet head \
+                 has no scheduler to trace); set it on each node's superfluid instead",
             );
-            std::process::exit(2);
         }
         {
             use superfluid_daemon::telemetry::{LogConfig, LogSink};
@@ -719,8 +719,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             Some(pth) => std::fs::read(pth)
                 .map(|t| t.trim_ascii().to_vec())
                 .unwrap_or_else(|e| {
-                    eprintln!("superfluid: cannot read --fleet-auth {}: {e}", pth.display());
-                    std::process::exit(2);
+                    superfluid_daemon::events::fail(2, format!("cannot read --fleet-auth {}: {e}", pth.display()));
                 }),
             None => superfluid_daemon::fleet_token::read(catalog.home()).unwrap_or_default(),
         };
@@ -734,24 +733,18 @@ pub fn run(args: &[String], embedding: &Embedding) {
             .map(|a| NodeSpec { addr: a.to_string(), auth: auth.clone() })
             .collect();
         if specs.is_empty() && fleet_listen.is_none() {
-            eprintln!("superfluid: --fleet needs at least one host:port, or --fleet-listen for nodes that join");
-            std::process::exit(2);
+            superfluid_daemon::events::fail(2, "--fleet needs at least one host:port, or --fleet-listen for nodes that join");
         }
         let policy = match fleet_policy.as_str() {
             "load-aware" => PlacementPolicy::LoadAware,
             "least-loaded" => PlacementPolicy::LeastLoaded,
             "round-robin" => PlacementPolicy::RoundRobin,
             other => {
-                eprintln!(
-                    "superfluid: unknown --fleet-policy '{other}' \
-                     (load-aware|least-loaded|round-robin)"
-                );
-                std::process::exit(2);
+                superfluid_daemon::events::fail(2, format!("unknown --fleet-policy '{other}' (load-aware|least-loaded|round-robin)"));
             }
         };
         let Some(addr) = http else {
-            eprintln!("superfluid: --fleet requires --http <addr> (the fleet OpenAI endpoint)");
-            std::process::exit(2);
+            superfluid_daemon::events::fail(2, "--fleet requires --http <addr> (the fleet OpenAI endpoint)");
         };
         let lease = superfluid_proto::linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
         let n_nodes = specs.len();
@@ -779,24 +772,20 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 continue;
             }
             let rt = runtime_pick.resolve(m, &catalog).and_then(|id| catalog.require(id)).unwrap_or_else(|e| {
-                eprintln!("superfluid: {}: {e}", m.display());
-                std::process::exit(2);
+                superfluid_daemon::events::fail(2, format!("{}: {e}", m.display()));
             });
             let tok = open_tokenizer(&rt, m).unwrap_or_else(|e| {
-                eprintln!("superfluid: {e}");
-                std::process::exit(2);
+                superfluid_daemon::events::fail(2, e);
             });
             manager.expect_tokenizer(&name, superfluid_daemon::fleet::tokenizer_digest(&*tok));
             let codec = codec_for_dialect(&dialect, tok).map(|(c, _)| c).unwrap_or_else(|e| {
-                eprintln!("superfluid: {}: {e}", m.display());
-                std::process::exit(2);
+                superfluid_daemon::events::fail(2, format!("{}: {e}", m.display()));
             });
             served.push((name, Some(codec)));
         }
         let names: Vec<String> = served.iter().map(|(n, _)| n.clone()).collect();
         let model_name = names.first().cloned().unwrap_or_else(|| {
-            eprintln!("superfluid: no model to serve");
-            std::process::exit(2);
+            superfluid_daemon::events::fail(2, "no model to serve");
         });
         let fleet_model = Arc::new(FleetModel {
             manager: Arc::clone(&manager),
@@ -862,8 +851,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
         manager.spawn_keepalive();
         if let Some(listen) = fleet_listen.as_deref() {
             let listener = std::net::TcpListener::bind(listen).unwrap_or_else(|e| {
-                eprintln!("superfluid: --fleet-listen {listen}: {e}");
-                std::process::exit(1);
+                superfluid_daemon::events::fail(1, format!("--fleet-listen {listen}: {e}"));
             });
             let port = listener.local_addr().map(|a| a.port()).unwrap_or_default();
             eprintln!("superfluid: fleet head takes joining nodes on {listen}");
@@ -879,35 +867,34 @@ pub fn run(args: &[String], embedding: &Embedding) {
             }
         }
         if !qos_flags.is_empty() {
-            eprintln!(
-                "superfluid: {} not supported in fleet-head mode (the fleet head has no \
+            superfluid_daemon::events::fail(2, format!(
+                "{} not supported in fleet-head mode (the fleet head has no \
                  local scheduler and Link F carries no QoS class); set them on each \
                  node's own `superfluid serve` instead",
                 qos_flags.join(", ")
-            );
-            std::process::exit(2);
+            ));
         }
         if op_spec_max_temperature.is_some() {
-            eprintln!(
-                "superfluid: --spec-max-temperature is not supported in fleet-head mode; \
-                 set it on each node's own `superfluid serve` instead"
+            superfluid_daemon::events::fail(
+                2,
+                "--spec-max-temperature is not supported in fleet-head mode; \
+                 set it on each node's own `superfluid serve` instead",
             );
-            std::process::exit(2);
         }
         if fim_model.is_some() {
-            eprintln!(
-                "superfluid: --fim-model is not supported in fleet-head mode (the head hosts no \
-                 engine); set it on a node's own `superfluid serve` instead"
+            superfluid_daemon::events::fail(
+                2,
+                "--fim-model is not supported in fleet-head mode (the head hosts no \
+                 engine); set it on a node's own `superfluid serve` instead",
             );
-            std::process::exit(2);
         }
         if op_repeat_penalty.is_some() {
-            eprintln!(
-                "superfluid: --repeat-penalty is not supported in fleet-head mode \
+            superfluid_daemon::events::fail(
+                2,
+                "--repeat-penalty is not supported in fleet-head mode \
                  (the fleet protocol carries no per-request penalty); \
-                 set it on each node's own `superfluid serve` instead"
+                 set it on each node's own `superfluid serve` instead",
             );
-            std::process::exit(2);
         }
         let http_listener = listen_or_exit("--http", &addr);
         eprintln!(
@@ -939,8 +926,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     };
                     eprintln!("superfluid: {name}: tokenizer and chat template from a node serving it");
                     fleet_model.codec(&name, tok).unwrap_or_else(|e| {
-                        eprintln!("superfluid: {name}: {e}");
-                        std::process::exit(2);
+                        superfluid_daemon::events::fail(2, format!("{name}: {e}"));
                     })
                 });
                 (name, codec)
@@ -950,12 +936,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
         let mut registry = None;
         for (name, codec) in served {
             let dir = fleet_model.dir(&name).unwrap_or_else(|e| {
-                eprintln!("superfluid: {name}: cannot keep its sessions: {e}");
-                std::process::exit(1);
+                superfluid_daemon::events::fail(1, format!("{name}: cannot keep its sessions: {e}"));
             });
             let daemon = fleet_model.daemon(&name, open_session_store(&dir), codec).unwrap_or_else(|e| {
-                eprintln!("superfluid: cannot serve '{name}' over the fleet: {e}");
-                std::process::exit(2);
+                superfluid_daemon::events::fail(2, format!("cannot serve '{name}' over the fleet: {e}"));
             });
             match &registry {
                 // A model loaded later is one a node serves.

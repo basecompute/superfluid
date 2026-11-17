@@ -3,11 +3,20 @@
 //! and a start that fails ends with why and the exit code.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use superfluid_daemon::fleet_join::accept_nodes;
+use superfluid_daemon::fleet_manager::{FleetManager, PlacementPolicy};
+use superfluid_daemon::fleet_models::HeadModels;
+use superfluid_daemon::registry::ModelRegistry;
+use superfluid_daemon::{Daemon, EngineHost, MockCodec, SessionStore};
+use superfluid_engine::{EngineConfig, MockEngine};
+use superfluid_proto::linkf::Lease;
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("superfluid-events-{tag}-{}", std::process::id()));
@@ -353,5 +362,163 @@ fn under_log_file_the_events_go_to_the_file() {
     assert_eq!(out.status.code(), Some(2));
     let log = std::fs::read_to_string(home.join("serve.log")).unwrap();
     assert!(log.ends_with("\n--kv-bits 3: expected 0 (auto), 4 (q4_0), 8 (q8_0), 16 (f16) or 84 (K q8_0 / V q4_0)\n"), "{log}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+const TOKEN: &str = "a fleet token";
+
+/// A fleet head in this process that serves `org/a` first, by id, and takes nodes that dial it;
+/// the registry it serves through, to serve another model first; and its daemon builder.
+fn fleet_head() -> (String, Arc<FleetManager>, Arc<ModelRegistry>, impl Fn() -> Arc<Daemon>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 0));
+    let models = HeadModels::fixed(Arc::clone(&manager), vec!["org/a".into()]);
+    models.know_ids(&["org/a".into(), "org/b".into()], &["org/a:q4".into(), "org/b:q4".into()]);
+    let dir = scratch("head");
+    let built = std::sync::atomic::AtomicU32::new(0);
+    let daemon = move || {
+        let wal = dir.join(format!("{}.wal", built.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let host = EngineHost::spawn(|| (MockEngine::new(EngineConfig::default()), None)).unwrap();
+        Arc::new(Daemon::new(SessionStore::open(&wal).unwrap(), host, Box::new(MockCodec), 1))
+    };
+    let registry = Arc::new(ModelRegistry::with_initial("org/a", daemon(), models.loader()));
+    models.attach(&registry);
+    let m = Arc::clone(&manager);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.as_bytes().to_vec(), models));
+    (addr, manager, registry, daemon)
+}
+
+/// A relay to `head` that the test can cut, as a head that restarts would: every link through it
+/// ends, and the node dials again.
+struct Relay {
+    addr: String,
+    open: Arc<Mutex<Vec<TcpStream>>>,
+}
+
+impl Relay {
+    fn to(head: String) -> Relay {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let open: Arc<Mutex<Vec<TcpStream>>> = Arc::default();
+        let o = Arc::clone(&open);
+        std::thread::spawn(move || {
+            for node in listener.incoming().flatten() {
+                let Ok(head) = TcpStream::connect(&head) else { continue };
+                o.lock().unwrap().extend([node.try_clone().unwrap(), head.try_clone().unwrap()]);
+                for (mut from, mut to) in [(node.try_clone().unwrap(), head.try_clone().unwrap()), (head, node)] {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from, &mut to);
+                        let _ = to.shutdown(Shutdown::Both);
+                    });
+                }
+            }
+        });
+        Relay { addr, open }
+    }
+
+    fn cut(&self) {
+        for sock in self.open.lock().unwrap().drain(..) {
+            let _ = sock.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+/// Waits, up to `within`, until what `child` wrote to `log` says `what`.
+fn said(log: &Path, child: &mut Server, within: Duration, what: impl Fn(&str) -> bool) -> String {
+    let by = Instant::now() + within;
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if what(&text) {
+            return text;
+        }
+        let ended = child.0.try_wait().unwrap();
+        assert!(ended.is_none() && Instant::now() < by, "not said ({ended:?}):\n{text}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_following_node_keeps_one_stream_across_its_restart_to_the_heads_new_model() {
+    let (head, _manager, registry, daemon) = fleet_head();
+    let relay = Relay::to(head);
+    let home = scratch("follow");
+    let log = home.join("stderr");
+    let mut node = Server(
+        superfluid(&home)
+            .args(["node", "join", &relay.addr, "--token", TOKEN, "--identity", "follower-e", "--runtime", "mock", "--max-batch", "1"])
+            .args(["--log-format", "json"])
+            .env_remove("RUST_LOG")
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let pid = node.0.id();
+    said(&log, &mut node, Duration::from_secs(20), |t| t.contains(r#""event":"node.joined""#));
+
+    // The head serves org/b first now, and its links end, as a head restarted with another model.
+    registry.insert_loaded("org/b", daemon());
+    registry.unload("org/a").unwrap();
+    relay.cut();
+    let dialing_b = r#""event":"node.dialing","head""#;
+    said(&log, &mut node, Duration::from_secs(40), |t| {
+        t.matches(r#""event":"start""#).count() == 2 && t.rsplit(r#""event":"start""#).next().is_some_and(|after| after.contains(dialing_b))
+    });
+    drop(node);
+
+    let events = events(&std::fs::read(&log).unwrap());
+    let starts: Vec<usize> = (0..events.len()).filter(|&i| events[i]["event"] == "start").collect();
+    assert_eq!(starts.len(), 2, "{events:#?}");
+    assert!(starts.iter().all(|&i| events[i]["pid"] == json!(pid) && events[i]["command"] == "node join"), "the same process, exec'd: {events:#?}");
+    let (before, after) = events.split_at(starts[1]);
+    let named = |events: &[Value], name: &str| events.iter().filter(|e| e["event"] == name).cloned().collect::<Vec<_>>();
+    assert_eq!(named(before, "node.dialing")[0]["model"], "org/a");
+    let changed = named(before, "node.head.changed");
+    assert_eq!(changed.len(), 1, "{before:#?}");
+    assert_eq!((&changed[0]["model"], &changed[0]["id"], &changed[0]["from"]), (&json!("org/b"), &json!("org/b:q4"), &json!("org/a")));
+    let dialing = named(after, "node.dialing");
+    assert_eq!((dialing.len(), &dialing[0]["model"], &dialing[0]["node"]), (1, &json!("org/b"), &json!("follower-e")), "{after:#?}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn a_node_the_head_removes_says_so_once_and_ends_with_exit_code_5() {
+    let (head, manager, _registry, _daemon) = fleet_head();
+    let home = scratch("removed");
+    let log = home.join("stderr");
+    let mut node = Server(
+        superfluid(&home)
+            .args(["node", "join", &head, "--token", TOKEN, "--identity", "removed-e", "--model", "mock", "--runtime", "mock"])
+            .args(["--max-batch", "3", "--log-format", "json"])
+            .env_remove("RUST_LOG")
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    said(&log, &mut node, Duration::from_secs(20), |t| t.contains(r#""event":"node.joined""#));
+    let by = Instant::now() + Duration::from_secs(10);
+    while manager.status().iter().filter(|n| n.name == "removed-e").count() == 0 {
+        assert!(Instant::now() < by, "the head took the node");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    manager.remove("removed-e").expect("listed");
+    let by = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = node.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < by, "the node is still running after its head removed it");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(superfluid_daemon::fleet_join::REMOVED_EXIT));
+    let events = events(&std::fs::read(&log).unwrap());
+    let steps = steps(&events);
+    assert_eq!(steps.iter().filter(|s| **s == "node.removed").count(), 1, "every lane is told; the node says it once: {steps:?}");
+    assert_eq!(steps[steps.len() - 2..], ["node.removed", "error"], "{events:#?}");
+    let (removed, error) = (&events[events.len() - 2], &events[events.len() - 1]);
+    assert_eq!(removed["head"], json!(head));
+    assert_eq!(error["exit_code"], 5);
+    assert_eq!(error["message"], format!("the head at {head} removed this node; it will refuse it until it restarts"));
     let _ = std::fs::remove_dir_all(&home);
 }

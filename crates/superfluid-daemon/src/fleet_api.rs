@@ -53,11 +53,16 @@ pub(crate) async fn nodes_remove(
     }
     match fleet.remove(&name) {
         Ok(entry) => {
-            let by = match cred.as_ref().and_then(|c| c.0 .0.strip_prefix("policy:").map(str::to_string)) {
+            let key = cred.as_ref().and_then(|c| c.0 .0.strip_prefix("policy:").map(str::to_string));
+            let by = match &key {
                 Some(key) => format!("{}, key '{key}'", peer.ip()),
                 None => peer.ip().to_string(),
             };
             eprintln!("superfluid: fleet node '{}' removed (by {by})", entry.status.name);
+            crate::events::emit(
+                "fleet.node.removed",
+                serde_json::json!({"node": entry.status.name, "addr": entry.status.addr, "by": peer.ip().to_string(), "key": key}),
+            );
             let mut body = entry_json(&entry);
             body["schema"] = SCHEMA.into();
             body["removed"] = true.into();
