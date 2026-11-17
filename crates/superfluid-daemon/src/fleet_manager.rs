@@ -701,6 +701,10 @@ impl FleetManager {
         };
         if say {
             eprintln!("superfluid: fleet node '{identity}' at {peer} was removed; refusing it until this head restarts");
+            crate::events::emit(
+                "fleet.node.refused",
+                serde_json::json!({"addr": peer.to_string(), "node": identity, "reason": "it was removed; refused until this head restarts"}),
+            );
         }
         true
     }

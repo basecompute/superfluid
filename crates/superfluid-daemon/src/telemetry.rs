@@ -221,7 +221,7 @@ impl std::ops::Deref for LogLines {
 /// `\r` or escape sequence would tear the display. A carriage return keeps
 /// only what follows it (progress bars redraw that way), ANSI escape
 /// sequences go, tabs become spaces, and other control characters are dropped.
-fn clean_log_line(line: &str) -> String {
+pub(crate) fn clean_log_line(line: &str) -> String {
     let line = line.trim_end();
     let line = line.rsplit('\r').next().unwrap_or(line);
     if !line.contains(char::is_control) {
@@ -334,11 +334,25 @@ pub fn init_sinks(
             .with_target(false)
             .with_writer(RingMaker { ring })
     };
-    let stderr_layer = || {
-        tracing_subscriber::fmt::layer()
-            .compact()
-            .with_target(false)
-            .with_writer(std::io::stderr)
+    let stderr_layer = || -> BoxedLayer {
+        // Under --log-format json, tracing's own JSON, its fields beside the message: the relay
+        // passes each line on as a `log` event (crate::events).
+        if crate::events::json() {
+            return Box::new(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .flatten_event(true)
+                    .with_current_span(false)
+                    .with_span_list(false)
+                    .with_writer(std::io::stderr),
+            );
+        }
+        Box::new(
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_target(false)
+                .with_writer(std::io::stderr),
+        )
     };
     let (logs, filter): (BoxedLayer, String) = match sink {
         LogSink::File(cfg) => match file_writer(&cfg) {
@@ -365,12 +379,12 @@ pub fn init_sinks(
                 ));
                 let layer: BoxedLayer = match tui_ring {
                     Some(ring) => Box::new(ring_layer(ring)),
-                    None => Box::new(stderr_layer()),
+                    None => stderr_layer(),
                 };
                 (layer, cfg.filter)
             }
         },
-        LogSink::Stderr(filter) => (Box::new(stderr_layer()), filter),
+        LogSink::Stderr(filter) => (stderr_layer(), filter),
     };
     let filter = EnvFilter::try_new(&filter).unwrap_or_else(|e| {
         errors.push(format!("log filter {filter:?}: {e} (using \"info\")"));

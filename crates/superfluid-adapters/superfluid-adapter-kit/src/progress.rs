@@ -9,6 +9,9 @@
 //! since the watch began are the pull's, what was there already is not, and a file is known by
 //! its inode, so it counts once however the tool renames or moves it, and the bytes a tool
 //! preallocates (basert sizes its `.partial` before fetching into it) count as they are filled.
+//!
+//! Under a superfluid that writes JSON events (`--log-format json`), the bar is never drawn:
+//! the pull is `pull.progress` lines on stderr instead, which superfluid relays to its host.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{IsTerminal, Write};
@@ -87,19 +90,36 @@ struct Line {
 
 static LINE: Mutex<Line> = Mutex::new(Line { drawn: false });
 
+/// Whether the program that started this one reads events: `SUPERFLUID_LOG_FORMAT=json`, which
+/// superfluid sets for its workers under `--log-format json`. The pull is then `pull.progress`
+/// lines, never a bar.
+fn events() -> bool {
+    std::env::var_os("SUPERFLUID_LOG_FORMAT").is_some_and(|f| f == "json")
+}
+
 /// Draws the pull until `stop`, from `seen` as the watch began, and says what landed.
 fn draw_until(watch: Watch, mut seen: Seen, stop: &AtomicBool) -> Landed {
-    let tty = std::io::stderr().is_terminal();
+    let events = events();
+    let tty = !events && std::io::stderr().is_terminal();
     let began = Instant::now();
     let mut gauge = Gauge::new(watch.total, began);
     let mut last_line = began;
     let mut shown = false;
+    let mut said: Option<u64> = None;
     loop {
         let done = stop.load(Ordering::SeqCst);
         let now = Instant::now();
         gauge.sample(now, seen.look(&watch.roots, &watch.follow));
         if gauge.fetched >= DRAW_FROM {
-            if tty {
+            if events {
+                // At most a tick's worth (4 a second) while the bytes grow, one every LINE_EVERY
+                // while they do not, and the last as it ends.
+                if said != Some(gauge.present) || now.duration_since(last_line) >= LINE_EVERY {
+                    write_through(gauge.event().as_bytes());
+                    said = Some(gauge.present);
+                    last_line = now;
+                }
+            } else if tty {
                 let mut line = LINE.lock().unwrap_or_else(|e| e.into_inner());
                 let mut err = std::io::stderr().lock();
                 let _ = err.write_all(format!("\r\x1b[K{}", gauge.bar(now)).as_bytes());
@@ -117,7 +137,7 @@ fn draw_until(watch: Watch, mut seen: Seen, stop: &AtomicBool) -> Landed {
         }
         std::thread::sleep(TICK);
     }
-    if shown {
+    if shown && !events {
         write_through(format!("pull: {}\n", gauge.summary()).as_bytes());
     }
     Landed { present: gauge.present, fetched: gauge.fetched }
@@ -371,6 +391,21 @@ impl Gauge {
         }
     }
 
+    /// One `pull.progress` event line, for the superfluid that started this worker to relay:
+    /// the bytes against the total (null when not known), the rate and the seconds left. It
+    /// begins with ASCII RS, which marks Superfluid's own events among the lines it relays; the
+    /// relay adds the timestamp and the pull's id.
+    fn event(&self) -> String {
+        let event = serde_json::json!({
+            "event": "pull.progress",
+            "done_bytes": self.present,
+            "total_bytes": self.total,
+            "bytes_per_sec": self.rate() as u64,
+            "secs_left": self.left(),
+        });
+        format!("\x1e{event}\n")
+    }
+
     /// The seconds from the first byte landing to the last, rounded up (a fetch under a
     /// second is one).
     fn fetch_secs(&self) -> u64 {
@@ -521,6 +556,33 @@ mod tests {
         assert!(g.finishing());
         assert_eq!(g.bar(at(2)), "100% [==============================] 1.0 kB / 1.0 kB  fetched in 2s, finishing");
         assert_eq!(g.summary(), "100 B in 2s (50 B/s)");
+    }
+
+    #[test]
+    fn for_a_program_the_gauge_says_the_bytes_the_rate_and_the_time_left_as_one_event() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut g = Gauge::new(Some(1000), t0);
+        g.sample(at(0), all(0));
+        g.sample(at(1), all(100));
+        g.sample(at(2), all(200));
+        let line = g.event();
+        assert!(line.ends_with('\n') && line.matches('\n').count() == 1, "{line:?}");
+        let line = line.strip_prefix('\x1e').expect("marked as one of Superfluid's events");
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({"event": "pull.progress", "done_bytes": 200, "total_bytes": 1000, "bytes_per_sec": 100, "secs_left": 8})
+        );
+        // nothing to size the pull against: the total and the time left are null
+        let mut g = Gauge::new(None, t0);
+        g.sample(at(0), all(0));
+        g.sample(at(2), all(5_000_000));
+        let event: serde_json::Value = serde_json::from_str(&g.event()[1..]).unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({"event": "pull.progress", "done_bytes": 5_000_000, "total_bytes": null, "bytes_per_sec": 2_500_000, "secs_left": null})
+        );
     }
 
     #[test]

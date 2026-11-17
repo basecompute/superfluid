@@ -8,6 +8,7 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 
 | variable | default | meaning |
 |---|---|---|
+| `SUPERFLUID_LOG_FORMAT` | `text` | `json` makes every stderr line of `serve` and `node join` one JSON event, as `--log-format json` does; the flag wins. See [Start-up events](events.md). |
 | `SUPERFLUID_HOME` | `~/.superfluid` | Home directory: the installed Superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
 | `SUPERFLUID_NO_UPDATE_CHECK` | unset | Set to anything but `0` to stop `serve` from checking once a day whether a newer Superfluid is out. See [Updating Superfluid](updating.md). |
 | `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |

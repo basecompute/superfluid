@@ -59,6 +59,9 @@ Options:
   --park                  Keep each prompt's prefix on disk, under
                           $SUPERFLUID_HOME/fleet/nodes/<identity>/park, so a restarted node
                           starts the head's sessions warm
+  --log-format <text|json>
+                          Stderr as prose, or one JSON event a line for a program that runs
+                          this [default: text, or SUPERFLUID_LOG_FORMAT]
 ";
 
 const CONNECT: Duration = Duration::from_secs(5);
@@ -86,16 +89,35 @@ pub fn run(args: &[String]) {
 /// Ends a node the head at `head` removed, with [`REMOVED_EXIT`]: it neither dials that head
 /// again nor starts again to follow it.
 fn removed(head: impl std::fmt::Display) -> ! {
-    eprintln!("superfluid: the head at {head} removed this node; it will refuse it until it restarts");
-    std::process::exit(REMOVED_EXIT);
+    ending();
+    crate::events::emit("node.removed", serde_json::json!({"head": head.to_string()}));
+    crate::events::fail(REMOVED_EXIT, format!("the head at {head} removed this node; it will refuse it until it restarts"))
 }
 
 fn fail(msg: impl std::fmt::Display) -> ! {
-    eprintln!("superfluid: {msg}");
-    std::process::exit(2);
+    crate::events::fail(2, msg)
+}
+
+/// The head refused this node's token: no dialing again will change that.
+fn refused() -> ! {
+    ending();
+    crate::events::emit("node.refused", serde_json::json!({"reason": REFUSED}));
+    fail(REFUSED)
+}
+
+/// Lets the first of the node's threads that ends it say why: the head tells every lane, and the
+/// others wait for the exit, so the node says it once.
+fn ending() {
+    static ENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if ENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        loop {
+            std::thread::park();
+        }
+    }
 }
 
 fn join(args: &[String]) {
+    crate::events::init("node join", args).unwrap_or_else(|e| fail(e));
     // The node-agent's warnings (a fenced session, a silent head) go to stderr, as noded's do.
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".to_string());
     if let Err(e) = crate::telemetry::init_stderr(&filter) {
@@ -116,6 +138,9 @@ fn join(args: &[String]) {
             "--max-batch" => max_batch = val().parse().unwrap_or_else(|_| fail("--max-batch takes a number")),
             "--offline" => offline = true,
             "--park" => park = true,
+            // Read before the rest by events::init.
+            "--log-format" => drop(val()),
+            s if s.starts_with("--log-format=") => {}
             "-h" | "--help" => {
                 print!("{HELP}");
                 return;
@@ -190,6 +215,7 @@ fn join(args: &[String]) {
     });
     let follow_note = if follows.is_some() { ", following the head's model" } else { "" };
     eprintln!("superfluid: node '{identity}' serves {model_name}{follow_note}; dialing the head at {target} once per lane ({max_batch})");
+    crate::events::emit("node.dialing", serde_json::json!({"head": target.to_string(), "node": identity, "model": model_name, "lanes": max_batch}));
     // One connection per lane, each its own generation at a time on the head.
     let (target, links) = (Arc::new(target), Arc::new(Links::default()));
     if follows.is_some() {
@@ -215,6 +241,12 @@ fn join(args: &[String]) {
     };
     let Some(wanted) = followed else { return };
     eprintln!("superfluid: {}", wanted.change_from(&model_name));
+    let (next, id) = match &wanted {
+        Follow::Serve(s) => (Some(&s.name), Some(&s.id)),
+        Follow::Unpullable(name) => (Some(name), None),
+        Follow::Nothing => (None, None),
+    };
+    crate::events::emit("node.head.changed", serde_json::json!({"model": next, "id": id, "from": model_name}));
     // What the node runs ends, then its links, then its engine; it starts again as it was
     // started, and pulls and loads the head's model as it did at first.
     let by = std::time::Instant::now() + DRAIN;
@@ -379,12 +411,15 @@ impl Target {
         }
         if let Some(at) = tried.first() {
             eprintln!("superfluid: the head at {at} does not answer; looking for a head of this network");
+            crate::events::emit("node.head.lost", serde_json::json!({"head": at.to_string()}));
+            crate::events::emit("node.discover.start", serde_json::json!({}));
         }
         let mut search = self.search.lock().expect("head search");
         match crate::fleet_mdns::find_head(&mut search, DISCOVER, &|msg| eprintln!("superfluid: {msg}")) {
             Ok(head) => {
                 if head.nodes != *found {
                     eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.models.join(", "));
+                    crate::events::emit("node.head.found", serde_json::json!({"addr": head.nodes[0].to_string(), "models": head.models}));
                 }
                 *found = head.nodes;
             }
@@ -567,10 +602,12 @@ impl Asking {
 /// The head of this node's network on the local network, however long it takes to appear.
 fn discover(search: &mut Search) -> crate::fleet_mdns::Head {
     eprintln!("superfluid: looking for a fleet head on the local network");
+    crate::events::emit("node.discover.start", serde_json::json!({}));
     loop {
         match crate::fleet_mdns::find_head(search, DISCOVER, &|msg| eprintln!("superfluid: {msg}")) {
             Ok(head) => {
                 eprintln!("superfluid: found the head at {}, serving {}", head.nodes[0], head.models.join(", "));
+                crate::events::emit("node.head.found", serde_json::json!({"addr": head.nodes[0].to_string(), "models": head.models}));
                 return head;
             }
             Err(e) => eprintln!("superfluid: {e}; looking again"),
@@ -621,7 +658,7 @@ fn learn_head(given: Option<&str>, search: &mut Search, token: &[u8], identity: 
                 "the head at {at} states nothing over the link of what it serves (it was released before heads did), \
                  so a node with no --model does not follow it; give this node --model"
             )),
-            Err(LinkFError::Unauthorized) if given.is_some() => fail(REFUSED),
+            Err(LinkFError::Unauthorized) if given.is_some() => refused(),
             Err(LinkFError::Removed) => removed(at),
             Err(LinkFError::Unauthorized) => say_once(format!(
                 "the head announced at {at} does not hold this network's token, so it is not followed \
@@ -688,6 +725,8 @@ fn restart() -> ! {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("cannot find this program to start it again: {e}")));
     eprintln!("superfluid: starting again to serve the head's model");
+    // The next image writes its events to the stream this one wrote to, from its `start` on.
+    crate::events::prepare_exec();
     let e = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
     fail(format!("cannot start again: {e}"))
 }
@@ -763,6 +802,11 @@ fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, lane: u32, l
             eprintln!("superfluid: {msg}");
         }
     };
+    let tell = |event: &str, fields: serde_json::Value| {
+        if lane == 0 {
+            crate::events::emit(event, fields);
+        }
+    };
     let mut backoff = Duration::from_secs(2);
     while !links.stopping() {
         let addrs = target.addrs();
@@ -772,6 +816,7 @@ fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, lane: u32, l
                     return;
                 }
                 say(format!("joined the head at {target}"));
+                tell("node.joined", serde_json::json!({"head": target.to_string()}));
                 backoff = Duration::from_secs(2);
                 let served = conn.serve(ep);
                 links.close(lane);
@@ -785,18 +830,21 @@ fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, lane: u32, l
                 match served {
                     Ok(()) => {
                         tracing::debug!(lane, "the link to the head closed");
-                        say("the head closed the link".into())
+                        say("the head closed the link".into());
+                        tell("node.link.ended", serde_json::json!({"reason": "the head closed the link"}))
                     }
-                    Err(crate::DaemonError::Fleet(LinkFError::Unauthorized)) => fail(REFUSED),
+                    Err(crate::DaemonError::Fleet(LinkFError::Unauthorized)) => refused(),
                     Err(e) => {
                         tracing::debug!(lane, error = %e, "the link to the head ended");
-                        say(format!("the link to the head ended: {e}"))
+                        say(format!("the link to the head ended: {e}"));
+                        tell("node.link.ended", serde_json::json!({"reason": format!("the link to the head ended: {e}")}))
                     }
                 }
             }
-            Err(LinkFError::Unauthorized) => fail(REFUSED),
+            Err(LinkFError::Unauthorized) => refused(),
             Err(e) => {
                 say(format!("cannot join the head at {target}: {e}"));
+                tell("node.dial.failed", serde_json::json!({"head": target.to_string(), "error": e.to_string()}));
                 target.refind(&addrs);
             }
         }
@@ -804,6 +852,7 @@ fn keep_dialing(target: &Target, token: &[u8], mut conn: NodeAgent, lane: u32, l
             return;
         }
         say(format!("dialing again in {} s", backoff.as_secs()));
+        tell("node.retry", serde_json::json!({"in_secs": backoff.as_secs()}));
         if !links.sleep(backoff) {
             return;
         }
@@ -852,6 +901,7 @@ pub fn load_node(
         },
     };
     let ctx = ctx.max(512);
+    crate::events::emit("model.load.start", serde_json::json!({"model": model_name, "runtime": runtime.id.name(), "path": path.display().to_string()}));
     let host = if runtime.worker.bin.is_file() {
         EngineHost::spawn_process(crate::WorkerSpec {
             bin: runtime.worker.bin.clone(),
@@ -864,7 +914,9 @@ pub fn load_node(
         let args = crate::runtime_options::worker_args(runtime.id, &path, ctx, lanes, 0).map_err(|e| format!("model load failed: {e}"))?;
         EngineHost::try_spawn_loaded(move || rt.open(&args))
     }
-    .map_err(|e| format!("model load failed: {e}"))?;
+    .map_err(|e| format!("model load failed: {e}"))
+    .inspect_err(|e| crate::events::emit("model.load.failed", serde_json::json!({"model": model_name, "error": e})))?;
+    crate::events::emit("model.load.done", serde_json::json!({"model": model_name, "runtime": runtime.id.name(), "context": ctx, "lanes": lanes}));
     let summary = format!(
         "runtime {} serves {}: context window {ctx} tokens ({sized}), {lanes} lanes",
         runtime.id.name(),
@@ -1007,6 +1059,7 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
         let Ok(peer) = sock.peer_addr() else { continue };
         if auth.is_empty() && !peer.ip().is_loopback() {
             eprintln!("superfluid: a node at {peer} was refused: this head has no fleet token (`superfluid fleet token` makes one)");
+            crate::events::emit("fleet.node.refused", serde_json::json!({"addr": peer.to_string(), "reason": "this head has no fleet token (`superfluid fleet token` makes one)"}));
             continue;
         }
         while in_handshake.load(std::sync::atomic::Ordering::Acquire) >= HANDSHAKES_AT_ONCE {
@@ -1028,13 +1081,22 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
                     }
                     let joined = manager.adopt(head, peer.ip());
                     match &joined {
-                        Ok((_, true, _)) => eprintln!(
-                            "superfluid: fleet node '{identity}' joined from {peer}: {}, context window {ctx} tokens",
-                            serves.join(", ")
-                        ),
-                        Ok((_, false, 1)) => eprintln!("superfluid: fleet node '{identity}' rejoined from {peer}"),
+                        Ok((_, true, _)) => {
+                            eprintln!(
+                                "superfluid: fleet node '{identity}' joined from {peer}: {}, context window {ctx} tokens",
+                                serves.join(", ")
+                            );
+                            crate::events::emit("fleet.node.joined", serde_json::json!({"node": identity, "addr": peer.to_string(), "models": serves, "context": ctx}));
+                        }
+                        Ok((_, false, 1)) => {
+                            eprintln!("superfluid: fleet node '{identity}' rejoined from {peer}");
+                            crate::events::emit("fleet.node.rejoined", serde_json::json!({"node": identity, "addr": peer.to_string()}));
+                        }
                         Ok(_) => {}
-                        Err(why) => eprintln!("superfluid: a node at {peer} did not join: {why}"),
+                        Err(why) => {
+                            eprintln!("superfluid: a node at {peer} did not join: {why}");
+                            crate::events::emit("fleet.node.refused", serde_json::json!({"addr": peer.to_string(), "reason": why.to_string()}));
+                        }
                     }
                     if joined.is_ok() {
                         models.know_ids(&serves, &ids);
@@ -1043,7 +1105,10 @@ pub fn accept_nodes(listener: TcpListener, manager: Arc<FleetManager>, auth: Vec
                         }
                     }
                 }
-                Err(e) => eprintln!("superfluid: a node at {peer} did not join: {e}"),
+                Err(e) => {
+                    eprintln!("superfluid: a node at {peer} did not join: {e}");
+                    crate::events::emit("fleet.node.refused", serde_json::json!({"addr": peer.to_string(), "reason": e.to_string()}));
+                }
             }
         });
     }
