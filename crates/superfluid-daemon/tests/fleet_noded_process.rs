@@ -43,6 +43,7 @@ fn noded_process_serves_a_fleet_generation() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_superfluid-noded"))
         .args(["--listen", "127.0.0.1:0", "--engine", "mock", "--identity", "proc-node"])
         .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("SUPERFLUID_HOME", home.join(".superfluid"))
         .stderr(Stdio::piped())
         .spawn()
@@ -85,6 +86,7 @@ fn noded(args: &[&str], home: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_superfluid-noded"))
         .args(args)
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("SUPERFLUID_HOME", home.join(".superfluid"))
         .stdin(Stdio::null())
         .output()
@@ -107,7 +109,9 @@ fn noded_refuses_an_open_listener_before_pulling_anything() {
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("without a fleet token"), "{err}");
     assert!(!err.contains("pulling"), "nothing is pulled before the refusal: {err}");
-    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    // Windows scans a program just built before its first start, which can take that long by itself.
+    let within = if cfg!(windows) { 60 } else { 10 };
+    assert!(start.elapsed() < std::time::Duration::from_secs(within));
     assert!(!home.join(".superfluid/runtimes").exists(), "no runtime was installed either");
 }
 
@@ -144,6 +148,7 @@ fn noded_sizes_its_window_for_the_device() {
         .args(["--listen", "127.0.0.1:0", "--max-batch", "2", "--model"])
         .arg(&model)
         .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("SUPERFLUID_HOME", home.join(".superfluid"))
         .stderr(Stdio::piped())
         .spawn()

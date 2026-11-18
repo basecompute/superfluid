@@ -1,7 +1,7 @@
 //! Shared rig for the basert speculation tests (spec_conformance, spec_gpu_sampling).
 
 #![allow(dead_code, clippy::too_many_arguments)]
-pub use std::os::unix::net::UnixStream;
+pub use superfluid_shm::os::UnixStream;
 pub use std::path::PathBuf;
 pub use std::sync::Mutex;
 pub use std::thread;

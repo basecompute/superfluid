@@ -1,8 +1,8 @@
 //! The daemon's control words for one worker, in a small segment beside the rings.
 
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::os::RawFd;
 use crate::{segment::ShmSegment, ShmError};
 
 /// "SFCTRL01", little-endian.
@@ -51,16 +51,15 @@ impl ControlSegment {
         self.seg.raw_fd()
     }
 
+    /// A second handle to the segment.
+    pub fn dup_fd(&self) -> std::io::Result<crate::os::OwnedFd> {
+        self.seg.dup_fd()
+    }
+
     /// A second mapping of the segment, for raising its words from another
     /// thread while its owner is busy.
     pub fn signal(&self) -> Result<YieldSignal, ShmError> {
-        // SAFETY: dup of an fd this segment owns; the duplicate is owned below.
-        let fd = unsafe { libc::dup(self.seg.raw_fd()) };
-        if fd < 0 {
-            return Err(ShmError::Io(std::io::Error::last_os_error()));
-        }
-        // SAFETY: fd is a fresh duplicate nothing else owns.
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let fd = self.seg.dup_fd()?;
         Ok(YieldSignal { ctl: ControlSegment::attach(ShmSegment::from_fd(fd, CONTROL_BYTES)?)? })
     }
 
@@ -106,7 +105,7 @@ impl YieldSignal {
 mod tests {
     use super::*;
     use crate::fdpass::{recv_fd, send_fd};
-    use std::os::unix::net::UnixStream;
+    use crate::os::UnixStream;
 
     #[test]
     fn words_raised_through_a_signal_reach_the_segment_passed_over_the_channel() {

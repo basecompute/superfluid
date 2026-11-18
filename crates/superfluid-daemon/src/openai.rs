@@ -445,13 +445,8 @@ impl HostGuard {
 }
 
 fn machine_host_names() -> Vec<String> {
-    let mut buf = [0u8; 256];
-    // SAFETY: buf is writable for its full length; gethostname NUL-terminates within it or fails.
-    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
-        return Vec::new();
-    }
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let name = String::from_utf8_lossy(&buf[..len]).trim_end_matches('.').to_ascii_lowercase();
+    let Some(name) = crate::sys::hostname() else { return Vec::new() };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
     if name.is_empty() {
         return Vec::new();
     }
@@ -624,13 +619,17 @@ pub fn serve_blocking_config(
         let drain_deadline_sig = Arc::clone(&drain_deadline);
         let watchdog_registry = Arc::clone(&shutdown_registry);
         let shutdown = async move {
-            let mut sig = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::user_defined1(),
-            ) {
-                Ok(s) => s,
-                Err(_) => return std::future::pending::<()>().await,
-            };
-            sig.recv().await;
+            // Windows has no signal a server can be asked to drain by: it runs until it is ended.
+            #[cfg(not(unix))]
+            std::future::pending::<()>().await;
+            #[cfg(unix)]
+            {
+                let mut sig = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
+                    Ok(s) => s,
+                    Err(_) => return std::future::pending::<()>().await,
+                };
+                sig.recv().await;
+            }
             let _ = drain_deadline_sig
                 .set(std::time::Instant::now() + std::time::Duration::from_secs(drain));
             draining_sig.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1166,12 +1165,11 @@ fn audio_extension(filename: &str) -> Option<&str> {
 fn stage_audio(dir: &std::path::Path, ext: &str, audio: &[u8]) -> std::io::Result<std::path::PathBuf> {
     use std::hash::{BuildHasher, Hasher};
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let mut last = None;
     for _ in 0..8 {
         let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
         let path = dir.join(format!("superfluid-audio-{nonce:016x}.{ext}"));
-        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        match crate::sys::owner_only(std::fs::OpenOptions::new().write(true).create_new(true)).open(&path) {
             Ok(mut f) => {
                 if let Err(e) = f.write_all(audio) {
                     let _ = std::fs::remove_file(&path);
@@ -2175,7 +2173,10 @@ mod browser_guard_tests {
 
 #[cfg(test)]
 mod audio_staging_tests {
-    use super::{audio_extension, stage_audio};
+    use super::audio_extension;
+    #[cfg(unix)]
+    use super::stage_audio;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -2188,6 +2189,7 @@ mod audio_staging_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn staged_audio_is_owner_only_and_never_reuses_a_path() {
         let dir = std::env::temp_dir().join(format!("superfluid-audio-stage-{}", std::process::id()));

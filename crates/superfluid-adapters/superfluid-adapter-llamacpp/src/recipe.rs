@@ -14,20 +14,31 @@ pub struct Archive {
     pub cudart: bool,
 }
 
+/// llama.cpp's Windows archives are zips (`llama-b12470-bin-win-vulkan-x64.zip`), with the CPU
+/// build named for what it is (`win-cpu-x64`) and the CUDA runtime's archive for no build
+/// (`cudart-llama-bin-win-cuda-12.4-x64.zip`): a release carries the one its CUDA builds run on.
 pub fn parse_name(name: &str) -> Option<Archive> {
     let (cudart, rest) = match name.strip_prefix("cudart-") {
         Some(r) => (true, r),
         None => (false, name),
     };
-    let rest = rest.strip_prefix("llama-")?.strip_suffix(".tar.gz")?;
-    let (version, rest) = rest.split_once("-bin-")?;
-    if !version.starts_with('b') || !version[1..].chars().all(|c| c.is_ascii_digit()) {
+    let rest = rest.strip_prefix("llama-")?;
+    let (rest, zip) = match rest.strip_suffix(".tar.gz") {
+        Some(r) => (r, false),
+        None => (rest.strip_suffix(".zip")?, true),
+    };
+    let (version, rest) = match rest.strip_prefix("bin-") {
+        Some(r) if cudart && zip => ("", r),
+        _ => rest.split_once("-bin-")?,
+    };
+    if !version.is_empty() && (!version.starts_with('b') || !version[1..].chars().all(|c| c.is_ascii_digit())) {
         return None;
     }
     let (os, rest) = rest.split_once('-')?;
-    let os = match os {
-        "macos" => "macos",
-        "ubuntu" => "linux",
+    let os = match (os, zip) {
+        ("macos", false) => "macos",
+        ("ubuntu", false) => "linux",
+        ("win", true) => "windows",
         _ => return None,
     };
     let (backend, arch) = match rest.rsplit_once('-') {
@@ -144,6 +155,7 @@ fn choose(host: &Host, have: &[&Archive]) -> Vec<(String, String)> {
             out.push((b.to_string(), format!("{}: ROCm", host.describe())));
         }
     }
+    // No NVIDIA or ROCm install is looked for on Windows yet: `--backend cuda` or `rocm` names one.
     if host.vulkan && has("vulkan") {
         out.push(("vulkan".to_string(), format!("{}: a Vulkan driver", host.describe())));
     }
@@ -221,13 +233,16 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
         }]);
     }
 
-    let version = req.version.clone().or_else(|| builds.first().map(|(v, _)| v.clone())).ok_or("the recipe lists no build")?;
+    let platform = host.platform();
+    // The newest tested build with an archive for this platform: the recipe may list one for
+    // some platforms before it does for the rest.
+    let newest = || builds.iter().find(|(_, a)| a.iter().any(|a| a.platform == platform)).or(builds.first()).map(|(v, _)| v.clone());
+    let version = req.version.clone().or_else(newest).ok_or("the recipe lists no build")?;
     untested(&version)?;
     let archives = match builds.iter().find(|(v, _)| *v == version) {
         Some((_, a)) => a.clone(),
         None => published(&version)?,
     };
-    let platform = host.platform();
     let here: Vec<&Archive> = archives.iter().filter(|a| a.platform == platform).collect();
     if here.is_empty() {
         return Err(format!("llama.cpp {version} publishes no build for {platform}"));
@@ -330,9 +345,31 @@ mod tests {
         assert_eq!(parse_name("llama-b11284-bin-macos-x64.tar.gz").unwrap().backend, "cpu");
         assert_eq!(parse_name("llama-b11284-bin-ubuntu-x64.tar.gz").unwrap().backend, "cpu");
         assert_eq!(parse_name("llama-b11284-bin-ubuntu-openvino-2026.4-x64.tar.gz").unwrap().backend, "openvino-2026.4");
-        for bad in ["llama-b11284-bin-win-cpu-x64.zip", "llama-b11284-xcframework.zip", "llama-v1-bin-ubuntu-x64.tar.gz", "llama-b1-bin-ubuntu-s390x.tar.gz"] {
+        let a = parse_name("llama-b12470-bin-win-vulkan-x64.zip").unwrap();
+        assert_eq!((a.version.as_str(), a.platform.as_str(), a.backend.as_str(), a.cudart), ("b12470", "windows-x64", "vulkan", false));
+        assert_eq!(parse_name("llama-b12470-bin-win-cpu-x64.zip").unwrap().backend, "cpu");
+        let a = parse_name("cudart-llama-bin-win-cuda-12.4-x64.zip").unwrap();
+        assert_eq!((a.version.as_str(), a.platform.as_str(), a.backend.as_str(), a.cudart), ("", "windows-x64", "cuda-12.4", true));
+        for bad in ["llama-b11284-bin-win-cpu-x64.tar.gz", "llama-b11284-bin-ubuntu-x64.zip", "llama-bin-win-cuda-12.4-x64.zip", "llama-b11284-xcframework.zip", "llama-v1-bin-ubuntu-x64.tar.gz", "llama-b1-bin-ubuntu-s390x.tar.gz"] {
             assert_eq!(parse_name(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn windows_takes_the_vulkan_build_where_a_driver_is_and_the_cpu_build_beside_it() {
+        let mut win = host("windows", "x64");
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert_eq!(backends(&plans), ["cpu"]);
+        assert!(plans[0].assets[0].name.ends_with("-bin-win-cpu-x64.zip"), "{:?}", plans[0].assets);
+        win.vulkan = true;
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert_eq!(backends(&plans), ["vulkan", "cpu"]);
+        assert!(plans[0].why.starts_with("Windows x64, Vulkan"), "{}", plans[0].why);
+        // A CUDA build is taken by name, with the runtime its release carries.
+        let cuda = plan(&Request { backend: Some("cuda".into()), ..Request::default() }, &win).unwrap();
+        assert!(cuda[0].backend.starts_with("cuda-13."), "{}", cuda[0].backend);
+        let names: Vec<&str> = cuda[0].assets.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.len() == 2 && names[1].starts_with("cudart-llama-bin-win-cuda-13."), "{names:?}");
     }
 
     #[test]

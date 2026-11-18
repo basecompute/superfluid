@@ -414,10 +414,7 @@ pub fn serve_blocking(
 
 pub fn mint_token(path: &std::path::Path) -> std::io::Result<String> {
     let mut buf = [0u8; 32];
-    {
-        use std::io::Read;
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
-    }
+    crate::sys::random(&mut buf)?;
     let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     let mut o = std::fs::OpenOptions::new();
     o.create(true).write(true).truncate(true);

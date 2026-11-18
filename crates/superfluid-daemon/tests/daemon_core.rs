@@ -148,7 +148,7 @@ fn native_api_round_trip() {
     let dir = test_dir();
     let socket = dir.join("superfluid.sock");
     let daemon = Arc::new(mock_daemon(&dir.join("wal.log")));
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);
@@ -268,7 +268,7 @@ fn cancel_stops_generation_with_a_committed_event() {
     let dir = test_dir();
     let socket = dir.join("superfluid.sock");
     let daemon = Arc::new(mock_daemon(&dir.join("wal.log")));
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);
@@ -637,7 +637,7 @@ fn cancel_requires_active_generation() {
     let dir = test_dir();
     let socket = dir.join("superfluid.sock");
     let daemon = Arc::new(mock_daemon(&dir.join("wal.log")));
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);
@@ -1078,7 +1078,7 @@ fn subscription_streams_backlog_then_live() {
     let dir = test_dir();
     let socket = dir.join("superfluid.sock");
     let daemon = Arc::new(mock_daemon(&dir.join("wal.log")));
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);
@@ -1152,7 +1152,7 @@ fn provisional_deltas_precede_and_reconcile_with_commits() {
         let host = EngineHost::spawn(move || (MockEngine::new(cfg), None)).unwrap();
         Arc::new(Daemon::new(store, host, Box::new(MockCodec), 8))
     };
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);
@@ -1469,6 +1469,7 @@ fn process_worker_matches_in_process_output() {
     assert!(!via_process.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn worker_crash_fails_typed_then_respawns() {
     let dir = test_dir();
@@ -1893,7 +1894,7 @@ fn purge_is_cas_quiesced_and_reroots_or_cascades() {
         let host = EngineHost::spawn(|| (MockEngine::new(EngineConfig::default()), None))
             .expect("spawn");
         let d = Arc::new(Daemon::new(store, host, Box::new(MockChatCodec), 8));
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
         let serving = Arc::clone(&d);
         std::thread::spawn(move || {
             let _ = api::serve(listener, serving);
@@ -3228,6 +3229,7 @@ fn a_shared_prefix_pin_keeps_the_longest_deadline() {
     assert_eq!(d.pinned_prefix_tokens(&stream, &[64]).unwrap(), 64);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_worker_respawn_drops_pin_leases_at_once() {
     use std::sync::atomic::Ordering;
@@ -4172,7 +4174,7 @@ fn a_declared_tool_call_is_answered_over_the_socket() {
     let dir = test_dir();
     let socket = dir.join("superfluid.sock");
     let daemon = Arc::new(chat_daemon(&dir, script.clone()));
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);

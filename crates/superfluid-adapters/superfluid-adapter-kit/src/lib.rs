@@ -1,6 +1,6 @@
 //! What every runtime adapter is built from.
 
-use std::os::unix::net::UnixStream;
+use superfluid_shm::os::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -146,7 +146,7 @@ pub fn option<'a>(args: &'a WorkerArgs, name: &str) -> Option<&'a str> {
 }
 
 /// Flags of every worker an option may not be named after: the parser reads them before an adapter sees them.
-const RESERVED: &[&str] = &["model", "max-context", "max-batch", "kv-bits", "frames-fd", "fd-channel-fd", "engine"];
+const RESERVED: &[&str] = &["model", "max-context", "max-batch", "kv-bits", "frames-fd", "fd-channel-fd", "link", "engine"];
 
 /// Refuses a declaration the daemon or the worker could not honour.
 pub fn check_declaration(options: &[ServeOption]) -> Result<(), String> {
@@ -717,7 +717,7 @@ pub fn install_into(rt: &dyn Runtime, plan: &Plan, dir: &Path) -> Result<Manifes
         backend: plan.backend.clone(),
         link_w: vec![superfluid_worker::server::PROTO_VERSION],
         platforms: vec![host.platform()],
-        worker: format!("bin/superfluid-worker-{id}"),
+        worker: format!("bin/superfluid-worker-{id}{}", std::env::consts::EXE_SUFFIX),
         sources,
         tested: plan.tested,
         requires: rule_asked(rt, plan, &host),
@@ -991,6 +991,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pull_tools_stderr_is_read_for_why_it_failed() {
         let script = |body: &str| {

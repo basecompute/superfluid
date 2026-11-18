@@ -604,10 +604,14 @@ pub fn default_socket(home: &Path, sun_path_len: usize) -> PathBuf {
     if sock.as_os_str().len() < sun_path_len {
         return sock;
     }
+    #[cfg(unix)]
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
+    // The temporary directory is the user's own on Windows.
+    #[cfg(windows)]
+    let uid = 0;
     let tmp = std::env::temp_dir().join(format!("superfluid-{uid}.sock"));
-    if tmp.as_os_str().len() < sun_path_len {
+    if tmp.as_os_str().len() < sun_path_len || cfg!(windows) {
         tmp
     } else {
         PathBuf::from(format!("/tmp/superfluid-{uid}.sock"))

@@ -552,10 +552,13 @@ fn served_id(model: &str) -> String {
 
 fn on_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(binary)).find(|p| {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    })
+    let names: Vec<String> = if cfg!(windows) {
+        // An agent npm installs is a `.cmd` beside a script of the bare name, which is not a program.
+        ["exe", "cmd", "bat"].iter().map(|ext| format!("{binary}.{ext}")).collect()
+    } else {
+        vec![binary.to_string()]
+    };
+    std::env::split_paths(&path).flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>()).find(|p| crate::sys::is_executable(p))
 }
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -582,8 +585,7 @@ fn read_server() -> Option<(i32, String)> {
 }
 
 fn alive(pid: i32) -> bool {
-    // SAFETY: signal 0 checks for the process without sending anything.
-    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+    crate::sys::alive(pid)
 }
 
 pub fn run(args: &[String]) {
@@ -768,7 +770,6 @@ fn remembered() -> Option<String> {
 /// Starts `superfluid serve <model>` in its own session, so it outlives the agent and the
 /// terminal, and waits until it lists its models.
 fn start_server(model: &str, addr: &str, api_key: Option<&str>) -> Vec<Served> {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("could not find this program: {e}")));
     let logs = crate::runtimes::default_home().join("logs");
     let log = logs.join("serve.log");
@@ -787,13 +788,7 @@ fn start_server(model: &str, addr: &str, api_key: Option<&str>) -> Vec<Served> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(stdout.map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null()))
         .stderr(std::process::Stdio::null());
-    // SAFETY: setsid is async-signal-safe and touches only the child.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::sys::detached(&mut cmd);
     let mut child = cmd.spawn().unwrap_or_else(|e| fail(format!("could not start the server: {e}")));
     let pid = child.id() as i32;
     let _ = std::fs::write(server_file(), format!("{pid}\n{addr}\n"));
@@ -835,7 +830,6 @@ fn tail(log: &Path, from: u64, n: usize) -> String {
 }
 
 fn exec(plan: &Plan) -> ! {
-    use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(&plan.program);
     cmd.args(&plan.args);
     for k in &plan.env_remove {
@@ -847,7 +841,7 @@ fn exec(plan: &Plan) -> ! {
             cmd.env(k, v);
         }
     }
-    let err = cmd.exec();
+    let err = crate::sys::replace_process(&mut cmd);
     fail(format!("could not run {}: {err}", plan.program))
 }
 
@@ -894,8 +888,7 @@ pub fn stop(args: &[String]) {
         eprintln!("superfluid stop: no server started by `superfluid launch` is running");
         std::process::exit(1);
     };
-    // SAFETY: pid is a live process launch started (read_server checked it).
-    unsafe { libc::kill(pid, libc::SIGTERM) };
+    crate::sys::terminate(pid);
     let started = Instant::now();
     while alive(pid) && started.elapsed() < Duration::from_secs(90) {
         std::thread::sleep(Duration::from_millis(200));
@@ -978,7 +971,7 @@ mod tests {
         assert!(joined.ends_with("-m Qwen3.6-27B-Q4_K_M exec hi"), "{joined}");
         assert_eq!(env(&p, "SUPERFLUID_LAUNCH_KEY"), Some("superfluid"));
         let (path, text) = &p.files[0];
-        assert!(joined.contains(&path.to_string_lossy().to_string()));
+        assert!(joined.contains(&toml_str(&path.to_string_lossy())), "{joined}");
         let catalog: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(catalog["models"][0]["slug"], "Qwen3.6-27B-Q4_K_M");
         assert_eq!(catalog["models"][0]["context_window"], 131_072);

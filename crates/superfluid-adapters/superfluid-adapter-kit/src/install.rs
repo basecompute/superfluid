@@ -35,6 +35,10 @@ impl Host {
             other => other,
         };
         let mut host = Host { os: os.into(), arch: arch.into(), ..Host::default() };
+        if host.os == "windows" {
+            // The loader every Vulkan driver installs; which GPU it finds is llama.cpp's to say.
+            host.vulkan = std::env::var_os("SystemRoot").is_some_and(|root| Path::new(&root).join("System32").join("vulkan-1.dll").is_file());
+        }
         if host.os == "linux" {
             host.nvidia_driver = std::fs::read_to_string("/proc/driver/nvidia/version").ok().and_then(|t| nvidia_driver_version(&t));
             host.cuda_runtime = cuda_runtime_major();
@@ -61,6 +65,7 @@ impl Host {
         let os = match self.os.as_str() {
             "macos" => "macOS",
             "linux" => "Linux",
+            "windows" => "Windows",
             other => other,
         };
         let mut facts = vec![format!("{os} {}", self.arch)];
@@ -761,7 +766,7 @@ pub fn platform_cache_dir() -> PathBuf {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
+    std::env::home_dir().filter(|h| !h.as_os_str().is_empty()).unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// Whether `path` matches the shell pattern `pattern`, where `*` stands for any run of
@@ -791,14 +796,56 @@ pub fn glob_matches(pattern: &str, path: &str) -> bool {
     true
 }
 
+/// `path` with its links resolved, as `std::fs::canonicalize` gives it, less the `\\?\` Windows
+/// puts before it: under that prefix `..` names a file, a path over 260 characters aside, and a
+/// worker finds its libraries by `..\lib` from where it runs.
+pub fn canonical(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
+    let full = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    if let Some(plain) = full.to_str().and_then(|s| s.strip_prefix(r"\\?\")).filter(|s| s.as_bytes().get(1) == Some(&b':') && s.len() < 248) {
+        return Ok(PathBuf::from(plain));
+    }
+    Ok(full)
+}
+
+/// Where the directory link at `link` leads. On Unix it is a symbolic link, and the path through
+/// it is the answer. Windows gives an ordinary user no symbolic link, and refuses to follow a
+/// junction such a user made from a process started by a service (an ssh session is one), so
+/// there the link is a file that holds the name of the directory beside it.
+pub fn through_link(link: &Path) -> PathBuf {
+    if cfg!(windows) && link.is_file() {
+        if let Ok(name) = std::fs::read_to_string(link) {
+            let name = name.trim();
+            if !name.is_empty() && !Path::new(name).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+                return link.with_file_name(name);
+            }
+        }
+    }
+    link.to_path_buf()
+}
+
+/// The system's own `tar`: bsdtar on Windows, which reads a zip as well, where the `tar` a
+/// shell finds first may be one that does not.
+fn tar() -> Command {
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        let own = Path::new(&root).join("System32").join("tar.exe");
+        if own.is_file() {
+            return Command::new(own);
+        }
+    }
+    Command::new("tar")
+}
+
 pub fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
     std::fs::create_dir_all(into).map_err(|e| format!("{}: {e}", into.display()))?;
     let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    let zip = name.ends_with(".zip");
+    // Windows has no unzip, and its tar reads a zip.
+    let zip = name.ends_with(".zip") && !cfg!(windows);
     let listed = if zip {
         Command::new("unzip").arg("-Z1").arg(archive).output()
     } else {
-        Command::new("tar").arg("-tf").arg(archive).output()
+        tar().arg("-tf").arg(archive).output()
     }
     .map_err(|e| format!("listing {name}: {e}"))?;
     if !listed.status.success() {
@@ -812,7 +859,7 @@ pub fn unpack(archive: &Path, into: &Path) -> Result<(), String> {
         c.arg("-q").arg(archive).arg("-d").arg(into);
         c
     } else {
-        let mut c = Command::new("tar");
+        let mut c = tar();
         c.arg("-xf").arg(archive).arg("-C").arg(into).args(["--no-same-owner", "--no-same-permissions"]);
         c
     };
@@ -924,7 +971,7 @@ fn merge(from: &Path, into: &Path) -> Result<(), String> {
 pub fn copy_worker(install: &Path, id: &str) -> Result<PathBuf, String> {
     let bin = install.join("bin");
     std::fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
-    let dest = bin.join(format!("superfluid-worker-{id}"));
+    let dest = bin.join(format!("superfluid-worker-{id}{}", std::env::consts::EXE_SUFFIX));
     if dest.is_file() {
         return Ok(dest);
     }
@@ -1051,6 +1098,7 @@ mod tests {
         assert!(seen(None, Some("9,GPU-1a2b")).0, "not one past an invalid entry");
     }
 
+    #[cfg(unix)]
     #[test]
     fn rocm_runtimes_are_the_core_trees_with_libraries_under_the_root() {
         let root = std::env::temp_dir().join(format!("superfluid-kit-rocm-{}", std::process::id()));
@@ -1119,6 +1167,7 @@ mod tests {
         assert_eq!(Manifest::from_json(&older.to_json()).unwrap(), older, "an install from before manifests kept a rule's ask");
     }
 
+    #[cfg(unix)]
     #[test]
     fn archives_unpack_through_their_top_directory_and_the_first_keeps_a_shared_name() {
         let dir = std::env::temp_dir().join(format!("superfluid-kit-unpack-{}", std::process::id()));
@@ -1188,6 +1237,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_archive_reaches_nothing_outside_its_install() {
         let dir = std::env::temp_dir().join(format!("superfluid-kit-escape-{}", std::process::id()));
@@ -1243,6 +1293,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_top_entry_is_refused() {
         let dir = std::env::temp_dir().join(format!("superfluid-kit-top-{}", std::process::id()));

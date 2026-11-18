@@ -7,13 +7,19 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Link W local-adapter mechanics: POSIX shared-memory segments, SCM_RIGHTS fd passing, and the token/logits ring layout shared by worker and node-agent"
+description = "Link W local-adapter mechanics: shared-memory segments, passing them to another process, and the token/logits ring layout shared by worker and node-agent"
 
 [dependencies]
 superfluid-engine.workspace = true
 superfluid-abi.workspace = true
-libc = "0.2"
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1.1"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

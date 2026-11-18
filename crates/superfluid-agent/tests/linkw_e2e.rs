@@ -1,4 +1,4 @@
-use std::os::unix::net::UnixStream;
+use superfluid_shm::os::UnixStream;
 use std::thread;
 
 use superfluid_agent::{argmax, WorkerClient};
@@ -402,7 +402,7 @@ fn frame_version_mismatch_fails_closed() {
     use superfluid_proto::envelope::FrameClass;
     use superfluid_proto::linkw::msg_type;
     use std::io::Write;
-    use std::os::unix::net::UnixStream;
+    use superfluid_shm::os::UnixStream;
 
     let (frames_a, frames_w) = UnixStream::pair().expect("socketpair");
     let (fds_a, fds_w) = UnixStream::pair().expect("fd socketpair");

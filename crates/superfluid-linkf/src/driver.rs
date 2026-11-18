@@ -2,7 +2,10 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use uds_windows::UnixStream;
 use std::time::{Duration, Instant};
 
 use superfluid_proto::envelope::FrameClass;

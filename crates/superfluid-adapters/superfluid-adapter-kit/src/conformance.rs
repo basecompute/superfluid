@@ -135,7 +135,8 @@ pub fn worker(bin: &Path, id: &str) {
 
     let (code, _, err) = run(&["--model", &missing.to_string_lossy()]);
     assert_eq!(code, Some(2), "{id}: serving without the Link W streams must be refused");
-    assert!(err.contains("--frames-fd"), "{id}: {err}");
+    // What a worker is handed its streams by: descriptors on Unix, a socket to connect to on Windows.
+    assert!(err.contains(if cfg!(unix) { "--frames-fd" } else { "--link" }), "{id}: {err}");
 }
 
 fn scratch(id: &str) -> PathBuf {

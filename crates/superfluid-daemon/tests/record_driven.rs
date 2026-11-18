@@ -1,5 +1,8 @@
 //! The scheduler follows the model's capability record.
 
+// These tests stand in for a worker with a POSIX shell script, so they run on Unix only.
+#![cfg(unix)]
+
 use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -537,7 +540,7 @@ fn a_native_request_loads_a_retired_model_again() {
     }
     let socket = std::env::temp_dir().join(format!("brd-{}-{}.sock", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_file(&socket);
-    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind the native socket");
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).expect("bind the native socket");
     {
         let held = Arc::clone(&m.held);
         std::thread::spawn(move || superfluid_daemon::api::serve(listener, held));

@@ -81,6 +81,12 @@ fn ahead_args(rest: &[String]) -> Result<WorkerArgs, String> {
     Ok(args)
 }
 
+/// A no-op on Windows, whose C runtime has no line buffering (`_IOLBF` there is full
+/// buffering); the worker's own lines go out through Rust's stdout, which is line-buffered.
+#[cfg(not(unix))]
+fn line_buffer_stdout() {}
+
+#[cfg(unix)]
 fn line_buffer_stdout() {
     extern "C" {
         #[cfg(any(target_os = "macos", target_os = "ios"))]

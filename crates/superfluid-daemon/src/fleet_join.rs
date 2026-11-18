@@ -722,12 +722,11 @@ fn busy(daemon: &Daemon) -> bool {
 /// Starts this node again as it was started: with no `--model`, it serves the model its head
 /// serves now, pulled and loaded as at the first start.
 fn restart() -> ! {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("cannot find this program to start it again: {e}")));
     eprintln!("superfluid: starting again to serve the head's model");
     // The next image writes its events to the stream this one wrote to, from its `start` on.
     crate::events::prepare_exec();
-    let e = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    let e = crate::sys::replace_process(std::process::Command::new(exe).args(std::env::args_os().skip(1)));
     fail(format!("cannot start again: {e}"))
 }
 

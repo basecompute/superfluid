@@ -10,6 +10,9 @@ Superfluid is one daemon binary plus a worker per runtime. The runtimes themselv
 | macOS, Intel | CPU | no | no |
 | Linux x86-64 | CUDA, ROCm, Vulkan or CPU | no | ROCm (AMD Strix Halo or Strix Point GPU, ROCm 10) |
 | Linux arm64 | CUDA, Vulkan or CPU | no | CUDA (NVIDIA GPU) |
+| Windows x86-64 | Vulkan or CPU; CUDA or ROCm by name | no | no |
+
+Windows is new: it builds from source ([Windows](#windows) below), and no release is published for it yet.
 
 ## Install a release
 
@@ -73,7 +76,7 @@ export PATH="$PWD/target/release:$PATH"
 | `superfluid-workerd` | the worker the daemon spawns for a runtime it links |
 | `superfluid-noded` | the fleet node agent |
 | `superfluid-worker-llamacpp`, `superfluid-worker-basert` | the adapters' own workers |
-| `libsuperfluid_tokenizer_llamacpp.{dylib,so}` | the library the daemon tokenizes GGUF files with |
+| `libsuperfluid_tokenizer_llamacpp.{dylib,so}`, `superfluid_tokenizer_llamacpp.dll` | the library the daemon tokenizes GGUF files with |
 
 Nothing of llama.cpp, MLX or baseRT is downloaded or linked by the build.
 
@@ -95,6 +98,32 @@ SUPERFLUID_WORKER_MLX=target/adapters/superfluid-worker-mlx superfluid runtime i
 
 > [!WARNING]
 > Unset `SUPERFLUID_WORKER_MLX` before serving. A runtime named in the environment is served by that worker, and the staged copy has no Python beside it.
+
+### Windows
+
+Windows 10 1803 or later, x86-64. The daemon builds with llama.cpp and without baseRT, MLX or the terminal monitor, none of which has a Windows build:
+
+```powershell
+git clone https://github.com/basecompute/superfluid; cd superfluid
+cargo build --release -p superfluid --no-default-features --features llamacpp
+cargo build --release -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+$env:PATH = "$PWD\target\release;$env:PATH"
+superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
+```
+
+Either Rust toolchain builds it, with a C compiler beside it: `stable-x86_64-pc-windows-msvc` with the Visual Studio Build Tools, or `stable-x86_64-pc-windows-gnu` with a MinGW-w64 `gcc` on `PATH`. Neither the second nor anything Superfluid does afterwards needs administrator rights: rustup installs under your profile, a MinGW-w64 build such as [WinLibs](https://winlibs.com) unpacks anywhere, and Superfluid keeps to `%USERPROFILE%\.superfluid`, the Hugging Face cache and your temporary directory.
+
+`superfluid runtime install llamacpp` takes llama.cpp's Vulkan build where a Vulkan driver is installed, with the CPU build to fall back on. An NVIDIA or AMD HIP install is not looked for yet; `--backend cuda` or `--backend rocm` names one.
+
+What differs from macOS and Linux:
+
+| | on Windows |
+|---|---|
+| `superfluid self` | not offered; build the next version from source |
+| `superfluid top`, the `serve` TUI | not built (`tui` feature) |
+| `superfluid stop` | ends the server outright; there is no signal to ask it to finish first, and none to drain it (`SIGUSR1`) |
+| `$SUPERFLUID_HOME/runtimes/<id>/current` | a file that holds the default install's name, not a link: an ordinary user may make neither a symbolic link nor a junction every process follows |
+| the native session API | the same unix socket, `%USERPROFILE%\.superfluid\superfluid.sock` |
 
 ## Install a runtime
 

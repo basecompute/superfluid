@@ -376,6 +376,7 @@ mod tests {
         assert!(check(&good, &none).unwrap().is_empty(), "another runtime's options are not its concern");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_options_are_listed_before_the_runtime_runs_here() {
         let root = std::env::temp_dir().join(format!("superfluid-runtime-options-declared-{}", std::process::id()));

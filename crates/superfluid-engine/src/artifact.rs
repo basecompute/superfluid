@@ -160,6 +160,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_magic_probe_opens_only_regular_files() {
         let d = dir("fifo");

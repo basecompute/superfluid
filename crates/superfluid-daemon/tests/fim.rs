@@ -117,7 +117,7 @@ fn satellite_serves_completions_and_primary_falls_back_without_one() {
 
 fn serve_uds(daemon: Arc<Daemon>) -> PathBuf {
     let socket = test_dir().join("b.sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || {
         let _ = api::serve(listener, daemon);
     });

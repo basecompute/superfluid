@@ -123,7 +123,7 @@ impl Runtime for Llamacpp {
         let (id, tag) = pull.split()?;
         let lib = sys::load()?;
         let dir = lib.path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let tool = dir.join("llama");
+        let tool = dir.join(format!("llama{}", std::env::consts::EXE_SUFFIX));
         if !tool.is_file() {
             return Err(format!(
                 "the llama.cpp at {} has no `llama` tool beside it to pull with (a build from llama.cpp's releases has it: \
@@ -545,7 +545,9 @@ pub mod sized {
 }
 
 fn tokenizer_library_file() -> String {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        "superfluid_tokenizer_llamacpp.dll".into()
+    } else if cfg!(target_os = "macos") {
         "libsuperfluid_tokenizer_llamacpp.dylib".into()
     } else {
         "libsuperfluid_tokenizer_llamacpp.so".into()

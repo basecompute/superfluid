@@ -59,15 +59,15 @@ pub fn refresh_current(catalog: &Catalog, id: RuntimeId) -> Result<Option<String
     match default(catalog, id) {
         Some(d) => {
             let tmp = root.join(format!(".current-new-{}", unguessable()?));
-            std::os::unix::fs::symlink(&d.name, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-            std::fs::rename(&tmp, &link).map_err(|e| {
-                let _ = std::fs::remove_file(&tmp);
+            crate::sys::link_dir(&d.name, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            crate::sys::replace_dir_link(&tmp, &link).map_err(|e| {
+                crate::sys::remove_dir_link(&tmp);
                 format!("switching current: {e}")
             })?;
             Ok(Some(d.name))
         }
         None => {
-            let _ = std::fs::remove_file(&link);
+            crate::sys::remove_dir_link(&link);
             let _ = std::fs::remove_file(root.join("pinned"));
             Ok(None)
         }
@@ -76,9 +76,8 @@ pub fn refresh_current(catalog: &Catalog, id: RuntimeId) -> Result<Option<String
 
 /// A name nobody else sharing the directory can claim first.
 fn unguessable() -> Result<u64, String> {
-    use std::io::Read;
     let mut buf = [0u8; 8];
-    std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).map_err(|e| format!("/dev/urandom: {e}"))?;
+    crate::sys::random(&mut buf).map_err(|e| format!("the system's random source: {e}"))?;
     Ok(u64::from_le_bytes(buf))
 }
 
@@ -369,7 +368,8 @@ fn last_lines(stderr: &[u8]) -> Option<String> {
     (!lines.is_empty()).then(|| lines.into_iter().rev().collect::<Vec<_>>().join(" / "))
 }
 
-#[cfg(test)]
+// The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

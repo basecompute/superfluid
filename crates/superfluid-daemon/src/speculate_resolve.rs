@@ -171,19 +171,12 @@ pub fn refresh_catalog(own: &Path) -> Result<String, String> {
 /// so a multi-gigabyte bundle is hashed once rather than at every start. `None` if unreadable.
 fn file_sha256(path: &Path, meta: &std::fs::Metadata, cache: Option<&Path>) -> Option<String> {
     use sha2::Digest;
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
-    let stamp = |m: &std::fs::Metadata| {
-        format!(
-            "{} {} {} {}.{} {}.{}",
-            m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()
-        )
-    };
+    let stamp = crate::sys::file_stamp;
     let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
     let before = stamp(meta);
     let entry = cache.and_then(|dir| {
         let canon = path.canonicalize().ok()?;
-        Some(dir.join(hex(&sha2::Sha256::digest(canon.as_os_str().as_bytes()))))
+        Some(dir.join(hex(&sha2::Sha256::digest(canon.as_os_str().as_encoded_bytes()))))
     });
     if let Some(remembered) = entry.as_ref().and_then(|e| std::fs::read_to_string(e).ok()) {
         if let Some((st, digest)) = remembered.trim().split_once('\n') {
@@ -444,7 +437,7 @@ fn expand_tilde(path: &str) -> String {
         Some(r) if r.starts_with('/') => r,
         _ => return path.to_string(),
     };
-    match std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+    match std::env::home_dir().filter(|h| !h.as_os_str().is_empty()) {
         Some(home) => format!("{}{rest}", Path::new(&home).display()),
         None => path.to_string(),
     }
@@ -491,7 +484,7 @@ pub fn auto_search_dirs(target: &Path) -> Vec<(PathBuf, usize)> {
 
 fn hub_roots() -> Vec<PathBuf> {
     let env = |k| std::env::var_os(k).filter(|v| !v.is_empty());
-    hub_roots_from(env("BASERT_MODELS_DIR"), env("HOME"), env("XDG_CACHE_HOME"))
+    hub_roots_from(env("BASERT_MODELS_DIR"), std::env::home_dir().map(Into::into).filter(|h: &std::ffi::OsString| !h.is_empty()), env("XDG_CACHE_HOME"))
 }
 
 fn hub_roots_from(
@@ -867,6 +860,7 @@ mod tests {
         assert_eq!(sizing_path("prompt-lookup", t), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_hub_cache_is_where_basert_pull_installs() {
         let os = |s: &str| Some(std::ffi::OsString::from(s));
@@ -925,6 +919,7 @@ mod tests {
     /// The drafter the catalog marks `speculator_auto` goes ahead of the target's own head, and is
     /// named for a pull while no copy is installed; Gemma 4's head, an unmarked pairing and a
     /// machine that does not follow the pairings keep the head first.
+    #[cfg(unix)]
     #[test]
     fn auto_takes_the_drafter_the_catalog_marks_ahead_of_the_head() {
         let root = scratch("marked");
@@ -991,6 +986,7 @@ mod tests {
     /// loaded later) each get their own drafter pulled once and ranked first, in either order.
     /// With no pull (`--offline`) nothing is fetched and the head stays first; a pull that installs
     /// nothing (a failed download) leaves the head first; a copy already here is not pulled again.
+    #[cfg(unix)]
     #[test]
     fn auto_pulls_the_marked_drafter_for_each_target() {
         let catalog = Pairings::from_json(

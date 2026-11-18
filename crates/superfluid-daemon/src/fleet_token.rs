@@ -1,7 +1,7 @@
 //! `superfluid fleet token`: the secret a head and its nodes authenticate and encrypt their
 //! link with, kept at `$SUPERFLUID_HOME/fleet/token`.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub fn path(home: &Path) -> PathBuf {
@@ -29,9 +29,8 @@ fn save(home: &Path, token: &[u8], fresh: bool) -> Result<bool, String> {
     let p = path(home);
     let dir = p.parent().expect("the token has a directory");
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    use std::os::unix::fs::OpenOptionsExt;
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).mode(0o600);
+    crate::sys::owner_only(opts.write(true));
     if fresh {
         opts.create_new(true);
     } else {
@@ -52,9 +51,7 @@ pub fn read_or_create(home: &Path) -> Result<Vec<u8>, String> {
         return Ok(t);
     }
     let mut raw = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut raw))
-        .map_err(|e| format!("/dev/urandom: {e}"))?;
+    crate::sys::random(&mut raw).map_err(|e| format!("the system's random source: {e}"))?;
     let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
     // Made by another process in the meantime: theirs is the token.
     if !save(home, token.as_bytes(), true)? {
@@ -101,7 +98,8 @@ pub fn run(args: &[String]) {
     }
 }
 
-#[cfg(test)]
+// The test reads the permission bits a Unix file has.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

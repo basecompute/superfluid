@@ -2,6 +2,9 @@
 //! reads on stderr. Every line is one JSON event; the steps of a start have names of their own,
 //! and a start that fails ends with why and the exit code.
 
+// These tests stand in for a worker with a POSIX shell script, so they run on Unix only.
+#![cfg(unix)]
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};

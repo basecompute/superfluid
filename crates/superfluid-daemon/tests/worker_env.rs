@@ -1,6 +1,9 @@
 //! A runtime's worker starts without the operator's credentials in its environment.
 //! One test in its own process: it sets the environment before any thread reads it.
 
+// These tests stand in for a worker with a POSIX shell script, so they run on Unix only.
+#![cfg(unix)]
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 

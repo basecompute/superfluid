@@ -161,8 +161,8 @@ impl Versions {
         }
         let tmp = self.dir.join(".current.tmp");
         let _ = std::fs::remove_file(&tmp);
-        std::os::unix::fs::symlink(v, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, self.dir.join("current")).map_err(|e| format!("{}: {e}", self.dir.join("current").display()))
+        crate::sys::link_dir(v, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        crate::sys::replace_dir_link(&tmp, &self.dir.join("current")).map_err(|e| format!("{}: {e}", self.dir.join("current").display()))
     }
 
     /// Removes every version but `current`, `previous`, one with a `keep` file, and one a running process started from.
@@ -225,7 +225,7 @@ impl Versions {
         let relink = |link: &Path, target: &Path| -> Result<(), String> {
             let tmp = link.with_file_name(format!(".{}.tmp", link.file_name().and_then(|n| n.to_str()).unwrap_or("link")));
             let _ = std::fs::remove_file(&tmp);
-            std::os::unix::fs::symlink(target, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            crate::sys::symlink_file(target, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
             std::fs::rename(&tmp, link).map_err(|e| format!("{}: {e}", link.display()))
         };
         for name in LINKED {
@@ -407,15 +407,11 @@ fn delegate(exe: &Path) -> Option<Delegate> {
 
 /// Whether this user may write `path`, as the manager would need to.
 fn writable(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
-    // SAFETY: `c` is a NUL-terminated path that outlives the call.
-    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    crate::sys::writable(path)
 }
 
 fn executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    crate::sys::is_executable(path)
 }
 
 /// `tool args…` with `tool` from PATH, or named when PATH has none.
@@ -949,7 +945,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
             copy_tree(&src, &dest)?;
         } else if kind.is_symlink() {
             let target = std::fs::read_link(&src).map_err(|e| format!("{}: {e}", src.display()))?;
-            std::os::unix::fs::symlink(target, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+            crate::sys::symlink_file(&target, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
         } else {
             std::fs::copy(&src, &dest).map_err(|e| format!("{} -> {}: {e}", src.display(), dest.display()))?;
         }
@@ -1369,7 +1365,8 @@ fn announce(home: &Path, mut check: Check, command: &str) -> Option<String> {
 
 /// What `serve` runs once the server is up: one listing read a day at most, one line per new release.
 pub fn check_in_background(home: PathBuf, offline: bool) {
-    if offline || std::env::var_os(NO_CHECK_ENV).is_some_and(|v| !v.is_empty() && v != "0") {
+    // Windows has no release to announce, nor a `superfluid self update` to install one with.
+    if offline || cfg!(windows) || std::env::var_os(NO_CHECK_ENV).is_some_and(|v| !v.is_empty() && v != "0") {
         return;
     }
     std::thread::Builder::new()
@@ -1401,6 +1398,12 @@ fn usage() -> ! {
 
 /// `superfluid self <action> ...`; the exit code.
 pub fn run(args: &[String]) -> i32 {
+    // No release is published for Windows, and a version here is kept behind symbolic links,
+    // which an ordinary user cannot make there.
+    if cfg!(windows) {
+        eprintln!("superfluid: `superfluid self` is not offered on Windows yet; build the next version from source");
+        return 1;
+    }
     let home = crate::runtimes::default_home();
     let exe = std::env::current_exe().unwrap_or_default();
     let catalog = Catalog::from_env();
@@ -1433,10 +1436,9 @@ pub fn run(args: &[String]) -> i32 {
             }
             match update(&home, &catalog, &exe, &opts) {
                 Ok(Report { hand_off: Some(mut cmd), .. }) => {
-                    use std::os::unix::process::CommandExt;
                     let _ = std::io::stdout().flush();
                     // Only returns when the command could not be run.
-                    let e = cmd.exec();
+                    let e = crate::sys::replace_process(&mut cmd);
                     eprintln!("superfluid: running {}: {e}", cmd.get_program().to_string_lossy());
                     1
                 }
@@ -1475,7 +1477,8 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
-#[cfg(test)]
+// The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
