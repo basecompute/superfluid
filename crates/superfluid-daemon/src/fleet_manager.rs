@@ -8,6 +8,7 @@ use superfluid_linkf::Liveness;
 use superfluid_proto::linkf::Lease;
 
 use crate::fleet::{FleetGeneration, FleetHead};
+use crate::fleet_metrics::{Counts, NodeCounts};
 use crate::wal::GenParams;
 use crate::DaemonError;
 
@@ -66,14 +67,25 @@ impl NodeLoad {
     }
 }
 
-/// Keeps `node`'s live load from each status `head` reads (weak, as the node owns the head), and
+/// Keeps `node`'s live load and counters from each status `head` reads (weak, as the node owns
+/// the head), adding what the counters add to `counted`, the head's sum of every node's; and
 /// ends `head`'s calls once the node is removed.
-fn watch(node: &Arc<NodeConn>, head: &mut FleetHead) {
+fn watch(node: &Arc<NodeConn>, head: &mut FleetHead, counted: &Arc<Mutex<Counts>>) {
     head.removed_when(Arc::clone(&node.removed));
-    let node = Arc::downgrade(node);
+    let weak = Arc::downgrade(node);
     head.on_status(Arc::new(move |cap| {
-        if let Some(node) = node.upgrade() {
+        if let Some(node) = weak.upgrade() {
             *node.live.lock().expect("live") = FleetManager::load_from(cap);
+        }
+    }));
+    let (weak, counted) = (Arc::downgrade(node), Arc::clone(counted));
+    head.on_stats(Arc::new(move |stats| {
+        if let Some(node) = weak.upgrade() {
+            // The node's lock held while the sum takes what it adds, so two of its connections
+            // reporting at once add each count once.
+            let mut counts = node.counts.lock().expect("counts");
+            let added = counts.absorb(stats);
+            crate::fleet_metrics::add(&mut counted.lock().expect("counted"), &added);
         }
     }));
 }
@@ -99,6 +111,8 @@ struct NodeConn {
     /// The last status any of its connections read, mid-generation included, for `/metrics`;
     /// the load placement reads is synced from a connection between calls.
     live: Mutex<NodeLoad>,
+    /// The scheduler counters it reports, for `/metrics`.
+    counts: Mutex<NodeCounts>,
     /// Set once the node is removed ([`FleetManager::remove`]); every connection to it reads it.
     removed: Arc<AtomicBool>,
 }
@@ -284,6 +298,9 @@ pub struct FleetManager {
     policy: PlacementPolicy,
     lease: Lease,
     pool_high_pct: u32,
+    /// What every node's scheduler counters added since the head started, a node removed or
+    /// restarted included, which the head's own series add.
+    counted: Arc<Mutex<Counts>>,
 }
 
 struct InFlight<'a> {
@@ -371,6 +388,9 @@ pub struct NodeStatus {
     pub decode_tokens: u64,
     /// The models the head places on it, from its report: none until it has reported.
     pub models: Vec<String>,
+    /// The scheduler counters it reports ([`crate::fleet_metrics::NODE_COUNTERS`]), over each
+    /// of its starts the head saw; `None` until it has, as from a node released before them.
+    pub counters: Option<Counts>,
 }
 
 /// One node as the head lists it (`GET /v1/fleet/nodes`).
@@ -443,6 +463,7 @@ impl FleetManager {
                     cursor: std::sync::atomic::AtomicUsize::new(0),
                     decoded: std::sync::atomic::AtomicU64::new(0),
                     live: Mutex::new(NodeLoad::default()),
+                    counts: Mutex::new(NodeCounts::default()),
                     removed: Arc::new(AtomicBool::new(false)),
                 })
             })
@@ -466,6 +487,7 @@ impl FleetManager {
             policy,
             lease,
             pool_high_pct: pool_high_pct.clamp(1, 100),
+            counted: Default::default(),
         }
     }
 
@@ -522,6 +544,7 @@ impl FleetManager {
                         cursor: std::sync::atomic::AtomicUsize::new(0),
                         decoded: std::sync::atomic::AtomicU64::new(0),
                         live: Mutex::new(NodeLoad::default()),
+                        counts: Mutex::new(NodeCounts::default()),
                         removed: Arc::new(AtomicBool::new(false)),
                     });
                     first = Some(fresh.conns[0].lock().expect("node conn"));
@@ -543,7 +566,7 @@ impl FleetManager {
         let node = self.node(i);
         let mut head = head;
         head.keep_alive(self.liveness);
-        watch(&node, &mut head);
+        watch(&node, &mut head, &self.counted);
         if let Some(mut first) = first {
             // A new node has no connection for short calls yet.
             let _ = head.ask_control();
@@ -592,6 +615,12 @@ impl FleetManager {
         counts
     }
 
+    /// What the scheduler counters of every node the head has had added since it started,
+    /// those since removed included: the sum the head's own series add, which only grows.
+    pub fn node_counts(&self) -> Counts {
+        *self.counted.lock().expect("counted")
+    }
+
     /// Every node the head knows, in the order it learned them, but those removed.
     pub fn status(&self) -> Vec<NodeStatus> {
         self.nodes().into_iter().map(|n| n.status).collect()
@@ -637,6 +666,7 @@ impl FleetManager {
                     kv_blocks_total: load.kv_total,
                     decode_tokens: node.decoded.load(Ordering::Relaxed),
                     models: meta.models.clone(),
+                    counters: node.counts.lock().expect("counts").total(),
                 };
                 let entry = NodeEntry {
                     status,
@@ -836,7 +866,7 @@ impl FleetManager {
         match FleetHead::connect(&spec.addr, spec.auth.clone()) {
             Ok(mut head) => {
                 head.keep_alive(self.liveness);
-                watch(&node, &mut head);
+                watch(&node, &mut head, &self.counted);
                 self.sync_meta(i, &head);
                 *guard = Some(head);
                 Ok(())
@@ -1961,7 +1991,7 @@ impl FleetManager {
                     match FleetHead::connect(&spec.addr, spec.auth.clone()) {
                         Ok(mut head) => {
                             head.keep_alive(self.liveness);
-                            watch(&node, &mut head);
+                            watch(&node, &mut head, &self.counted);
                             self.sync_meta(i, &head);
                             self.mark_up(i);
                             if let Ok(mut slot) = node.conns[0].try_lock() {

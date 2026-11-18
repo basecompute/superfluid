@@ -226,3 +226,84 @@ fn a_node_with_another_token_does_not_join() {
     std::thread::sleep(Duration::from_millis(200));
     assert!(manager.load().is_empty(), "nothing joined");
 }
+
+/// A mock daemon that speculates by prompt lookup, which proposes drafts on greedy lanes.
+fn speculating_daemon() -> Daemon {
+    let dir = std::env::temp_dir().join(format!("superfluid-join-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = SessionStore::open(&dir.join("wal.log")).unwrap();
+    let mut cfg = EngineConfig::default();
+    cfg.spaces.retain(|s| s.kind == superfluid_abi::space_kind::PAGED_TOKEN_KV);
+    let host = EngineHost::spawn(move || (MockEngine::new(cfg), None)).unwrap();
+    let options = superfluid_daemon::DaemonOptions { speculate: Some("prompt-lookup".into()), ..Default::default() };
+    Daemon::with_options(store, host, Box::new(MockCodec), options).unwrap()
+}
+
+/// `name`'s value in `metrics`, the line that starts with it whole; 0 where there is none.
+fn metric(metrics: &str, name: &str) -> u64 {
+    metrics.lines().find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.trim().parse().ok()).unwrap_or(0)
+}
+
+#[test]
+fn a_head_reports_what_its_nodes_schedulers_count_per_node_and_summed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let head_addr = listener.local_addr().unwrap().to_string();
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
+    let m = Arc::clone(&manager);
+    let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), models));
+    let dir = std::env::temp_dir().join(format!("superfluid-join-head-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let head = Daemon::over_fleet(
+        SessionStore::open(&dir.join("wal.log")).unwrap(),
+        Box::new(superfluid_daemon::codec::MockChatCodec),
+        Arc::clone(&manager),
+        "mock".into(),
+        Default::default(),
+    )
+    .unwrap();
+
+    let daemon = Arc::new(speculating_daemon());
+    let node = NodeAgent::new(Arc::clone(&daemon), "box-s", "mock").with_max_lanes(2).with_auth(TOKEN.to_vec());
+    for _ in 0..2 {
+        keep_dialing(head_addr.clone(), node.connection());
+    }
+    wait_for("the node joined", || manager.load().len() == 1);
+
+    let mut prompt = Vec::new();
+    for _ in 0..8 {
+        prompt.extend_from_slice(&[11, 12, 13, 14, 15, 16, 17, 18]);
+    }
+    for k in 1..=2u64 {
+        manager.place(k, GenParams::default(), 0, "chatml", "mock", &prompt, 24).expect("placed");
+        manager.generate(k, 24, 60_000).expect("generated");
+        manager.finish(k);
+    }
+    let stats = daemon.sched_stats();
+    let (proposed, accepted, prefilled) = (
+        stats.spec_proposed.load(Ordering::Relaxed),
+        stats.spec_accepted.load(Ordering::Relaxed),
+        stats.prefill_tokens.load(Ordering::Relaxed),
+    );
+    assert!(proposed > 0 && prefilled > 0, "the node speculated and prefilled");
+
+    let labels = "{node=\"box-s\",addr=\"127.0.0.1\",model=\"mock\"}";
+    // The node reports every 2 s, on each of its connections.
+    wait_for("the node's counters reached the head", || {
+        metric(&head.metrics_text(), &format!("superfluid_fleet_node_spec_proposed_total{labels}")) == proposed
+    });
+    let text = head.metrics_text();
+    assert_eq!(metric(&text, &format!("superfluid_fleet_node_spec_accepted_total{labels}")), accepted, "{text}");
+    assert_eq!(metric(&text, &format!("superfluid_fleet_node_prefill_tokens_total{labels}")), prefilled, "{text}");
+    assert_eq!(metric(&text, "superfluid_spec_proposed_total"), proposed, "the head's own series sum its nodes': {text}");
+    assert_eq!(metric(&text, "superfluid_spec_accepted_total"), accepted, "{text}");
+    assert_eq!(metric(&text, "superfluid_prefill_tokens_total"), prefilled, "{text}");
+
+    // A node that leaves takes its series, but not what it counted, from the head's own.
+    manager.remove("box-s").expect("removed");
+    let text = head.metrics_text();
+    assert!(!text.contains("superfluid_fleet_node_spec_proposed_total{node=\"box-s\""), "{text}");
+    assert_eq!(metric(&text, "superfluid_spec_proposed_total"), proposed, "{text}");
+    assert_eq!(metric(&text, "superfluid_prefill_tokens_total"), prefilled, "{text}");
+}

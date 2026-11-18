@@ -83,6 +83,9 @@ pub struct NodeAgent {
     /// What the node tells the head of itself ([`superfluid_proto::handshake::FOLLOWS_HEAD`]).
     feature_flags: u64,
     start: Instant,
+    /// Which start of the daemon's counters this is, told to the head with them
+    /// ([`linkf::NodeStatsMsg::run`]); every connection of this node shares it.
+    run: u64,
     handshake_timeout: Duration,
     idle_timeout: Duration,
     auth: Vec<u8>,
@@ -111,6 +114,16 @@ const MAX_BLOB: u64 = 1 << 30;
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 const STATUS_INTERVAL_MS: u64 = 2_000;
+
+/// A value no earlier start of a node's counters is likely to have had: a node agent is made
+/// with its daemon, so a new one means counters from 0.
+fn new_run() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    h.write_u32(std::process::id());
+    h.finish()
+}
 
 /// A renewal the head has not answered is asked for again after this long.
 const RENEW_RETRY: Duration = Duration::from_secs(1);
@@ -156,6 +169,7 @@ impl NodeAgent {
             model_id: None,
             feature_flags: 0,
             start: Instant::now(),
+            run: new_run(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             auth: Vec::new(),
@@ -176,6 +190,7 @@ impl NodeAgent {
             model_id: self.model_id.clone(),
             feature_flags: self.feature_flags,
             start: self.start,
+            run: self.run,
             handshake_timeout: self.handshake_timeout,
             idle_timeout: self.idle_timeout,
             auth: self.auth.clone(),
@@ -328,9 +343,38 @@ impl NodeAgent {
             },
             capacity,
             loadable_models: vec![self.model_name.clone()],
+            stats: Some(self.stats()),
         };
         let _ = endpoint.send(msg_type::NODE_STATUS, &msg);
         self.last_status_ms = self.start.elapsed().as_millis() as u64;
+    }
+
+    /// The daemon's scheduler counters, for the head's `/metrics`.
+    fn stats(&self) -> linkf::NodeStatsMsg {
+        let s = self.daemon.sched_stats();
+        let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        linkf::NodeStatsMsg {
+            run: self.run,
+            prefill_tokens: g(&s.prefill_tokens),
+            warm_prefix_tokens: g(&s.warm_prefix_tokens),
+            cold_admissions: g(&s.cold_admissions),
+            unservable_cold_admissions: g(&s.unservable_cold_admissions),
+            unservable_park_refusals: g(&s.unservable_park_refusals),
+            preemptions: g(&s.preemptions),
+            admits_deferred: g(&s.admits_deferred),
+            starvation_grants: g(&s.starvation_grants),
+            os_pressure_events: g(&s.os_pressure_events),
+            pressure_evictions: g(&s.pressure_evictions),
+            pressure_bytes_evicted: g(&s.pressure_bytes_evicted),
+            pins_yielded: g(&s.pins_yielded),
+            pins_expired: g(&s.pins_expired),
+            worker_respawns: g(&s.worker_respawns),
+            spec_proposed: g(&s.spec_proposed),
+            spec_accepted: g(&s.spec_accepted),
+            parks_lossless: g(&s.parks_lossless),
+            parks_lossy: g(&s.parks_lossy),
+            resumes: g(&s.resumes),
+        }
     }
 
     fn ackf(&mut self) -> HelloAckF {
