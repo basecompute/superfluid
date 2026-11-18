@@ -45,6 +45,58 @@ pub fn resolve(flag: &str, value: &str, ids: &[RuntimeId]) -> Option<Given> {
     best.map(|(runtime, name)| Given { flag: flag.to_string(), runtime, name: name.to_string(), value: value.to_string() })
 }
 
+/// A runtime option as a command line gives it, `--<id>-<name> <value>` or `--<id>-<name>=<value>`: the flag, and its
+/// value, the next argument taken when it is not a flag itself. `None` when `arg` is not shaped as one ([`looks_like`]).
+pub fn candidate(arg: &str, rest: &mut std::slice::Iter<'_, String>) -> Option<(String, Option<String>)> {
+    let (flag, given) = match arg.split_once('=') {
+        Some((f, v)) => (f, Some(v.to_string())),
+        None => (arg, None),
+    };
+    if !looks_like(flag) {
+        return None;
+    }
+    let value = given.or_else(|| {
+        let next = rest.clone().next().filter(|v| !v.starts_with("--")).cloned();
+        if next.is_some() {
+            rest.next();
+        }
+        next
+    });
+    Some((flag.to_string(), value))
+}
+
+/// Why a [`candidate`] is not a runtime option here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unresolved {
+    /// No runtime here has the id it names.
+    Unknown(String),
+    /// It was given no value.
+    NoValue(String),
+}
+
+/// Each [`candidate`] resolved against the runtimes here ([`resolve`]).
+pub fn resolve_candidates(candidates: &[(String, Option<String>)], ids: &[RuntimeId]) -> Result<Vec<Given>, Unresolved> {
+    candidates
+        .iter()
+        .map(|(flag, value)| match resolve(flag, value.as_deref().unwrap_or_default(), ids) {
+            None => Err(Unresolved::Unknown(flag.clone())),
+            Some(_) if value.is_none() => Err(Unresolved::NoValue(flag.clone())),
+            Some(given) => Ok(given),
+        })
+        .collect()
+}
+
+/// Takes the options for every worker this process starts, as given, a repeat refused: before a runtime is first
+/// asked for, so one that makes it usable here counts from the start ([`given_pairs`]); [`settle`] checks them once
+/// the runtime is known.
+pub fn adopt(given: &[Given]) -> Result<(), String> {
+    refuse_repeats(given)?;
+    set(given_pairs(given));
+    // The llama.cpp tokenizer this process loads finds its library the way the worker does.
+    export_to_daemon();
+    Ok(())
+}
+
 /// Refuses an option given twice: the worker reads the last value and this process the first (`daemon_environment`),
 /// so a repeat would split one knob between two values; serve refuses it as a usage error before anything starts.
 pub fn refuse_repeats(given: &[Given]) -> Result<(), String> {
@@ -265,6 +317,24 @@ mod tests {
             default: default.into(),
             about: format!("about {name}"),
         }
+    }
+
+    #[test]
+    fn a_candidate_takes_its_value_from_the_next_argument_unless_that_is_a_flag() {
+        let args: Vec<String> = ["20", "--offline", "--mlx-venv=/env"].iter().map(|s| s.to_string()).collect();
+        let mut rest = args.iter();
+        assert_eq!(candidate("--llamacpp-n-gpu-layers", &mut rest), Some(("--llamacpp-n-gpu-layers".into(), Some("20".into()))));
+        assert_eq!(candidate("--llamacpp-lib", &mut rest), Some(("--llamacpp-lib".into(), None)), "--offline is a flag, not its value");
+        assert_eq!(rest.next().map(String::as_str), Some("--offline"));
+        assert_eq!(candidate("--mlx-venv=/env", &mut rest), Some(("--mlx-venv".into(), Some("/env".into()))));
+        assert_eq!(candidate("--offline", &mut rest), None, "not shaped as a runtime option");
+        assert_eq!(candidate("--Bad-Flag", &mut rest), None);
+
+        let ids = [RuntimeId::new("llamacpp")];
+        let given = resolve_candidates(&[("--llamacpp-n-gpu-layers".into(), Some("20".into()))], &ids).unwrap();
+        assert_eq!((given[0].name.as_str(), given[0].value.as_str()), ("n-gpu-layers", "20"));
+        assert_eq!(resolve_candidates(&[("--mlx-venv".into(), Some("/e".into()))], &ids), Err(Unresolved::Unknown("--mlx-venv".into())));
+        assert_eq!(resolve_candidates(&[("--llamacpp-lib".into(), None)], &ids), Err(Unresolved::NoValue("--llamacpp-lib".into())));
     }
 
     #[test]

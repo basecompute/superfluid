@@ -33,11 +33,15 @@ fn engine() -> EngineHost {
 }
 
 fn serve(daemon: Daemon) -> String {
-    let registry = Arc::new(ModelRegistry::single("mock-model", Arc::new(daemon)));
+    serve_with(Arc::new(daemon), openai::ServeConfig::default())
+}
+
+fn serve_with(daemon: Arc<Daemon>, cfg: openai::ServeConfig) -> String {
+    let registry = Arc::new(ModelRegistry::single("mock-model", daemon));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
-        let _ = openai::serve_blocking_config(listener, registry, openai::ServeConfig::default());
+        let _ = openai::serve_blocking_config(listener, registry, cfg);
     });
     addr
 }
@@ -47,10 +51,14 @@ fn local() -> String {
 }
 
 fn node() -> String {
+    node_serving(Daemon::new(store("node"), engine(), Box::new(MockCodec), 8))
+}
+
+fn node_serving(daemon: Daemon) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
-        let daemon = Arc::new(Daemon::new(store("node"), engine(), Box::new(MockCodec), 8));
+        let daemon = Arc::new(daemon);
         let node = NodeAgent::new(daemon, "api-node", "mock-model").with_max_lanes(8);
         for sock in listener.incoming() {
             let Ok(sock) = sock else { break };
@@ -65,12 +73,15 @@ fn node() -> String {
 }
 
 fn head(node: String) -> String {
+    serve(head_daemon(node))
+}
+
+fn head_daemon(node: String) -> Daemon {
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let fleet = Arc::new(FleetManager::new(vec![NodeSpec { addr: node, auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease));
     let _ = fleet.probe();
-    let daemon = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), DaemonOptions::default())
-        .expect("a daemon over the fleet");
-    serve(daemon)
+    Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), DaemonOptions::default())
+        .expect("a daemon over the fleet")
 }
 
 fn agent() -> ureq::Agent {
@@ -897,6 +908,68 @@ fn a_fleet_head_refuses_a_batch_invariant_lane_its_nodes_cannot_keep() {
             assert!(said.contains("unsupported_on_fleet") && said.contains("batch-invariant"), "stream={stream}: {said}");
         } else {
             assert_eq!(status, 200, "{said}");
+        }
+    }
+}
+
+/// The operator's sampling defaults (`--repeat-penalty`, `--presence-penalty`,
+/// `--spec-max-temperature`) are the head's: it resolves each request before a node sees it, and
+/// a node applies only what the request carries, so a request's own value still wins. The head
+/// takes from the node's capability record what the node's own server would from its engine:
+/// whether the engine applies penalties itself (the presence default) and whether it speculates
+/// (the temperature cap), and answers as one machine would.
+#[test]
+fn the_head_resolves_the_operators_sampling_defaults_as_its_nodes_own_server_would() {
+    let op = openai::SamplingOverrides {
+        repeat_penalty: Some(1.3),
+        presence_penalty: Some(0.5),
+        spec_max_temperature: Some(0.2),
+        ..Default::default()
+    };
+    for (speculates, penalties) in [(true, true), (false, false), (true, false), (false, true)] {
+        let record = if penalties {
+            r#"{"descriptor_version":1,"architecture":"mock","workload":{"causal_generation":true},"sampling":{"engine_penalties":true}}"#
+        } else {
+            r#"{"descriptor_version":1,"architecture":"mock","workload":{"causal_generation":true}}"#
+        };
+        let engine = || {
+            EngineHost::spawn(move || (MockEngine::new(EngineConfig { vocab: 512, ..EngineConfig::default() }).with_capability_descriptor(record), None))
+                .unwrap()
+        };
+        let opts = || DaemonOptions { speculate: speculates.then(|| "prompt-lookup".to_string()), ..DaemonOptions::default() };
+        let local = Arc::new(Daemon::with_options(store("op-local"), engine(), Box::new(MockChatCodec), opts()).unwrap());
+        let node = Daemon::with_options(store("op-node"), engine(), Box::new(MockCodec), opts()).unwrap();
+        assert_eq!(node.speculation().is_some(), speculates);
+        let head = Arc::new(head_daemon(node_serving(node)));
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while head.capabilities().record().and_then(|r| r.get("architecture")).is_none() {
+            assert!(std::time::Instant::now() < by, "the head learned its node's capability record");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let (here, there) = (op.for_daemon(&local), op.for_daemon(&head));
+        assert_eq!(there, here, "speculates={speculates} penalties={penalties}: resolved as one machine would");
+        assert_eq!((there.spec_max_temperature.is_some(), there.presence_penalty.is_some()), (speculates, penalties));
+        assert_eq!(there.repeat_penalty, Some(1.3));
+        if !(speculates && penalties) {
+            continue;
+        }
+        let cfg = || openai::ServeConfig { sampling: op, ..Default::default() };
+        let (local, head) = (serve_with(local, cfg()), serve_with(head, cfg()));
+        let props = |addr: &str| {
+            let mut resp = agent().get(&format!("http://{addr}/props")).call().unwrap();
+            json(&resp.body_mut().read_to_string().unwrap())["default_generation_settings"].clone()
+        };
+        let (l, h) = (props(&local), props(&head));
+        assert_eq!((h["repeat_penalty"].as_f64(), h["presence_penalty"].as_f64()), (Some(1.3f32 as f64), Some(0.5)), "{h}");
+        assert_eq!((&h["repeat_penalty"], &h["presence_penalty"]), (&l["repeat_penalty"], &l["presence_penalty"]));
+        // No temperature or penalty named: the defaults apply, through the head as on one machine;
+        // one named wins over them. (What each says of its speculation is the engine's own state.)
+        for extra in [serde_json::json!({}), serde_json::json!({"repeat_penalty": 1.0, "presence_penalty": 0, "temperature": 0})] {
+            let mut body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 12, "seed": 7});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let (l, h) = (post(&local, "/v1/chat/completions", &body), post(&head, "/v1/chat/completions", &body));
+            assert_eq!((h.0, l.0), (200, 200), "{body}: {} / {}", l.1, h.1);
+            assert_eq!(said(&h.1)["choices"], said(&l.1)["choices"], "{body}: the head said otherwise");
         }
     }
 }

@@ -18,19 +18,26 @@ fn usage() -> ! {
     eprintln!(
         "usage: superfluid-noded --model <path|org/model[:tag]> [--listen <ip:port>] [--auth-file <path>] \
          [--runtime <id>] [--model-name <id>] [--max-context N] [--max-batch N] [--identity <name>] \
-         [--offline] [--speculate <strategy|off>] [--park] [--insecure-no-auth] [--idle-timeout-ms N] \
-         [--handshake-timeout-ms N]\n\
+         [--offline] [--speculate <strategy|off>] [--park] [--park-lossy] [--park-budget-gb N] \
+         [--kv-bits <0|4|8|16|84>] [--<runtime>-<name> <value>] [--prefill-budget N] \
+         [--tick-decode-budget N] [--tick-target-ms N] [--spec-* ...] [--otlp-endpoint <url> [--otlp-* ...]] \
+         [--insecure-no-auth] [--idle-timeout-ms N] [--handshake-timeout-ms N]\n\
          \n\
          A model given by id is pulled, and its runtime installed, as `superfluid serve` does; the\n\
          context window is sized for this device unless --max-context pins it. It speculates as\n\
          `superfluid serve` does: --speculate names the strategy, else auto on basert, off elsewhere.\n\
+         The engine flags --park-lossy, --park-budget-gb, --kv-bits, a runtime's --<runtime>-<name>,\n\
+         the scheduler's budgets, the --spec-* knobs and --otlp-* are read and checked as `serve`\n\
+         reads them.\n\
          (--listen defaults to 0.0.0.0:8454, the fleet-worker port next to BASE 8453;\n\
           --auth-file holds the fleet token (default $SUPERFLUID_HOME/fleet/token, from\n\
           `superfluid fleet token`); with it the link is encrypted and both ends checked.\n\
           --park keeps each prompt's prefix on disk under $SUPERFLUID_HOME/fleet/nodes/<identity>/park,\n\
           so a restarted node starts the head's sessions warm.\n\
           There is no sampling flag here: a fleet generation must match the local path\n\
-          token for token, so the node applies only what the request carries.)"
+          token for token, so the node applies only what the request carries. The head\n\
+          resolves it, its own --temperature, --repeat-penalty, --presence-penalty and\n\
+          --spec-max-temperature the defaults for a request that names none.)"
     );
     std::process::exit(2);
 }
@@ -45,40 +52,32 @@ fn fail(code: i32, msg: impl std::fmt::Display) -> ! {
 const MAX_HANDSHAKES: usize = 64;
 
 fn main() {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    if let Err(e) = superfluid_daemon::telemetry::init_stderr(&filter) {
-        eprintln!("superfluid-noded: logging: {e}");
-    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut listen: Option<String> = None;
-    let mut runtime: Option<String> = None;
     let mut model: Option<String> = None;
-    let mut max_context: Option<i32> = None;
     let mut max_batch: Option<u32> = None;
+    let mut opts = superfluid_daemon::fleet_join::NodeOptions::default();
     let mut identity: Option<String> = None;
     let mut model_name_override: Option<String> = None;
     let mut handshake_timeout = DEFAULT_HANDSHAKE_TIMEOUT;
     let mut idle_timeout = DEFAULT_IDLE_TIMEOUT;
     let mut auth_file: Option<PathBuf> = None;
     let mut insecure_no_auth = false;
-    let mut offline = false;
     let mut park = false;
-    let mut speculate: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| usage());
         match a.as_str() {
             "--listen" => listen = Some(val()),
-            "--runtime" | "--engine" => runtime = Some(val()),
+            "--runtime" | "--engine" => opts.runtime = Some(val()),
             "--model" => model = Some(val()),
-            "--max-context" => max_context = Some(val().parse().unwrap_or_else(|_| usage())),
+            "--max-context" => opts.max_context = Some(val().parse().unwrap_or_else(|_| usage())),
             "--max-batch" => max_batch = Some(val().parse().unwrap_or_else(|_| usage())),
             "--identity" => identity = Some(val()),
             "--model-name" => model_name_override = Some(val()),
             "--auth-file" => auth_file = Some(PathBuf::from(val())),
             "--insecure-no-auth" => insecure_no_auth = true,
-            "--offline" => offline = true,
-            "--speculate" => speculate = Some(val()),
+            "--offline" => opts.offline = true,
             "--park" => park = true,
             "--handshake-timeout-ms" => {
                 handshake_timeout = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
@@ -86,13 +85,24 @@ fn main() {
             "--idle-timeout-ms" => {
                 idle_timeout = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
-            _ => usage(),
+            // The flags `serve` takes for the engine, a runtime's own among them, after every other.
+            s => match opts.take(s, &mut it) {
+                Ok(true) => {}
+                Ok(false) => usage(),
+                Err(e) => fail(2, e),
+            },
         }
+    }
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    let otlp = opts.engine.otlp_traces().unwrap_or_else(|e| fail(2, e));
+    if let Err(e) = superfluid_daemon::telemetry::init_sinks(superfluid_daemon::telemetry::LogSink::Stderr(filter), None, otlp) {
+        eprintln!("superfluid-noded: logging: {e}");
     }
     let listen = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let identity = identity.unwrap_or_else(superfluid_daemon::metrics::hostname);
     let lanes = max_batch.unwrap_or(DEFAULT_LANES).max(1);
-    let mock = runtime.as_deref() == Some("mock");
+    opts.lanes = lanes;
+    let mock = opts.runtime.as_deref() == Some("mock");
     if model.is_none() && !mock {
         usage();
     }
@@ -131,17 +141,17 @@ fn main() {
     // during a long pull is refused at once instead of waiting out its handshake.
     drop(TcpListener::bind(&listen).unwrap_or_else(|e| fail(1, format!("bind {listen} failed: {e}"))));
 
-    let state = if park {
+    let state = if opts.parks(park) {
         superfluid_daemon::fleet_join::NodeState::open(&home, &identity, true)
     } else {
         superfluid_daemon::fleet_join::NodeState::scratch()
     }
     .unwrap_or_else(|e| fail(3, e));
     let loaded = if mock {
-        superfluid_daemon::fleet_join::load_mock_node(max_context, lanes, speculate.as_deref(), &state)
+        superfluid_daemon::fleet_join::load_mock_node(&opts, &state)
     } else {
         let model = model.expect("checked above");
-        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, lanes, offline, speculate.as_deref(), &state)
+        superfluid_daemon::fleet_join::load_node(&model, &opts, &state)
     }
     .unwrap_or_else(|e| fail(3, e));
     let model_name = model_name_override.unwrap_or(loaded.model_name);
