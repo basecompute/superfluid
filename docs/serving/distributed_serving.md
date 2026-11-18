@@ -29,13 +29,13 @@ Several fleets can share one local network. A head with a token announces a netw
 
 | flag | default | meaning |
 |---|---|---|
-| `--model <path\|id>` | required | the model; an id is pulled first |
+| `--model <path\|id>` | required | the model; an id is pulled first; again for each more the node serves ([Several models on one node](#several-models-on-one-node)) |
 | `--token <value>` | `$SUPERFLUID_HOME/fleet/token` | the head's token, kept at that path |
 | `--runtime <id>` | by format | the runtime |
 | `--max-context <N>` | sized for this device | the node's window |
-| `--max-batch <N>` | 8 | the node's lanes |
+| `--max-batch <N>` | 8 | the node's lanes, each model's with several |
 | `--identity <name>` | the host name | the name in the head's logs |
-| `--model-name <id>` | what the head announces, else the model's id | the name the head matches on |
+| `--model-name <id>` | what the head announces, else the model's id | the name the head matches on; with several models, once per `--model` in the same order |
 | `--offline` | off | pull nothing |
 | `--speculate <strategy\|off>` | `auto` on `basert`, else off | speculative decoding on the node, as `serve` takes it ([Speculative decoding](../features/speculative_decoding.md)) |
 | `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
@@ -49,6 +49,18 @@ Several fleets can share one local network. A head with a token announces a netw
 | `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event, for a program that runs the node ([Start-up events](events.md)) |
 
 A node that joins opens one connection per lane, and the head runs one generation per connection, so a node runs as many generations at once as it has lanes, joined or dialed. The head also asks it for one connection more, which no generation takes: a short call (a prompt's encoding, a state operation) goes over it while every lane is generating. A node from before this release opens only its lanes.
+
+### Several models on one node
+
+```sh
+superfluid node join --model basecompute/Qwen3-8B --model basecompute/Qwen3-0.6B --token <the token>
+```
+
+Give `--model` more than once, to `node join` or to `superfluid-noded`, and the node serves each model at once, as `serve` serves several: each on an engine and daemon of its own with `--max-batch` lanes, their windows sized together so they all fit on the device, each model's drafter counted (`--max-context` gives each that window instead). Models on runtimes of different families are not sized together, as `serve` does not size them: each gets 8192 unless `--max-context` pins it. The node has one connection per lane of each model, tells the head every model with its own tokenizer and window, and runs each session on the model the head placed it for; everything else the head asks (a prompt's encoding, the tokenizer it shares, embeddings, a LoRA, the media a request brings, any state operation) runs on the model the request names. The head takes on each model the node brings, and holds each to its own tokenizer and window, as it does models of nodes that serve one.
+
+Each model is served under its own name, `org/model` for one given by id and the file's name for one given by path; give `--model-name` once per `--model`, in the same order, to name them otherwise. The first model keeps the node's session store and parked prefixes; each other keeps its own in a directory under `$SUPERFLUID_HOME/fleet/nodes/<identity>/models`. A node with no `--model` follows the head's first model and serves that one only.
+
+A head from before this release does not say which model a session or request is for, so a node serving several offers such a head its first model only, and runs everything that head asks on it.
 
 ## Run a node by hand
 
@@ -66,11 +78,11 @@ superfluid-noded: node 'box-a' serving 'basecompute/Qwen3.8-27B' on 100.64.0.2:8
 | flag | default | meaning |
 |---|---|---|
 | `--listen <ip:port>` | `0.0.0.0:8454` | where the head connects |
-| `--model <path\|id>` | required | the model; an id is pulled first |
+| `--model <path\|id>` | required | the model; an id is pulled first; again for each more the node serves ([Several models on one node](#several-models-on-one-node)) |
 | `--runtime <id>` | by format | `basert`, `llamacpp` or `mlx`; `--engine` is the same flag, and `--engine mock` serves the test engine |
-| `--model-name <id>` | the model's id | the name the head matches on; set it the same on every node |
+| `--model-name <id>` | the model's id | the name the head matches on; set it the same on every node; with several models, once per `--model` in the same order |
 | `--max-context <N>` | sized for this device | the node's window, floor 512 |
-| `--max-batch <N>` | 8 | the node's lanes |
+| `--max-batch <N>` | 8 | the node's lanes, each model's with several |
 | `--identity <name>` | the host name | the name in the head's logs |
 | `--offline` | off | pull and install nothing |
 | `--speculate <strategy\|off>` | `auto` on `basert`, else off | speculative decoding on the node, as `serve` takes it |

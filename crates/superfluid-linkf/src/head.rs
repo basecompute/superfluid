@@ -78,6 +78,7 @@ impl HeadSession {
             params: Vec::new(),
             qos_class,
             policy_ref: 0,
+            model: String::new(),
         }
     }
 

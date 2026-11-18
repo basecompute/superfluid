@@ -366,6 +366,32 @@ impl Drop for Child {
 }
 
 #[test]
+fn a_node_join_process_serves_each_model_it_is_given_and_dials_for_each_ones_lanes() {
+    let fleet = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, LEASE, 90, 0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let join_addr = listener.local_addr().unwrap().to_string();
+    let f = Arc::clone(&fleet);
+    let models = HeadModels::fixed(Arc::clone(&f), vec!["mock-a".into(), "mock-b".into()]);
+    std::thread::spawn(move || accept_nodes(listener, f, Vec::new(), models));
+    let home = dir("join-several-home");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_superfluid"))
+        .args(["node", "join", &join_addr, "--runtime", "mock", "--model", "mock-a", "--model", "mock-b"])
+        .args(["--identity", "proc-two", "--max-batch", "2"])
+        .env("HOME", &home)
+        .env("SUPERFLUID_HOME", home.join(".superfluid"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn superfluid node join");
+    let _child = Child(child);
+    wait_for("the node joined on a lane for each of each model's", || fleet.status().first().is_some_and(|n| n.up && n.lanes == 4));
+    assert_eq!(fleet.status()[0].models, ["mock-a", "mock-b"]);
+    assert_eq!(fleet.serving("mock-b").0, 1);
+    let state = home.join(".superfluid/fleet/nodes/proc-two");
+    assert!(state.join("wal.log").exists(), "the first model keeps the node's session store");
+    assert!(state.join("models/mock-b/wal.log").exists(), "the second its own");
+}
+
+#[test]
 fn a_node_join_process_the_head_removes_exits_saying_so() {
     use std::io::Read;
     let (fleet, join_addr) = {

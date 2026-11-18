@@ -33,6 +33,9 @@ struct AgentShared {
     contexts: HashMap<u64, Vec<u32>>,
     /// Each session's sampling and the QoS class the head gave it, which its generations run in.
     params: HashMap<u64, (GenParams, u8)>,
+    /// The model each session runs on, by its place in [`NodeAgent::models`]; none for one the
+    /// head named a model this node does not serve.
+    models: HashMap<u64, Option<usize>>,
     last_load_sample: Option<(u64, u64, u64)>,
     decode_rate_ewma: u32,
     prefill_rate_ewma: u32,
@@ -73,13 +76,29 @@ impl Busy {
 /// What a node is told of its head's models at each handshake ([`NodeAgent::with_on_head`]).
 pub type HeadHook = Arc<dyn Fn(Option<&superfluid_proto::handshake::Served>) + Send + Sync>;
 
-pub struct NodeAgent {
+/// One model a node serves, on an engine and daemon of its own.
+#[derive(Clone)]
+struct Model {
     daemon: Arc<Daemon>,
+    /// The name the head matches it on.
+    name: String,
+    /// The id it is pulled by, told to the head, which announces it to nodes that follow.
+    id: Option<String>,
+    /// Its tokenizer digest, told to the head (0: not known).
+    tokenizer: u64,
+    /// Its tokenizer, for a head that has no copy of the model to export and encode with.
+    tokenizer_impl: Option<Arc<dyn superfluid_engine::Tokenizer>>,
+}
+
+pub struct NodeAgent {
+    /// The models served, the first first: a head before [`superfluid_linkf::driver::NAMES_MODELS`]
+    /// is offered only it, and everything it asks runs on it.
+    models: Vec<Model>,
+    /// Whether this connection's head names the model of each session and request, and so is
+    /// offered every model.
+    names_models: bool,
     shared: Arc<Mutex<AgentShared>>,
     identity: String,
-    model_name: String,
-    /// The id the model is pulled by, told to the head, which announces it to nodes that follow.
-    model_id: Option<String>,
     /// What the node tells the head of itself ([`superfluid_proto::handshake::FOLLOWS_HEAD`]).
     feature_flags: u64,
     start: Instant,
@@ -95,10 +114,6 @@ pub struct NodeAgent {
     opts: HashMap<(u64, u64), linkf::GenerateOptsMsg>,
     /// Blobs the head is sending: the SHA-256 each should have, and the bytes so far.
     incoming: HashMap<u64, ([u8; 32], Vec<u8>)>,
-    /// The model's tokenizer digest, told to the head (0: not known).
-    tokenizer: u64,
-    /// The model's tokenizer, for a head that has no copy of the model to export and encode with.
-    tokenizer_impl: Option<Arc<dyn superfluid_engine::Tokenizer>>,
     /// Called when a head this node dialed asks for a connection for short calls.
     on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Told, at each handshake, what the head stated it serves over the link.
@@ -136,24 +151,22 @@ impl NodeAgent {
             asked: HashMap::new(),
             opts: HashMap::new(),
             incoming: HashMap::new(),
-            tokenizer: 0,
-            tokenizer_impl: None,
             on_control_ask: None,
             on_head: None,
-            daemon,
+            models: vec![Model { daemon, name: model_name.into(), id: None, tokenizer: 0, tokenizer_impl: None }],
+            names_models: false,
             shared: Arc::new(Mutex::new(AgentShared {
                 agent: AgentSession::new(),
                 owners: HashMap::new(),
                 contexts: HashMap::new(),
                 params: HashMap::new(),
+                models: HashMap::new(),
                 last_load_sample: None,
                 decode_rate_ewma: 0,
                 prefill_rate_ewma: 0,
                 busy: Busy::default(),
             })),
             identity: identity.into(),
-            model_name: model_name.into(),
-            model_id: None,
             feature_flags: 0,
             start: Instant::now(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
@@ -169,11 +182,10 @@ impl NodeAgent {
 
     pub fn connection(&self) -> NodeAgent {
         NodeAgent {
-            daemon: Arc::clone(&self.daemon),
+            models: self.models.clone(),
+            names_models: false,
             shared: Arc::clone(&self.shared),
             identity: self.identity.clone(),
-            model_name: self.model_name.clone(),
-            model_id: self.model_id.clone(),
             feature_flags: self.feature_flags,
             start: self.start,
             handshake_timeout: self.handshake_timeout,
@@ -185,8 +197,6 @@ impl NodeAgent {
             asked: HashMap::new(),
             opts: HashMap::new(),
             incoming: HashMap::new(),
-            tokenizer: self.tokenizer,
-            tokenizer_impl: self.tokenizer_impl.clone(),
             on_control_ask: self.on_control_ask.clone(),
             on_head: self.on_head.clone(),
         }
@@ -200,9 +210,23 @@ impl NodeAgent {
         self
     }
 
+    /// Serves `model_name` too, on `daemon`, its own engine: a head that names the model of each
+    /// session and request ([`superfluid_linkf::driver::NAMES_MODELS`]) is offered it after the
+    /// models before it, and each session for it runs there; a head before that is offered the
+    /// first model only. What [`Self::with_model_id`] and the tokenizer setters tell from here on
+    /// is this model's.
+    pub fn with_model(mut self, daemon: Arc<Daemon>, model_name: impl Into<String>) -> NodeAgent {
+        self.models.push(Model { daemon, name: model_name.into(), id: None, tokenizer: 0, tokenizer_impl: None });
+        self
+    }
+
+    fn last(&mut self) -> &mut Model {
+        self.models.last_mut().expect("a node serves a model")
+    }
+
     /// Tells each head the id the model is pulled by, `org/model:tag`.
     pub fn with_model_id(mut self, id: impl Into<String>) -> NodeAgent {
-        self.model_id = Some(id.into());
+        self.last().id = Some(id.into());
         self
     }
 
@@ -216,16 +240,41 @@ impl NodeAgent {
     /// Tells each head the model's tokenizer by `digest` ([`crate::fleet::tokenizer_digest`]),
     /// so one whose tokenizer differs places nothing here.
     pub fn with_tokenizer(mut self, digest: u64) -> NodeAgent {
-        self.tokenizer = digest;
+        self.last().tokenizer = digest;
         self
     }
 
     /// Serves the model's tokenizer to a head: its digest, all it says without encoding, and
     /// the text it encodes, so a head with no copy of the model tokenizes as this node does.
     pub fn with_tokenizer_of(mut self, tok: Arc<dyn superfluid_engine::Tokenizer>) -> NodeAgent {
-        self.tokenizer = crate::fleet::tokenizer_digest(&*tok);
-        self.tokenizer_impl = Some(tok);
+        let model = self.last();
+        model.tokenizer = crate::fleet::tokenizer_digest(&*tok);
+        model.tokenizer_impl = Some(tok);
         self
+    }
+
+    /// The models this connection's head is offered: every one to a head that names the model
+    /// of each request, the first to one before.
+    fn served(&self) -> &[Model] {
+        if self.names_models {
+            &self.models
+        } else {
+            &self.models[..1]
+        }
+    }
+
+    /// The model the head means by `name`: on a node serving one, or to a head that names none,
+    /// the first; otherwise the one served by that name, the first for an empty one, and none
+    /// for a name this node does not serve.
+    fn model_of(&self, name: &str) -> Option<usize> {
+        if self.served().len() == 1 || name.is_empty() {
+            return Some(0);
+        }
+        self.models.iter().position(|m| m.name == name)
+    }
+
+    fn first(&self) -> &Arc<Daemon> {
+        &self.models[0].daemon
     }
 
     /// For a node that dials its head: `dial` is called when the head asks for one connection
@@ -249,10 +298,13 @@ impl NodeAgent {
 
     fn sample_load(&mut self) -> (u64, u64, u32, u32, u32, u32, u32, u64) {
         let mut sh = self.shared.lock().expect("agent shared");
-        let stats = self.daemon.sched_stats();
+        // The node's load is every model's: they share its device, and its connections.
+        let sum = |of: &dyn Fn(&crate::scheduler::SchedStats) -> u64| -> u64 {
+            self.models.iter().map(|m| of(&m.daemon.sched_stats())).sum()
+        };
         let now = self.start.elapsed().as_millis() as u64;
-        let decoded = stats.decode_tokens.load(std::sync::atomic::Ordering::Relaxed);
-        let prefilled = stats.prefill_tokens.load(std::sync::atomic::Ordering::Relaxed);
+        let decoded = sum(&|s| s.decode_tokens.load(Ordering::Relaxed));
+        let prefilled = sum(&|s| s.prefill_tokens.load(Ordering::Relaxed));
 
         let smooth = |prev: u32, inst: u32| -> u32 {
             match prev {
@@ -281,11 +333,11 @@ impl NodeAgent {
         }
         let (rate, prefill_rate) = (sh.decode_rate_ewma, sh.prefill_rate_ewma);
 
-        let queue: u64 = stats.queue_depth.iter().map(|q| q.load(std::sync::atomic::Ordering::Relaxed)).sum();
+        let queue = sum(&|s| s.queue_depth.iter().map(|q| q.load(Ordering::Relaxed)).sum());
         (
-            stats.pool_blocks_used.load(std::sync::atomic::Ordering::Relaxed),
-            stats.pool_blocks_total.load(std::sync::atomic::Ordering::Relaxed),
-            stats.lanes_active.load(std::sync::atomic::Ordering::Relaxed) as u32,
+            sum(&|s| s.pool_blocks_used.load(Ordering::Relaxed)),
+            sum(&|s| s.pool_blocks_total.load(Ordering::Relaxed)),
+            sum(&|s| s.lanes_active.load(Ordering::Relaxed)) as u32,
             self.max_lanes,
             queue as u32,
             rate,
@@ -303,7 +355,7 @@ impl NodeAgent {
             host_memory_bytes: 0,
             active_sessions: self.shared.lock().expect("agent shared").contexts.len() as u32,
             max_sessions: u32::MAX,
-            max_context_tokens: self.daemon.max_stream_tokens(),
+            max_context_tokens: self.first().max_stream_tokens(),
             kv_blocks_used: kv_used,
             kv_blocks_total: kv_total,
             lanes_active: lanes,
@@ -327,20 +379,25 @@ impl NodeAgent {
                 tentative_bytes: 0,
             },
             capacity,
-            loadable_models: vec![self.model_name.clone()],
+            loadable_models: self.served().iter().map(|m| m.name.clone()).collect(),
         };
         let _ = endpoint.send(msg_type::NODE_STATUS, &msg);
         self.last_status_ms = self.start.elapsed().as_millis() as u64;
     }
 
     fn ackf(&mut self) -> HelloAckF {
+        // In the models' order, empty where one has no id, and none past the last that has one.
+        let mut model_ids: Vec<String> = self.served().iter().map(|m| m.id.clone().unwrap_or_default()).collect();
+        while model_ids.last().is_some_and(String::is_empty) {
+            model_ids.pop();
+        }
         HelloAckF {
             chosen_version: superfluid_linkf::driver::PROTO_VERSION,
             node_identity: self.identity.clone(),
             capacity: self.capacity(),
-            loadable_models: vec![self.model_name.clone()],
+            loadable_models: self.served().iter().map(|m| m.name.clone()).collect(),
             feature_flags: self.feature_flags,
-            model_ids: self.model_id.iter().cloned().collect(),
+            model_ids,
             limits: LinkFLimits {
                 max_frame: superfluid_proto::MAX_FRAME,
                 transfer_window: 8,
@@ -351,11 +408,17 @@ impl NodeAgent {
     }
 
     pub fn serve(&mut self, mut endpoint: Endpoint) -> Result<(), DaemonError> {
-        let hs = if self.handshake_timeout.is_zero() {
-            endpoint.answer_hello_as_agent(&self.ackf(), &self.auth)
+        // The hello says the version the head speaks, which says what it is offered.
+        let hello = if self.handshake_timeout.is_zero() {
+            endpoint.read_hello()
         } else {
-            endpoint.answer_hello_as_agent_within(&self.ackf(), self.handshake_timeout, &self.auth)
+            endpoint.read_hello_within(self.handshake_timeout)
         };
+        let hs = hello.and_then(|hello| {
+            self.names_models = Endpoint::shared_version(&hello).is_some_and(|v| v >= superfluid_linkf::driver::NAMES_MODELS);
+            let ack = self.ackf();
+            endpoint.answer_hello(&hello, &ack, &self.auth)
+        });
         match hs {
             Ok(()) => {}
             Err(LinkFError::TimedOut) => {
@@ -374,7 +437,19 @@ impl NodeAgent {
         };
         endpoint.keep_alive(Liveness { heartbeat, silence: self.idle_timeout });
         if endpoint.version() >= 3 {
-            endpoint.send(msg_type::TOKENIZER, &linkf::TokenizerMsg { digest: self.tokenizer })?;
+            let models = match self.names_models {
+                true => self
+                    .models
+                    .iter()
+                    .map(|m| linkf::NodeModelMsg {
+                        name: m.name.clone(),
+                        tokenizer: m.tokenizer,
+                        max_context_tokens: m.daemon.max_stream_tokens(),
+                    })
+                    .collect(),
+                false => Vec::new(),
+            };
+            endpoint.send(msg_type::TOKENIZER, &linkf::TokenizerMsg { digest: self.models[0].tokenizer, models })?;
         }
         // Dropped on the way out, which stops a generation still running.
         let mut work = Work::default();
@@ -479,6 +554,7 @@ impl NodeAgent {
                     sh.contexts.remove(&session_id);
                     sh.params.remove(&session_id);
                     sh.owners.remove(&session_id);
+                    sh.models.remove(&session_id);
                 }
             }
         }
@@ -506,10 +582,15 @@ impl NodeAgent {
                 }
             }
             msg_type::SESSION_ASSIGN => {
-                let m: linkf::SessionAssignMsg = postcard::from_bytes(&frame.payload)?;
+                let m = linkf::SessionAssignMsg::decode(&frame.payload)?;
+                let model = self.model_of(&m.model);
+                if model.is_none() {
+                    tracing::warn!(session = m.session_id, model = %m.model, "the head placed a session for a model this node does not serve; its generations are declined");
+                }
                 let mut sh = self.shared.lock().expect("agent shared");
                 if sh.agent.on_assign(&m, now) {
                     sh.params.insert(m.session_id, (decode_params(&m.params), m.qos_class.min(crate::qos::BACKGROUND_AGENT)));
+                    sh.models.insert(m.session_id, model);
                     sh.owners.insert(m.session_id, self.conn);
                     self.asked.remove(&m.session_id);
                 }
@@ -521,6 +602,7 @@ impl NodeAgent {
                     sh.contexts.remove(&m.session_id);
                     sh.params.remove(&m.session_id);
                     sh.owners.remove(&m.session_id);
+                    sh.models.remove(&m.session_id);
                     self.asked.remove(&m.session_id);
                 }
             }
@@ -534,15 +616,22 @@ impl NodeAgent {
             }
             msg_type::GENERATE_REQ => {
                 let m: linkf::GenerateReqMsg = postcard::from_bytes(&frame.payload)?;
-                let declined = work.generation.is_some() || !self.shared.lock().expect("agent shared").agent.on_generate(&m);
+                let model = {
+                    let sh = self.shared.lock().expect("agent shared");
+                    // A session placed before this node told its models is the first's.
+                    sh.models.get(&m.session_id).copied().unwrap_or(Some(0))
+                };
+                let declined = work.generation.is_some()
+                    || model.is_none()
+                    || !self.shared.lock().expect("agent shared").agent.on_generate(&m);
                 if declined {
                     tracing::warn!(
                         session = m.session_id,
                         generation = m.generation_id,
                         epoch = m.epoch,
-                        "declining a generate (unknown session, superseded epoch, replayed \
-                         command, or one already running on this connection); reporting it \
-                         rather than going silent"
+                        "declining a generate (unknown session or model, superseded epoch, \
+                         replayed command, or one already running on this connection); \
+                         reporting it rather than going silent"
                     );
                     let msg = linkf::TokenEventsMsg {
                         events: vec![linkf::TokenEvent {
@@ -557,7 +646,7 @@ impl NodeAgent {
                     };
                     endpoint.send(msg_type::TOKEN_EVENTS, &msg)?;
                 } else {
-                    work.generation = Some(self.start_generation(&m));
+                    work.generation = Some(self.start_generation(&m, model.expect("checked above")));
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
@@ -569,12 +658,13 @@ impl NodeAgent {
             // The head removed this node and closes the link; whoever serves it says so.
             msg_type::REMOVED => return Err(LinkFError::Removed.into()),
             msg_type::TOKENIZER_EXPORT_REQ => {
-                let m: linkf::TokenizerExportReqMsg = postcard::from_bytes(&frame.payload)?;
-                endpoint.send(msg_type::TOKENIZER_EXPORT, &self.export(m.request_id))?;
+                let m = linkf::TokenizerExportReqMsg::decode(&frame.payload)?;
+                endpoint.send(msg_type::TOKENIZER_EXPORT, &self.export(m.request_id, self.model_of(&m.model)))?;
             }
             msg_type::TOKENIZE_REQ => {
-                let m: linkf::TokenizeReqMsg = postcard::from_bytes(&frame.payload)?;
-                let tokens = self.tokenizer_impl.as_ref().and_then(|t| match &m.text {
+                let m = linkf::TokenizeReqMsg::decode(&frame.payload)?;
+                let tok = self.model_of(&m.model).and_then(|i| self.models[i].tokenizer_impl.as_ref());
+                let tokens = tok.and_then(|t| match &m.text {
                     linkf::TokenizeMsg::Encode(text) => Some(t.encode(text)),
                     linkf::TokenizeMsg::Plain(text) => t.encode_plain(text),
                     linkf::TokenizeMsg::Pieces(pieces) => {
@@ -611,17 +701,25 @@ impl NodeAgent {
                     if crate::media::content_hash(&bytes) != want {
                         return Err(DaemonError::Protocol("a blob from the head is not what its hash says"));
                     }
-                    // A blob this node cannot keep fails the request that brings it, not the link.
-                    if let Err(e) = self.daemon.media_put(&bytes) {
-                        tracing::warn!("node-agent cannot keep a blob from the head: {e}");
+                    // Kept by each model's daemon, as the request it comes for may run on any; a blob
+                    // this node cannot keep fails the request that brings it, not the link.
+                    for model in &self.models {
+                        if let Err(e) = model.daemon.media_put(&bytes) {
+                            tracing::warn!("node-agent cannot keep a blob from the head: {e}");
+                        }
                     }
                 }
             }
             msg_type::STATE_SYNC_REQ => {
-                let mut m: linkf::StateSyncReqF = postcard::from_bytes(&frame.payload)?;
-                self.localize(&mut m.req);
+                let mut m = linkf::StateSyncReqF::decode(&frame.payload)?;
+                let Some(model) = self.model_of(&m.model) else {
+                    let result = Err(format!("this node does not serve {}", m.model));
+                    endpoint.send(msg_type::STATE_SYNC_RESP, &linkf::StateSyncRespF { request_id: m.request_id, result })?;
+                    return Ok(());
+                };
+                let daemon = Arc::clone(&self.models[model].daemon);
+                Self::localize(&daemon, &mut m.req);
                 let (tx, rx) = mpsc::channel();
-                let daemon = Arc::clone(&self.daemon);
                 std::thread::Builder::new()
                     .name("node-state-sync".into())
                     .spawn(move || {
@@ -692,9 +790,11 @@ impl NodeAgent {
         Ok(())
     }
 
-    /// The tokenizer as a head without the model takes it; no vocabulary when this node has none.
-    fn export(&self, request_id: u64) -> linkf::TokenizerExportMsg {
-        let Some(t) = &self.tokenizer_impl else {
+    /// The tokenizer of `model` as a head without the model takes it; no vocabulary when this
+    /// node has none, or does not serve the model.
+    fn export(&self, request_id: u64, model: Option<usize>) -> linkf::TokenizerExportMsg {
+        let model = model.map(|i| &self.models[i]);
+        let Some((t, digest)) = model.and_then(|m| Some((m.tokenizer_impl.as_ref()?, m.tokenizer))) else {
             return linkf::TokenizerExportMsg {
                 request_id,
                 digest: 0,
@@ -710,7 +810,7 @@ impl NodeAgent {
         };
         linkf::TokenizerExportMsg {
             request_id,
-            digest: self.tokenizer,
+            digest,
             vocab: (0..t.vocab_size()).map(|i| t.token_bytes(i)).collect(),
             specials: t.special_tokens(),
             bos: t.bos_token(),
@@ -722,28 +822,28 @@ impl NodeAgent {
         }
     }
 
-    /// A path the head sent as a blob, where the blob sits in this node's media pool.
-    fn local(&self, path: &str) -> String {
+    /// A path the head sent as a blob, where the blob sits in `daemon`'s media pool.
+    fn local(daemon: &Daemon, path: &str) -> String {
         match path.strip_prefix(linkf::BLOB_PREFIX) {
-            Some(hash) if crate::media::MediaPool::is_valid_id(hash) => self.daemon.media_path(hash).to_string_lossy().into_owned(),
+            Some(hash) if crate::media::MediaPool::is_valid_id(hash) => daemon.media_path(hash).to_string_lossy().into_owned(),
             _ => path.to_string(),
         }
     }
 
-    fn localize(&self, req: &mut superfluid_proto::linkw::StateSyncReqMsg) {
+    fn localize(daemon: &Daemon, req: &mut superfluid_proto::linkw::StateSyncReqMsg) {
         use superfluid_proto::linkw::StateSyncReqMsg as R;
         match req {
-            R::MediaProbe { image_path } | R::MediaEncode { image_path } => *image_path = self.local(image_path),
-            R::Transcribe { audio_path, .. } => *audio_path = self.local(audio_path),
+            R::MediaProbe { image_path } | R::MediaEncode { image_path } => *image_path = Self::local(daemon, image_path),
+            R::Transcribe { audio_path, .. } => *audio_path = Self::local(daemon, audio_path),
             _ => {}
         }
     }
 
     /// Runs a stage forward on a thread of its own, as a generation runs, so a long one does not
-    /// silence the connection.
+    /// silence the connection; on the first model, as a pipeline serves one.
     fn start_stage(&self, m: linkf::StageForwardReqMsg) -> mpsc::Receiver<linkf::StageForwardRespMsg> {
         let (tx, rx) = mpsc::channel();
-        let daemon = Arc::clone(&self.daemon);
+        let daemon = Arc::clone(self.first());
         std::thread::Builder::new()
             .name("node-stage".into())
             .spawn(move || {
@@ -758,9 +858,11 @@ impl NodeAgent {
         rx
     }
 
-    /// Starts `req` on a thread of its own, so this connection goes on reading the head
-    /// (cancels, lease grants, heartbeats) and sending status while it runs.
-    fn start_generation(&mut self, req: &linkf::GenerateReqMsg) -> Running {
+    /// Starts `req` on a thread of its own, on the engine of the `model`-th model, so this
+    /// connection goes on reading the head (cancels, lease grants, heartbeats) and sending status
+    /// while it runs.
+    fn start_generation(&mut self, req: &linkf::GenerateReqMsg, model: usize) -> Running {
+        let daemon = Arc::clone(&self.models[model].daemon);
         let (context, (params, class)) = {
             let sh = self.shared.lock().expect("agent shared");
             (
@@ -775,11 +877,11 @@ impl NodeAgent {
         let media: Vec<(u64, std::path::PathBuf, u32)> = opts
             .iter()
             .flat_map(|o| &o.media)
-            .map(|(offset, hash, n)| (*offset, std::path::PathBuf::from(self.local(&format!("{}{hash}", linkf::BLOB_PREFIX))), *n))
+            .map(|(offset, hash, n)| (*offset, std::path::PathBuf::from(Self::local(&daemon, &format!("{}{hash}", linkf::BLOB_PREFIX))), *n))
             .collect();
         let cancel = Arc::new(AtomicBool::new(false));
         let (tx, out) = mpsc::channel();
-        let (daemon, shared, stop) = (Arc::clone(&self.daemon), Arc::clone(&self.shared), Arc::clone(&cancel));
+        let (shared, stop) = (Arc::clone(&self.shared), Arc::clone(&cancel));
         shared.lock().expect("agent shared").busy.start();
         std::thread::Builder::new()
             .name("node-generation".into())
