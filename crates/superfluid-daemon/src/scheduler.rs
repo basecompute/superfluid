@@ -4379,12 +4379,12 @@ pub fn run_completion_streaming(
     extras: GenExtras,
     on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
 ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
-    run_completion_streaming_lp(tx, cancels, stream, params, max_tokens, deadline_ms, crate::qos::INLINE_COMPLETION, extras, Vec::new(), on_tokens, |_| {})
+    run_completion_streaming_lp(tx, cancels, stream, params, max_tokens, deadline_ms, crate::qos::INLINE_COMPLETION, false, extras, Vec::new(), on_tokens, |_| {})
 }
 
 /// As [`run_completion_streaming`] in QoS class `class` (a fleet node runs the class its head
-/// gave the session), telling `on_logprobs` each token's log-probabilities when the extras ask
-/// for them.
+/// gave the session), alone when `batch_invariant` (as the head asked), telling `on_logprobs`
+/// each token's log-probabilities when the extras ask for them.
 #[allow(clippy::too_many_arguments)]
 pub fn run_completion_streaming_lp(
     tx: &Sender<SchedCmd>,
@@ -4394,6 +4394,7 @@ pub fn run_completion_streaming_lp(
     max_tokens: u32,
     deadline_ms: u64,
     class: u8,
+    batch_invariant: bool,
     extras: GenExtras,
     media: Vec<(u64, std::path::PathBuf, u32)>,
     mut on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
@@ -4408,7 +4409,7 @@ pub fn run_completion_streaming_lp(
         max_tokens,
         events: etx,
         class,
-        batch_invariant: false,
+        batch_invariant,
         carry: None,
         queued_at: 0,
         media,

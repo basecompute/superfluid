@@ -114,6 +114,7 @@ impl NodeMeta {
             learned: false,
             max_context_tokens: 0,
             max_lanes: 0,
+            feature_flags: 0,
             load: NodeLoad::default(),
             tokenizer_refused: Vec::new(),
             since: std::time::Instant::now(),
@@ -233,6 +234,10 @@ struct NodeMeta {
     learned: bool,
     max_context_tokens: u64,
     max_lanes: u32,
+    /// What the node stated of itself at its handshake ([`HelloAckF::feature_flags`]).
+    ///
+    /// [`HelloAckF::feature_flags`]: superfluid_proto::handshake::HelloAckF::feature_flags
+    feature_flags: u64,
     load: NodeLoad,
     /// The models the node serves with a tokenizer other than the head's.
     tokenizer_refused: Vec<String>,
@@ -251,6 +256,8 @@ struct Placed {
     node: usize,
     params: GenParams,
     qos_class: u8,
+    /// What its node had to state ([`RequestShape::needs`]), and any node it moves to.
+    needs: u64,
     codec: String,
     model: String,
     tokens: Vec<u32>,
@@ -338,6 +345,12 @@ pub struct RequestShape {
     /// The node holding the longest prefix of the prompt warm, tried first while it has a
     /// lane free.
     pub warm: Option<usize>,
+    /// What a node must state of itself to be placed on ([`HelloAckF::feature_flags`]): 0, or
+    /// [`BATCH_INVARIANT`] for a generation that runs alone.
+    ///
+    /// [`HelloAckF::feature_flags`]: superfluid_proto::handshake::HelloAckF::feature_flags
+    /// [`BATCH_INVARIANT`]: superfluid_proto::handshake::BATCH_INVARIANT
+    pub needs: u64,
 }
 
 pub const DEFAULT_POOL_HIGH_PCT: u32 = 90;
@@ -897,6 +910,28 @@ impl FleetManager {
         !sh.meta[i].learned || sh.meta[i].models.iter().any(|m| m == model)
     }
 
+    /// Whether node `i` states each of `needs`, or has not said yet: one learned at placement
+    /// is asked again there.
+    fn states(sh: &Shared, i: usize, needs: u64) -> bool {
+        !sh.meta[i].learned || sh.meta[i].feature_flags & needs == needs
+    }
+
+    /// For a generation that asks `needs` of its node: a refusal naming the nodes up that serve
+    /// `model` when none of them states it; none while one does, or none is up to say.
+    pub fn needs_refusal(&self, model: &str, needs: u64) -> Option<DaemonError> {
+        if needs == 0 {
+            return None;
+        }
+        let sh = self.shared.lock().expect("shared");
+        let serving: Vec<usize> =
+            (0..sh.meta.len()).filter(|&i| sh.meta[i].up() && sh.meta[i].learned && Self::serves(&sh, i, model)).collect();
+        if serving.is_empty() || serving.iter().any(|&i| Self::states(&sh, i, needs)) {
+            return None;
+        }
+        let names: Vec<String> = serving.iter().map(|&i| sh.meta[i].identity.clone()).collect();
+        Some(crate::fleet::older_node(&names.join(", "), crate::fleet::needs_what(needs)))
+    }
+
     fn holds(sh: &Shared, i: usize, len: u64) -> bool {
         let max = sh.meta[i].max_context_tokens;
         max == 0 || len <= max
@@ -937,6 +972,7 @@ impl FleetManager {
         sh.meta[i].models = models;
         sh.meta[i].max_context_tokens = cap.max_context_tokens;
         sh.meta[i].max_lanes = cap.max_lanes;
+        sh.meta[i].feature_flags = head.node().feature_flags;
         sh.meta[i].identity = head.node().node_identity.clone();
         sh.meta[i].learned = true;
         sh.meta[i].load = Self::load_from(cap);
@@ -965,11 +1001,12 @@ impl FleetManager {
         }
     }
 
-    fn replacement_shape(tokens: &[u32], expected_out: u64) -> RequestShape {
+    fn replacement_shape(tokens: &[u32], expected_out: u64, needs: u64) -> RequestShape {
         RequestShape {
             prompt_tokens: tokens.len() as u64,
             expected_out,
             warm: None,
+            needs,
         }
     }
 
@@ -987,7 +1024,7 @@ impl FleetManager {
             }
         }
         let mut cand: Vec<usize> = (0..self.node_count())
-            .filter(|&i| sh.meta[i].up() && Self::serves(&sh, i, model))
+            .filter(|&i| sh.meta[i].up() && Self::serves(&sh, i, model) && Self::states(&sh, i, shape.needs))
             .collect();
         match self.policy {
             PlacementPolicy::LoadAware => {
@@ -1101,19 +1138,21 @@ impl FleetManager {
         tokens: &[u32],
         expected_out: u64,
     ) -> Result<usize, DaemonError> {
-        let placed = self.place_by(session, params, qos_class, codec, model, tokens, expected_out, None)?;
+        let placed = self.place_by(session, params, qos_class, 0, codec, model, tokens, expected_out, None)?;
         Ok(placed.expect("no deadline to pass"))
     }
 
     /// As [`Self::place`], for a generation that must start by `deadline`: none once it passes
     /// before the session is placed (every connection to a node serving the model held by
     /// another generation meanwhile), rather than placed for a generation already too late.
+    /// Placed only on a node that states each of `needs` ([`RequestShape::needs`]).
     #[allow(clippy::too_many_arguments)]
     pub fn place_by(
         &self,
         session: u64,
         params: GenParams,
         qos_class: u8,
+        needs: u64,
         codec: &str,
         model: &str,
         tokens: &[u32],
@@ -1128,12 +1167,16 @@ impl FleetManager {
                 prompt_tokens: tokens.len() as u64,
                 expected_out,
                 warm,
+                needs,
             },
         );
         let release_on_error = |e: DaemonError| {
             InFlight::release(&self.shared, session);
             e
         };
+        if let Some(e) = cand.is_empty().then(|| self.needs_refusal(model, needs)).flatten() {
+            return Err(release_on_error(e));
+        }
         if cand.is_empty() {
             return Err(release_on_error(DaemonError::NoNode(
                 "no healthy node can serve the model",
@@ -1149,7 +1192,7 @@ impl FleetManager {
             if late() {
                 break;
             }
-            match self.try_place_by(i, session, params, qos_class, codec, model, tokens, deadline) {
+            match self.try_place_by(i, session, params, qos_class, needs, codec, model, tokens, deadline) {
                 Ok(true) => {
                     tracing::info!(
                         "fleet: session {session} ({} prompt tokens) placed on {}",
@@ -1170,7 +1213,7 @@ impl FleetManager {
             InFlight::release(&self.shared, session);
             return Ok(None);
         }
-        if let Some(e) = self.length_refusal(&cand, model, len) {
+        if let Some(e) = self.length_refusal(&cand, model, len).or_else(|| self.needs_refusal(model, needs)) {
             return Err(release_on_error(e));
         }
         Err(release_on_error(last_err.unwrap_or(DaemonError::NoNode(
@@ -1185,11 +1228,12 @@ impl FleetManager {
         session: u64,
         params: GenParams,
         qos_class: u8,
+        needs: u64,
         codec: &str,
         model: &str,
         tokens: &[u32],
     ) -> Result<bool, DaemonError> {
-        self.try_place_by(i, session, params, qos_class, codec, model, tokens, None)
+        self.try_place_by(i, session, params, qos_class, needs, codec, model, tokens, None)
     }
 
     /// As [`Self::try_place_on`], not placed once `deadline` passes while every connection to
@@ -1201,6 +1245,7 @@ impl FleetManager {
         session: u64,
         params: GenParams,
         qos_class: u8,
+        needs: u64,
         codec: &str,
         model: &str,
         tokens: &[u32],
@@ -1223,7 +1268,7 @@ impl FleetManager {
             if !Self::serves(&sh, i, model) {
                 return Ok(false);
             }
-            if !Self::holds(&sh, i, tokens.len() as u64) {
+            if !Self::holds(&sh, i, tokens.len() as u64) || !Self::states(&sh, i, needs) {
                 return Ok(false);
             }
         }
@@ -1248,6 +1293,7 @@ impl FleetManager {
                 node: i,
                 params,
                 qos_class,
+                needs,
                 codec: codec.to_string(),
                 model: model.to_string(),
                 tokens: tokens.to_vec(),
@@ -1301,7 +1347,7 @@ impl FleetManager {
             .candidates_claiming(
                 &placed.model,
                 Some(session),
-                Self::replacement_shape(tokens, 0),
+                Self::replacement_shape(tokens, 0, placed.needs),
             )
             .into_iter()
             .filter(|&i| i != from)
@@ -1316,6 +1362,7 @@ impl FleetManager {
                 session,
                 placed.params,
                 placed.qos_class,
+                placed.needs,
                 &placed.codec,
                 &placed.model,
                 tokens,
@@ -1362,7 +1409,7 @@ impl FleetManager {
             .candidates_claiming(
                 &placed.model,
                 Some(session),
-                Self::replacement_shape(&placed.tokens, max_new_tokens),
+                Self::replacement_shape(&placed.tokens, max_new_tokens, placed.needs),
             )
             .into_iter()
             .filter(|&i| i != node)
@@ -1373,6 +1420,7 @@ impl FleetManager {
                 session,
                 placed.params,
                 placed.qos_class,
+                placed.needs,
                 &placed.codec,
                 &placed.model,
                 &placed.tokens,
@@ -1548,7 +1596,7 @@ impl FleetManager {
                 .candidates_claiming(
                     &placed.model,
                     Some(session),
-                    Self::replacement_shape(&input, remaining),
+                    Self::replacement_shape(&input, remaining, placed.needs),
                 )
                 .into_iter()
                 .filter(|i| !tried.contains(i))
@@ -1567,6 +1615,7 @@ impl FleetManager {
                 session,
                 placed.params,
                 placed.qos_class,
+                placed.needs,
                 &placed.codec,
                 &placed.model,
                 &ctx,
@@ -1807,7 +1856,7 @@ impl FleetManager {
         let cand = self.candidates_claiming(
             &placed.model,
             Some(session),
-            Self::replacement_shape(&placed.tokens, 0),
+            Self::replacement_shape(&placed.tokens, 0, placed.needs),
         );
         if cand.is_empty() {
             InFlight::release(&self.shared, session);
@@ -1820,6 +1869,7 @@ impl FleetManager {
                 session,
                 placed.params,
                 placed.qos_class,
+                placed.needs,
                 &placed.codec,
                 &placed.model,
                 &placed.tokens,

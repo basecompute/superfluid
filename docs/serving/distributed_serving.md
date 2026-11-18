@@ -3,7 +3,7 @@
 Fleet mode runs one Superfluid as a **head** that owns the HTTP API and the chat template, and one or more **node agents** (`superfluid-noded`) that each own a model and sample its tokens. Each request is placed as a whole session on one node. Prompt tokens, sampled tokens and what a request carries (its grammar, media files, and its text when a node encodes it) cross the network; weights and KV caches do not.
 
 > [!WARNING]
-> Fleet mode is early. No KV moves between nodes, so a failover re-prefills; `/slots` does not reach the nodes; and no QoS class crosses to a node.
+> Fleet mode is early. No KV moves between nodes, so a failover re-prefills; and `/slots` does not reach the nodes.
 
 <!-- source: docs/assets/diagrams/fleet.excalidraw; edit it in excalidraw.com and export the SVG over fleet.svg -->
 ![fleet mode: the head serves the HTTP API and places each session on a node over Link F; nodes run the worker and sample](../assets/diagrams/fleet.svg)
@@ -34,6 +34,7 @@ Several fleets can share one local network. A head with a token announces a netw
 | `--runtime <id>` | by format | the runtime |
 | `--max-context <N>` | sized for this device | the node's window |
 | `--max-batch <N>` | 8 | the node's lanes |
+| `--class-lanes <class>=N[,...]` | uncapped | the lanes each QoS class may hold here ([QoS](#qos)) |
 | `--identity <name>` | the host name | the name in the head's logs |
 | `--model-name <id>` | what the head announces, else the model's id | the name the head matches on |
 | `--offline` | off | pull nothing |
@@ -63,6 +64,7 @@ superfluid-noded: node 'box-a' serving 'basecompute/Qwen3.8-27B' on 100.64.0.2:8
 | `--model-name <id>` | the model's id | the name the head matches on; set it the same on every node |
 | `--max-context <N>` | sized for this device | the node's window, floor 512 |
 | `--max-batch <N>` | 8 | the node's lanes |
+| `--class-lanes <class>=N[,...]` | uncapped | the lanes each QoS class may hold here ([QoS](#qos)) |
 | `--identity <name>` | the host name | the name in the head's logs |
 | `--offline` | off | pull and install nothing |
 | `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
@@ -106,9 +108,15 @@ superfluid serve /models/qwen.base /models/gemma.base --http 0.0.0.0:8453 --flee
 | `--fleet-pool-high <pct>` | 90 | `load-aware` avoids nodes at or above this KV occupancy |
 | `--fleet-conns-per-node <N>` | the node's lanes | connections to each node in `--fleet`, and so concurrent generations there |
 
-The head loads no engine. A model given by path is still read there for its tokenizer and chat template; one given by id takes them from a node, as above. Its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no `--max-context`. It logs where each session is placed and every move to another node. `--dialect`, `--tool-call-parser` and `--temperature`/`--top-p`/`--top-k`/`--min-p` apply on the head. `--api-key`, `--key-policy` and `--rate-limit` protect its listener; a policy's `class` and `max_class` do not apply, since the head has no scheduler.
+The head loads no engine. A model given by path is still read there for its tokenizer and chat template; one given by id takes them from a node, as above. Its model id must match what the nodes advertise (the head warns about a node that serves another). Its context window is the nodes', so it needs no `--max-context`. It logs where each session is placed and every move to another node. `--dialect`, `--tool-call-parser` and `--temperature`/`--top-p`/`--top-k`/`--min-p` apply on the head. `--api-key`, `--key-policy` and `--rate-limit` protect its listener. `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant` and a policy's `class`, `max_class` and `batch_invariant` apply on the head as on a single server ([QoS](#qos)).
 
-Refused on the head (set them on each node's own `superfluid serve`): `--class-lanes`, `--http-default-qos`, `--no-http-qos-header`, `--http-allow-batch-invariant`, `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--presence-penalty`, `--otlp-endpoint`. A batch-invariant lane is refused however it is asked for (a key whose policy grants `batch_invariant`, or `SetQos`) with 400 `unsupported_on_fleet`: a node batches each generation with the others it runs.
+Refused on the head: `--class-lanes` (set it on each node: `node join --class-lanes`, `superfluid-noded --class-lanes`), and `--spec-max-temperature`, `--fim-model`, `--repeat-penalty`, `--presence-penalty`, `--otlp-endpoint` (set them on each node's own `superfluid serve`).
+
+### QoS
+
+The head resolves each request's QoS class as a single server does (`x-superfluid-qos`, `--http-default-qos`, the key's `class` and `max_class`, `SetQos`) and sends it to the node with the session. The node's scheduler admits the generation in that class, under the node's own `--class-lanes`: lane caps are a scheduler's, and each node runs its own. The head places by load, not by class. A node from before 0.1.7 runs every generation in the `completion` class.
+
+A batch-invariant lane (`x-superfluid-batch-invariant`, under `--http-allow-batch-invariant` or a key that grants it, or `SetQos`) is placed only on a node that can run it alone, and runs alone there, as on a single server: nothing else on that node is admitted while it runs or waits. A node from before this release cannot: when every node serving the model is one, the request is refused with 400 `unsupported_on_fleet`, naming them.
 
 ## Placement policies
 
@@ -200,4 +208,4 @@ A request a head restart cut short runs again when the client retries it with it
 ## Limits
 
 - No KV transfer between nodes: a failover re-prefills.
-- No QoS class crosses the wire.
+- The head does not cap lanes per QoS class across the fleet; each node caps its own (`--class-lanes`).

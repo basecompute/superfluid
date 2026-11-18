@@ -52,6 +52,10 @@ Options:
   --runtime <id>          The runtime, when the model's format does not decide it
   --max-context <N>       This node's context window [default: sized for this device]
   --max-batch <N>         This node's lanes [default: 8]
+  --class-lanes <class>=N[,...]
+                          Caps this node's lanes per QoS class, as `serve --class-lanes`
+                          does: the head sends each generation in its request's class
+                          [default: uncapped]
   --identity <name>       The name the head shows for this node [default: the host name]
   --model-name <id>       The name the head matches on [default: an id's own name; a
                           path's own name, or the head's one model when it serves one]
@@ -125,6 +129,7 @@ fn join(args: &[String]) {
     }
     let (mut head, mut model, mut token, mut runtime, mut identity, mut model_name) = (None, None, None, None, None, None);
     let (mut max_context, mut max_batch, mut offline, mut park) = (None, 8u32, false, false);
+    let mut class_lanes: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| fail(format!("{a} takes a value")));
@@ -136,6 +141,7 @@ fn join(args: &[String]) {
             "--model-name" => model_name = Some(val()),
             "--max-context" => max_context = Some(val().parse().unwrap_or_else(|_| fail("--max-context takes a number"))),
             "--max-batch" => max_batch = val().parse().unwrap_or_else(|_| fail("--max-batch takes a number")),
+            "--class-lanes" => class_lanes = Some(val()),
             "--offline" => offline = true,
             "--park" => park = true,
             // Read before the rest by events::init.
@@ -182,13 +188,14 @@ fn join(args: &[String]) {
         fail("no fleet token: run `superfluid fleet token` on the head and pass --token <value> here");
     }
     let max_batch = max_batch.max(1);
+    let class_lanes = class_lanes_of(class_lanes.as_deref(), max_batch).unwrap_or_else(|e| fail(e));
     let state = NodeState::open(&home, &identity, park).unwrap_or_else(|e| fail(e));
     let source = match (&follows, &model) {
         (Some(serving), _) => serving.id.clone(),
         (None, Some(m)) => m.clone(),
         (None, None) => unreachable!("a node with no --model follows its head"),
     };
-    let loaded = load_node(&source, runtime.as_deref(), max_context, max_batch, offline, &state).unwrap_or_else(|e| fail(e));
+    let loaded = load_node(&source, runtime.as_deref(), max_context, (max_batch, class_lanes), offline, &state).unwrap_or_else(|e| fail(e));
     eprintln!("superfluid: {}", loaded.summary);
     let model_name = match (&follows, model_name) {
         (Some(serving), _) => serving.name.clone(),
@@ -872,21 +879,31 @@ pub struct LoadedNode {
     pub tokenizer: Option<Arc<dyn superfluid_engine::Tokenizer>>,
 }
 
+/// `--class-lanes` on a node: the lanes each QoS class may hold of `lanes`, as
+/// [`crate::qos::parse_class_lanes`] reads them for `serve`; uncapped when not given.
+pub fn class_lanes_of(spec: Option<&str>, lanes: u32) -> Result<[usize; 4], String> {
+    match spec {
+        None => Ok([0; 4]),
+        Some(spec) => crate::qos::parse_class_lanes(spec, lanes.max(1) as usize).map_err(|e| format!("--class-lanes: {e}")),
+    }
+}
+
 /// A fleet node's model by path or id, as `superfluid serve` loads one: pulled when given by
 /// id, on its runtime (installed first if it never was), in a window sized for this device
-/// unless `max_context` pins it.
+/// unless `max_context` pins it. `lanes` are its lanes and the cap on each QoS class's
+/// ([`class_lanes_of`]).
 pub fn load_node(
     model: &str,
     runtime: Option<&str>,
     max_context: Option<i32>,
-    lanes: u32,
+    lanes: (u32, [usize; 4]),
     offline: bool,
     state: &NodeState,
 ) -> Result<LoadedNode, String> {
-    let lanes = lanes.max(1);
+    let (lanes, class_lanes) = (lanes.0.max(1), lanes.1);
     // The test engine, which needs no model, as `superfluid-noded --engine mock` serves it.
     if runtime == Some("mock") {
-        return load_mock_node(max_context, lanes, state);
+        return load_mock_node(max_context, (lanes, class_lanes), state);
     }
     let catalog = Catalog::from_env();
     let runtime = runtime.map(|r| if r == "native" { "basert" } else { r });
@@ -922,15 +939,15 @@ pub fn load_node(
         runtime.id.name(),
         path.display()
     );
-    let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, state)?;
+    let mut node = loaded(host, Box::new(NoCodec), (lanes, class_lanes), model_name, summary, state)?;
     node.tokenizer = crate::serve::open_tokenizer(&runtime, &path).ok();
     node.id = pulled;
     Ok(node)
 }
 
 /// A node on the test engine, which needs no model.
-pub fn load_mock_node(max_context: Option<i32>, lanes: u32, state: &NodeState) -> Result<LoadedNode, String> {
-    let lanes = lanes.max(1);
+pub fn load_mock_node(max_context: Option<i32>, lanes: (u32, [usize; 4]), state: &NodeState) -> Result<LoadedNode, String> {
+    let (lanes, class_lanes) = (lanes.0.max(1), lanes.1);
     let engine = crate::linked::engine("mock").ok_or("this build does not link the mock engine")?;
     let args = superfluid_adapter_kit::WorkerArgs {
         max_context: max_context.unwrap_or(4096).max(512),
@@ -938,19 +955,20 @@ pub fn load_mock_node(max_context: Option<i32>, lanes: u32, state: &NodeState) -
         ..Default::default()
     };
     let host = EngineHost::try_spawn_loaded(move || engine.open(&args)).map_err(|e| format!("model load failed: {e}"))?;
-    loaded(host, Box::new(crate::MockCodec), lanes, "mock".into(), "the mock engine".into(), state)
+    loaded(host, Box::new(crate::MockCodec), (lanes, class_lanes), "mock".into(), "the mock engine".into(), state)
 }
 
 fn loaded(
     host: EngineHost,
     codec: Box<dyn crate::TextCodec + Send + Sync>,
-    lanes: u32,
+    (lanes, class_lanes): (u32, [usize; 4]),
     model_name: String,
     summary: String,
     state: &NodeState,
 ) -> Result<LoadedNode, String> {
     let store = SessionStore::open(&state.wal).map_err(|e| format!("node store: {e}"))?;
-    let daemon = Daemon::with_park(store, host, codec, lanes as usize, state.park.clone());
+    let opts = crate::DaemonOptions { max_lanes: lanes as usize, class_lanes, park_dir: state.park.clone(), ..crate::DaemonOptions::default() };
+    let daemon = Daemon::with_options(store, host, codec, opts).map_err(|e| format!("node: {e}"))?;
     Ok(LoadedNode { daemon, model_name, id: None, summary, tokenizer: None })
 }
 
@@ -1325,7 +1343,7 @@ mod tests {
         std::thread::spawn(move || accept_nodes(listener, m, t, models));
 
         let state = NodeState::scratch().unwrap();
-        let node = load_mock_node(None, 2, &state).unwrap();
+        let node = load_mock_node(None, (2, [0; 4]), &state).unwrap();
         let agent = NodeAgent::new(Arc::new(node.daemon), "box-a", "mock").with_max_lanes(2).with_auth(token.clone());
         let target = Arc::new(Target::new(Some(addr), Vec::new(), Search::for_token(&token), None));
         let links = Arc::new(Links::default());
@@ -1347,6 +1365,16 @@ mod tests {
             assert!(std::time::Instant::now() < by, "every lane ended once its link closed");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn a_node_caps_its_lanes_per_class_as_serve_does() {
+        assert_eq!(class_lanes_of(None, 8), Ok([0; 4]), "uncapped");
+        assert_eq!(class_lanes_of(Some("background=2,agent=6"), 8), Ok([0, 0, 6, 2]));
+        let e = class_lanes_of(Some("agent=9"), 8).unwrap_err();
+        assert!(e.starts_with("--class-lanes: ") && e.contains("exceeds"), "{e}");
+        let state = NodeState::scratch().unwrap();
+        load_mock_node(None, (2, [0, 0, 1, 0]), &state).expect("a capped node loads");
     }
 
     #[test]

@@ -17,7 +17,7 @@ const DEFAULT_LANES: u32 = 8;
 fn usage() -> ! {
     eprintln!(
         "usage: superfluid-noded --model <path|org/model[:tag]> [--listen <ip:port>] [--auth-file <path>] \
-         [--runtime <id>] [--model-name <id>] [--max-context N] [--max-batch N] [--identity <name>] \
+         [--runtime <id>] [--model-name <id>] [--max-context N] [--max-batch N] [--class-lanes <class>=N[,...]] [--identity <name>] \
          [--offline] [--park] [--insecure-no-auth] [--idle-timeout-ms N] [--handshake-timeout-ms N]\n\
          \n\
          A model given by id is pulled, and its runtime installed, as `superfluid serve` does; the\n\
@@ -27,6 +27,8 @@ fn usage() -> ! {
           `superfluid fleet token`); with it the link is encrypted and both ends checked.\n\
           --park keeps each prompt's prefix on disk under $SUPERFLUID_HOME/fleet/nodes/<identity>/park,\n\
           so a restarted node starts the head's sessions warm.\n\
+          --class-lanes caps this node's lanes per QoS class, as `superfluid serve --class-lanes`\n\
+          does; the head sends each generation in its request's class.\n\
           There is no sampling flag here: a fleet generation must match the local path\n\
           token for token, so the node applies only what the request carries.)"
     );
@@ -53,6 +55,7 @@ fn main() {
     let mut model: Option<String> = None;
     let mut max_context: Option<i32> = None;
     let mut max_batch: Option<u32> = None;
+    let mut class_lanes: Option<String> = None;
     let mut identity: Option<String> = None;
     let mut model_name_override: Option<String> = None;
     let mut handshake_timeout = DEFAULT_HANDSHAKE_TIMEOUT;
@@ -70,6 +73,7 @@ fn main() {
             "--model" => model = Some(val()),
             "--max-context" => max_context = Some(val().parse().unwrap_or_else(|_| usage())),
             "--max-batch" => max_batch = Some(val().parse().unwrap_or_else(|_| usage())),
+            "--class-lanes" => class_lanes = Some(val()),
             "--identity" => identity = Some(val()),
             "--model-name" => model_name_override = Some(val()),
             "--auth-file" => auth_file = Some(PathBuf::from(val())),
@@ -88,6 +92,7 @@ fn main() {
     let listen = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let identity = identity.unwrap_or_else(superfluid_daemon::metrics::hostname);
     let lanes = max_batch.unwrap_or(DEFAULT_LANES).max(1);
+    let class_lanes = superfluid_daemon::fleet_join::class_lanes_of(class_lanes.as_deref(), lanes).unwrap_or_else(|e| fail(2, e));
     let mock = runtime.as_deref() == Some("mock");
     if model.is_none() && !mock {
         usage();
@@ -134,10 +139,10 @@ fn main() {
     }
     .unwrap_or_else(|e| fail(3, e));
     let loaded = if mock {
-        superfluid_daemon::fleet_join::load_mock_node(max_context, lanes, &state)
+        superfluid_daemon::fleet_join::load_mock_node(max_context, (lanes, class_lanes), &state)
     } else {
         let model = model.expect("checked above");
-        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, lanes, offline, &state)
+        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, (lanes, class_lanes), offline, &state)
     }
     .unwrap_or_else(|e| fail(3, e));
     let model_name = model_name_override.unwrap_or(loaded.model_name);

@@ -80,7 +80,8 @@ pub struct NodeAgent {
     model_name: String,
     /// The id the model is pulled by, told to the head, which announces it to nodes that follow.
     model_id: Option<String>,
-    /// What the node tells the head of itself ([`superfluid_proto::handshake::FOLLOWS_HEAD`]).
+    /// What the node tells the head of itself ([`superfluid_proto::handshake::FOLLOWS_HEAD`],
+    /// [`superfluid_proto::handshake::BATCH_INVARIANT`]).
     feature_flags: u64,
     start: Instant,
     handshake_timeout: Duration,
@@ -154,7 +155,7 @@ impl NodeAgent {
             identity: identity.into(),
             model_name: model_name.into(),
             model_id: None,
-            feature_flags: 0,
+            feature_flags: superfluid_proto::handshake::BATCH_INVARIANT,
             start: Instant::now(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -210,6 +211,14 @@ impl NodeAgent {
     /// model the node serves.
     pub fn following(mut self) -> NodeAgent {
         self.feature_flags |= superfluid_proto::handshake::FOLLOWS_HEAD;
+        self
+    }
+
+    /// A node that does not state `flag` to its head, as one released before it does; for
+    /// testing a head against such a node.
+    #[doc(hidden)]
+    pub fn without_feature(mut self, flag: u64) -> NodeAgent {
+        self.feature_flags &= !flag;
         self
     }
 
@@ -585,7 +594,7 @@ impl NodeAgent {
                 endpoint.send(msg_type::TOKENIZE_RESP, &linkf::TokenizeRespMsg { request_id: m.request_id, tokens })?;
             }
             msg_type::GENERATE_OPTS => {
-                let m: linkf::GenerateOptsMsg = postcard::from_bytes(&frame.payload)?;
+                let m = linkf::GenerateOptsMsg::decode(&frame.payload)?;
                 self.opts.insert((m.session_id, m.generation_id), m);
             }
             msg_type::XFER_BEGIN => {
@@ -765,6 +774,8 @@ impl NodeAgent {
         let max_wall_ms = req.budgets.max_wall_ms;
         let opts = self.opts.remove(&(req.session_id, req.generation_id));
         self.opts.clear();
+        // Asked only of a node that states it can, as a single server runs one: alone.
+        let batch_invariant = opts.as_ref().is_some_and(|o| o.batch_invariant);
         let media: Vec<(u64, std::path::PathBuf, u32)> = opts
             .iter()
             .flat_map(|o| &o.media)
@@ -786,6 +797,7 @@ impl NodeAgent {
                             max_new,
                             max_wall_ms,
                             class,
+                            batch_invariant,
                             extras.extras.clone(),
                             media,
                             |batch| {
