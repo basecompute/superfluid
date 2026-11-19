@@ -514,6 +514,36 @@ fn shape(p: &str, windows: bool) -> String {
     }
 }
 
+/// `word` as one word of a command a user is shown to type. A path no shell splits or reads into stays as it is; any
+/// other goes in single quotes, which PowerShell reads on Windows (a `'` in it doubled) and a POSIX shell elsewhere.
+fn shell_word(word: &str, windows: bool) -> String {
+    let plain = |c: char| c.is_alphanumeric() || matches!(c, '/' | ':' | '.' | '_' | '-' | '+') || (windows && matches!(c, '\\' | '~'));
+    if !word.is_empty() && word.chars().all(plain) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', if windows { "''" } else { r"'\''" }))
+}
+
+/// The start of a command that runs the program at `program`. PowerShell takes a quoted path for a string, and runs
+/// it only after `&`.
+fn shell_program(program: &str, windows: bool) -> String {
+    let word = shell_word(program, windows);
+    if windows && word.starts_with('\'') {
+        format!("& {word}")
+    } else {
+        word
+    }
+}
+
+/// `why`, saying which shell a quoted Windows command is for: cmd reads neither `'` nor `&` as PowerShell does.
+fn for_powershell(command: &str, why: String, windows: bool) -> String {
+    if windows && command.contains('\'') {
+        format!("{why}; the command is written for PowerShell")
+    } else {
+        why
+    }
+}
+
 fn delegate_by_place(exe: &Path) -> Option<Delegate> {
     let p = exe.to_string_lossy().into_owned();
     let at = shape(&p, cfg!(windows));
@@ -632,21 +662,32 @@ fn npm_global_prefix(p: &str, windows: bool) -> Option<&str> {
     Path::new(prefix).join("superfluid.cmd").is_file().then_some(prefix)
 }
 
+/// What a user types to update the copy in the npm global folder under `prefix`. On Windows it names the prefix: the
+/// command is all the update there is there, and typed as it is elsewhere it would install into whichever folder
+/// npm's configuration names, leaving this copy as it was.
+fn npm_global_command(prefix: &str, windows: bool) -> String {
+    if windows {
+        format!("npm install --global --prefix {} @basecompute/superfluid@latest", shell_word(prefix, true))
+    } else {
+        "npm install --global @basecompute/superfluid@latest".to_string()
+    }
+}
+
 /// `npm install --global` by the npm whose global folder holds the copy, told that folder's prefix (npm's
 /// configuration or NPM_CONFIG_PREFIX may name another); a project's dependency (or pnpm's, yarn's, bun's) is that
 /// project's to update. On Windows the command is named (`named_while_it_runs`).
 fn npm(p: &str) -> Delegate {
     let manager = "npm".to_string();
-    let command = "npm install --global @basecompute/superfluid@latest".to_string();
     let Some(prefix) = npm_global_prefix(p, cfg!(windows)) else {
         let why = "it is a project's dependency (or pnpm's, yarn's or bun's): update it in that project".to_string();
         return Delegate::Name { manager, command: "npm install @basecompute/superfluid@latest".into(), why };
     };
+    let command = npm_global_command(prefix, cfg!(windows));
     let prefix = Path::new(prefix);
     if cfg!(windows) {
         // Its npm is not looked for: it may be anywhere (Node's installer keeps the global folder apart from npm
         // itself), and it is not run.
-        return Delegate::Name { why: while_it_runs(&manager), manager, command };
+        return Delegate::Name { why: for_powershell(&command, while_it_runs(&manager), true), manager, command };
     }
     let bin = prefix.join("bin");
     let npm = bin.join("npm");
@@ -672,12 +713,18 @@ fn npm(p: &str) -> Delegate {
 /// system's, which refuses or needs root.
 fn pip(p: &str) -> Delegate {
     let python = python_of(p, cfg!(windows)).filter(|py| executable(py));
-    let command = match python {
-        Some(py) => format!("{} -m pip install --upgrade superfluid-cli", py.display()),
-        None => "pip install --upgrade superfluid-cli".to_string(),
-    };
+    let command = pip_command(python.as_deref(), cfg!(windows));
     let why = "its environment may be a project's, pinned by a lock file, or the system's: run it in that environment yourself";
-    Delegate::Name { manager: "pip".into(), command, why: why.into() }
+    Delegate::Name { manager: "pip".into(), why: for_powershell(&command, why.into(), cfg!(windows)), command }
+}
+
+/// pip's update by the environment's own `python`, its path quoted where a shell would split it (a home folder named
+/// with a space), or by whichever `pip` is on PATH when that Python is not found.
+fn pip_command(python: Option<&Path>, windows: bool) -> String {
+    match python {
+        Some(py) => format!("{} -m pip install --upgrade superfluid-cli", shell_program(&py.to_string_lossy(), windows)),
+        None => "pip install --upgrade superfluid-cli".to_string(),
+    }
 }
 
 /// Where the Python of the environment that holds the copy at `p` would be:
@@ -754,7 +801,7 @@ fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
     let idle = || -> Result<(), String> {
         let busy: Vec<String> = other_processes()
             .into_iter()
-            .filter(|(_, e)| under(e, &watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
+            .filter(|(_, e)| runs_under(e, &watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
             .map(|(pid, _)| pid.to_string())
             .collect();
         if busy.is_empty() {
@@ -1104,7 +1151,14 @@ pub fn running_from(dir: &Path) -> bool {
 /// The other processes running an executable under `dir`, by pid and when each started.
 fn processes_from(dir: &Path) -> Vec<(i32, u64)> {
     let Ok(dir) = crate::sys::canonical(dir) else { return Vec::new() };
-    other_processes().into_iter().filter(|(_, exe)| under(exe, &dir)).map(|(p, _)| (p, started_at(p).unwrap_or(0))).collect()
+    other_processes().into_iter().filter(|(_, exe)| runs_under(exe, &dir)).map(|(p, _)| (p, started_at(p).unwrap_or(0))).collect()
+}
+
+/// Whether the process whose executable the system reports as `exe` runs from under the real path `dir`. Windows
+/// reports the path the process was started by, which may reach the file by a short name (`C:\Users\RUNNER~1`) or
+/// through a junction; such a path is resolved as `dir` was. Elsewhere the system reports the real path.
+fn runs_under(exe: &Path, dir: &Path) -> bool {
+    under(exe, dir) || (cfg!(windows) && crate::sys::canonical(exe).is_ok_and(|real| under(&real, dir)))
 }
 
 
@@ -1188,6 +1242,19 @@ fn move_tree(from: &Path, to: &Path) -> Result<(), String> {
     }
     copy_tree(from, to)?;
     std::fs::remove_dir_all(from).map_err(|e| format!("{}: {e}", from.display()))
+}
+
+/// `move_tree` for a tree the caller unpacked and removes itself, which may hold the program that is running this:
+/// the install script runs the release it unpacked. Where the tree cannot be renamed (another volume) it is copied,
+/// and what cannot then be removed is left to the caller. Windows deletes no program that is running, so there the
+/// removal always stops at this one.
+fn take_tree(from: &Path, to: &Path) -> Result<(), String> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_tree(from, to)?;
+    let _ = std::fs::remove_dir_all(from);
+    Ok(())
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
@@ -1459,7 +1526,8 @@ pub fn use_version(home: &Path, catalog: &Catalog, exe: &Path, v: &str) -> Resul
 }
 
 /// `self install --from <dir> [--prefix <dir>]`: an unpacked release placed
-/// into the layout and made current; the install script's last step.
+/// into the layout and made current; the install script's last step. `<dir>` is moved there, or copied when it is on
+/// another volume, and then what is left of it is the script's to remove.
 pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<&Path>) -> Result<Report, String> {
     let versions = Versions::of(home);
     let mut report = Report::default();
@@ -1480,7 +1548,7 @@ pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<
     } else {
         // Proved where it is, then set in place of a copy that does not work.
         probe_binary(&command, &v, home, &engine).map_err(|e| format!("{v} was not made current: {e}"))?;
-        replace_tree(from, &dest, &versions.dir.join(format!(".replaced-{v}")), move_tree)?;
+        replace_tree(from, &dest, &versions.dir.join(format!(".replaced-{v}")), take_tree)?;
     }
     // The install script's earlier copy under the prefix is kept as the version to go back to.
     let kept = match prefix.and_then(|p| match installed_as(&p.join(crate::sys::exe_name("superfluid"))) {
@@ -1809,6 +1877,71 @@ mod install_script_tests {
         assert_eq!(named_while_it_runs(basert.clone()), basert, "basert is handed the process, and replaces a copy nothing runs from");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // On Windows the command a user is shown is the whole update, so it has to be one a shell runs as it is typed.
+    #[test]
+    fn a_command_a_user_is_to_type_updates_the_copy_it_is_about_and_survives_a_space() {
+        // npm is told the folder the copy is in: npm's own configuration may name another (%AppData%\npm).
+        assert_eq!(npm_global_command(r"D:\sf-tools", true), r"npm install --global --prefix D:\sf-tools @basecompute/superfluid@latest");
+        assert_eq!(
+            npm_global_command(r"C:\Users\Jane Doe\AppData\Roaming\npm", true),
+            r"npm install --global --prefix 'C:\Users\Jane Doe\AppData\Roaming\npm' @basecompute/superfluid@latest"
+        );
+        assert_eq!(npm_global_command("/usr/local", false), "npm install --global @basecompute/superfluid@latest", "elsewhere superfluid runs npm, with the prefix");
+
+        // A path no shell splits is as it is; another is quoted, and PowerShell runs a quoted program after `&`.
+        let python = |p: &str, windows| pip_command(Some(Path::new(p)), windows);
+        assert_eq!(python(r"C:\Users\me\venv\Scripts\python.exe", true), r"C:\Users\me\venv\Scripts\python.exe -m pip install --upgrade superfluid-cli");
+        assert_eq!(python(r"C:\Users\RUNNER~1\venv\Scripts\python.exe", true), r"C:\Users\RUNNER~1\venv\Scripts\python.exe -m pip install --upgrade superfluid-cli");
+        assert_eq!(
+            python(r"C:\Users\Jane Doe\venv\Scripts\python.exe", true),
+            r"& 'C:\Users\Jane Doe\venv\Scripts\python.exe' -m pip install --upgrade superfluid-cli"
+        );
+        assert_eq!(python(r"C:\Users\O'Brien & Co\python.exe", true), r"& 'C:\Users\O''Brien & Co\python.exe' -m pip install --upgrade superfluid-cli");
+        assert_eq!(python("/opt/env/bin/python", false), "/opt/env/bin/python -m pip install --upgrade superfluid-cli");
+        assert_eq!(python("/home/jane doe/it's/bin/python", false), r"'/home/jane doe/it'\''s/bin/python' -m pip install --upgrade superfluid-cli");
+        assert_eq!(pip_command(None, true), "pip install --upgrade superfluid-cli");
+        assert_eq!(shell_word("", true), "''");
+        assert_eq!(shell_word(r"a\b", false), r"'a\b'", "a backslash is a name's on Unix, and a shell's too");
+
+        // cmd reads a quoted command another way, so the reason says whose it is.
+        let why = for_powershell(&python(r"C:\Users\Jane Doe\python.exe", true), "run it yourself".into(), true);
+        assert_eq!(why, "run it yourself; the command is written for PowerShell");
+        assert_eq!(for_powershell(&python(r"C:\Users\me\python.exe", true), "run it yourself".into(), true), "run it yourself");
+        assert_eq!(for_powershell("'/a b/python' -m pip", "run it yourself".into(), false), "run it yourself");
+    }
+
+    // The install script hands over the folder it unpacked, with the program it runs inside.
+    #[test]
+    fn an_unpacked_release_is_taken_whole_and_what_cannot_be_removed_is_left_to_its_owner() {
+        let root = std::env::temp_dir().join(format!("sf-self-take-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release = |dir: &Path| {
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::write(dir.join("bin").join("superfluid"), b"a release").unwrap();
+        };
+        // On one volume it is renamed.
+        release(&root.join("unpacked"));
+        take_tree(&root.join("unpacked"), &root.join("moved")).unwrap();
+        assert_eq!(std::fs::read(root.join("moved").join("bin").join("superfluid")).unwrap(), b"a release");
+        assert!(!root.join("unpacked").exists());
+        // Where it cannot be (here, something is in the way, as another volume would refuse), it is copied; a source
+        // that cannot then be removed, as a running program's on Windows, does not undo the install.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let from = root.join("held");
+            release(&from);
+            std::fs::create_dir_all(root.join("dest").join("in-the-way")).unwrap();
+            std::fs::set_permissions(from.join("bin"), std::fs::Permissions::from_mode(0o555)).unwrap();
+            take_tree(&from, &root.join("dest")).unwrap();
+            assert_eq!(std::fs::read(root.join("dest").join("bin").join("superfluid")).unwrap(), b"a release");
+            if from.exists() {
+                std::fs::set_permissions(from.join("bin"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 // The Windows layout, on files that stand in for a release: the launcher is whatever bytes the version carries.
@@ -1929,13 +2062,22 @@ mod windows_tests {
         let global = packaged(&in_main.join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
         std::fs::write(prefix.join("superfluid.cmd"), b"").unwrap();
         assert!(matches!(installed_as(&global), Installed::Other(_)), "it is npm's, not a release unpacked in one place");
+        // The command names the folder this copy is in, which need not be the one npm is set to.
+        let update_it = format!("npm install --global --prefix {} @basecompute/superfluid@latest", crate::sys::canonical(&prefix).unwrap().display());
         let (manager, command, why) = named(&global);
-        assert_eq!((manager.as_str(), command.as_str()), ("npm", "npm install --global @basecompute/superfluid@latest"));
-        assert!(why.contains("Windows lets npm replace no program that is running"), "{why}");
-        assert_eq!(update_command(&global), "npm install --global @basecompute/superfluid@latest");
+        assert_eq!((manager.as_str(), command.as_str()), ("npm", update_it.as_str()));
+        assert!(why.contains("Windows lets npm replace no program that is running") && !why.contains("PowerShell"), "{why}");
+        assert_eq!(update_command(&global), update_it);
         let yes = Options { yes: true, ..Options::default() };
         let refused = update(&root, &Catalog::from_env(), &global, &yes).unwrap_err();
-        assert!(refused.contains("was installed by npm, which updates it: run `npm install --global @basecompute/superfluid@latest`"), "{refused}");
+        assert!(refused.contains(&format!("was installed by npm, which updates it: run `{update_it}`")), "{refused}");
+        // A folder named with a space is quoted, as PowerShell reads it.
+        let spaced = root.join("my tools");
+        let in_spaced = packaged(&spaced.join("node_modules").join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
+        std::fs::write(spaced.join("superfluid.cmd"), b"").unwrap();
+        let (_, command, why) = named(&in_spaced);
+        assert_eq!(command, format!("npm install --global --prefix '{}' @basecompute/superfluid@latest", crate::sys::canonical(&spaced).unwrap().display()));
+        assert!(why.contains("written for PowerShell"), "{why}");
         // A project's dependency is that project's.
         let project = packaged(&root.join("app").join("node_modules").join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
         let (_, command, why) = named(&project);
@@ -1950,6 +2092,15 @@ mod windows_tests {
         let python = crate::sys::canonical(env.join("Scripts").join("python.exe")).unwrap();
         let (manager, command, _) = named(&pip_copy);
         assert_eq!((manager.as_str(), command), ("pip", format!("{} -m pip install --upgrade superfluid-cli", python.display())));
+        // A home folder named with a space: the program is quoted, and run with `&`.
+        let env = root.join("Jane Doe").join("venv");
+        let pip_copy = packaged(&env.join("Lib").join("site-packages").join("superfluid_cli").join("release"), pip_line);
+        std::fs::create_dir_all(env.join("Scripts")).unwrap();
+        std::fs::write(env.join("Scripts").join("python.exe"), b"").unwrap();
+        let python = crate::sys::canonical(env.join("Scripts").join("python.exe")).unwrap();
+        let (_, command, why) = named(&pip_copy);
+        assert_eq!(command, format!("& '{}' -m pip install --upgrade superfluid-cli", python.display()));
+        assert!(why.contains("written for PowerShell"), "{why}");
         // pipx and uv are told apart by their folders, and are named too, with or without one on PATH.
         let site = Path::new("Lib").join("site-packages").join("superfluid_cli").join("release");
         let pipx = packaged(&root.join("pipx").join("venvs").join("superfluid-cli").join(&site), pip_line);

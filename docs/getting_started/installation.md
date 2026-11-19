@@ -147,7 +147,7 @@ What differs from macOS and Linux:
 | `superfluid stop` | ends the server outright, as `SIGTERM` does elsewhere |
 | `$SUPERFLUID_HOME/runtimes/<id>/current` | a file that holds the default install's name, not a link: an ordinary user may make neither a symbolic link nor a junction every process follows |
 | a server other machines connect to (`--http` off loopback, a fleet head, `superfluid-noded`) | reached only where Windows Defender Firewall allows the program inbound connections, which an administrator grants once; `superfluid node join` dials out and needs nothing ([Distributed serving](../serving/distributed_serving.md#join-a-node)) |
-| a copy from npm or PyPI | `superfluid self update` names the package manager's command and runs none: Windows lets nothing replace a program that is running, so run it yourself with no Superfluid running. Homebrew has no Windows |
+| a copy from npm or PyPI | `superfluid self update` names the package manager's command and runs none: Windows lets nothing replace a program that is running, so run it yourself with no Superfluid running. The command is for the copy it names (npm's carries `--prefix`), and a path with a space is quoted for PowerShell. Homebrew has no Windows |
 
 ## Install a runtime
 
