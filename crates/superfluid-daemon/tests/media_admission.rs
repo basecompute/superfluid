@@ -177,16 +177,34 @@ fn an_image_that_fails_to_encode_fails_its_own_request_and_releases_the_rest() {
 
 #[test]
 fn a_request_cancelled_while_its_images_encode_ends_and_frees_its_slot() {
-    let d = daemon(Duration::from_millis(100), 3);
+    let log = EncodeLog::default();
+    let (d, _) = daemon_logging(Duration::from_millis(100), 3, false, Some(Arc::clone(&log)));
     let running = start_decoding(&d);
     let s = image_session(&d, &images(3, "cancelled"));
     let dd = Arc::clone(&d);
     let gen = std::thread::spawn(move || dd.generate(s, 4));
-    // Inside its first image's encode: two are left.
-    std::thread::sleep(Duration::from_millis(50));
-    d.cancel_registry().cancel(s);
+    // Cancelled once its first image's encode has begun, not after a wait: a
+    // cancel that comes before the request has registered is dropped as one
+    // meant for the session's previous generation, and one that comes before
+    // any encode ends a request that holds no image. The mock notes an encode
+    // under the log's lock, so no further encode begins while the cancel goes
+    // in.
+    let begun = loop {
+        assert!(!gen.is_finished(), "the request ended before any of its images encoded");
+        let at = log.lock().unwrap();
+        if !at.is_empty() {
+            d.cancel_registry().cancel(s);
+            break at.len();
+        }
+        drop(at);
+        std::thread::sleep(Duration::from_millis(1));
+    };
     let out = gen.join().unwrap().unwrap();
-    assert_eq!(out.tokens_generated, 0);
+    assert_eq!(out.tokens_generated, 0, "cancelled with {begun} of its 3 encodes begun");
+    // It stopped encoding: at most the encode already asked for when the
+    // cancel went in began after it.
+    let encoded = log.lock().unwrap().len();
+    assert!(encoded <= begun + 1, "{encoded} encodes, {begun} begun at the cancel");
     // Its encoded images were let go: another three-image request fits.
     let next = image_session(&d, &images(3, "after"));
     assert_eq!(d.generate(next, 4).unwrap().tokens_generated, 4);
