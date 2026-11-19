@@ -105,6 +105,45 @@ class CarriedAssets(unittest.TestCase):
         assets, _, _ = nightly_runtimes.carried_assets(tested("b100", "llama-{v}-bin-ubuntu-cuda-13.4-x64.tar.gz"), "b101", release)
         self.assertEqual(self.names(assets), ["llama-b101-bin-ubuntu-cuda-13.10-x64.tar.gz"], "compared as numbers")
 
+    def test_windows_archives_are_carried_and_a_runtime_named_for_no_build_keeps_its_name(self):
+        # llama.cpp's Windows CUDA runtime is one zip for every build of a CUDA version.
+        previous = tested(
+            "b100",
+            "cudart-llama-bin-win-cuda-12.4-x64.zip",
+            "cudart-llama-bin-win-cuda-13.4-x64.zip",
+            "llama-{v}-bin-win-cpu-x64.zip",
+            "llama-{v}-bin-win-cuda-13.4-x64.zip",
+            "llama-{v}-bin-win-vulkan-x64.zip",
+        )
+        release = published(
+            "b101",
+            "cudart-llama-bin-win-cuda-12.4-x64.zip",
+            "cudart-llama-bin-win-cuda-13.5-x64.zip",
+            "llama-{v}-bin-win-cpu-arm64.zip",
+            "llama-{v}-bin-win-cpu-x64.zip",
+            "llama-{v}-bin-win-cuda-13.5-x64.zip",
+            "llama-{v}-bin-win-vulkan-x64.zip",
+        )
+        assets, missing, moved = nightly_runtimes.carried_assets(previous, "b101", release)
+        self.assertEqual(
+            self.names(assets),
+            [
+                "cudart-llama-bin-win-cuda-12.4-x64.zip",
+                "cudart-llama-bin-win-cuda-13.5-x64.zip",
+                "llama-b101-bin-win-cpu-x64.zip",
+                "llama-b101-bin-win-cuda-13.5-x64.zip",
+                "llama-b101-bin-win-vulkan-x64.zip",
+            ],
+        )
+        self.assertEqual(missing, [])
+        self.assertEqual(
+            moved,
+            [
+                "cudart-llama-bin-win-cuda-13.4-x64.zip is now cudart-llama-bin-win-cuda-13.5-x64.zip",
+                "llama-b101-bin-win-cuda-13.4-x64.zip is now llama-b101-bin-win-cuda-13.5-x64.zip",
+            ],
+        )
+
     def test_an_asset_with_no_sha256_is_missing(self):
         release = published("b101", "llama-{v}-bin-macos-arm64.tar.gz")
         release[0]["digest"] = None

@@ -136,10 +136,23 @@ jobs:
             runner: [self-hosted, macOS, ARM64, ram-48g]
           - os: ubuntu-24.04
             runner: ubuntu-24.04
+          # A hosted Windows runner has no GPU and no Vulkan driver, so the
+          # plan there is llama.cpp's CPU build: the leg shows that the build
+          # loads on Windows and that the adapter drives it, as the Linux leg
+          # does with its CPU build. The Vulkan build is what a machine with a
+          # GPU installs, and no runner here has one.
+          - os: windows-2025
+            runner: windows-2025
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # Bash on every runner: Windows would run these steps in PowerShell.
+    defaults:
+      run:
+        shell: bash
     env:
       BUILD: ${{ needs.pick.outputs.llamacpp }}
+      # The Windows runner's `python3` may be the Store's stand-in for one.
+      PY: ${{ startsWith(matrix.os, 'windows') && 'python' || 'python3' }}
     steps:
       # The tests run an untested llama.cpp: the job's token is not left in .git/config for it.
       # A self-hosted runner's checkout is not cleaned, so target/ outlives the job (see
@@ -171,7 +184,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           plan=$(target/debug/superfluid-worker-llamacpp plan --version "$BUILD" --untested \
-            | python3 -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
+            | "$PY" -c 'import sys, json; print(json.dumps(json.load(sys.stdin)["plans"][0]))')
           {
             echo "plan<<PLAN_EOF"
             echo "$plan"
@@ -195,14 +208,18 @@ jobs:
         run: |
           mkdir -p ~/.cache/superfluid-nightly/models
           model=~/.cache/superfluid-nightly/models/$(basename "$TEST_GGUF_URL")
+          # Git Bash on Windows has sha256sum, and shasum only with perl on PATH.
+          if command -v shasum >/dev/null 2>&1; then sum="shasum -a 256"; else sum=sha256sum; fi
           # Checked, not just present: a download cut short would stay in the cache, and on
           # the self-hosted runner, a model every later night's tests fail on.
-          if ! echo "$TEST_GGUF_SHA256  $model" | shasum -a 256 -c --status 2>/dev/null; then
+          if ! echo "$TEST_GGUF_SHA256  $model" | $sum -c --status 2>/dev/null; then
             curl -fsSL --retry 3 -o "$model.part" "$TEST_GGUF_URL"
-            echo "$TEST_GGUF_SHA256  $model.part" | shasum -a 256 -c --status \
+            echo "$TEST_GGUF_SHA256  $model.part" | $sum -c --status \
               || { echo "::error::$TEST_GGUF_URL does not have the SHA-256 the workflow pins"; exit 1; }
             mv "$model.part" "$model"
           fi
+          # The tests are a Windows program there, and take the path as Windows writes it.
+          if [ "$RUNNER_OS" = Windows ]; then model="$(cygpath -m "$model")"; fi
           echo "SUPERFLUID_TEST_GGUF=$model" >> "$GITHUB_ENV"
 
       - name: The adapter's tests on it
@@ -211,7 +228,7 @@ jobs:
           export SUPERFLUID_LLAMA_LIB="$RUNNER_TEMP/llamacpp/lib"
           cargo test -p superfluid-adapter-llamacpp -- --nocapture 2>&1 \
             | tee "$RUNNER_TEMP/llamacpp-tests.log" \
-            | python3 scripts/skip_report.py "llama.cpp adapter"
+            | "$PY" scripts/skip_report.py "llama.cpp adapter"
 
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
