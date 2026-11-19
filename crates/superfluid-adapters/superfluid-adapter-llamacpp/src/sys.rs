@@ -527,7 +527,14 @@ fn open() -> Result<Loaded, String> {
     let dir = libllama.parent().map(Path::to_path_buf).unwrap_or_default();
     // SAFETY: loading a shared library runs its initializers; llama.cpp's
     // are its static registrations, safe to run once in this process.
-    let lib = unsafe { open_library(&libllama) }.map_err(|e| format!("{}: {e}", libllama.display()))?;
+    let lib = unsafe { open_library(&libllama) }.map_err(|e| {
+        // Windows names the library asked for, never the one of its own it could not find.
+        let lacks = if cfg!(windows) { crate::vcruntime::missing(&dir, &crate::vcruntime::system_dir()) } else { Vec::new() };
+        match lacks.is_empty() {
+            true => format!("{}: {e}", libllama.display()),
+            false => format!("{}: {e} ({})", libllama.display(), crate::vcruntime::advice(&lacks)),
+        }
+    })?;
     let mut libs = vec![lib];
     for stem in ["libggml", "libggml-base"] {
         if let Some(p) = file_names(stem).into_iter().map(|n| dir.join(n)).find(|p| p.is_file()) {

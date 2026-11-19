@@ -19,6 +19,11 @@ $ProgressPreference = 'SilentlyContinue'
 
 function Say($m) { Write-Host "superfluid: $m" }
 function Fail($m) { throw "superfluid: $m" }
+# A folder (file:///...) is copied from: PowerShell 7's web requests take no file URL.
+function Fetch($url, $to) {
+  if ($url -like 'file:*') { Copy-Item -LiteralPath ([Uri] $url).LocalPath -Destination $to }
+  else { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $to }
+}
 
 $repo = 'basecompute/superfluid'
 $version = if ($env:SUPERFLUID_VERSION) { $env:SUPERFLUID_VERSION } else { 'latest' }
@@ -45,9 +50,9 @@ try {
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
   $archive = Join-Path $tmp "$name.tar.gz"
   Say "downloading $name ($version)"
-  try { Invoke-WebRequest -UseBasicParsing -Uri "$base/$name.tar.gz" -OutFile $archive }
+  try { Fetch "$base/$name.tar.gz" $archive }
   catch { Fail "could not download $base/$name.tar.gz ($($_.Exception.Message))" }
-  try { Invoke-WebRequest -UseBasicParsing -Uri "$base/$name.tar.gz.sha256" -OutFile "$archive.sha256" }
+  try { Fetch "$base/$name.tar.gz.sha256" "$archive.sha256" }
   catch { Fail "could not download its checksum ($($_.Exception.Message))" }
   $want = ((Get-Content -Raw "$archive.sha256").Trim() -split '\s+')[0].ToLower()
   $have = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower()

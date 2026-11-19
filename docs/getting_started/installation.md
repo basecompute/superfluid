@@ -112,6 +112,8 @@ superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 
 The script checks the tarball's SHA-256, puts the release (`bin\` and `libexec\superfluid\`) in `%LOCALAPPDATA%\Programs\superfluid` in place of the one there, and adds its `bin\` to your own `PATH`. Nothing needs an administrator. Run it again to update: it refuses while a server from that folder is running.
 
+Nothing else has to be installed first. Superfluid's own programs need no Visual C++ runtime. llama.cpp's Windows builds do, and carry none: the release brings the three libraries (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`), and `superfluid runtime install llamacpp` puts beside llama.cpp whichever of them the machine lacks. A GPU is used through its Vulkan driver, which comes with the graphics driver; without one llama.cpp runs on the CPU. A source build ships no runtime libraries: where llama.cpp will not load for want of them, the error names them and the [redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
 | variable | default | meaning |
 |---|---|---|
 | `SUPERFLUID_VERSION` | latest release | a release tag, e.g. `v0.2.0` |
