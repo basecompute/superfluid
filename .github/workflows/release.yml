@@ -164,7 +164,7 @@ jobs:
           cp "$root/compat.json" "dist/$name.compat.json"
           # The engine ABI number in an asset name, so `superfluid self update`
           # and a host pick a release from the listing without a download.
-          abi="$(jq -r '.runtimes.basert.abi // empty' "$root/compat.json")"
+          abi="$(jq -r '.runtimes.basert.abi // empty' "$root/compat.json" | tr -d '\r')"
           if [ -n "$abi" ]; then echo "$abi" > "dist/superfluid-basert-abi-$abi.txt"; fi
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           # Git Bash on Windows has sha256sum, and shasum only with perl on PATH.
@@ -192,7 +192,10 @@ jobs:
           cmp "$installed" "${{ steps.pack.outputs.root }}/libexec/superfluid/superfluid-shim.exe"
           v="$("$installed" --version | awk '{print $2}')"
           test -f "$RUNNER_TEMP/sf-home/versions/$v/libexec/superfluid/vcruntime/msvcp140.dll"
-          "$installed" self list | tee /dev/stderr | grep -q "^  $v  current"
+          # Shown, then searched: Git Bash on a runner has no /dev/stderr to tee into.
+          listed="$("$installed" self list)"
+          echo "$listed"
+          grep -q "^  $v  current" <<< "$listed"
           # Its status is the program's own.
           if "$installed" no-such-command 2>/dev/null; then echo "::error::the launcher lost the program's status"; exit 1; fi
 
@@ -206,7 +209,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          v="$(jq -r .superfluid "${{ steps.pack.outputs.root }}/compat.json")"
+          # The runner's jq is a Windows program and ends its line with CRLF,
+          # of which $( ) drops only the LF.
+          v="$(jq -r .superfluid "${{ steps.pack.outputs.root }}/compat.json" | tr -d '\r')"
           python packaging/build.py dist "$RUNNER_TEMP/packages" --version "$v" --only pypi,npm --targets "${{ matrix.target }}"
           for kind in pip npm; do
             packaging/try-install.sh "$kind" "$RUNNER_TEMP/packages" "$v"

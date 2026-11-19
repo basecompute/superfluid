@@ -153,11 +153,17 @@ def binaries(root: Path) -> list[Path]:
     return out
 
 
+def put_text(path: Path, text: str) -> None:
+    """Write text as UTF-8 with the line ends it has. Python on Windows, where
+    release.yml tries the packages, would write CRLF and its own code page."""
+    path.write_bytes(text.encode("utf-8"))
+
+
 def check_sha256(tarball: Path) -> None:
     sums = tarball.with_name(tarball.name + ".sha256")
     if not sums.is_file():
         raise ReleaseError(f"no {sums.name} beside {tarball.name}")
-    want = (sums.read_text().split() or [""])[0]
+    want = (sums.read_text(encoding="utf-8").split() or [""])[0]
     have = hashlib.sha256(tarball.read_bytes()).hexdigest()
     if want != have:
         raise ReleaseError(f"{tarball.name}: SHA-256 is {have}, {sums.name} says {want or 'nothing'}")
@@ -202,7 +208,7 @@ def check(root: Path, target: str, version: str | None) -> str:
     compat = root / "compat.json"
     if not compat.is_file():
         raise ReleaseError(f"no compat.json in the {target} release")
-    found = json.loads(compat.read_text()).get("superfluid")
+    found = json.loads(compat.read_text(encoding="utf-8")).get("superfluid")
     if not isinstance(found, str) or not found:
         raise ReleaseError(f"{target}: compat.json names no superfluid version")
     if version is not None and found != version:
@@ -241,7 +247,7 @@ def stage(tarball: Path, dest: Path, version: str | None = None, installed_by: s
         manager, sep, command = installed_by.partition(": ")
         if not sep or not manager.strip() or not command.strip() or "\n" in installed_by:
             raise ReleaseError(f"--installed-by must be one line, '<manager>: <command>', not {installed_by!r}")
-        (dest / INSTALLED_BY).write_text(installed_by + "\n")
+        put_text(dest / INSTALLED_BY, installed_by + "\n")
     set_modes(dest)
     return Release(dest, target, found)
 

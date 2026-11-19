@@ -263,6 +263,27 @@ class ContractTest(unittest.TestCase):
         for target in release.OPTIONAL:
             self.assertRegex(workflow, rf"continue-on-error: \$\{{\{{ matrix\.target == '{re.escape(target)}'")
 
+    def test_what_release_yml_tries_on_windows_is_what_a_linux_build_publishes(self):
+        # The Windows packages are tried where their tarball was built, by these builders run on Windows. Python
+        # there reads text in the machine's code page and writes CRLF, unless each read and write says otherwise.
+        for name in ("release.py", "build.py", "python/build_wheel.py", "npm/build_packages.py"):
+            source = (ROOT / "packaging" / name).read_text(encoding="utf-8")
+            self.assertNotIn(".read_text()", source, f"{name} reads text in the machine's own encoding")
+            self.assertNotIn(".write_text(", source, f"{name} writes text with the machine's own line ends")
+        with tempfile.TemporaryDirectory() as tmp:
+            release.put_text(Path(tmp) / "f", "a \u00b7 b\n")
+            self.assertEqual((Path(tmp) / "f").read_bytes(), b"a \xc2\xb7 b\n")
+        # The runner's jq ends its line with CRLF, and a version with a carriage return is none: the step that
+        # reads it drops the CR, and the builder refuses one that kept it.
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        step = workflow.split("- name: Package the release for pip and npm, and install each")[1].split("\n      - ")[0]
+        self.assertIn("shell: bash", step)
+        reads = [line for line in step.splitlines() if line.strip().startswith('v="$(')]
+        self.assertEqual(len(reads), 1, step)
+        self.assertIn("| tr -d '\\r')\"", reads[0])
+        with self.assertRaisesRegex(release.ReleaseError, "not a version"):
+            build_wheel.pep440("0.2.0\r")
+
     def test_publish_yml_asks_the_registries_for_every_package_and_wheel(self):
         workflow = (ROOT / ".github/workflows/publish.yml").read_text()
         for t in build_packages.TARGETS.values():

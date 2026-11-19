@@ -83,7 +83,7 @@ def metadata(version: str) -> bytes:
         "Requires-Python: >=3.9",
         "Description-Content-Type: text/markdown",
     ]
-    return ("\n".join(lines) + "\n\n" + (HERE / "README.md").read_text()).encode()
+    return ("\n".join(lines) + "\n\n" + (HERE / "README.md").read_text(encoding="utf-8")).encode()
 
 
 def record_line(name: str, data: bytes) -> str:
@@ -117,7 +117,7 @@ def build(tarball: Path, out: Path, version: str) -> Path:
         root = Path(tmp) / "release"
         r = release.stage(tarball, root, version=version, installed_by=INSTALLED_BY)
         tag = f"py3-none-{release.wheel_platform(r.root)}"
-        launcher = (HERE / PACKAGE / "__init__.py").read_text()
+        launcher = (HERE / PACKAGE / "__init__.py").read_text(encoding="utf-8")
         if '__version__ = "0+unknown"' not in launcher:
             raise release.ReleaseError("superfluid_cli/__init__.py lost its __version__ placeholder")
         files = [

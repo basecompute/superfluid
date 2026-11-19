@@ -52,7 +52,7 @@ TARGETS = {
 
 
 def write_json(path: Path, obj: dict) -> None:
-    path.write_text(json.dumps(obj, indent=2) + "\n")
+    release.put_text(path, json.dumps(obj, indent=2) + "\n")
 
 
 def pack(folder: Path, out: Path) -> Path:
@@ -77,9 +77,10 @@ def platform_package(tarball: Path, stage: Path, version: str) -> dict:
     t = TARGETS[r.target]
     for name in ("LICENSE", "NOTICE"):
         shutil.copyfile(r.root / name, stage / name)
-    (stage / "README.md").write_text(
+    release.put_text(
+        stage / "README.md",
         f"# {t['name']}\n\nThe superfluid {version} release for {t['what']}. "
-        f"[`{MAIN}`](https://www.npmjs.com/package/{MAIN}) installs it and runs it; depend on that, not on this.\n"
+        f"[`{MAIN}`](https://www.npmjs.com/package/{MAIN}) installs it and runs it; depend on that, not on this.\n",
     )
     manifest = {
         "name": t["name"],
@@ -107,7 +108,7 @@ def main_package(stage: Path, version: str, legal: Path, targets: list[str]) -> 
     bins = {}
     for command in release.COMMANDS:
         script = stage / "bin" / f"{command}.js"
-        script.write_text(f'#!/usr/bin/env node\n"use strict";\nrequire("../lib/launch.js")("{command}");\n')
+        release.put_text(script, f'#!/usr/bin/env node\n"use strict";\nrequire("../lib/launch.js")("{command}");\n')
         script.chmod(0o755)
         bins[command] = f"bin/{command}.js"
     shutil.copyfile(HERE / "README.md", stage / "README.md")
