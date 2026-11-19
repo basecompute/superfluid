@@ -243,7 +243,12 @@ fn a_decoding_lane_waits_one_image_not_the_whole_prompt() {
     assert_eq!(out.tokens_generated, 4);
     let gap = running.longest_gap(t0, t1);
     running.stop(&d);
-    let whole = per_token * 8 * 48;
-    eprintln!("[media-prefill] longest decode gap {gap:?}; the images alone prefill in {whole:?}; request {:?}", t1 - t0);
-    assert!(gap < whole / 2, "the decoding lane stalled {gap:?} beside {whole:?} of image prefill");
+    let (whole, request) = (per_token * 8 * 48, t1 - t0);
+    eprintln!("[media-prefill] longest decode gap {gap:?}; the images alone prefill in {whole:?}; request {request:?}");
+    // Judged against the request's own time, not against the sleeps alone: the
+    // mock's ticks cost CPU time too, which a small runner stretches (a 3-core
+    // macOS runner took 250-270 ms for a gap that is 95 ms on a laptop, and
+    // 1.4-1.8 s for the request). One image a tick keeps the longest wait near
+    // an eighth of the request; the whole prompt in one tick made it most of it.
+    assert!(gap * 3 < request, "the decoding lane stalled {gap:?} of the image request's {request:?}");
 }
