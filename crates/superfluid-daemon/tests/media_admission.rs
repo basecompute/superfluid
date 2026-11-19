@@ -14,6 +14,9 @@ use superfluid_engine::{EngineConfig, MockEngine};
 
 const TICK: Duration = Duration::from_millis(5);
 
+/// The engine's tick count at each image encode.
+type EncodeLog = Arc<Mutex<Vec<u64>>>;
+
 fn daemon(encode: Duration, max_live_media: usize) -> Arc<Daemon> {
     daemon_with(encode, max_live_media, false)
 }
@@ -23,6 +26,15 @@ fn daemon_with(encode: Duration, max_live_media: usize, park: bool) -> Arc<Daemo
 }
 
 fn daemon_in(encode: Duration, max_live_media: usize, park: bool) -> (Arc<Daemon>, std::path::PathBuf) {
+    daemon_logging(encode, max_live_media, park, None)
+}
+
+fn daemon_logging(
+    encode: Duration,
+    max_live_media: usize,
+    park: bool,
+    encode_log: Option<EncodeLog>,
+) -> (Arc<Daemon>, std::path::PathBuf) {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "superfluid-media-admission-{}-{}",
@@ -37,6 +49,7 @@ fn daemon_in(encode: Duration, max_live_media: usize, park: bool) -> (Arc<Daemon
         media_tokens_per_image: 4,
         tick_delay: TICK,
         media_encode_delay: encode,
+        media_encode_log: encode_log,
         max_live_media,
         ..EngineConfig::default()
     };
@@ -105,10 +118,12 @@ impl Decoding {
     }
 }
 
-/// The longest stall a decoding lane sees while a request carrying `n`
-/// images, each taking `encode` to encode, is admitted beside it.
-fn stall_beside(n: usize, encode: Duration) -> (Duration, Duration) {
-    let d = daemon(encode, 0);
+/// A request carrying `n` images, each taking `encode` to encode, admitted
+/// beside a decoding lane: the engine's tick count at each of its encodes,
+/// the longest stall the decoding lane saw, and how long the request took.
+fn encodes_beside(n: usize, encode: Duration) -> (Vec<u64>, Duration, Duration) {
+    let log = EncodeLog::default();
+    let (d, _) = daemon_logging(encode, 0, false, Some(Arc::clone(&log)));
     let running = start_decoding(&d);
     let s = image_session(&d, &images(n, "stall"));
     let t0 = Instant::now();
@@ -117,36 +132,27 @@ fn stall_beside(n: usize, encode: Duration) -> (Duration, Duration) {
     assert_eq!(out.tokens_generated, 4);
     let gap = running.longest_gap(t0, t1);
     running.stop(&d);
-    (gap, t1 - t0)
+    let at = log.lock().unwrap().clone();
+    (at, gap, t1 - t0)
 }
 
 #[test]
 fn a_decoding_lane_keeps_ticking_while_another_request_encodes_its_images() {
+    // Two 150 ms encodes do not fit one open tick, so each round encodes one.
     let encode = Duration::from_millis(150);
-    let runs: Vec<(u32, Duration, Duration)> = [1u32, 4, 8]
-        .into_iter()
-        .map(|n| {
-            let (gap, took) = stall_beside(n as usize, encode);
-            eprintln!("[media-admission] images={n} encode={encode:?} longest_gap={gap:?} request={took:?}");
-            (n, gap, took)
-        })
-        .collect();
-    // One image's encode (and a tick) between two of its ticks, at most; never
-    // every image of the request at once. Judged against the request's own time,
-    // not against the encode's sleep alone: the mock's ticks cost CPU time too,
-    // which a small runner stretches (a 3-core macOS runner took 320-345 ms for a
-    // gap that is 160 ms on a laptop, the same for 1, 4 and 8 images). Encoding
-    // an image at a time keeps the longest wait near one image's share of the
-    // request; encoding them all at admission made it nearly the whole request.
-    for (n, gap, took) in runs {
-        if n == 1 {
-            assert!(gap < encode * 4, "1 image: the decoding lane stalled {gap:?} (one encode is {encode:?})");
-        } else {
-            assert!(
-                gap * n < took * 2,
-                "{n} images: the decoding lane stalled {gap:?} of a request that took {took:?} (over two images' share)"
-            );
-        }
+    for n in [1usize, 4, 8] {
+        let (at, gap, took) = encodes_beside(n, encode);
+        // The times are a diagnostic, not a check: the mock's ticks cost CPU
+        // time too, which a small runner stretches (160 ms on a laptop, 320-345
+        // ms on a 3-core macOS runner, the same for 1, 4 and 8 images).
+        eprintln!("[media-admission] images={n} encode={encode:?} longest_gap={gap:?} request={took:?} encodes at ticks {at:?}");
+        assert_eq!(at.len(), n, "one encode for each image: {at:?}");
+        // A tick ran between every two of the request's encodes: the decoding
+        // lane's rounds. Encoded at admission, they all sat at one tick count.
+        assert!(
+            at.windows(2).all(|w| w[1] > w[0]),
+            "{n} images: two encodes with no tick between them (ticks at each encode: {at:?})"
+        );
     }
 }
 
@@ -210,3 +216,39 @@ fn a_resumed_chat_with_many_new_images_is_admitted_before_its_seed_lapses() {
     assert!(out.warm_prefix > 0, "resumed from its parked first turn");
     running.stop(&d);
 }
+
+#[test]
+fn a_resumed_chat_taken_behind_another_requests_images_keeps_its_seed() {
+    // The mock's seed lease is 8 ticks. A resumed chat with one new image is
+    // taken while a request ahead of it is still encoding fourteen, an image a
+    // round (two 130 ms encodes do not fit one open tick): waiting its turn it
+    // reached the front after its lease ran out, its admission was refused as
+    // a stale seed, and the tick failed every request in it.
+    let (d, dir) = daemon_in(Duration::from_millis(130), 0, true);
+    let s = image_session(&d, &images(1, "first turn"));
+    assert_eq!(d.generate(s, 4).unwrap().tokens_generated, 4);
+    let park = dir.join("park").join(format!("{s}.park"));
+    let t0 = Instant::now();
+    while !park.is_file() {
+        assert!(t0.elapsed() < Duration::from_secs(5), "never parked");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let hash = d.put_media(b"second turn image").unwrap();
+    d.append_image(s, role::USER, &hash, "and this:", " ").unwrap();
+
+    let running = start_decoding(&d);
+    let ahead = image_session(&d, &images(14, "ahead"));
+    let dd = Arc::clone(&d);
+    let ahead_gen = std::thread::spawn(move || dd.generate(ahead, 4));
+    // Inside the first of the fourteen encodes.
+    std::thread::sleep(Duration::from_millis(15));
+    let resumed = d.generate(s, 4);
+    let ahead_out = ahead_gen.join().unwrap();
+    running.stop(&d);
+    let resumed = resumed.unwrap_or_else(|e| panic!("the resumed chat failed: {e}"));
+    assert_eq!(resumed.tokens_generated, 4);
+    assert!(resumed.warm_prefix > 0, "resumed from its parked first turn");
+    let ahead_out = ahead_out.unwrap_or_else(|e| panic!("the request ahead of it failed: {e}"));
+    assert_eq!(ahead_out.tokens_generated, 4);
+}
+

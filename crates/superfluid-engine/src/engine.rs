@@ -39,6 +39,9 @@ pub struct EngineConfig {
     pub tick_delay: std::time::Duration,
     /// How long the mock takes to encode one image: the vision tower's cost.
     pub media_encode_delay: std::time::Duration,
+    /// When set, the mock notes its tick count at each image encode: the
+    /// ticks that ran between a request's encodes, for tests.
+    pub media_encode_log: Option<std::sync::Arc<std::sync::Mutex<Vec<u64>>>>,
     /// Encoded images the mock holds at once (0: no limit); an encode past
     /// it fails, so a handle left unreleased shows.
     pub max_live_media: usize,
@@ -84,6 +87,7 @@ impl Default for EngineConfig {
             scripted: Vec::new(),
             tick_delay: std::time::Duration::ZERO,
             media_encode_delay: std::time::Duration::ZERO,
+            media_encode_log: None,
             max_live_media: 0,
         }
     }

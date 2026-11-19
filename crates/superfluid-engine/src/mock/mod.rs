@@ -791,6 +791,9 @@ impl Engine for MockEngine {
 
     fn media_encode(&mut self, image_path: &str) -> Result<(u64, superfluid_abi::MediaInfo), Status> {
         let info = self.media_probe(image_path)?;
+        if let Some(log) = &self.cfg.media_encode_log {
+            log.lock().expect("encode log").push(self.tick_count);
+        }
         if !self.cfg.media_encode_delay.is_zero() {
             std::thread::sleep(self.cfg.media_encode_delay);
         }

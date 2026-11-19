@@ -2561,20 +2561,35 @@ impl Scheduler {
     /// whose images are bound joins the lanes (the round after its last
     /// encode while lanes run); one cancelled or past its deadline stops
     /// encoding and joins them as it is, to end before it is admitted.
+    ///
+    /// A request holding a seed goes ahead of the ones taken before it once
+    /// it has held the seed [`SEEDED_ENCODE_MAX_TICKS`]: it encodes what it
+    /// has left at once and joins the lanes in this round. Waiting its turn
+    /// behind another request's images, an image a tick, it reached the front
+    /// after its lease ran out; its admission was then refused as a stale
+    /// seed, and the tick failed every request in it.
     fn encode_admitting(&mut self) {
         let start = std::time::Instant::now();
         let mut slowest = 0.0f64;
         let mut encoded = 0u32;
-        while let Some(a) = self.admitting.front_mut() {
+        loop {
+            let now = self.tick_count;
+            let due = self
+                .admitting
+                .iter()
+                .position(|a| a.seed_handle != 0 && now.saturating_sub(a.since_tick) >= SEEDED_ENCODE_MAX_TICKS);
+            let lease_due = due.is_some();
+            let at = due.unwrap_or(0);
+            let Some(a) = self.admitting.get_mut(at) else {
+                break;
+            };
             let ended = self.cancels.lock().expect("cancels").contains(&a.job.session)
                 || a.job.deadline.is_some_and(|d| std::time::Instant::now() > d);
             if ended || a.left.is_empty() {
-                let a = self.admitting.pop_front().expect("front");
+                let a = self.admitting.remove(at).expect("taken");
                 self.push_lane(a.job, a.tag, a.span, a.seed_handle, a.warm_prefix, a.bound);
                 continue;
             }
-            // A seed is leased for some ticks: one held this long finishes now.
-            let lease_due = a.seed_handle != 0 && self.tick_count.saturating_sub(a.since_tick) >= SEEDED_ENCODE_MAX_TICKS;
             let spent = start.elapsed().as_secs_f64();
             if encoded > 0 && !self.lanes.is_empty() && !lease_due && spent + slowest > self.tick_shape.open_secs {
                 break;
@@ -2589,16 +2604,18 @@ impl Scheduler {
             tracing::debug!(lane = tag, offset, ms = (secs * 1000.0) as u64, "image encoded");
             match res {
                 Ok(handle) => {
-                    let a = self.admitting.front_mut().expect("front");
+                    let a = self.admitting.get_mut(at).expect("taken");
                     a.bound.push(handle);
                     // It joins next round: its prefill tick does not follow
                     // this encode with nothing between for the running lanes.
-                    if a.left.is_empty() && !self.lanes.is_empty() {
+                    // One whose lease is due joins now (the next pass of this
+                    // loop): a round more is a tick more of its lease.
+                    if a.left.is_empty() && !self.lanes.is_empty() && !lease_due {
                         break;
                     }
                 }
                 Err(()) => {
-                    let a = self.admitting.pop_front().expect("front");
+                    let a = self.admitting.remove(at).expect("taken");
                     release_media(&mut self.host, &a.bound);
                     if a.seed_handle != 0 && self.host.is_alive() {
                         let _ = self.host.client().seed_release(a.seed_handle);
