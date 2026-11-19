@@ -67,17 +67,17 @@ jobs:
       - name: cargo clippy
         shell: bash
         run: |
-          cargo clippy -p superfluid --no-default-features --features llamacpp,tui --all-targets -- -D warnings
+          cargo clippy -p superfluid --no-default-features --features llamacpp,tui,shim --all-targets -- -D warnings
           cargo clippy $CRATES --all-targets -- -D warnings
       - name: cargo build
         shell: bash
         run: |
-          cargo build -p superfluid --no-default-features --features llamacpp,tui
+          cargo build -p superfluid --no-default-features --features llamacpp,tui,shim
           cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
       - name: cargo test
         shell: bash
         run: |
-          cargo test -p superfluid --no-default-features --features llamacpp,tui
+          cargo test -p superfluid --no-default-features --features llamacpp,tui,shim
           cargo test $CRATES
 
   adapters:

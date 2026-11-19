@@ -110,14 +110,15 @@ irm https://github.com/basecompute/superfluid/releases/latest/download/install.p
 superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 ```
 
-The script checks the tarball's SHA-256, puts the release (`bin\` and `libexec\superfluid\`) in `%LOCALAPPDATA%\Programs\superfluid` in place of the one there, and adds its `bin\` to your own `PATH`. Nothing needs an administrator. Run it again to update: it refuses while a server from that folder is running.
+The script checks the tarball's SHA-256 and keeps the release under `%USERPROFILE%\.superfluid\versions\<v>`, as on macOS and Linux. An ordinary Windows user may make no symbolic link, so the commands it puts in `%LOCALAPPDATA%\Programs\superfluid\bin` (`superfluid`, `superfluid-workerd`, `superfluid-noded`) are small launchers, each of which runs the current version's program of its own name. It adds that folder to your own `PATH`. Nothing needs an administrator. `superfluid self update` installs the next release beside this one and `superfluid self use <v>` goes back; a server that is running keeps the version it started with.
 
 Nothing else has to be installed first. Superfluid's own programs need no Visual C++ runtime. llama.cpp's Windows builds do, and carry none: the release brings the three libraries (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`), and `superfluid runtime install llamacpp` puts beside llama.cpp whichever of them the machine lacks. A GPU is used through its Vulkan driver, which comes with the graphics driver; without one llama.cpp runs on the CPU. A source build ships no runtime libraries: where llama.cpp will not load for want of them, the error names them and the [redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
 | variable | default | meaning |
 |---|---|---|
 | `SUPERFLUID_VERSION` | latest release | a release tag, e.g. `v0.2.0` |
-| `SUPERFLUID_PREFIX` | `%LOCALAPPDATA%\Programs\superfluid` | where the release goes |
+| `SUPERFLUID_PREFIX` | `%LOCALAPPDATA%\Programs\superfluid` | where the commands go (its `bin\`) |
+| `SUPERFLUID_HOME` | `%USERPROFILE%\.superfluid` | where releases are kept, side by side (its `versions\`) |
 | `SUPERFLUID_NO_PATH` | unset | set to anything to leave `PATH` as it is |
 | `SUPERFLUID_RELEASE_URL` | GitHub | where the release's files are: a mirror, or a folder (`file:///C:/...`) |
 
@@ -139,7 +140,7 @@ What differs from macOS and Linux:
 
 | | on Windows |
 |---|---|
-| `superfluid self update` | names the install script, which replaces the release where it is; `self use` and `self install` are not offered, since versions side by side sit behind symbolic links |
+| the commands on `PATH` | launchers that read which version is current and run it, where they are symbolic links elsewhere; `versions\current` is a file that holds the version's name |
 | draining a server | `superfluid stop --drain` (with `--pid <pid>` for one you started yourself), or `Ctrl+Break` in its console, where `kill -USR1` is elsewhere |
 | `superfluid stop` | ends the server outright, as `SIGTERM` does elsewhere |
 | `$SUPERFLUID_HOME/runtimes/<id>/current` | a file that holds the default install's name, not a link: an ordinary user may make neither a symbolic link nor a junction every process follows |

@@ -86,10 +86,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release --locked -p superfluid --no-default-features --features llamacpp,tui
+          # `shim` builds the launcher: the commands on PATH are copies of it (`superfluid self`).
+          cargo build --release --locked -p superfluid --no-default-features --features llamacpp,tui,shim
           cargo build --release --locked -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
           mkdir -p target/adapters/vcruntime
-          cp target/release/superfluid-worker-llamacpp.exe target/release/superfluid_tokenizer_llamacpp.dll target/adapters/
+          cp target/release/superfluid-worker-llamacpp.exe target/release/superfluid_tokenizer_llamacpp.dll target/release/superfluid-shim.exe target/adapters/
           # llama.cpp's Windows builds are linked against the Visual C++ runtime
           # and carry none. The release carries the three libraries, from the
           # redistributable folder of the Visual Studio that built it, and an
@@ -169,6 +170,7 @@ jobs:
           if command -v shasum >/dev/null 2>&1; then sum="shasum -a 256"; else sum=sha256sum; fi
           (cd dist && $sum "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
 
       # The tarball installs with the script a user runs, in the PowerShell
       # Windows comes with and in the current one, over itself the second time.
@@ -179,15 +181,19 @@ jobs:
           set -euo pipefail
           export SUPERFLUID_RELEASE_URL="file:///$(cygpath -m "$PWD/dist")"
           export SUPERFLUID_PREFIX="$(cygpath -w "$RUNNER_TEMP/sf-installed")" SUPERFLUID_NO_PATH=1
+          export SUPERFLUID_HOME="$(cygpath -w "$RUNNER_TEMP/sf-home")" SUPERFLUID_NO_UPDATE_CHECK=1
           installed="$RUNNER_TEMP/sf-installed/bin/superfluid.exe"
           for shell in powershell pwsh; do
             "$shell" -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
             "$installed" --version
           done
-          test -f "$RUNNER_TEMP/sf-installed/libexec/superfluid/vcruntime/msvcp140.dll"
-          # A release the script placed is the script's to update: `self update` names it.
-          if said="$("$installed" self update 2>&1)"; then echo "::error::self update did not stop: $said"; exit 1; fi
-          echo "$said" | grep -q 'install\.ps1' || { echo "::error::self update does not name the script: $said"; exit 1; }
+          # The command in the prefix is the launcher; the release is under versions, and current.
+          cmp "$installed" "${{ steps.pack.outputs.root }}/libexec/superfluid/superfluid-shim.exe"
+          v="$("$installed" --version | awk '{print $2}')"
+          test -f "$RUNNER_TEMP/sf-home/versions/$v/libexec/superfluid/vcruntime/msvcp140.dll"
+          "$installed" self list | tee /dev/stderr | grep -q "^  $v  current"
+          # Its status is the program's own.
+          if "$installed" no-such-command 2>/dev/null; then echo "::error::the launcher lost the program's status"; exit 1; fi
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

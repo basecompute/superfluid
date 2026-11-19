@@ -20,6 +20,8 @@ basert = ["dep:superfluid-engine-ffi", "dep:superfluid-adapter-basert", "tui"]
 llamacpp = ["dep:superfluid-adapter-llamacpp"]
 mlx = ["dep:superfluid-adapter-mlx"]
 tui = ["dep:ratatui", "dep:unicode-segmentation", "dep:unicode-width"]
+# The command on PATH on Windows (src/bin/superfluid-shim.rs), which a Windows release ships.
+shim = []
 
 [dependencies]
 superfluid-abi.workspace = true
@@ -61,7 +63,7 @@ unicode-width = { version = "0.2", optional = true }
 mdns-sd = { version = "0.21", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tungstenite = "0.29"
@@ -76,6 +78,10 @@ name = "superfluid-workerd"
 
 [[bin]]
 name = "superfluid-noded"
+
+[[bin]]
+name = "superfluid-shim"
+required-features = ["shim"]
 
 # Its own main(): the binary is also the server and the worker it tests.
 [[test]]

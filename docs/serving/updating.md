@@ -26,6 +26,20 @@ The install script places the release it downloaded with that release's own `sup
 
 Each version finds its workers beside its own real executable, so a server started from 0.1.3 keeps spawning 0.1.3's workers after 0.1.4 became current. The `superfluid-<version>` names run a specific copy.
 
+### On Windows
+
+Versions are kept the same way, under `%USERPROFILE%\.superfluid\versions`. An ordinary Windows user may make no symbolic link, so the two links are something else there:
+
+```text
+%LOCALAPPDATA%\Programs\superfluid\bin\superfluid.exe        a launcher
+%LOCALAPPDATA%\Programs\superfluid\bin\superfluid-versions   the path of the versions folder
+%USERPROFILE%\.superfluid\versions\current                   a file that holds "0.2.1"
+%USERPROFILE%\.superfluid\versions\0.2.1\                    bin\ libexec\superfluid\ compat.json
+%USERPROFILE%\.superfluid\versions\0.2.0\
+```
+
+The launcher is a small program the release carries (`libexec\superfluid\superfluid-shim.exe`), copied under each command's name. It reads which version is current and runs that version's program of its own name with the same arguments, console and exit status; `Ctrl+C` and `Ctrl+Break` go to the program, and ending the launcher ends it. `self update` and `self use` change the `current` file, so they place nothing on `PATH` unless a release brings a different launcher. There is no `superfluid-<version>` name: `versions\<version>\bin\superfluid.exe` runs a specific copy.
+
 ## What an update does
 
 1. Reads the release listing and picks the newest release for this platform. With a baseRT engine here (an installed `basert` runtime, or `BASERT_LIB`), the release must declare the engine's ABI number, which releases carry in an asset name; with llama.cpp or MLX only, the newest release fits. `--version <v>` names one instead.
