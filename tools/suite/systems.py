@@ -9,9 +9,10 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 
-from common import Server, get_json, post_json
+from common import WINDOWS, Server, get_json, post_json
 
 PORTS = {
     "superfluid-llamacpp": 18601,
@@ -49,8 +50,15 @@ def load_box(path):
     box["models"] = {k: os.path.join(root, v) for k, v in box["models"].items()}
     box.setdefault("ollama_model", OLLAMA_MODEL)
     # The variable a shared-library path goes in: DYLD_LIBRARY_PATH on macOS,
-    # LD_LIBRARY_PATH on Linux.
-    box.setdefault("lib_env", "DYLD_LIBRARY_PATH" if os.uname().sysname == "Darwin" else "LD_LIBRARY_PATH")
+    # LD_LIBRARY_PATH on Linux. Windows has none: a program's libraries are
+    # found beside it, so a box there names no `llama_lib`.
+    if not WINDOWS:
+        box.setdefault("lib_env", "DYLD_LIBRARY_PATH" if os.uname().sysname == "Darwin" else "LD_LIBRARY_PATH")
+    # The worker a box's own build runs, where it is not the released one:
+    # {"superfluid-llamacpp": "superfluid-workerd"} for a daemon with the
+    # adapter linked in.
+    for name, pattern in box.get("workers", {}).items():
+        CAPS[name] = dict(CAPS[name], worker=pattern)
     # Systems the box describes itself (mistral.rs, oMLX, vLLM, SGLang ...):
     # {"name": {"argv": [...], "env": {...}, "probe": "/v1/models", "port": N}}.
     # argv and env values may use {gguf} {mlx} {hf} {port} {lanes} {ctx}
@@ -71,6 +79,17 @@ def known(box, name):
         return False
     binary, model = need[name]
     return binary in box and model in box["models"]
+
+
+def lib_env(box):
+    """The environment that lets llama-server find its libraries."""
+    return {box["lib_env"]: box["llama_lib"]} if "lib_env" in box and "llama_lib" in box else {}
+
+
+def socket_path(port):
+    """The session socket of a superfluid under test. /tmp on Unix, where a
+    socket's path is short; Windows has no /tmp."""
+    return os.path.join(tempfile.gettempdir() if WINDOWS else "/tmp", f"suite-{port}.sock")
 
 
 def superfluid_sha(box):
@@ -107,7 +126,7 @@ def build(name, box, run_dir, lanes=8, ctx=4096, extra=None, fresh_state=True, d
             shutil.rmtree(home, ignore_errors=True)
         os.makedirs(home, exist_ok=True)
         argv = [box["superfluid"], "serve", model, "--http", f"127.0.0.1:{port}", "--sessions", os.path.join(home, "sessions"),
-                "--socket", f"/tmp/suite-{port}.sock", "--no-tui"] + extra
+                "--socket", socket_path(port), "--no-tui"] + extra
         srv = Server(name, argv, {"SUPERFLUID_HOME": box["superfluid_home"]}, port, log, probe="/health",
                      worker_pattern=CAPS[name]["worker"])
         srv.model_path = model
@@ -119,7 +138,7 @@ def build(name, box, run_dir, lanes=8, ctx=4096, extra=None, fresh_state=True, d
         if fresh_state:
             shutil.rmtree(sess, ignore_errors=True)
         argv = [box["superfluid"], "serve", "--model", model, "--runtime", runtime, "--sessions", sess,
-                "--socket", f"/tmp/suite-{port}.sock", "--http", f"127.0.0.1:{port}",
+                "--socket", socket_path(port), "--http", f"127.0.0.1:{port}",
                 "--max-batch", str(lanes), "--max-context", str(ctx), "--no-tui"]
         # Speculation off unless the scenario asks for it.
         argv += extra if "--speculate" in extra else ["--speculate", "off"] + extra
@@ -129,13 +148,13 @@ def build(name, box, run_dir, lanes=8, ctx=4096, extra=None, fresh_state=True, d
         return srv
     if name == "llama-server" and defaults:
         argv = [box["llama_server"], "-m", box["models"]["gguf"], "--host", "127.0.0.1", "--port", str(port)] + extra
-        return Server(name, argv, {box["lib_env"]: box["llama_lib"]}, port, log, probe="/health")
+        return Server(name, argv, lib_env(box), port, log, probe="/health")
     if name == "llama-server":
         # Unified KV sized lanes x ctx: the same total as everyone else, any
         # one sequence may use up to ctx.
         argv = [box["llama_server"], "-m", box["models"]["gguf"], "-c", str(lanes * ctx), "-np", str(lanes), "-ngl", "99",
                 "-kvu", "--kv-unified-per-slot", str(ctx), "--metrics", "--host", "127.0.0.1", "--port", str(port)] + extra
-        return Server(name, argv, {box["lib_env"]: box["llama_lib"]}, port, log, probe="/health")
+        return Server(name, argv, lib_env(box), port, log, probe="/health")
     if name == "mlx-lm-server" and defaults:
         argv = [box["mlx_python"], "-m", "mlx_lm", "server", "--model", box["models"]["mlx"], "--host", "127.0.0.1",
                 "--port", str(port)] + extra
