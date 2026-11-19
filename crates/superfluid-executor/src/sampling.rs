@@ -41,7 +41,37 @@ fn max_of(row: &[f32]) -> f32 {
         }
         best
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::{_mm_cvtss_f32, _mm_loadu_ps, _mm_max_ps, _mm_max_ss, _mm_movehl_ps, _mm_set1_ps, _mm_shuffle_ps};
+        let (chunks, rest) = row.as_chunks::<16>();
+        // SAFETY: SSE2 is part of the x86-64 baseline; each load reads
+        // four f32 inside a 16-element chunk.
+        let mut best = unsafe {
+            let low = _mm_set1_ps(f32::NEG_INFINITY);
+            let (mut a, mut b, mut c, mut d) = (low, low, low, low);
+            for chunk in chunks {
+                let p = chunk.as_ptr();
+                // The row first: where it holds a NaN the instruction answers
+                // its second operand, so a NaN is passed over, as `v > best`
+                // and NEON's maxnm pass over one.
+                a = _mm_max_ps(_mm_loadu_ps(p), a);
+                b = _mm_max_ps(_mm_loadu_ps(p.add(4)), b);
+                c = _mm_max_ps(_mm_loadu_ps(p.add(8)), c);
+                d = _mm_max_ps(_mm_loadu_ps(p.add(12)), d);
+            }
+            let m = _mm_max_ps(_mm_max_ps(a, b), _mm_max_ps(c, d));
+            let m = _mm_max_ps(m, _mm_movehl_ps(m, m));
+            _mm_cvtss_f32(_mm_max_ss(m, _mm_shuffle_ps::<1>(m, m)))
+        };
+        for &v in rest {
+            if v > best {
+                best = v;
+            }
+        }
+        best
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let mut best = f32::NEG_INFINITY;
         for &v in row {
@@ -168,7 +198,37 @@ fn softmax_weights(row: &mut [f32], inv_t: f32) -> f32 {
             }
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: SSE2 is part of the x86-64 baseline; every load and store is
+    // four f32 inside a 16-element chunk or the 16-element `acc`.
+    unsafe {
+        use std::arch::x86_64::*;
+        let sums = acc.as_mut_ptr();
+        let (top, dead) = (_mm_set1_ps(max), _mm_set1_ps(DEAD_BELOW));
+        for chunk in chunks.iter_mut() {
+            let p = chunk.as_mut_ptr();
+            let x = [
+                _mm_sub_ps(_mm_loadu_ps(p), top),
+                _mm_sub_ps(_mm_loadu_ps(p.add(4)), top),
+                _mm_sub_ps(_mm_loadu_ps(p.add(8)), top),
+                _mm_sub_ps(_mm_loadu_ps(p.add(12)), top),
+            ];
+            // No element above the dead line (a NaN is above nothing): the chunk is zeros.
+            let live = _mm_or_ps(_mm_or_ps(_mm_cmpgt_ps(x[0], dead), _mm_cmpgt_ps(x[1], dead)), _mm_or_ps(_mm_cmpgt_ps(x[2], dead), _mm_cmpgt_ps(x[3], dead)));
+            if _mm_movemask_ps(live) == 0 {
+                for q in 0..4 {
+                    _mm_storeu_ps(p.add(4 * q), _mm_setzero_ps());
+                }
+                continue;
+            }
+            for (q, xq) in x.iter().enumerate() {
+                let e = exp_neg_x4(*xq);
+                _mm_storeu_ps(p.add(4 * q), e);
+                _mm_storeu_ps(sums.add(4 * q), _mm_add_ps(_mm_loadu_ps(sums.add(4 * q)), e));
+            }
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     for chunk in chunks.iter_mut() {
         for j in 0..16 {
             let e = exp_neg(chunk[j] - max);
@@ -204,6 +264,28 @@ unsafe fn exp_neg_x4(x: std::arch::aarch64::float32x4_t) -> std::arch::aarch64::
     let y = vaddq_f32(vaddq_f32(vmulq_f32(poly, vmulq_f32(r, r)), r), vdupq_n_f32(1.0));
     let scale = vreinterpretq_f32_s32(vshlq_n_s32::<23>(vaddq_s32(n, vdupq_n_s32(127))));
     vbslq_f32(live, vmulq_f32(y, scale), zero)
+}
+
+/// [`exp_neg`] of four at once, operation for operation (no fused multiply-add, the
+/// conversion truncating as `as i32` does), so each lane is the scalar's result bit for bit.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn exp_neg_x4(x: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128 {
+    use std::arch::x86_64::*;
+    let k = |v: f32| _mm_set1_ps(v);
+    let live = _mm_cmpgt_ps(x, k(DEAD_BELOW));
+    let x = _mm_and_ps(live, x);
+    let n = _mm_cvttps_epi32(_mm_sub_ps(_mm_mul_ps(x, k(std::f32::consts::LOG2_E)), k(0.5)));
+    let nf = _mm_cvtepi32_ps(n);
+    let r = _mm_sub_ps(_mm_sub_ps(x, _mm_mul_ps(nf, k(0.693_359_4))), _mm_mul_ps(nf, k(-2.121_944_4e-4)));
+    let mut poly = _mm_add_ps(_mm_mul_ps(k(1.987_569_1e-4), r), k(1.398_2e-3));
+    poly = _mm_add_ps(_mm_mul_ps(poly, r), k(8.333_452e-3));
+    poly = _mm_add_ps(_mm_mul_ps(poly, r), k(4.166_579_6e-2));
+    poly = _mm_add_ps(_mm_mul_ps(poly, r), k(1.666_666_5e-1));
+    poly = _mm_add_ps(_mm_mul_ps(poly, r), k(0.5));
+    let y = _mm_add_ps(_mm_add_ps(_mm_mul_ps(poly, _mm_mul_ps(r, r)), r), k(1.0));
+    let scale = _mm_castsi128_ps(_mm_slli_epi32::<23>(_mm_add_epi32(n, _mm_set1_epi32(127))));
+    _mm_and_ps(live, _mm_mul_ps(y, scale))
 }
 
 fn top_head(probs: &[f32], head: usize, out: &mut Vec<(u32, f32)>) {

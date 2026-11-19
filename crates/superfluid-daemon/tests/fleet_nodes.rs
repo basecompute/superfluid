@@ -246,21 +246,23 @@ fn a_server_that_is_not_a_fleet_head_has_no_nodes() {
 #[test]
 fn removing_a_joined_node_moves_its_session_and_refuses_the_node_when_it_dials_again() {
     let (fleet, join_addr) = head(Vec::new(), PlacementPolicy::RoundRobin);
-    // Steps slow enough that the generation is still running when its node is removed.
-    let removed = join(&join_addr, "box-a", 1, Duration::from_millis(40));
+    // A step decodes up to a few hundred tokens, so it takes slow steps and a generation many
+    // of them long (over a second of them here) to be still running when its node is removed.
+    const NEW_TOKENS: usize = 3000;
+    let removed = join(&join_addr, "box-a", 1, Duration::from_millis(100));
     wait_for("box-a joined", || listed(&fleet) == ["box-a"]);
     join(&join_addr, "box-b", 1, Duration::from_millis(5));
     wait_for("box-b joined", || listed(&fleet).len() == 2);
 
     let prompt: Vec<u32> = (200..232).collect();
-    fleet.place(1, GenParams::default(), 0, "chatml", "mock", &prompt, 60).expect("placed");
+    fleet.place(1, GenParams::default(), 0, "chatml", "mock", &prompt, NEW_TOKENS as u64).expect("placed");
     assert_eq!(fleet.node_of(1).as_deref(), Some("box-a"));
     assert_eq!(fleet.nodes().iter().find(|n| n.status.name == "box-a").map(|n| n.sessions), Some(1));
     let got = Arc::new(AtomicUsize::new(0));
     let run = {
         let (fleet, got) = (Arc::clone(&fleet), Arc::clone(&got));
         std::thread::spawn(move || {
-            fleet.generate_streaming(1, 60, 60_000, |b| {
+            fleet.generate_streaming(1, NEW_TOKENS as u64, 60_000, |b| {
                 got.fetch_add(b.len(), Ordering::SeqCst);
             })
         })
@@ -270,7 +272,7 @@ fn removing_a_joined_node_moves_its_session_and_refuses_the_node_when_it_dials_a
     assert_eq!(entry.status.name, "box-a");
     let generated = run.join().unwrap().expect("the generation finished on another node");
     assert!(!generated.expired);
-    assert_eq!(got.load(Ordering::SeqCst), 60, "every token, once");
+    assert_eq!(got.load(Ordering::SeqCst), NEW_TOKENS, "every token, once");
     assert_eq!(fleet.node_of(1).as_deref(), Some("box-b"), "the session moved");
     fleet.finish(1);
 

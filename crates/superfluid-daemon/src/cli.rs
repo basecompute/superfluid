@@ -779,13 +779,16 @@ mod tests {
     }
 
     /// Every flag the `serve` parser matches is in the table (or an alias or a
-    /// retired flag), so `serve --help`, `--flag=value` and the suggestions know it.
+    /// retired flag), so `serve --help`, `--flag=value` and the suggestions know it:
+    /// its own, and the engine flags it reads with a fleet node's (engine_flags).
     #[test]
     fn every_flag_serve_reads_is_known_here() {
         let src = include_str!("serve.rs");
         let start = src.find("SERVE-FLAGS-BEGIN").expect("marker");
         let end = src.find("SERVE-FLAGS-END").expect("marker");
-        let body = &src[start..end];
+        let engine = include_str!("engine_flags.rs");
+        let engine = &engine[..engine.find("#[cfg(test)]").expect("its tests")];
+        let body = format!("{}{engine}", &src[start..end]);
         let mut seen = 0;
         for piece in body.split('"').skip(1).step_by(2) {
             let long = piece.starts_with("--") && piece.len() > 2 && piece != "--pull-";

@@ -218,19 +218,14 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut park = false;
     let mut sessions_cache = false;
     let mut park_lossy = false;
-    let mut park_budget_gb: u64 = 20;
     let mut tool_lease_ms: u64 = 0;
     let mut prefix_blob_budget_mb: u64 = 0;
-    let mut kv_bits_arg: Option<i32> = None;
     let mut worker_process = true;
     let mut os_pressure = true;
     let mut dialect = String::from("auto");
     let mut pressure_high: u8 = 0;
     let mut pressure_low: u8 = 0;
     let mut pin_budget_pct: u8 = superfluid_daemon::DaemonOptions::default().pin_budget_pct;
-    let mut tick_decode_budget: u32 = 0;
-    let mut tick_target_ms: u32 = 0;
-    let mut prefill_budget: u32 = superfluid_daemon::DaemonOptions::default().prefill_budget;
     let mut starvation_ticks: u32 = 8;
     let mut class_lanes_spec: Option<String> = None;
     let mut http_default_qos = superfluid_daemon::openai::RequestQos::AGENT;
@@ -241,8 +236,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut log_dir: Option<PathBuf> = None;
     let mut log_filter = String::from("info");
     let mut speculate: Option<String> = None;
-    let mut speculation = superfluid_daemon::SpeculationOptions::default();
-    let mut spec_bitexact: Option<bool> = None;
+    // The engine's flags a fleet node takes too, read as one (engine_flags).
+    let mut engine = superfluid_daemon::engine_flags::EngineFlags::default();
     let mut completion_deadline_ms: u64 = 0;
     let mut completion_bucket = superfluid_daemon::completion_bucket::BucketConfig::default();
     let mut fim_model: Option<PathBuf> = None;
@@ -252,8 +247,6 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut web_origins: Vec<String> = Vec::new();
     let mut otlp_metrics: Option<String> = None;
     let mut otlp_interval_ms: u64 = 15_000;
-    let mut otlp_endpoint: Option<String> = None;
-    let mut otlp_cfg = superfluid_daemon::otlp::OtlpConfig::default();
     let mut tui_flag = false;
     let mut no_tui = false;
     let mut fleet: Option<String> = None;
@@ -269,6 +262,12 @@ pub fn run(args: &[String], embedding: &Embedding) {
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| needs_value(a));
         // SERVE-FLAGS-BEGIN: every flag `serve` reads is listed in superfluid_daemon::cli (a test checks).
+        match engine.take(a, &mut val) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(superfluid_daemon::engine_flags::FlagError::Usage(e)) => usage_error(&e, "serve"),
+            Err(superfluid_daemon::engine_flags::FlagError::Invalid(e)) => superfluid_daemon::events::fail(2, e),
+        }
         match a.as_str() {
             "--model" => models.push(PathBuf::from(val())),
             "--offline" => pull_flags.offline = true,
@@ -361,12 +360,10 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 park = true;
                 park_lossy = true;
             }
-            "--park-budget-gb" => park_budget_gb = num(a, val()),
             "--tool-lease-ms" => tool_lease_ms = num(a, val()),
             "--prefix-blob-budget-mb" => {
                 prefix_blob_budget_mb = num(a, val())
             }
-            "--kv-bits" => kv_bits_arg = Some(num(a, val())),
             "--dialect" => dialect = val(),
             "--worker-process" => worker_process = true,
             "--no-worker-process" => worker_process = false,
@@ -380,67 +377,12 @@ pub fn run(args: &[String], embedding: &Embedding) {
             // Kept as named, `off` included: no `--speculate` is the default, `auto` on the baseRT
             // runtime (speculate_directive).
             "--speculate" => speculate = Some(val()),
-            "--spec-draft-tokens" => {
-                let n: u32 = num(a, val());
-                if !(1..=15).contains(&n) {
-                    superfluid_daemon::events::fail(2, "--spec-draft-tokens must be in 1..=15");
-                }
-                speculation.max_draft = Some(n);
-            }
-            "--spec-adaptive" => speculation.adaptive = Some(true),
-            "--no-spec-adaptive" => speculation.adaptive = Some(false),
-            "--spec-min-yield" => {
-                let v: f64 = num(a, val());
-                if !v.is_finite() || v < 0.0 {
-                    superfluid_daemon::events::fail(2, "--spec-min-yield must be finite and non-negative");
-                }
-                speculation.min_yield = Some(v);
-            }
-            "--spec-yield-rounds" => {
-                let n: u32 = num(a, val());
-                if n == 0 {
-                    superfluid_daemon::events::fail(2, "--spec-yield-rounds must be at least 1");
-                }
-                speculation.yield_rounds = Some(n);
-            }
-            "--spec-throughput-gate" => speculation.throughput_gate = Some(true),
-            "--no-spec-throughput-gate" => speculation.throughput_gate = Some(false),
-            "--spec-gate-probe-tokens" => {
-                speculation.gate_probe_tokens = Some(num(a, val()))
-            }
             "--spec-max-temperature" => {
                 op_spec_max_temperature = Some(sampling_f32("--spec-max-temperature", &val(), 0.0, 2.0))
             }
-            "--spec-min-speedup" => {
-                let v: f64 = num(a, val());
-                if !v.is_finite() || v < 1.0 {
-                    superfluid_daemon::events::fail(2, "--spec-min-speedup must be finite and at least 1.0");
-                }
-                speculation.min_speedup = Some(v);
-            }
-            "--spec-gate-reprobe" => {
-                speculation.gate_reprobe = Some(num(a, val()))
-            }
-            "--spec-gate-reprobe-max" => {
-                speculation.gate_reprobe_max = Some(num(a, val()))
-            }
-            "--dspark-confidence" => {
-                let v: f32 = num(a, val());
-                if !v.is_finite() || v <= 0.0 {
-                    superfluid_daemon::events::fail(2, "--dspark-confidence must be finite and positive");
-                }
-                speculation.dspark_confidence = Some(v);
-            }
-            "--spec-bitexact" => spec_bitexact = Some(true),
-            "--no-spec-bitexact" => spec_bitexact = Some(false),
             "--log-filter" => log_filter = val(),
             // Read before the rest by events::init, so that a refusal here is an event too.
             "--log-format" => drop(val()),
-            "--tick-decode-budget" => {
-                tick_decode_budget = num(a, val())
-            }
-            "--tick-target-ms" => tick_target_ms = num(a, val()),
-            "--prefill-budget" => prefill_budget = num(a, val()),
             "--starvation-ticks" => starvation_ticks = num(a, val()),
             "--class-lanes" => {
                 class_lanes_spec = Some(val());
@@ -485,23 +427,6 @@ pub fn run(args: &[String], embedding: &Embedding) {
             "--tui" => tui_flag = true,
             "--no-tui" => no_tui = true,
             "--otlp-interval-ms" => otlp_interval_ms = num(a, val()),
-            "--otlp-endpoint" => otlp_endpoint = Some(val()),
-            "--otlp-header" => {
-                let kv = val();
-                let (k, v) = kv.split_once('=').unwrap_or_else(|| usage_error(&format!("--otlp-header expects k=v, got {kv:?}"), "serve"));
-                otlp_cfg.headers.push((k.trim().to_string(), v.trim().to_string()));
-            }
-            "--otlp-service-name" => otlp_cfg.service_name = val(),
-            "--otlp-filter" => otlp_cfg.filter = val(),
-            "--otlp-queue" => otlp_cfg.queue = num(a, val()),
-            "--otlp-batch-ms" => {
-                let ms = num(a, val());
-                otlp_cfg.interval = std::time::Duration::from_millis(ms);
-            }
-            "--otlp-timeout-ms" => {
-                let ms = num(a, val());
-                otlp_cfg.timeout = std::time::Duration::from_millis(ms);
-            }
             "--fleet" => fleet = Some(val()),
             "--fleet-auth" => fleet_auth = Some(PathBuf::from(val())),
             "--fleet-listen" => fleet_listen = Some(val()),
@@ -553,29 +478,17 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 retired(a, "an engine-level knob superfluid does not expose")
             }
             other if !other.starts_with('-') => models.push(PathBuf::from(other)),
-            _ => {
-                let (flag, given) = match a.split_once('=') {
-                    Some((f, v)) => (f, Some(v.to_string())),
-                    None => (a.as_str(), None),
-                };
-                if !superfluid_daemon::runtime_options::looks_like(flag) {
-                    unknown_serve_flag(a);
-                }
-                let value = match given {
-                    Some(v) => Some(v),
-                    None => match it.clone().next() {
-                        Some(v) if !v.starts_with("--") => {
-                            it.next();
-                            Some(v.clone())
-                        }
-                        _ => None,
-                    },
-                };
-                option_candidates.push((flag.to_string(), value));
-            }
+            _ => match superfluid_daemon::runtime_options::candidate(a, &mut it) {
+                Some(given) => option_candidates.push(given),
+                None => unknown_serve_flag(a),
+            },
         }
         // SERVE-FLAGS-END
     }
+    let kv_bits_arg = engine.kv_bits;
+    let (park_budget_gb, prefill_budget) = (engine.park_budget_gb, engine.prefill_budget);
+    let (tick_decode_budget, tick_target_ms) = (engine.tick_decode_budget, engine.tick_target_ms);
+    let speculation = engine.speculation.clone();
     let env_key = std::env::var(superfluid_daemon::keypolicy::API_KEY_ENV).ok().filter(|k| !k.is_empty());
     let key_from_env = api_key.is_none() && api_key_file.is_none() && env_key.is_some();
     let api_key = superfluid_daemon::keypolicy::global_key(api_key, api_key_file.as_deref(), env_key, |w| {
@@ -597,22 +510,14 @@ pub fn run(args: &[String], embedding: &Embedding) {
         Some(workerd) => superfluid_daemon::runtimes::Catalog::with_workerd(workerd.clone()),
         None => superfluid_daemon::runtimes::Catalog::from_env(),
     });
-    let runtime_options: Vec<superfluid_daemon::runtime_options::Given> = {
-        let ids = catalog.ids();
-        option_candidates
-            .iter()
-            .map(|(flag, value)| match superfluid_daemon::runtime_options::resolve(flag, value.as_deref().unwrap_or_default(), &ids) {
-                None => unknown_serve_flag(flag),
-                Some(_) if value.is_none() => needs_value(flag),
-                Some(given) => given,
-            })
-            .collect()
-    };
-    superfluid_daemon::runtime_options::refuse_repeats(&runtime_options).unwrap_or_else(|e| usage_error(&e, "serve"));
+    use superfluid_daemon::runtime_options::Unresolved;
+    let runtime_options = superfluid_daemon::runtime_options::resolve_candidates(&option_candidates, &catalog.ids())
+        .unwrap_or_else(|e| match e {
+            Unresolved::Unknown(flag) => unknown_serve_flag(&flag),
+            Unresolved::NoValue(flag) => needs_value(&flag),
+        });
     // Set before the runtime is required, so an option that makes it usable here counts for the first probe.
-    superfluid_daemon::runtime_options::set(superfluid_daemon::runtime_options::given_pairs(&runtime_options));
-    // The llama.cpp tokenizer this process loads finds its library the way the worker does.
-    superfluid_daemon::runtime_options::export_to_daemon();
+    superfluid_daemon::runtime_options::adopt(&runtime_options).unwrap_or_else(|e| usage_error(&e, "serve"));
     let sessions = Some(sessions.unwrap_or_else(|| superfluid_daemon::cli::default_sessions(catalog.home())));
     let socket = if embedding.session_socket {
         Some(socket.unwrap_or_else(|| superfluid_daemon::cli::default_socket(catalog.home(), SUN_PATH_LEN)))
@@ -690,11 +595,12 @@ pub fn run(args: &[String], embedding: &Embedding) {
         Arc::new(table)
     });
     if fleet_mode {
-        if otlp_endpoint.is_some() {
+        if engine.otlp_endpoint.is_some() {
             superfluid_daemon::events::fail(
                 2,
                 "--otlp-endpoint is not supported in fleet-head mode (the fleet head \
-                 has no scheduler to trace); set it on each node's superfluid instead",
+                 has no scheduler to trace); set it on each node: \
+                 `superfluid node join … --otlp-endpoint <url>`",
             );
         }
         {
@@ -872,41 +778,19 @@ pub fn run(args: &[String], embedding: &Embedding) {
         }
         if !qos_flags.is_empty() {
             superfluid_daemon::events::fail(2, format!(
-                "{} not supported in fleet-head mode (the fleet head has no \
-                 local scheduler and Link F carries no QoS class); set them on each \
-                 node's own `superfluid serve` instead",
+                "{} not supported in fleet-head mode: the fleet head has no local \
+                 scheduler, and Link F carries no QoS class, so a node runs every \
+                 generation in one class and a network has no place to set them",
                 qos_flags.join(", ")
             ));
-        }
-        if op_spec_max_temperature.is_some() {
-            superfluid_daemon::events::fail(
-                2,
-                "--spec-max-temperature is not supported in fleet-head mode; \
-                 set it on each node's own `superfluid serve` instead",
-            );
         }
         if fim_model.is_some() {
             superfluid_daemon::events::fail(
                 2,
-                "--fim-model is not supported in fleet-head mode (the head hosts no \
-                 engine); set it on a node's own `superfluid serve` instead",
+                "--fim-model is not supported in fleet-head mode: the head hosts no \
+                 engine, and it does not send FIM completions to a node; serve them \
+                 from one machine's own `superfluid serve --fim-model`",
             );
-        }
-        if op_repeat_penalty.is_some() {
-            superfluid_daemon::events::fail(
-                2,
-                "--repeat-penalty is not supported in fleet-head mode \
-                 (the fleet protocol carries no per-request penalty); \
-                 set it on each node's own `superfluid serve` instead",
-            );
-        }
-        if op_presence_penalty.is_some() {
-            eprintln!(
-                "superfluid: --presence-penalty is not supported in fleet-head mode (it sets the \
-                 default of a model on the basert runtime, and the head hosts no engine); \
-                 send presence_penalty in the request instead"
-            );
-            std::process::exit(2);
         }
         let http_listener = listen_or_exit("--http", &addr);
         eprintln!(
@@ -980,9 +864,13 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     top_p: op_top_p,
                     top_k: op_top_k,
                     min_p: op_min_p,
+                    // Resolved here, where the request is, and sent to the node as the request's own,
+                    // which is all a node applies: the presence default where the nodes' engine applies
+                    // penalties itself and the temperature cap where they speculate, as their
+                    // capability record says (SamplingOverrides::for_daemon).
                     repeat_penalty: op_repeat_penalty,
-                    presence_penalty: None,
-                    spec_max_temperature: None,
+                    presence_penalty: op_presence_penalty,
+                    spec_max_temperature: op_spec_max_temperature,
                     fallback: embedding.sampling_fallback,
                 },
                 keys: key_policy.clone(),
@@ -1035,9 +923,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
         speculate = Some(format!("{kind}:{}", path.display()));
     }
     eprintln!("superfluid: runtime {} serves {} ({})", runtime.id.name(), model.display(), describe_worker(&runtime));
-    if let Some(on) = spec_bitexact {
-        std::env::set_var("BASERT_SPEC_BITEXACT", if on { "1" } else { "0" });
-    }
+    engine.export_spec_bitexact();
     let directive = speculation_for(speculate.as_deref(), &runtime.static_capabilities(), &model, runtime.id.name());
     let speculate_auto = directive.map(str::trim) == Some("auto");
     let resolved = directive.map(|d| {
@@ -1201,28 +1087,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
             superfluid_daemon::events::fail(2, "--otlp-interval-ms must be > 0");
         }
     }
-    if fleet_mode && otlp_endpoint.is_some() {
-        superfluid_daemon::events::fail(
-            2,
-            "--otlp-endpoint is not supported in fleet-head mode (the fleet head \
-             has no scheduler to trace); set it on each node's superfluid instead",
-        );
-    }
-    let otlp = otlp_endpoint.map(|endpoint| {
-        let mut cfg = otlp_cfg;
-        cfg.endpoint = endpoint;
-        if let Err(e) = cfg.validate() {
-            superfluid_daemon::events::fail(2, format!("--otlp-endpoint: {e}"));
-        }
-        eprintln!(
-            "superfluid: pushing operational traces to {} ({}an EGRESS: ids, lengths, timings and \
-             codes only, never session content; spans: {})",
-            cfg.traces_url(),
-            if cfg.is_loopback() { "" } else { "NON-LOOPBACK, " },
-            cfg.filter
-        );
-        cfg
-    });
+    let otlp = engine.otlp_traces().unwrap_or_else(|e| superfluid_daemon::events::fail(2, e));
     use superfluid_daemon::telemetry::{LogConfig, LogSink};
     let sink = match log_dir_eff {
         Some(dir) => LogSink::File(LogConfig {
@@ -1261,18 +1126,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
         }
     }
 
-    if let Some(b) = kv_bits_arg {
-        if ![0, 4, 8, 16, 84].contains(&b) {
-            fail_unprefixed(2, format!("--kv-bits {b}: expected 0 (auto), 4 (q4_0), 8 (q8_0), 16 (f16) or 84 (K q8_0 / V q4_0)"));
-        }
-    }
-    let kv_bits = match (park_lossy, kv_bits_arg) {
-        (true, None) | (true, Some(16)) => 16,
-        (true, Some(other)) => {
-            fail_unprefixed(2, format!("--park-lossy requires F16 KV pools; --kv-bits {other} conflicts"));
-        }
-        (false, v) => v.unwrap_or(0),
-    };
+    let kv_bits = engine.kv_bits_for(park_lossy).unwrap_or_else(|e| fail_unprefixed(2, e));
 
     let dir_default = max_context.is_none() && !max_context_auto_flag && model_dir.is_some();
     // A fleet head holds no model; its window is the nodes', learned when it reaches them.
@@ -1667,15 +1521,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
             superfluid_daemon::events::fail(2, format!("cannot serve '{model_display}': {e}"));
         }),
     );
-    {
-        let bits = daemon.sched_stats().kv_bits.load(std::sync::atomic::Ordering::Relaxed);
-        match superfluid_daemon::scheduler::kv_bits_label(bits) {
-            Some(label) if kv_bits != 0 && bits != kv_bits as u64 => {
-                eprintln!("superfluid: kv cache {label} (--kv-bits {kv_bits} overridden by the engine, see above)")
-            }
-            Some(label) => eprintln!("superfluid: kv cache {label}"),
-            None => {}
-        }
+    if let Some(said) = kv_cache(&daemon, kv_bits) {
+        eprintln!("superfluid: {said}");
     }
     superfluid_daemon::events::emit("model.load.done", serde_json::json!({"model": model_name, "runtime": runtime.id.name(), "context": ctx, "lanes": max_batch}));
     let fim_satellite: Option<(String, Arc<Daemon>)> = fim_model.as_ref().map(|path| {
@@ -2086,7 +1933,19 @@ fn build_codec_for(
     Ok(codec)
 }
 
-fn refuse_statically(
+/// The KV cache precision the engine loaded `daemon` with, as the start says it: `kv_bits` is the one
+/// asked for (0, auto). None when the engine does not say.
+pub(crate) fn kv_cache(daemon: &Daemon, kv_bits: i32) -> Option<String> {
+    let bits = daemon.sched_stats().kv_bits.load(std::sync::atomic::Ordering::Relaxed);
+    let label = superfluid_daemon::scheduler::kv_bits_label(bits)?;
+    Some(if kv_bits != 0 && bits != kv_bits as u64 {
+        format!("kv cache {label} (--kv-bits {kv_bits} overridden by the engine, see above)")
+    } else {
+        format!("kv cache {label}")
+    })
+}
+
+pub(crate) fn refuse_statically(
     runtime: &superfluid_daemon::runtimes::Runtime,
     park_lossy: bool,
     kv_bits: Option<i32>,
@@ -2256,7 +2115,7 @@ fn codec_for_dialect(
 /// for `target` when no copy is installed, by `runtime`, the one that serves the target, as a drafter
 /// given by id is pulled. A pull that fails is said, and `auto` settles among what is installed. The
 /// default `auto` (no `--speculate`, speculate_directive) pulls as a named one does.
-fn auto_drafter_pull<'a>(
+pub(crate) fn auto_drafter_pull<'a>(
     catalog: &'a superfluid_daemon::runtimes::Catalog,
     runtime: RuntimeId,
     target: &'a std::path::Path,
@@ -2273,7 +2132,7 @@ fn auto_drafter_pull<'a>(
 /// none), else `auto` on the baseRT runtime, where speculative decoding is on by default, and none on
 /// the other runtimes, whose `auto` is prompt-lookup. A pinned installation (`basert@<install>`) is
 /// its base runtime here (is_basert).
-fn speculate_directive<'a>(named: Option<&'a str>, runtime: &str) -> Option<&'a str> {
+pub(crate) fn speculate_directive<'a>(named: Option<&'a str>, runtime: &str) -> Option<&'a str> {
     match named {
         Some(d) if d.trim() == "off" => None,
         Some(d) => Some(d),
@@ -2288,7 +2147,7 @@ fn is_basert(runtime: &str) -> bool {
 
 /// The strategy a model serves with, from the `--speculate` the command line names (None: not named;
 /// see speculate_directive): `auto` settled for the runtime and the engine's capabilities.
-fn speculation_for<'a>(
+pub(crate) fn speculation_for<'a>(
     named: Option<&'a str>,
     caps: &superfluid_daemon::capabilities::Capabilities,
     model: &std::path::Path,

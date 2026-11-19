@@ -193,12 +193,13 @@ async fn auth_layer(
     if let Some(key) = keyed {
         if admin_route && !key.admin {
             if key.admit(false, true).is_err() {
-                return error_response_typed(
+                let refusal = error_response_typed(
                     StatusCode::TOO_MANY_REQUESTS,
                     format!("API key '{}' exceeded its rate limit ({}/min)", key.name, key.rate_limit_rpm),
                     "rate_limit_error",
                     "rate_limit_exceeded",
                 );
+                return refuse(req, refusal).await;
             }
             let ip_ok = key.rate_limit_rpm > 0
                 || req
@@ -206,15 +207,16 @@ async fn auth_layer(
                     .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                     .is_none_or(|c| auth.ip_limiter.allow(c.0.ip()));
             if !ip_ok {
-                return error_response_typed(
+                let refusal = error_response_typed(
                     StatusCode::TOO_MANY_REQUESTS,
                     "Rate limit exceeded".to_string(),
                     "rate_limit_error",
                     "rate_limit_exceeded",
                 );
+                return refuse(req, refusal).await;
             }
             key.note_admin_reject();
-            return (
+            let refusal = (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"error": {
                     "message": format!(
@@ -228,6 +230,7 @@ async fn auth_layer(
                 }})),
             )
                 .into_response();
+            return refuse(req, refusal).await;
         }
         let slot = if exempt {
             None
@@ -246,7 +249,7 @@ async fn auth_layer(
                             "rate_limit_exceeded",
                         ),
                     };
-                    return (
+                    let refusal = (
                         StatusCode::TOO_MANY_REQUESTS,
                         Json(serde_json::json!({"error": {
                             "message": message,
@@ -256,6 +259,7 @@ async fn auth_layer(
                         }})),
                     )
                         .into_response();
+                    return refuse(req, refusal).await;
                 }
             }
         };
@@ -296,7 +300,7 @@ async fn auth_layer(
         }
         return next.run(req).await;
     }
-    (
+    let refusal = (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({"error": {
             "message": "Invalid or missing API key",
@@ -305,7 +309,16 @@ async fn auth_layer(
             "code": "invalid_api_key",
         }})),
     )
-        .into_response()
+        .into_response();
+    refuse(req, refusal).await
+}
+
+/// Answers `refusal` to a request a layer turns away, its body read first
+/// ([`crate::http_state::drain_body`]): a layer refuses before any handler has taken the body,
+/// and a client still sending it would lose the refusal to a reset connection.
+async fn refuse(req: axum::extract::Request, refusal: Response) -> Response {
+    crate::http_state::drain_body(req.into_body()).await;
+    refusal
 }
 
 struct HeldBody {
@@ -367,7 +380,7 @@ async fn rate_limit_layer(
     if limiter.allow(peer.ip()) {
         return next.run(req).await;
     }
-    (
+    let refusal = (
         StatusCode::TOO_MANY_REQUESTS,
         Json(serde_json::json!({"error": {
             "message": "Rate limit exceeded",
@@ -376,7 +389,8 @@ async fn rate_limit_layer(
             "code": "rate_limit_exceeded",
         }})),
     )
-        .into_response()
+        .into_response();
+    refuse(req, refusal).await
 }
 
 const MAX_BODY_SIZE: usize = 100 * 1024 * 1024;

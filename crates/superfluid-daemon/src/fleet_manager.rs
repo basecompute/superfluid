@@ -281,6 +281,9 @@ pub struct FleetManager {
     shared: Mutex<Shared>,
     /// Which node last ran each prompt prefix, to place the next turn where it is warm.
     warm: Mutex<crate::fleet_warm::Warm>,
+    /// How many times the nodes serving may have changed ([`FleetManager::changes`]), and what
+    /// wakes whoever waits for the next.
+    changes: (Mutex<u64>, std::sync::Condvar),
     policy: PlacementPolicy,
     lease: Lease,
     pool_high_pct: u32,
@@ -454,6 +457,7 @@ impl FleetManager {
             liveness: Liveness::DEFAULT,
             tokenizers: Default::default(),
             warm: Default::default(),
+            changes: Default::default(),
             shared: Mutex::new(Shared {
                 meta,
                 sessions: BTreeMap::new(),
@@ -573,7 +577,28 @@ impl FleetManager {
         } else {
             self.mark_up(i);
         }
+        self.changed();
         Ok((i, new, open))
+    }
+
+    /// How many times the nodes serving may have changed since the head started: a connection
+    /// made to a node or taken in from one (a node that started again comes back on a new one),
+    /// a node found down, a node removed. What the head keeps of its nodes that a node's start
+    /// decides, as its capability record is, is read again when this moves.
+    pub fn changes(&self) -> u64 {
+        *self.changes.0.lock().expect("changes")
+    }
+
+    /// Returns once [`Self::changes`] is no longer `seen`, or after `at_most`.
+    pub fn wait_for_change(&self, seen: u64, at_most: std::time::Duration) {
+        let (count, moved) = &self.changes;
+        drop(moved.wait_timeout_while(count.lock().expect("changes"), at_most, |now| *now == seen).expect("changes"));
+    }
+
+    fn changed(&self) {
+        let (count, moved) = &self.changes;
+        *count.lock().expect("changes") += 1;
+        moved.notify_all();
     }
 
     /// The connections a node has open.
@@ -684,6 +709,7 @@ impl FleetManager {
                 std::thread::spawn(move || head.say_removed());
             }
         }
+        self.changed();
         Ok(entry)
     }
 
@@ -779,6 +805,8 @@ impl FleetManager {
             sh.meta[i].last_retry = Some(now);
             sh.meta[i].since = now;
             tracing::warn!("fleet: node {} is down ({why}); retrying it in the background", self.label(&sh, i));
+            drop(sh);
+            self.changed();
         }
     }
 
@@ -839,6 +867,7 @@ impl FleetManager {
                 watch(&node, &mut head);
                 self.sync_meta(i, &head);
                 *guard = Some(head);
+                self.changed();
                 Ok(())
             }
             Err(e) => {
@@ -1969,6 +1998,7 @@ impl FleetManager {
                                     *slot = Some(head);
                                 }
                             }
+                            self.changed();
                         }
                         Err(e) => tracing::debug!("fleet: {e}"),
                     }
