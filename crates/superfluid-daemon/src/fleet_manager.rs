@@ -200,6 +200,20 @@ impl NodeConn {
         self.checkout_next().1
     }
 
+    /// The connection for short calls, waited for if a call holds it, and never a lane's while
+    /// the node has one: for what the head asks of its own accord, which can wait. A lane's
+    /// connection that is idle may be the one a session was just placed on, and holding it for
+    /// a question keeps that session, or the next one placed, off the node meanwhile. A joined
+    /// node that dialed no such connection has only its lanes' ([`Self::checkout_idle`]).
+    fn checkout_aside(&self) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
+        let control = self.control.lock().expect("node conn");
+        if control.is_some() || !self.spec.addr.starts_with(JOINED) {
+            return control;
+        }
+        drop(control);
+        self.checkout_idle()
+    }
+
     fn checkout_at(&self, i: usize) -> std::sync::MutexGuard<'_, Option<FleetHead>> {
         self.conns[i.min(self.conns.len() - 1)].lock().expect("node conn")
     }
@@ -1780,6 +1794,17 @@ impl FleetManager {
         self.on_a_node(model, |head| head.state_sync(model, req.clone(), blobs))
     }
 
+    /// As [`Self::state_sync`], on the node's connection for short calls and not a lane's
+    /// ([`NodeConn::checkout_aside`]): for a question the head asks of its own accord, as it
+    /// asks for the nodes' capability record, which no request waits for.
+    pub fn state_sync_aside(
+        &self,
+        model: &str,
+        req: superfluid_proto::linkw::StateSyncReqMsg,
+    ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
+        self.on_a_node_by(model, NodeConn::checkout_aside, |head| head.state_sync(model, req.clone(), &[]))
+    }
+
     /// [`FleetManager::state_sync`] for a streamed transcription, each segment told as the node
     /// has it. Once one has been told, a node lost after it fails the call rather than starting
     /// over on another, which would tell those segments twice.
@@ -1831,8 +1856,18 @@ impl FleetManager {
     /// Runs `call` on an idle connection to node `i`, connecting it first if it has to; a node
     /// whose link fails is down.
     fn on_node<R>(&self, i: usize, call: impl FnOnce(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
+        self.on_node_by(i, NodeConn::checkout_idle, call)
+    }
+
+    /// As [`Self::on_node`], on the connection `checkout` gives.
+    fn on_node_by<R>(
+        &self,
+        i: usize,
+        checkout: fn(&NodeConn) -> std::sync::MutexGuard<'_, Option<FleetHead>>,
+        call: impl FnOnce(&mut FleetHead) -> Result<R, DaemonError>,
+    ) -> Result<R, DaemonError> {
         let node = self.node(i);
-        let mut guard = node.checkout_idle();
+        let mut guard = checkout(&node);
         if guard.as_mut().is_some_and(|h| h.drain_status().is_err()) {
             *guard = None;
         }
@@ -1848,11 +1883,21 @@ impl FleetManager {
     }
 
     /// Runs `call` on one node serving `model`, the next tried when a node fails.
-    fn on_a_node<R>(&self, model: &str, mut call: impl FnMut(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
+    fn on_a_node<R>(&self, model: &str, call: impl FnMut(&mut FleetHead) -> Result<R, DaemonError>) -> Result<R, DaemonError> {
+        self.on_a_node_by(model, NodeConn::checkout_idle, call)
+    }
+
+    /// As [`Self::on_a_node`], on the connection `checkout` gives of each node tried.
+    fn on_a_node_by<R>(
+        &self,
+        model: &str,
+        checkout: fn(&NodeConn) -> std::sync::MutexGuard<'_, Option<FleetHead>>,
+        mut call: impl FnMut(&mut FleetHead) -> Result<R, DaemonError>,
+    ) -> Result<R, DaemonError> {
         let cand = self.candidates_claiming(model, None, RequestShape::default());
         let mut last = None;
         for i in cand {
-            match self.on_node(i, &mut call) {
+            match self.on_node_by(i, checkout, &mut call) {
                 Ok(r) => return Ok(r),
                 Err(e) if is_fatal_node(&e) => last = Some(e),
                 Err(e) => return Err(e),
@@ -2144,4 +2189,61 @@ fn is_fatal_node(e: &DaemonError) -> bool {
             | DaemonError::Fleet(superfluid_linkf::LinkFError::TimedOut)
             | DaemonError::Fleet(superfluid_linkf::LinkFError::Io(_))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodeagent::NodeAgent;
+    use superfluid_proto::linkw::StateSyncReqMsg;
+
+    /// A mock node with two lanes that takes the connections a head dials; its address.
+    fn dialed_node() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let dir = std::env::temp_dir().join(format!("superfluid-fleet-manager-{}-{}", std::process::id(), addr.replace(':', "-")));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = crate::EngineHost::spawn(|| (superfluid_engine::MockEngine::new(superfluid_engine::EngineConfig::default()), None)).unwrap();
+        let daemon = Arc::new(crate::Daemon::new(store, host, Box::new(crate::MockCodec), 2));
+        let agent = NodeAgent::new(daemon, "box-a", "mock").with_max_lanes(2);
+        std::thread::spawn(move || {
+            for sock in listener.incoming() {
+                let Ok(sock) = sock else { break };
+                let mut conn = agent.connection();
+                std::thread::spawn(move || {
+                    let _ = conn.serve(superfluid_linkf::Endpoint::from_tcp(sock).unwrap());
+                });
+            }
+        });
+        addr
+    }
+
+    /// A head that dials the node at `addr`, with no connection made yet.
+    fn head_of(addr: &str) -> FleetManager {
+        let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+        FleetManager::new(vec![NodeSpec { addr: addr.to_string(), auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease)
+    }
+
+    fn connected(slot: &Mutex<Option<FleetHead>>) -> bool {
+        slot.lock().unwrap().is_some()
+    }
+
+    #[test]
+    fn a_question_the_head_asks_of_its_own_accord_leaves_the_lanes_connections_alone() {
+        // An ordinary short call takes a lane's connection that is idle, and dials it.
+        let node_addr = dialed_node();
+        let fleet = head_of(&node_addr);
+        let _ = fleet.state_sync("mock", StateSyncReqMsg::Capabilities, &[]);
+        let node = fleet.node(0);
+        assert!(connected(&node.conns[0]) && !connected(&node.control), "a request's short call runs on an idle lane's connection");
+
+        // The head's own question takes the connection for short calls, whatever the lanes do:
+        // an idle lane's may be the one a session was just placed on.
+        let fleet = head_of(&node_addr);
+        let _ = fleet.state_sync_aside("mock", StateSyncReqMsg::Capabilities);
+        let node = fleet.node(0);
+        assert!(connected(&node.control), "asked on the connection for short calls");
+        assert!(node.conns.iter().all(|lane| !connected(lane)), "and no lane's was dialed or held for it");
+    }
 }
