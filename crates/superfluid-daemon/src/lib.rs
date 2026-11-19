@@ -61,6 +61,7 @@ pub mod versions;
 pub mod selfupdate;
 pub mod linked;
 pub mod dylib_tokenizer;
+pub mod engine_flags;
 pub mod events;
 pub mod export;
 pub mod otlp;
@@ -731,6 +732,11 @@ pub struct SpeculationOptions {
     pub gate_reprobe_max: Option<u32>,
     pub dspark_confidence: Option<f32>,
 }
+
+/// Where in its capability record a fleet node says it speculates, for the head, which resolves
+/// the speculation cap on a request's default temperature (`--spec-max-temperature`) before
+/// the node sees it.
+pub const NODE_SPECULATES: (&str, &str) = ("fleet", "speculates");
 
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
@@ -1640,6 +1646,12 @@ impl Daemon {
 
     pub fn speculation(&self) -> Option<scheduler::SpeculationGrant> {
         self.serving().speculation.grant()
+    }
+
+    /// Whether this model's generations speculate: its own engine registered a strategy, or, for
+    /// a daemon over a fleet, the nodes serving it said they do ([`NODE_SPECULATES`]).
+    pub fn speculates(&self) -> bool {
+        self.speculation().is_some() || self.capable(NODE_SPECULATES.0, NODE_SPECULATES.1)
     }
 
     pub fn tool_lease_ms(&self) -> u64 {

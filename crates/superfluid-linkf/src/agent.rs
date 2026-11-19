@@ -270,6 +270,7 @@ mod tests {
             params: Vec::new(),
             qos_class: 0,
             policy_ref: 0,
+            model: String::new(),
         }
     }
 
