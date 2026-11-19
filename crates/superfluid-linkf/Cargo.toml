@@ -17,8 +17,9 @@ serde.workspace = true
 snow = "0.10"
 sha2 = "0.10"
 
+# The unix socket and the wait before a timed read, as Link W has them on Windows.
 [target.'cfg(windows)'.dependencies]
-uds_windows = "1.1"
+superfluid-shm.workspace = true
 
 [lints]
 workspace = true

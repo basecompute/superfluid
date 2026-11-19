@@ -148,7 +148,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::net::UnixStream;
     #[cfg(windows)]
-    use uds_windows::UnixStream;
+    use superfluid_shm::os::UnixStream;
 
     fn pair(a: &[u8], b: &[u8]) -> (io::Result<SecureStream<UnixStream>>, io::Result<SecureStream<UnixStream>>) {
         let (x, y) = UnixStream::pair().unwrap();

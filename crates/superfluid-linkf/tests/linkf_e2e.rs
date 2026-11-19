@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(windows)]
-use uds_windows::UnixStream;
+use superfluid_shm::os::UnixStream;
 use std::time::Duration;
 
 use superfluid_linkf::{AgentAction, AgentSession, Endpoint, HeadSession};

@@ -2130,8 +2130,8 @@ dependencies = [
  "sha2",
  "snow",
  "superfluid-proto",
+ "superfluid-shm",
  "thiserror",
- "uds_windows",
 ]
 
 [[package]]
