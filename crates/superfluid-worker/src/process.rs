@@ -68,6 +68,8 @@ impl WorkerArgs {
 
     pub fn streams(&mut self) -> Result<(UnixStream, UnixStream), String> {
         if let Some(link) = self.link.take() {
+            #[cfg(windows)]
+            leave_ctrl_break_to_the_server();
             return connect_streams(&link).map_err(|e| format!("--link {}: {e}", link.display()));
         }
         self.inherited_streams()
@@ -88,6 +90,24 @@ impl WorkerArgs {
     #[cfg(not(unix))]
     fn inherited_streams(&mut self) -> Result<(UnixStream, UnixStream), String> {
         Err("--link is required to serve".into())
+    }
+}
+
+/// Has this process take no notice of Ctrl+Break. Windows sends the key to every process on
+/// the console, the server's workers with it, and ends each one that does not answer it. The
+/// server answers it by draining, which its workers must live through: a worker ends when the
+/// server closes its streams, as it does on every platform.
+#[cfg(windows)]
+fn leave_ctrl_break_to_the_server() {
+    use windows_sys::Win32::Foundation::BOOL;
+    use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT};
+
+    unsafe extern "system" fn answered(kind: u32) -> BOOL {
+        BOOL::from(kind == CTRL_BREAK_EVENT)
+    }
+    // SAFETY: the handler is a function that lives as long as the process and touches nothing.
+    unsafe {
+        SetConsoleCtrlHandler(Some(answered), 1);
     }
 }
 
