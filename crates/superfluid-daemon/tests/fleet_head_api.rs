@@ -973,3 +973,65 @@ fn the_head_resolves_the_operators_sampling_defaults_as_its_nodes_own_server_wou
         }
     }
 }
+
+/// What the head takes from its nodes' capability record is the record of the node serving now,
+/// not of the first that answered: a node can be removed and another join in its place, started
+/// otherwise. The head reads the record again when its nodes change, so the temperature cap
+/// (`--spec-max-temperature`) comes with a node that speculates and goes with one that does not.
+#[test]
+fn the_head_reads_its_nodes_record_again_when_another_node_takes_over() {
+    const TOKEN: &[u8] = b"a fleet token";
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let fleet = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LeastLoaded, lease, 90, 0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let join_addr = listener.local_addr().unwrap().to_string();
+    let models = superfluid_daemon::fleet_models::HeadModels::fixed(Arc::clone(&fleet), vec!["mock-model".into()]);
+    let accepting = Arc::clone(&fleet);
+    std::thread::spawn(move || superfluid_daemon::fleet_join::accept_nodes(listener, accepting, TOKEN.to_vec(), models));
+    let head = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), Arc::clone(&fleet), "mock-model".into(), DaemonOptions::default())
+        .expect("a daemon over the fleet");
+
+    // A node that dials the head as `identity`, speculating or not, until the head removes it.
+    let join = |identity: &'static str, speculates: bool| {
+        let record = r#"{"descriptor_version":1,"architecture":"mock","workload":{"causal_generation":true}}"#;
+        let engine = EngineHost::spawn(move || {
+            (MockEngine::new(EngineConfig { vocab: 512, ..EngineConfig::default() }).with_capability_descriptor(record), None)
+        })
+        .unwrap();
+        let opts = DaemonOptions { speculate: speculates.then(|| "prompt-lookup".to_string()), ..DaemonOptions::default() };
+        let daemon = Daemon::with_options(store("joined"), engine, Box::new(MockCodec), opts).unwrap();
+        assert_eq!(daemon.speculation().is_some(), speculates);
+        let mut conn = NodeAgent::new(Arc::new(daemon), identity, "mock-model").with_max_lanes(1).with_auth(TOKEN.to_vec()).connection();
+        let head = join_addr.clone();
+        std::thread::spawn(move || loop {
+            let Ok(sock) = std::net::TcpStream::connect(&head) else { break };
+            let secure = superfluid_linkf::Endpoint::from_tcp_secure(sock, TOKEN, superfluid_linkf::Role::Responder, std::time::Duration::from_secs(5));
+            let Ok(ep) = secure else { break };
+            if matches!(conn.serve(ep), Err(superfluid_daemon::DaemonError::Fleet(superfluid_linkf::LinkFError::Removed))) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+    };
+    let wait_for = |what: &str, ok: &dyn Fn() -> bool| {
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !ok() {
+            assert!(std::time::Instant::now() < by, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    let op = openai::SamplingOverrides { spec_max_temperature: Some(0.2), ..Default::default() };
+    let capped = || op.for_daemon(&head).spec_max_temperature.is_some();
+
+    join("plain", false);
+    wait_for("the head learned its node's capability record", &|| head.capabilities().record().and_then(|r| r.get("architecture")).is_some());
+    assert!(!capped(), "no cap over a node that does not speculate");
+
+    fleet.remove("plain").expect("the plain node is listed");
+    join("speculating", true);
+    wait_for("the cap applies once a node that speculates serves", &capped);
+
+    fleet.remove("speculating").expect("the speculating node is listed");
+    join("plain-again", false);
+    wait_for("the cap is gone once the node serving does not speculate", &|| !capped());
+}
