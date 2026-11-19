@@ -54,6 +54,10 @@ fn ring_slots(host: &mut EngineHost, ring_id: u32) -> Option<u32> {
         .map(|r| r.slots)
 }
 
+/// A failed tick after which this worker serves no other: it went away, or it is still there and its engine reported
+/// the tick fatal. An engine's `Status::Fatal` for a tick means its state is lost (baseRT: "process presumed dead after
+/// this"; a command buffer failed mid-step, or a job a coprocessor ran for the pass did), and it refuses every tick
+/// after it, so a worker left running answered each later request with the same status until the server was restarted.
 fn worker_is_gone(e: &DaemonError) -> bool {
     matches!(
         e,
@@ -62,7 +66,12 @@ fn worker_is_gone(e: &DaemonError) -> bool {
                 | superfluid_agent::AgentError::Closed
                 | superfluid_agent::AgentError::Envelope(_)
         )
-    )
+    ) || engine_is_lost(e)
+}
+
+/// The worker answered, and its engine said the tick was fatal.
+fn engine_is_lost(e: &DaemonError) -> bool {
+    matches!(e, DaemonError::Agent(superfluid_agent::AgentError::Rejected(s)) if *s == superfluid_abi::Status::Fatal as i32)
 }
 
 pub const PREFILL_BUDGET: u32 = 4096;
@@ -1023,6 +1032,22 @@ mod prefill_order_tests {
     }
 
     #[test]
+    fn a_fatal_tick_loses_the_worker_like_a_dead_one() {
+        use super::{engine_is_lost, worker_is_gone, DaemonError};
+        use superfluid_abi::Status;
+        use superfluid_agent::AgentError;
+        let gone = |e: AgentError| worker_is_gone(&DaemonError::Agent(e));
+        assert!(gone(AgentError::Closed), "a worker that went away");
+        assert!(gone(AgentError::Rejected(Status::Fatal as i32)), "an engine that called the tick fatal refuses every later one");
+        assert!(engine_is_lost(&DaemonError::Agent(AgentError::Rejected(Status::Fatal as i32))));
+        assert!(!engine_is_lost(&DaemonError::Agent(AgentError::Closed)), "that one died; nothing answered");
+        // A plan the engine turned away left its state as it was: the worker serves the next tick.
+        assert!(!gone(AgentError::Rejected(Status::NeedsReplan as i32)));
+        assert!(!gone(AgentError::Rejected(Status::UnknownHandle as i32)));
+        assert!(!gone(AgentError::Rejected(Status::Unsupported as i32)));
+    }
+
+    #[test]
     fn only_an_engine_that_cannot_fork_refuses_checkpoints_for_good() {
         use super::CheckpointError;
         use superfluid_abi::Status;
@@ -1901,18 +1926,17 @@ impl Scheduler {
                 self.publish_occupancy();
                 if worker_is_gone(&e) && self.host.is_process() {
                     let mut fresh = false;
+                    let what = if engine_is_lost(&e) { "engine reported a fatal tick" } else { "engine worker died" };
                     if self.respawn_streak < MAX_WORKER_RESPAWNS {
                         self.respawn_streak += 1;
                         self.stats.worker_respawns.fetch_add(1, Ordering::Relaxed);
                         match self.respawn_worker().and_then(|()| self.speculation.reregister(&mut self.host)) {
                             Ok(()) => {
-                                eprintln!("[superfluid] engine worker died ({e}); respawned a fresh one");
+                                eprintln!("[superfluid] {what} ({e}); respawned a fresh worker");
                                 self.after_respawn();
                                 fresh = true;
                             }
-                            Err(err) => eprintln!(
-                                "[superfluid] engine worker died ({e}); respawn FAILED: {err}"
-                            ),
+                            Err(err) => eprintln!("[superfluid] {what} ({e}); respawn FAILED: {err}"),
                         }
                     }
                     if !fresh && self.respawn_streak >= MAX_WORKER_RESPAWNS {
