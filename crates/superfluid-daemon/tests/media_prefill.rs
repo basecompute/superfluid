@@ -234,7 +234,7 @@ fn a_decoding_lane_waits_one_image_not_the_whole_prompt() {
     // Each prompt token takes 1 ms to prefill: eight 48-token images are
     // ~0.4 s of prefill, which the decoding lane used to wait out at once.
     let per_token = Duration::from_millis(1);
-    let (d, _log) = daemon(0, false, 48, per_token, None);
+    let (d, log) = daemon(0, false, 48, per_token, None);
     let running = start_decoding(&d);
     let s = image_session(&d, 8, "stall");
     let t0 = Instant::now();
@@ -243,12 +243,31 @@ fn a_decoding_lane_waits_one_image_not_the_whole_prompt() {
     assert_eq!(out.tokens_generated, 4);
     let gap = running.longest_gap(t0, t1);
     running.stop(&d);
-    let (whole, request) = (per_token * 8 * 48, t1 - t0);
-    eprintln!("[media-prefill] longest decode gap {gap:?}; the images alone prefill in {whole:?}; request {request:?}");
-    // Judged against the request's own time, not against the sleeps alone: the
-    // mock's ticks cost CPU time too, which a small runner stretches (a 3-core
-    // macOS runner took 250-270 ms for a gap that is 95 ms on a laptop, and
-    // 1.4-1.8 s for the request). One image a tick keeps the longest wait near
-    // an eighth of the request; the whole prompt in one tick made it most of it.
-    assert!(gap * 3 < request, "the decoding lane stalled {gap:?} of the image request's {request:?}");
+
+    // What a tick's decode rounds wait behind is that tick's prefill. The image
+    // prompt's prefill in any one tick is one image's worth, under a third of
+    // the prompt (an eighth and some text); in one tick it was all of it. And
+    // the decoding lane has rounds in every one of those ticks.
+    let (image_lane, ticks) = image_lane_ticks(&log, 1);
+    let per_tick: Vec<u32> = ticks
+        .iter()
+        .map(|t| t.prefills.iter().filter(|p| p.lane_tag == image_lane).map(|p| p.end - p.start).sum())
+        .collect();
+    let (longest, prompt) = (per_tick.iter().copied().max().unwrap_or(0), per_tick.iter().sum::<u32>());
+    assert!(
+        longest * 3 < prompt,
+        "a tick prefilled {longest} of the image prompt's {prompt} tokens (per tick: {per_tick:?})"
+    );
+    for t in &ticks {
+        assert!(t.decodes.iter().any(|&l| l != image_lane), "the decoding lane has no round in {t:?}");
+    }
+    // The times are a diagnostic, not a check: the mock's ticks cost CPU time
+    // too, which a small runner stretches (a 95 ms gap on a laptop was 250-270
+    // ms on a 3-core macOS runner, and the request 1.4-1.8 s against 0.67 s).
+    eprintln!(
+        "[media-prefill] longest decode gap {gap:?} of a request that took {:?}; the images alone prefill in {:?}; \
+         prefill tokens per tick {per_tick:?}",
+        t1 - t0,
+        per_token * 8 * 48
+    );
 }
