@@ -80,4 +80,4 @@ Completions run in the `completion` class with no session log, a per-client toke
 
 ## Fleet head
 
-A fleet head resolves each request's class as above and sends it to the node that runs the generation, whose scheduler admits it in that class; a batch-invariant lane runs alone on a node that can give one. The head has no scheduler of its own and refuses `--class-lanes`: set it on each node (`superfluid node join --class-lanes`, `superfluid-noded --class-lanes`). See [Distributed serving](../serving/distributed_serving.md#qos).
+A fleet head resolves each request's class as above and sends it to the node that runs the generation, whose scheduler admits it in that class; a batch-invariant lane runs alone on a node that can give one. The head has no scheduler of its own and refuses `--class-lanes`: set it on each node (`superfluid node join --class-lanes`, `superfluid-noded --class-lanes`). A node takes `--prefill-budget`, `--tick-decode-budget` and `--tick-target-ms` as `serve` does. See [Distributed serving](../serving/distributed_serving.md#qos).

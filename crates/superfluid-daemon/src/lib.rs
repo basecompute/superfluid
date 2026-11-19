@@ -61,6 +61,7 @@ pub mod versions;
 pub mod selfupdate;
 pub mod linked;
 pub mod dylib_tokenizer;
+pub mod engine_flags;
 pub mod events;
 pub mod export;
 pub mod otlp;
@@ -731,6 +732,11 @@ pub struct SpeculationOptions {
     pub gate_reprobe_max: Option<u32>,
     pub dspark_confidence: Option<f32>,
 }
+
+/// Where in its capability record a fleet node says it speculates, for the head, which resolves
+/// the speculation cap on a request's default temperature (`--spec-max-temperature`) before
+/// the node sees it.
+pub const NODE_SPECULATES: (&str, &str) = ("fleet", "speculates");
 
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
@@ -1644,6 +1650,12 @@ impl Daemon {
         self.serving().speculation.grant()
     }
 
+    /// Whether this model's generations speculate: its own engine registered a strategy, or, for
+    /// a daemon over a fleet, the nodes serving it said they do ([`NODE_SPECULATES`]).
+    pub fn speculates(&self) -> bool {
+        self.speculation().is_some() || self.capable(NODE_SPECULATES.0, NODE_SPECULATES.1)
+    }
+
     pub fn tool_lease_ms(&self) -> u64 {
         self.tool_lease_ms
     }
@@ -1995,7 +2007,14 @@ impl Daemon {
     /// As [`Self::metrics_text`]; over a fleet, the head's info names every model in `served`
     /// after this daemon's own, where a server with several models knows them all.
     pub fn metrics_text_serving(&self, served: &[String]) -> String {
-        let mut out = metrics::render_prometheus(&self.stats);
+        let mut out = match &self.fleet {
+            // A head's scheduler routes; its nodes' count what it would, and it adds theirs.
+            Some((fleet, _)) => {
+                let counts = fleet.node_counts();
+                metrics::render_prometheus_adding(&self.stats, &|key| fleet_metrics::head_count(&counts, key))
+            }
+            None => metrics::render_prometheus(&self.stats),
+        };
         if let Some((fleet, model)) = &self.fleet {
             let models: Vec<String> =
                 std::iter::once(model.clone()).chain(served.iter().filter(|m| *m != model).cloned()).collect();

@@ -13,7 +13,12 @@ use superfluid_proto::{encode_frame, Frame, FrameDecoder};
 use crate::secure::{key_from, Role, SecureStream};
 use crate::LinkFError;
 
-pub const PROTO_VERSION: u16 = 3;
+pub const PROTO_VERSION: u16 = 4;
+
+/// The first version on which the head names the model of each session and request
+/// ([`superfluid_proto::linkf::SessionAssignMsg::model`]), so a node may offer it several; a head
+/// before it is offered the node's first model only.
+pub const NAMES_MODELS: u16 = 4;
 
 /// The oldest version this end still speaks: 2 has no heartbeat, so a peer on it is never given
 /// up for silence.
@@ -303,13 +308,24 @@ impl Endpoint {
         ack: &HelloAckF,
         expected_auth: &[u8],
     ) -> Result<(), LinkFError> {
+        let hello = self.read_hello()?;
+        self.answer_hello(&hello, ack, expected_auth)
+    }
+
+    /// The head's hello, waited on as long as it takes, and not answered yet.
+    pub fn read_hello(&mut self) -> Result<Hello, LinkFError> {
         let frames = self.wait_frames()?;
         let hello_frame = frames
             .iter()
             .find(|f| f.msg_type == msg_type::HELLO)
             .ok_or(LinkFError::Protocol("expected Hello"))?;
-        let hello = Hello::decode(&hello_frame.payload)?;
-        self.answer_hello(&hello, ack, expected_auth)
+        Ok(Hello::decode(&hello_frame.payload)?)
+    }
+
+    /// The version this end and the head that sent `hello` share, which [`Self::answer_hello`]
+    /// answers at; none when they share none.
+    pub fn shared_version(hello: &Hello) -> Option<u16> {
+        negotiate(hello.proto_versions, (OLDEST_VERSION, PROTO_VERSION))
     }
 
     /// What the head stated it serves in the hello this end answered: `None` before an answer,
@@ -321,8 +337,7 @@ impl Endpoint {
     /// Checks the head's hello and answers it with `ack`, at the version the two share; what the
     /// hello states the head serves is kept ([`Self::head_serves`]).
     pub fn answer_hello(&mut self, hello: &Hello, ack: &HelloAckF, expected_auth: &[u8]) -> Result<(), LinkFError> {
-        let version = negotiate(hello.proto_versions, (OLDEST_VERSION, PROTO_VERSION))
-            .ok_or(LinkFError::Protocol("no common proto version"))?;
+        let version = Self::shared_version(hello).ok_or(LinkFError::Protocol("no common proto version"))?;
         if hello.link_role != LinkRole::HeadDaemon {
             return Err(LinkFError::Protocol("peer is not a head daemon"));
         }
@@ -435,10 +450,21 @@ mod tests {
 
     #[test]
     fn a_silent_head_on_version_3_is_given_up() {
-        let (_head, mut node) = answered((OLDEST_VERSION, PROTO_VERSION));
+        let (_head, mut node) = answered((OLDEST_VERSION, 3));
         assert_eq!(node.version(), 3);
         std::thread::sleep(Duration::from_millis(120));
         assert!(matches!(node.pump(), Err(LinkFError::TimedOut)));
+    }
+
+    #[test]
+    fn a_head_of_this_release_is_answered_at_the_version_that_names_models() {
+        let (_head, node) = answered((OLDEST_VERSION, PROTO_VERSION));
+        assert_eq!(node.version(), NAMES_MODELS);
+        let hello = |hi| Hello { proto_versions: (OLDEST_VERSION, hi), link_role: LinkRole::HeadDaemon, auth: Vec::new(), serves: None };
+        assert_eq!(Endpoint::shared_version(&hello(3)), Some(3), "a head before it shares 3");
+        assert_eq!(Endpoint::shared_version(&hello(9)), Some(PROTO_VERSION));
+        let none = Hello { proto_versions: (PROTO_VERSION + 1, PROTO_VERSION + 1), ..hello(9) };
+        assert_eq!(Endpoint::shared_version(&none), None);
     }
 
     #[test]

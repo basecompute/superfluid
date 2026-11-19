@@ -16,21 +16,35 @@ const DEFAULT_LANES: u32 = 8;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: superfluid-noded --model <path|org/model[:tag]> [--listen <ip:port>] [--auth-file <path>] \
-         [--runtime <id>] [--model-name <id>] [--max-context N] [--max-batch N] [--class-lanes <class>=N[,...]] [--identity <name>] \
-         [--offline] [--park] [--insecure-no-auth] [--idle-timeout-ms N] [--handshake-timeout-ms N]\n\
+        "usage: superfluid-noded --model <path|org/model[:tag]> [--model ...] [--listen <ip:port>] [--auth-file <path>] \
+         [--runtime <id>] [--model-name <id> ...] [--max-context N] [--max-batch N] [--class-lanes <class>=N[,...]] [--identity <name>] \
+         [--offline] [--speculate <strategy|off>] [--park] [--park-lossy] [--park-budget-gb N] \
+         [--kv-bits <0|4|8|16|84>] [--<runtime>-<name> <value>] [--prefill-budget N] \
+         [--tick-decode-budget N] [--tick-target-ms N] [--spec-* ...] [--otlp-endpoint <url> [--otlp-* ...]] \
+         [--insecure-no-auth] [--idle-timeout-ms N] [--handshake-timeout-ms N]\n\
          \n\
          A model given by id is pulled, and its runtime installed, as `superfluid serve` does; the\n\
-         context window is sized for this device unless --max-context pins it.\n\
+         context window is sized for this device unless --max-context pins it. It speculates as\n\
+         `superfluid serve` does: --speculate names the strategy, else auto on basert, off elsewhere.\n\
+         --model again serves several models at once, each on its own engine with --max-batch\n\
+         lanes, their windows sized together (each one's drafter counted) as `serve` sizes the\n\
+         models it serves at once; a head runs each request on the model it names. A head released\n\
+         before heads named the model (Link F version 4) is offered the first model only.\n\
+         --model-name renames a model; with several, give it once per --model, in order.\n\
+         The engine flags --park-lossy, --park-budget-gb, --kv-bits, a runtime's --<runtime>-<name>,\n\
+         the scheduler's budgets, the --spec-* knobs and --otlp-* are read and checked as `serve`\n\
+         reads them.\n\
          (--listen defaults to 0.0.0.0:8454, the fleet-worker port next to BASE 8453;\n\
           --auth-file holds the fleet token (default $SUPERFLUID_HOME/fleet/token, from\n\
           `superfluid fleet token`); with it the link is encrypted and both ends checked.\n\
           --park keeps each prompt's prefix on disk under $SUPERFLUID_HOME/fleet/nodes/<identity>/park,\n\
           so a restarted node starts the head's sessions warm.\n\
-          --class-lanes caps this node's lanes per QoS class, as `superfluid serve --class-lanes`\n\
-          does; the head sends each generation in its request's class.\n\
+          --class-lanes caps this node's lanes per QoS class, each model's, as `superfluid serve\n\
+          --class-lanes` does; the head sends each generation in its request's class.\n\
           There is no sampling flag here: a fleet generation must match the local path\n\
-          token for token, so the node applies only what the request carries.)"
+          token for token, so the node applies only what the request carries. The head\n\
+          resolves it, its own --temperature, --repeat-penalty, --presence-penalty and\n\
+          --spec-max-temperature the defaults for a request that names none.)"
     );
     std::process::exit(2);
 }
@@ -45,40 +59,32 @@ fn fail(code: i32, msg: impl std::fmt::Display) -> ! {
 const MAX_HANDSHAKES: usize = 64;
 
 fn main() {
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-    if let Err(e) = superfluid_daemon::telemetry::init_stderr(&filter) {
-        eprintln!("superfluid-noded: logging: {e}");
-    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut listen: Option<String> = None;
-    let mut runtime: Option<String> = None;
-    let mut model: Option<String> = None;
-    let mut max_context: Option<i32> = None;
+    let mut models: Vec<String> = Vec::new();
     let mut max_batch: Option<u32> = None;
-    let mut class_lanes: Option<String> = None;
+    let mut opts = superfluid_daemon::fleet_join::NodeOptions::default();
     let mut identity: Option<String> = None;
-    let mut model_name_override: Option<String> = None;
+    let mut names: Vec<String> = Vec::new();
     let mut handshake_timeout = DEFAULT_HANDSHAKE_TIMEOUT;
     let mut idle_timeout = DEFAULT_IDLE_TIMEOUT;
     let mut auth_file: Option<PathBuf> = None;
     let mut insecure_no_auth = false;
-    let mut offline = false;
     let mut park = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| usage());
         match a.as_str() {
             "--listen" => listen = Some(val()),
-            "--runtime" | "--engine" => runtime = Some(val()),
-            "--model" => model = Some(val()),
-            "--max-context" => max_context = Some(val().parse().unwrap_or_else(|_| usage())),
+            "--runtime" | "--engine" => opts.runtime = Some(val()),
+            "--model" => models.push(val()),
+            "--max-context" => opts.max_context = Some(val().parse().unwrap_or_else(|_| usage())),
             "--max-batch" => max_batch = Some(val().parse().unwrap_or_else(|_| usage())),
-            "--class-lanes" => class_lanes = Some(val()),
             "--identity" => identity = Some(val()),
-            "--model-name" => model_name_override = Some(val()),
+            "--model-name" => names.push(val()),
             "--auth-file" => auth_file = Some(PathBuf::from(val())),
             "--insecure-no-auth" => insecure_no_auth = true,
-            "--offline" => offline = true,
+            "--offline" => opts.offline = true,
             "--park" => park = true,
             "--handshake-timeout-ms" => {
                 handshake_timeout = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
@@ -86,16 +92,32 @@ fn main() {
             "--idle-timeout-ms" => {
                 idle_timeout = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
             }
-            _ => usage(),
+            // The flags `serve` takes for the engine, a runtime's own among them, after every other.
+            s => match opts.take(s, &mut it) {
+                Ok(true) => {}
+                Ok(false) => usage(),
+                Err(e) => fail(2, e),
+            },
         }
+    }
+    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    let otlp = opts.engine.otlp_traces().unwrap_or_else(|e| fail(2, e));
+    if let Err(e) = superfluid_daemon::telemetry::init_sinks(superfluid_daemon::telemetry::LogSink::Stderr(filter), None, otlp) {
+        eprintln!("superfluid-noded: logging: {e}");
     }
     let listen = listen.unwrap_or_else(|| DEFAULT_LISTEN.to_string());
     let identity = identity.unwrap_or_else(superfluid_daemon::metrics::hostname);
     let lanes = max_batch.unwrap_or(DEFAULT_LANES).max(1);
-    let class_lanes = superfluid_daemon::fleet_join::class_lanes_of(class_lanes.as_deref(), lanes).unwrap_or_else(|e| fail(2, e));
-    let mock = runtime.as_deref() == Some("mock");
-    if model.is_none() && !mock {
+    opts.lanes = lanes;
+    if let Err(e) = opts.class_lanes() {
+        fail(2, e);
+    }
+    let mock = opts.runtime.as_deref() == Some("mock");
+    if models.is_empty() && !mock {
         usage();
+    }
+    if names.len() > models.len().max(1) || (models.len() > 1 && !names.is_empty() && names.len() != models.len()) {
+        fail(2, "give --model-name once for each --model, in the same order, or not at all");
     }
 
     // Whatever can refuse the node does so before a model is pulled or loaded.
@@ -132,21 +154,33 @@ fn main() {
     // during a long pull is refused at once instead of waiting out its handshake.
     drop(TcpListener::bind(&listen).unwrap_or_else(|e| fail(1, format!("bind {listen} failed: {e}"))));
 
-    let state = if park {
+    let state = if opts.parks(park) {
         superfluid_daemon::fleet_join::NodeState::open(&home, &identity, true)
     } else {
         superfluid_daemon::fleet_join::NodeState::scratch()
     }
     .unwrap_or_else(|e| fail(3, e));
-    let loaded = if mock {
-        superfluid_daemon::fleet_join::load_mock_node(max_context, (lanes, class_lanes), &state)
-    } else {
-        let model = model.expect("checked above");
-        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, (lanes, class_lanes), offline, &state)
+    let loaded = superfluid_daemon::fleet_join::load_nodes(&models, &opts, &state).unwrap_or_else(|e| fail(3, e));
+    let mut node: Option<NodeAgent> = None;
+    let mut served: Vec<String> = Vec::new();
+    for (i, loaded) in loaded.into_iter().enumerate() {
+        eprintln!("superfluid-noded: {}", loaded.summary);
+        let name = names.get(i).cloned().unwrap_or(loaded.model_name);
+        if served.contains(&name) {
+            fail(2, format!("two of the models are served as {name}; give each its own --model-name"));
+        }
+        let daemon = Arc::new(loaded.daemon);
+        let mut agent = match node.take() {
+            None => NodeAgent::new(daemon, identity.clone(), name.clone()),
+            Some(agent) => agent.with_model(daemon, name.clone()),
+        };
+        if let Some(tok) = loaded.tokenizer {
+            agent = agent.with_tokenizer_of(tok);
+        }
+        node = Some(agent);
+        served.push(name);
     }
-    .unwrap_or_else(|e| fail(3, e));
-    let model_name = model_name_override.unwrap_or(loaded.model_name);
-    eprintln!("superfluid-noded: {}", loaded.summary);
+    let model_name = served.join("', '");
 
     let listener = TcpListener::bind(&listen).unwrap_or_else(|e| fail(1, format!("bind {listen} failed: {e}")));
     let addr = listener.local_addr().map(|a| a.to_string()).unwrap_or(listen);
@@ -154,12 +188,10 @@ fn main() {
     if !auth.is_empty() {
         eprintln!("superfluid-noded: the link is encrypted and both ends are checked against the token");
     }
-    let mut node = NodeAgent::new(Arc::new(loaded.daemon), identity, model_name);
-    if let Some(tok) = loaded.tokenizer {
-        node = node.with_tokenizer_of(tok);
-    }
+    // Each model's lanes, which the head opens a connection for each of.
     let node = node
-        .with_max_lanes(lanes)
+        .expect("a node serves a model")
+        .with_max_lanes(lanes * served.len() as u32)
         .with_timeouts(handshake_timeout, idle_timeout)
         .with_auth(auth.clone());
     let handshaking = Arc::new(AtomicUsize::new(0));

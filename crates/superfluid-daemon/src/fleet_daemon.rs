@@ -120,29 +120,47 @@ pub(crate) fn message(e: DaemonError) -> String {
     }
 }
 
-/// How often the head asks again for a node's capabilities until one answers.
+/// How often the head asks again for a node's capabilities while none has answered.
 const CAPABILITIES_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Takes the first node serving the model's capability descriptor as the daemon's, so a route
-/// refuses what the nodes cannot do as a local server refuses what its engine cannot.
+/// Keeps the daemon's capability record that of the first node serving the model, so a route
+/// refuses what the nodes cannot do as a local server refuses what its engine cannot. A node's
+/// record says what it was started with (whether it speculates, for one), and the node serving
+/// can be another, or the same one started again otherwise: the record is read again each time
+/// the nodes serving may have changed ([`FleetManager::changes`]). While no node answers, the
+/// record stays as it was last read and is asked for again every [`CAPABILITIES_EVERY`].
 fn learn_capabilities(d: std::sync::Weak<Dispatch>) {
-    let spawned = std::thread::Builder::new().name("superfluid-fleet-capabilities".into()).spawn(move || loop {
-        let Some(dispatch) = d.upgrade() else { return };
-        if let Ok(StateSyncOkMsg::Capabilities { json }) = dispatch.fleet.state_sync(&dispatch.model, StateSyncReqMsg::Capabilities, &[]) {
-            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("backend".into(), "fleet".into());
-                    *dispatch.capabilities.write().expect("capability record") = crate::capabilities::Capabilities::parse(&v.to_string());
-                    return;
-                }
+    let spawned = std::thread::Builder::new().name("superfluid-fleet-capabilities".into()).spawn(move || {
+        // The fleet's changes the record was last read at.
+        let mut read_at = None;
+        loop {
+            let Some(dispatch) = d.upgrade() else { return };
+            let fleet = Arc::clone(&dispatch.fleet);
+            // Counted before the node is asked, so a change while it answers is read after.
+            let now = fleet.changes();
+            if read_at != Some(now) && read_capabilities(&dispatch) {
+                read_at = Some(now);
             }
+            drop(dispatch);
+            fleet.wait_for_change(now, CAPABILITIES_EVERY);
         }
-        drop(dispatch);
-        std::thread::sleep(CAPABILITIES_EVERY);
     });
     if let Err(e) = spawned {
         tracing::warn!("fleet: cannot learn the nodes' capabilities: {e}");
     }
+}
+
+/// Takes the capability record of a node serving the model as the daemon's; `false` when none
+/// answered with one.
+fn read_capabilities(dispatch: &Dispatch) -> bool {
+    let Ok(StateSyncOkMsg::Capabilities { json }) = dispatch.fleet.state_sync(&dispatch.model, StateSyncReqMsg::Capabilities, &[]) else {
+        return false;
+    };
+    let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&json) else { return false };
+    let Some(obj) = record.as_object_mut() else { return false };
+    obj.insert("backend".into(), "fleet".into());
+    *dispatch.capabilities.write().expect("capability record") = crate::capabilities::Capabilities::parse(&record.to_string());
+    true
 }
 
 type Reply = std::sync::mpsc::Sender<Result<StateSyncOkMsg, String>>;

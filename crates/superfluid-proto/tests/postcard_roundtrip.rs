@@ -365,6 +365,7 @@ fn session_assign_roundtrips() {
         params: vec![9, 9, 9],
         qos_class: 1,
         policy_ref: 42,
+        model: "org/model".into(),
     };
     assert_eq!(roundtrip(&msg), msg);
 }

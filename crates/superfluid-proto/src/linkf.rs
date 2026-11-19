@@ -181,6 +181,53 @@ pub struct SessionAssignMsg {
     pub params: Vec<u8>,
     pub qos_class: u8,
     pub policy_ref: u64,
+    /// The model the session is for, as the node told it in `loadable_models`; empty for the
+    /// node's first. A node serving several runs the session on that model's engine. Last, so a
+    /// node from before it reads the message and leaves it; [`SessionAssignMsg::decode`] reads
+    /// one from a head before it (version 4).
+    pub model: String,
+}
+
+/// A [`SessionAssignMsg`] from a head released before [`SessionAssignMsg::model`].
+#[derive(Deserialize)]
+struct SessionAssignBefore {
+    command_id: u64,
+    session_id: u64,
+    epoch: u64,
+    lease: Lease,
+    codec: String,
+    params: Vec<u8>,
+    qos_class: u8,
+    policy_ref: u64,
+}
+
+impl SessionAssignMsg {
+    /// An assignment from a head of any release; one from before `model` names none.
+    pub fn decode(bytes: &[u8]) -> Result<SessionAssignMsg, postcard::Error> {
+        or_before(bytes, |m: SessionAssignBefore| SessionAssignMsg {
+            command_id: m.command_id,
+            session_id: m.session_id,
+            epoch: m.epoch,
+            lease: m.lease,
+            codec: m.codec,
+            params: m.params,
+            qos_class: m.qos_class,
+            policy_ref: m.policy_ref,
+            model: String::new(),
+        })
+    }
+}
+
+/// `bytes` as a `T`, or, when they are too short for one, as the `B` a peer released before
+/// `T`'s last field sends, made a `T` by `from`.
+fn or_before<T: serde::de::DeserializeOwned, B: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    from: impl FnOnce(B) -> T,
+) -> Result<T, postcard::Error> {
+    match postcard::from_bytes::<T>(bytes) {
+        Ok(m) => Ok(m),
+        Err(e) => postcard::from_bytes::<B>(bytes).map(from).map_err(|_| e),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,14 +433,54 @@ impl GenerateOptsMsg {
 
 /// What a node's model tokenizes with, by digest (0: not known), so a head refuses a node whose
 /// tokens would mean other text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerMsg {
+    /// The first model's.
     pub digest: u64,
+    /// Each model the node serves, in `loadable_models` order, with its own tokenizer and window:
+    /// told to a head on version 4, which names the model of each session and request; empty to
+    /// one before it, which is offered the first model only. Last, so a head from before it reads
+    /// the message and leaves it; [`TokenizerMsg::decode`] reads one from a node before it.
+    pub models: Vec<NodeModelMsg>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// One model a node serves, as [`TokenizerMsg::models`] tells it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeModelMsg {
+    pub name: String,
+    /// Its tokenizer's digest, 0 when not known.
+    pub tokenizer: u64,
+    /// The longest context it holds, 0 when not known.
+    pub max_context_tokens: u64,
+}
+
+impl TokenizerMsg {
+    /// The digest from a node of any release; one from before `models` tells none.
+    pub fn decode(bytes: &[u8]) -> Result<TokenizerMsg, postcard::Error> {
+        #[derive(Deserialize)]
+        struct Before {
+            digest: u64,
+        }
+        or_before(bytes, |m: Before| TokenizerMsg { digest: m.digest, models: Vec::new() })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenizerExportReqMsg {
     pub request_id: u64,
+    /// The model whose tokenizer is asked for; empty for the node's first (version 4, last).
+    pub model: String,
+}
+
+impl TokenizerExportReqMsg {
+    /// A request from a head of any release; one from before `model` names none.
+    pub fn decode(bytes: &[u8]) -> Result<TokenizerExportReqMsg, postcard::Error> {
+        #[derive(Deserialize)]
+        struct Before {
+            request_id: u64,
+        }
+        or_before(bytes, |m: Before| TokenizerExportReqMsg { request_id: m.request_id, model: String::new() })
+    }
 }
 
 /// What a tokenizer says without being asked to encode: every token's bytes, its specials and
@@ -425,6 +512,20 @@ pub enum TokenizeMsg {
 pub struct TokenizeReqMsg {
     pub request_id: u64,
     pub text: TokenizeMsg,
+    /// The model whose tokenizer encodes it; empty for the node's first (version 4, last).
+    pub model: String,
+}
+
+impl TokenizeReqMsg {
+    /// A request from a head of any release; one from before `model` names none.
+    pub fn decode(bytes: &[u8]) -> Result<TokenizeReqMsg, postcard::Error> {
+        #[derive(Deserialize)]
+        struct Before {
+            request_id: u64,
+            text: TokenizeMsg,
+        }
+        or_before(bytes, |m: Before| TokenizeReqMsg { request_id: m.request_id, text: m.text, model: String::new() })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -440,6 +541,20 @@ pub const BLOB_PREFIX: &str = "fleet-blob:";
 pub struct StateSyncReqF {
     pub request_id: u64,
     pub req: crate::linkw::StateSyncReqMsg,
+    /// The model whose engine runs it; empty for the node's first (version 4, last).
+    pub model: String,
+}
+
+impl StateSyncReqF {
+    /// A request from a head of any release; one from before `model` names none.
+    pub fn decode(bytes: &[u8]) -> Result<StateSyncReqF, postcard::Error> {
+        #[derive(Deserialize)]
+        struct Before {
+            request_id: u64,
+            req: crate::linkw::StateSyncReqMsg,
+        }
+        or_before(bytes, |m: Before| StateSyncReqF { request_id: m.request_id, req: m.req, model: String::new() })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +640,61 @@ pub struct NodeStatusMsg {
     pub capacity: CapacitySummary,
     pub loadable_models: Vec<String>,
     pub mem: MemCountersMsg,
+    /// The node's scheduler counters; `None` from a node released before them. Last, so a head
+    /// from before it reads the status and leaves it; [`NodeStatusMsg::decode`] reads a status
+    /// from before it.
+    pub stats: Option<NodeStatsMsg>,
+}
+
+/// What a node's scheduler has counted since its counters last started from 0, as its own
+/// `/metrics` counts it, so a head that only routes can report what its nodes measure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeStatsMsg {
+    /// Which start of the node's counters these are: another value means they started again
+    /// from 0. A node with several connections reports on each, so a status read late can be
+    /// older than one read before it; within one run a lower count is such a status, not a
+    /// restart.
+    pub run: u64,
+    pub prefill_tokens: u64,
+    pub warm_prefix_tokens: u64,
+    pub cold_admissions: u64,
+    pub unservable_cold_admissions: u64,
+    pub unservable_park_refusals: u64,
+    pub preemptions: u64,
+    pub admits_deferred: u64,
+    pub starvation_grants: u64,
+    pub os_pressure_events: u64,
+    pub pressure_evictions: u64,
+    pub pressure_bytes_evicted: u64,
+    pub pins_yielded: u64,
+    pub pins_expired: u64,
+    pub worker_respawns: u64,
+    pub spec_proposed: u64,
+    pub spec_accepted: u64,
+    pub parks_lossless: u64,
+    pub parks_lossy: u64,
+    pub resumes: u64,
+}
+
+/// A status from a node released before [`NodeStatusMsg::stats`].
+#[derive(Deserialize)]
+struct NodeStatusBefore {
+    capacity: CapacitySummary,
+    loadable_models: Vec<String>,
+    mem: MemCountersMsg,
+}
+
+impl NodeStatusMsg {
+    /// A status from a node of any release; one from before `stats` has none.
+    pub fn decode(bytes: &[u8]) -> Result<NodeStatusMsg, postcard::Error> {
+        match postcard::from_bytes::<NodeStatusMsg>(bytes) {
+            Ok(status) => Ok(status),
+            Err(e) => match postcard::from_bytes::<NodeStatusBefore>(bytes) {
+                Ok(s) => Ok(NodeStatusMsg { capacity: s.capacity, loadable_models: s.loadable_models, mem: s.mem, stats: None }),
+                Err(_) => Err(e),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -624,6 +794,110 @@ mod tests {
         let old = postcard::to_stdvec(&OptsBefore::from(opts(false))).unwrap();
         assert_eq!(GenerateOptsMsg::decode(&old).unwrap(), opts(false));
         assert!(GenerateOptsMsg::decode(&old[..old.len() - 2]).is_err(), "cut options are still refused");
+    }
+
+    fn status(stats: Option<NodeStatsMsg>) -> NodeStatusMsg {
+        NodeStatusMsg {
+            capacity: CapacitySummary { max_lanes: 4, kv_blocks_used: 3, kv_blocks_total: 64, ..Default::default() },
+            loadable_models: vec!["org/model".into()],
+            mem: MemCountersMsg {
+                allocated_bytes: 0,
+                host_retained_bytes: 0,
+                pool_blocks_total: 64,
+                pool_blocks_used: 3,
+                pool_bytes_evictable: 0,
+                tentative_bytes: 0,
+            },
+            stats,
+        }
+    }
+
+    /// A status as a node released before [`NodeStatusMsg::stats`] sends it, and as a head
+    /// released before it reads one.
+    #[derive(Serialize, Deserialize)]
+    struct StatusFrom {
+        capacity: CapacitySummary,
+        loadable_models: Vec<String>,
+        mem: MemCountersMsg,
+    }
+
+    #[test]
+    fn a_head_from_before_node_stats_reads_a_status_that_carries_them() {
+        let stats = NodeStatsMsg { run: 9, spec_proposed: 40, spec_accepted: 31, warm_prefix_tokens: 512, ..Default::default() };
+        let new = postcard::to_stdvec(&status(Some(stats))).unwrap();
+        let old: StatusFrom = postcard::from_bytes(&new).unwrap();
+        assert_eq!((old.capacity.kv_blocks_used, old.loadable_models.as_slice()), (3, &["org/model".to_string()][..]));
+        assert_eq!(NodeStatusMsg::decode(&new).unwrap(), status(Some(stats)));
+    }
+
+    #[test]
+    fn a_status_from_before_node_stats_reads_as_one_with_none() {
+        let s = status(None);
+        let old = postcard::to_stdvec(&StatusFrom { capacity: s.capacity, loadable_models: s.loadable_models.clone(), mem: s.mem }).unwrap();
+        assert_eq!(NodeStatusMsg::decode(&old).unwrap(), s);
+        assert!(NodeStatusMsg::decode(&old[..old.len() - 2]).is_err(), "a cut status is still refused");
+    }
+
+    #[test]
+    fn a_head_and_a_node_from_before_the_model_named_read_each_other() {
+        #[derive(Serialize)]
+        struct OldAssign {
+            command_id: u64,
+            session_id: u64,
+            epoch: u64,
+            lease: Lease,
+            codec: String,
+            params: Vec<u8>,
+            qos_class: u8,
+            policy_ref: u64,
+        }
+        let lease = Lease { duration_ms: 30_000, renew_by_ms: 20_000 };
+        let assign = SessionAssignMsg {
+            command_id: 7,
+            session_id: 9,
+            epoch: 3,
+            lease,
+            codec: "raw".into(),
+            params: vec![1, 2],
+            qos_class: 1,
+            policy_ref: 0,
+            model: "org/b".into(),
+        };
+        // A node from before reads a new head's assignment, the model left unread.
+        let theirs: SessionAssignBefore = postcard::from_bytes(&postcard::to_allocvec(&assign).unwrap()).unwrap();
+        assert_eq!((theirs.session_id, theirs.epoch, theirs.policy_ref), (9, 3, 0));
+        assert_eq!(SessionAssignMsg::decode(&postcard::to_allocvec(&assign).unwrap()).unwrap(), assign);
+        // A head from before names no model, which is the node's first.
+        let old = OldAssign { command_id: 7, session_id: 9, epoch: 3, lease, codec: "raw".into(), params: vec![1, 2], qos_class: 1, policy_ref: 0 };
+        let read = SessionAssignMsg::decode(&postcard::to_allocvec(&old).unwrap()).unwrap();
+        assert_eq!(read, SessionAssignMsg { model: String::new(), ..assign });
+
+        #[derive(Serialize)]
+        struct OldSync {
+            request_id: u64,
+            req: crate::linkw::StateSyncReqMsg,
+        }
+        let old = OldSync { request_id: 4, req: crate::linkw::StateSyncReqMsg::Capabilities };
+        let read = StateSyncReqF::decode(&postcard::to_allocvec(&old).unwrap()).unwrap();
+        assert_eq!((read.request_id, read.model.as_str()), (4, ""));
+        let named = StateSyncReqF { request_id: 4, req: crate::linkw::StateSyncReqMsg::Capabilities, model: "org/b".into() };
+        assert_eq!(StateSyncReqF::decode(&postcard::to_allocvec(&named).unwrap()).unwrap(), named);
+
+        let read = TokenizerExportReqMsg::decode(&postcard::to_allocvec(&4u64).unwrap()).unwrap();
+        assert_eq!(read, TokenizerExportReqMsg { request_id: 4, model: String::new() });
+        let text = TokenizeMsg::Encode("hi".into());
+        let read = TokenizeReqMsg::decode(&postcard::to_allocvec(&(4u64, text.clone())).unwrap()).unwrap();
+        assert_eq!(read, TokenizeReqMsg { request_id: 4, text, model: String::new() });
+
+        // A head from before reads the first model's digest from a node that tells each model's.
+        let told = TokenizerMsg {
+            digest: 11,
+            models: vec![NodeModelMsg { name: "org/b".into(), tokenizer: 12, max_context_tokens: 4096 }],
+        };
+        let bytes = postcard::to_allocvec(&told).unwrap();
+        assert_eq!(postcard::from_bytes::<u64>(&bytes).unwrap(), 11);
+        assert_eq!(TokenizerMsg::decode(&bytes).unwrap(), told);
+        assert_eq!(TokenizerMsg::decode(&postcard::to_allocvec(&11u64).unwrap()).unwrap(), TokenizerMsg { digest: 11, models: Vec::new() });
     }
 
     #[test]

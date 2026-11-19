@@ -48,6 +48,8 @@ struct Placement {
     params: GenParams,
     qos_class: u8,
     codec: String,
+    /// The model the session is for, named to the node again when it is placed again.
+    model: String,
     lease: Lease,
     tokens: Vec<u32>,
 }
@@ -238,11 +240,16 @@ pub struct FleetHead {
     addr: String,
     auth: Vec<u8>,
     on_status: Option<StatusHook>,
+    on_stats: Option<StatsHook>,
     liveness: Liveness,
     /// The blobs this connection has sent, which the node keeps.
     blobs_sent: std::collections::HashSet<String>,
     /// The node's tokenizer digest (0: not known, as from a node on version 2).
     tokenizer: u64,
+    /// Each model the node serves with its own tokenizer and window, as a node on version 4
+    /// tells them; empty from one before it, whose one model has [`Self::tokenizer`] and the
+    /// window its capacity reports.
+    models: Vec<linkf::NodeModelMsg>,
     /// Set when the head removes the node ([`FleetHead::removed_when`]).
     removed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Whether the node was told it was removed, which is said once.
@@ -251,6 +258,10 @@ pub struct FleetHead {
 
 /// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
 pub type StatusHook = std::sync::Arc<dyn Fn(&superfluid_proto::handshake::CapacitySummary) + Send + Sync>;
+
+/// Told the scheduler counters each status carries, as [`StatusHook`] is told its capacity; a
+/// node released before them reports none.
+pub type StatsHook = std::sync::Arc<dyn Fn(&linkf::NodeStatsMsg) + Send + Sync>;
 
 /// Epochs and command ids are numbered across every connection this head makes: a node keeps
 /// a session's across connections, and refuses an epoch or command it has already seen.
@@ -408,9 +419,11 @@ impl FleetHead {
             addr,
             auth,
             on_status: None,
+            on_stats: None,
             liveness: Liveness::DEFAULT,
             blobs_sent: std::collections::HashSet::new(),
             tokenizer: 0,
+            models: Vec::new(),
             removed: None,
             told_removed: false,
         }
@@ -421,7 +434,33 @@ impl FleetHead {
         self.tokenizer
     }
 
-    /// Reads the tokenizer digest a node on version 3 sends just after the handshake.
+    /// The digest of the tokenizer the node serves `model` with, 0 when it did not say: a node
+    /// that tells each of its models' has its own for each, and one that does not has one.
+    pub fn tokenizer_of(&self, model: &str) -> u64 {
+        match self.models.iter().find(|m| m.name == model) {
+            Some(m) => m.tokenizer,
+            None if self.models.is_empty() => self.tokenizer,
+            None => 0,
+        }
+    }
+
+    /// The longest context the node holds for `model`, 0 when not known: its own window, from a
+    /// node that tells each of its models', else the one its capacity reports.
+    pub fn window_of(&self, model: &str) -> u64 {
+        match self.models.iter().find(|m| m.name == model) {
+            Some(m) => m.max_context_tokens,
+            None => self.node.capacity.max_context_tokens,
+        }
+    }
+
+    /// Each model the node told with its tokenizer and window; empty from a node before
+    /// version 4.
+    pub fn models(&self) -> &[linkf::NodeModelMsg] {
+        &self.models
+    }
+
+    /// Reads the tokenizer digest a node on version 3 sends just after the handshake, with each
+    /// of its models' on version 4.
     fn read_tokenizer(&mut self) -> Result<(), DaemonError> {
         if self.endpoint.version() < 3 {
             return Ok(());
@@ -430,7 +469,9 @@ impl FleetHead {
         loop {
             for frame in self.pump()? {
                 if frame.msg_type == msg_type::TOKENIZER {
-                    self.tokenizer = postcard::from_bytes::<linkf::TokenizerMsg>(&frame.payload)?.digest;
+                    let told = linkf::TokenizerMsg::decode(&frame.payload)?;
+                    self.tokenizer = told.digest;
+                    self.models = told.models;
                     return Ok(());
                 }
                 self.absorb(frame)?;
@@ -510,6 +551,12 @@ impl FleetHead {
         self.on_status = Some(hook);
     }
 
+    /// Tells `hook` the scheduler counters of every status the node sends from now on, as
+    /// [`Self::on_status`] does its capacity.
+    pub fn on_stats(&mut self, hook: StatsHook) {
+        self.on_stats = Some(hook);
+    }
+
     fn reconnect_self(&mut self) -> Result<(), DaemonError> {
         let (addr, auth) = (self.addr.clone(), self.auth.clone());
         self.reconnect(&addr, auth)?;
@@ -574,10 +621,13 @@ impl FleetHead {
     fn absorb(&mut self, frame: superfluid_proto::Frame) -> Result<Option<superfluid_proto::Frame>, DaemonError> {
         match frame.msg_type {
             msg_type::NODE_STATUS => {
-                if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload) {
+                if let Ok(m) = linkf::NodeStatusMsg::decode(&frame.payload) {
                     self.node.capacity = m.capacity;
                     if let Some(hook) = &self.on_status {
                         hook(&self.node.capacity);
+                    }
+                    if let (Some(hook), Some(stats)) = (&self.on_stats, &m.stats) {
+                        hook(stats);
                     }
                     if !m.loadable_models.is_empty() {
                         self.node.loadable_models = m.loadable_models;
@@ -703,6 +753,7 @@ impl FleetHead {
                         &p.codec,
                     );
                     msg.params = encode_params(&p.params);
+                    msg.model = p.model.clone();
                     self.endpoint.send(msg_type::SESSION_ASSIGN, &msg)?;
                     if !p.tokens.is_empty() {
                         self.send_append(session_id, epoch, &p.tokens)?;
@@ -714,6 +765,7 @@ impl FleetHead {
         Ok(replaced)
     }
 
+    /// Places the session on the node, for its first model.
     pub fn assign(
         &mut self,
         session_id: u64,
@@ -722,21 +774,39 @@ impl FleetHead {
         codec: &str,
         lease: Lease,
     ) -> Result<u64, DaemonError> {
+        self.assign_for(session_id, params, qos_class, codec, "", lease)
+    }
+
+    /// Places the session on the node for `model`, which a node serving several runs it on; an
+    /// empty name is the node's first.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assign_for(
+        &mut self,
+        session_id: u64,
+        params: GenParams,
+        qos_class: u8,
+        codec: &str,
+        model: &str,
+        lease: Lease,
+    ) -> Result<u64, DaemonError> {
         let entry = self.placements.entry(session_id).or_insert(Placement {
             params,
             qos_class,
             codec: codec.to_string(),
+            model: model.to_string(),
             lease,
             tokens: Vec::new(),
         });
         entry.params = params;
         entry.qos_class = qos_class;
         entry.codec = codec.to_string();
+        entry.model = model.to_string();
         entry.lease = lease;
 
         let epoch = NEXT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut msg = self.head.assign_session(session_id, epoch, lease, qos_class, codec);
         msg.params = encode_params(&params);
+        msg.model = model.to_string();
         match self.endpoint.send(msg_type::SESSION_ASSIGN, &msg) {
             Ok(()) => Ok(epoch),
             Err(e) => {
@@ -880,12 +950,14 @@ impl FleetHead {
         Err(older_node(&self.node.node_identity, needs_what(needs)))
     }
 
-    /// The node's tokenizer, whole but for encoding, for a head with no copy of the model.
-    pub fn tokenizer_export(&mut self) -> Result<linkf::TokenizerExportMsg, DaemonError> {
+    /// The tokenizer the node serves `model` with, whole but for encoding, for a head with no
+    /// copy of the model.
+    pub fn tokenizer_export(&mut self, model: &str) -> Result<linkf::TokenizerExportMsg, DaemonError> {
         self.needs_v3("sharing its tokenizer")?;
         let request_id = self.next_generation;
         self.next_generation += 1;
-        self.endpoint.send(msg_type::TOKENIZER_EXPORT_REQ, &linkf::TokenizerExportReqMsg { request_id })?;
+        let req = linkf::TokenizerExportReqMsg { request_id, model: model.to_string() };
+        self.endpoint.send(msg_type::TOKENIZER_EXPORT_REQ, &req)?;
         loop {
             for frame in self.endpoint.wait_frames()? {
                 let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKENIZER_EXPORT) else {
@@ -899,12 +971,13 @@ impl FleetHead {
         }
     }
 
-    /// Text the node's tokenizer encodes; none when it does not encode that way.
-    pub fn tokenize(&mut self, text: linkf::TokenizeMsg) -> Result<Option<Vec<u32>>, DaemonError> {
+    /// Text the tokenizer the node serves `model` with encodes; none when it does not encode
+    /// that way.
+    pub fn tokenize(&mut self, model: &str, text: linkf::TokenizeMsg) -> Result<Option<Vec<u32>>, DaemonError> {
         self.needs_v3("encoding text")?;
         let request_id = self.next_generation;
         self.next_generation += 1;
-        self.endpoint.send(msg_type::TOKENIZE_REQ, &linkf::TokenizeReqMsg { request_id, text })?;
+        self.endpoint.send(msg_type::TOKENIZE_REQ, &linkf::TokenizeReqMsg { request_id, text, model: model.to_string() })?;
         loop {
             for frame in self.endpoint.wait_frames()? {
                 let Some(frame) = self.absorb(frame)?.filter(|f| f.msg_type == msg_type::TOKENIZE_RESP) else {
@@ -918,19 +991,21 @@ impl FleetHead {
         }
     }
 
-    /// Runs one Link W state operation on the node's engine.
+    /// Runs one Link W state operation on the engine the node serves `model` on.
     pub fn state_sync(
         &mut self,
+        model: &str,
         req: superfluid_proto::linkw::StateSyncReqMsg,
         blobs: &[Blob],
     ) -> Result<superfluid_proto::linkw::StateSyncOkMsg, DaemonError> {
-        self.state_sync_streaming(req, blobs, &mut |_| {})
+        self.state_sync_streaming(model, req, blobs, &mut |_| {})
     }
 
     /// [`FleetHead::state_sync`], a streamed transcription's segments told to `on_segment` as
     /// the node has them.
     pub fn state_sync_streaming(
         &mut self,
+        model: &str,
         req: superfluid_proto::linkw::StateSyncReqMsg,
         blobs: &[Blob],
         on_segment: &mut dyn FnMut(superfluid_proto::linkw::TranscribeSegmentMsg),
@@ -939,7 +1014,7 @@ impl FleetHead {
         self.send_blobs(blobs)?;
         let request_id = self.next_generation;
         self.next_generation += 1;
-        self.endpoint.send(msg_type::STATE_SYNC_REQ, &linkf::StateSyncReqF { request_id, req })?;
+        self.endpoint.send(msg_type::STATE_SYNC_REQ, &linkf::StateSyncReqF { request_id, req, model: model.to_string() })?;
         loop {
             for frame in self.endpoint.wait_frames()? {
                 let Some(frame) = self.absorb(frame)? else { continue };
