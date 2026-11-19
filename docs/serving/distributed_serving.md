@@ -27,6 +27,8 @@ The node finds the head on the local network (`_superfluid-fleet._tcp`, which al
 
 Several fleets can share one local network. A head with a token announces a network id derived from that token, and a node joins only a head of its own token's network. A head of another network is never joined; the node says so once and keeps looking. A head that announces no network id (an older release) is joined only when no head of the node's network answers. When a node loses its head it looks again the same way, so it may join another machine of its network that took over. A head given as `<host:port>` is dialed only there, never looked for.
 
+On Windows, other machines reach a head (its `--fleet-listen` and `--http` ports) or a `superfluid-noded` node only where Windows Defender Firewall allows the program inbound connections, and by default it allows none to a program it has no rule for. A node then finds the head and cannot connect (`the head at <addr> does not answer`). Windows asks about a program the first time it listens when it was started from the desktop; started over ssh or as a service, nothing asks and it stays blocked. Allowing it takes an administrator, once. A Windows machine that joins with `superfluid node join` dials out and needs no rule.
+
 | flag | default | meaning |
 |---|---|---|
 | `--model <path\|id>` | required | the model; an id is pulled first |
