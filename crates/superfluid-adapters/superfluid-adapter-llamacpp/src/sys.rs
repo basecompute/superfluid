@@ -2,6 +2,7 @@
 
 #![allow(non_camel_case_types)]
 
+use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -588,13 +589,9 @@ fn open() -> Result<Loaded, String> {
         (None, None) => format!("llama.cpp (unversioned build {})", libllama.display()),
     };
     let loaded = Loaded { _libs: libs, api, info: Library { path: libllama, version }, layout };
-    // SAFETY: plain FFI on the library just resolved; the callback keeps
+    // SAFETY: plain FFI on the library just resolved; either callback counts
     // error lines and takes no user data.
-    unsafe {
-        if !keeps_log() {
-            (loaded.api.llama_log_set)(Some(quiet), std::ptr::null_mut());
-        }
-    }
+    unsafe { (loaded.api.llama_log_set)(Some(if keeps_log() { shown } else { quiet }), std::ptr::null_mut()) };
     // SAFETY: registry queries and the loader, on the library just resolved.
     unsafe {
         if (loaded.api.ggml_backend_dev_count)() == 0 {
@@ -621,9 +618,18 @@ const LOG_CONT: ggml_log_level = 5;
 
 static ERRORS: Mutex<(Vec<String>, bool)> = Mutex::new((Vec::new(), false));
 
+thread_local! {
+    /// The error lines llama.cpp has logged on this thread.
+    static ERROR_LINES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The log callback that keeps the error lines and drops the rest.
 unsafe extern "C" fn quiet(level: ggml_log_level, text: *const c_char, _user: *mut c_void) {
     if text.is_null() {
         return;
+    }
+    if level == LOG_ERROR {
+        ERROR_LINES.with(|n| n.set(n.get() + 1));
     }
     let Ok(mut kept) = ERRORS.lock() else { return };
     let continues = level == LOG_CONT && kept.1;
@@ -637,10 +643,28 @@ unsafe extern "C" fn quiet(level: ggml_log_level, text: *const c_char, _user: *m
         Some(last) if continues || !last.ends_with('\n') => last.push_str(&line),
         _ => kept.0.push(line.into_owned()),
     }
-    if kept.0.len() > 8 {
+    if kept.0.len() > KEPT_LINES {
         kept.0.remove(0);
     }
 }
+
+/// The log callback under `SUPERFLUID_LLAMA_LOG=1`: every line to stderr, as
+/// llama.cpp writes them itself, with the error lines counted as [`quiet`]
+/// counts them.
+unsafe extern "C" fn shown(level: ggml_log_level, text: *const c_char, _user: *mut c_void) {
+    use std::io::Write;
+    if text.is_null() {
+        return;
+    }
+    if level == LOG_ERROR {
+        ERROR_LINES.with(|n| n.set(n.get() + 1));
+    }
+    // SAFETY: llama.cpp passes a NUL-terminated string that outlives the call.
+    let line = unsafe { CStr::from_ptr(text) };
+    let _ = std::io::stderr().write_all(line.to_bytes());
+}
+
+const KEPT_LINES: usize = 8;
 
 pub fn clear_errors() {
     if let Ok(mut kept) = ERRORS.lock() {
@@ -649,8 +673,32 @@ pub fn clear_errors() {
 }
 
 pub fn last_error() -> String {
+    last_errors(KEPT_LINES as u64)
+}
+
+/// The newest `n` of the error lines kept, joined.
+fn last_errors(n: u64) -> String {
     let Ok(kept) = ERRORS.lock() else { return String::new() };
-    kept.0.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ")
+    let from = kept.0.len().saturating_sub(n.min(KEPT_LINES as u64) as usize);
+    kept.0[from..].iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ")
+}
+
+/// How many error lines llama.cpp has logged on this thread. A backend whose
+/// work is queued has no other way to say the device refused it: on Metal a
+/// decode returns 0 with its command buffers only committed, and the refusal
+/// is an error line from the call that waits for them, which is the read of
+/// the step's rows. The count is the thread's own, so an error in another
+/// context of the process is not this one's.
+pub fn errors_logged() -> u64 {
+    ERROR_LINES.with(Cell::get)
+}
+
+/// What llama.cpp said in the error lines this thread has logged since
+/// `mark`, a value [`errors_logged`] returned; `None` when there were none.
+/// The text is empty when the lines went to stderr and were not kept.
+pub fn errors_since(mark: u64) -> Option<String> {
+    let n = errors_logged().saturating_sub(mark);
+    (n > 0).then(|| last_errors(n))
 }
 
 const RETURN_ROOM: usize = 1024;
@@ -834,6 +882,33 @@ pub unsafe fn text(p: *const c_char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_lines_are_counted_on_the_thread_that_logged_them() {
+        let log = |callback: ggml_log_callback, level, text: &CStr| {
+            // SAFETY: a NUL-terminated string that outlives the call, and no user data.
+            unsafe { callback.unwrap()(level, text.as_ptr(), std::ptr::null_mut()) }
+        };
+        let mark = errors_logged();
+        assert_eq!(errors_since(mark), None);
+        log(Some(quiet), 2, c"llama_context: n_ctx = 4096\n");
+        log(Some(quiet), 3, c"decode: failed to find a memory slot for batch of size 512\n");
+        assert_eq!(errors_logged(), mark, "only error lines count");
+        log(Some(quiet), LOG_ERROR, c"ggml_metal_synchronize: error: command buffer 0 failed with status 5\n");
+        log(Some(quiet), LOG_ERROR, c"error: Insufficient Memory");
+        log(Some(quiet), LOG_CONT, c" (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)\n");
+        assert_eq!(errors_logged(), mark + 2, "a continued line is the line it continues");
+        assert!(errors_since(mark).is_some());
+        log(Some(shown), LOG_ERROR, c"");
+        assert_eq!(errors_logged(), mark + 3, "a line that is shown is counted as one that is kept");
+        let elsewhere = std::thread::spawn(move || {
+            let mark = errors_logged();
+            log(Some(quiet), LOG_ERROR, c"llama_decode: failed to decode, ret = -3\n");
+            errors_logged() - mark
+        });
+        assert_eq!(elsewhere.join().unwrap(), 1);
+        assert_eq!(errors_logged(), mark + 3, "another thread's errors are not this one's");
+    }
 
     #[test]
     fn the_structs_have_the_headers_layout() {
