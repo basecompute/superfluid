@@ -27,7 +27,8 @@ fn lib_given(args: &WorkerArgs) -> Option<&str> {
 
 impl Runtime for Llamacpp {
     fn compat(&self) -> serde_json::Value {
-        serde_json::json!({"tested": crate::recipe::tested().into_iter().map(|(v, _)| v).collect::<Vec<_>>()})
+        // The builds tested on this platform, which are the ones an install takes here.
+        serde_json::json!({"tested": crate::recipe::tested_on(&Host::here().platform())})
     }
 
     fn info(&self) -> RuntimeInfo {

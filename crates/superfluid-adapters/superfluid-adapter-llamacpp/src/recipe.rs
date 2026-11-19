@@ -90,6 +90,13 @@ pub fn tested() -> Vec<(String, Vec<Archive>)> {
     builds
 }
 
+/// The tested builds that install on `platform` (`linux-x64`), newest first. A build is tested
+/// where its tests ran, and the recipe lists its archives for those platforms alone: one that
+/// failed on Windows, or was not tried there, is still a tested build for the rest.
+pub fn tested_on(platform: &str) -> Vec<String> {
+    tested().into_iter().filter(|(_, archives)| archives.iter().any(|a| a.platform == platform)).map(|(v, _)| v).collect()
+}
+
 fn archive_of(a: &Value) -> Option<Archive> {
     let mut archive = parse_name(a["name"].as_str()?)?;
     archive.size = a["size"].as_u64();
@@ -200,10 +207,23 @@ fn beside_tested(version: &str, tested: &[&str]) -> String {
 pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
     let r = recipe();
     let builds = tested();
-    let tested_versions: Vec<&str> = builds.iter().map(|(v, _)| v.as_str()).collect();
+    let platform = host.platform();
+    let lists_here = |archives: &[Archive]| archives.iter().any(|a| a.platform == platform);
+    // Tested here: a build the recipe lists an archive of for this platform.
+    let tested_versions: Vec<&str> = builds.iter().filter(|(_, a)| lists_here(a)).map(|(v, _)| v.as_str()).collect();
     let untested = |version: &str| -> Result<(), String> {
         if tested_versions.contains(&version) || req.untested {
             return Ok(());
+        }
+        if builds.iter().any(|(v, _)| v == version) {
+            let here = match tested_versions.is_empty() {
+                true => "none is tested there".to_string(),
+                false => format!("tested there: {}", tested_versions.join(", ")),
+            };
+            return Err(format!(
+                "llama.cpp {version} was tested with this adapter on other platforms, not on {platform} ({here}); \
+                 pass --untested to install it anyway"
+            ));
         }
         Err(format!(
             "llama.cpp {version} is not a build this adapter was tested with (tested: {}); {}",
@@ -233,14 +253,14 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
         }]);
     }
 
-    let platform = host.platform();
-    // The newest tested build with an archive for this platform: the recipe may list one for
-    // some platforms before it does for the rest.
-    let newest = || builds.iter().find(|(_, a)| a.iter().any(|a| a.platform == platform)).or(builds.first()).map(|(v, _)| v.clone());
+    // The newest build tested on this platform: the recipe may list one for some platforms and
+    // not for the rest.
+    let newest = || tested_versions.first().map(|v| v.to_string()).or_else(|| builds.first().map(|(v, _)| v.clone()));
     let version = req.version.clone().or_else(newest).ok_or("the recipe lists no build")?;
     untested(&version)?;
-    let archives = match builds.iter().find(|(v, _)| *v == version) {
+    let archives = match builds.iter().find(|(v, a)| *v == version && lists_here(a)) {
         Some((_, a)) => a.clone(),
+        // Not listed, or listed for other platforms alone: what its release publishes.
         None => published(&version)?,
     };
     let here: Vec<&Archive> = archives.iter().filter(|a| a.platform == platform).collect();
@@ -370,6 +390,34 @@ mod tests {
         assert!(cuda[0].backend.starts_with("cuda-13."), "{}", cuda[0].backend);
         let names: Vec<&str> = cuda[0].assets.iter().map(|a| a.name.as_str()).collect();
         assert!(names.len() == 2 && names[1].starts_with("cudart-llama-bin-win-cuda-13."), "{names:?}");
+    }
+
+    #[test]
+    fn a_build_is_tested_on_the_platforms_the_recipe_lists_it_for() {
+        let all: Vec<String> = tested().into_iter().map(|(v, _)| v).collect();
+        // The legs a nightly needs to pass: every build has their archives.
+        assert_eq!(tested_on("macos-arm64"), all);
+        assert_eq!(tested_on("linux-x64"), all);
+        // Windows came later, and a build that fails there is listed without it.
+        let windows = tested_on("windows-x64");
+        assert!(!windows.is_empty() && windows.len() < all.len(), "{windows:?}");
+        assert!(windows.iter().all(|v| all.contains(v)));
+        assert!(tested_on("windows-arm64").is_empty());
+
+        // With no version asked for, each platform takes the newest build tested on it.
+        let win = host("windows", "x64");
+        assert_eq!(plan(&Request::default(), &win).unwrap()[0].version, windows[0]);
+        assert_eq!(plan(&Request::default(), &host("linux", "x64")).unwrap()[0].version, all[0]);
+
+        // A build tested elsewhere alone is asked for by name: refused, with where it is tested.
+        let elsewhere = all.iter().find(|v| !windows.contains(v)).unwrap();
+        let asked = Request { version: Some(elsewhere.clone()), ..Request::default() };
+        let e = plan(&asked, &win).unwrap_err();
+        assert!(e.contains("on other platforms, not on windows-x64") && e.contains(&format!("tested there: {}", windows.join(", "))), "{e}");
+        assert!(e.contains("--untested"), "{e}");
+        assert!(plan(&asked, &host("linux", "x64")).unwrap()[0].tested);
+        let e = plan(&Request::default(), &host("windows", "arm64")).unwrap_err();
+        assert!(e.contains("not on windows-arm64 (none is tested there)"), "{e}");
     }
 
     #[test]

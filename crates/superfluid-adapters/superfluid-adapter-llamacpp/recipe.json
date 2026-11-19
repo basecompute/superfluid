@@ -1,5 +1,5 @@
 {
-  "about": "llama.cpp builds this adapter drives, as ggml-org publishes them: each asset of a tested build with the size and SHA-256 GitHub lists for it. A build is tested when llama.cpp's llama.h, ggml.h, ggml-backend.h and gguf.h at that build declare what src/sys.rs declares. Add a build here, newest first, after running the adapter's tests on it.",
+  "about": "llama.cpp builds this adapter drives, as ggml-org publishes them: each asset of a tested build with the size and SHA-256 GitHub lists for it. A build is tested when llama.cpp's llama.h, ggml.h, ggml-backend.h and gguf.h at that build declare what src/sys.rs declares. Add a build here, newest first, after running the adapter's tests on it. A build lists its archives for the platforms it was tested on, and is a tested build on those alone: one that was not run on Windows has no Windows archive, and Windows installs the newest that has.",
   "release": "https://github.com/ggml-org/llama.cpp/releases/download/{version}/{name}",
   "api": "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}",
   "tested": [

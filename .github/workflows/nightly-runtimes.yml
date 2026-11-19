@@ -15,6 +15,12 @@ name: Nightly runtimes
 # MLX, which the night's first run tested. A `workflow_dispatch` of a named
 # build tests that build alone.
 #
+# A build is recorded for the platforms it passed on. macOS and Linux decide
+# whether it is recorded; Windows decides only whether its Windows archives are
+# listed with it, and a build that fails there leaves Windows installs on the
+# newest build that passed there. The adapter takes, on each platform, the
+# newest build the recipe lists an archive of for it.
+#
 # The PRs go to the release being cut: the newest rc-X.Y.Z branch, or, with
 # none open, main, as drafts. The adapter is tested, and the recipe read and
 # changed, as that branch has them, whichever branch this file ran from; an
@@ -145,6 +151,12 @@ jobs:
             runner: windows-2025
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # A build is recorded for the platforms it passed on. The macOS and Linux
+    # legs decide whether it is recorded at all; the Windows leg decides only
+    # whether its Windows archives are listed with it (the record job reads how
+    # the leg ended), so a build that fails there holds nothing else back and
+    # Windows installs stay on the newest build that passed there.
+    continue-on-error: ${{ startsWith(matrix.os, 'windows') }}
     # Bash on every runner: Windows would run these steps in PowerShell.
     defaults:
       run:
@@ -278,11 +290,29 @@ jobs:
           ref: ${{ needs.pick.outputs.base }}
           token: ${{ steps.app.outputs.token }}
 
+      # The Windows leg may fail without failing the job (continue-on-error), so its
+      # own conclusion is read from this run's jobs: "success", or why it is not.
+      - name: How the Windows leg ended
+        id: windows
+        if: needs.llamacpp.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ended=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '[.jobs[] | select(.name | test("^llama\\.cpp .* on windows-")) | .conclusion] | last // "missing"')
+          echo "the Windows leg ended: $ended"
+          echo "ended=$ended" >> "$GITHUB_OUTPUT"
+          if [ "$ended" != success ]; then
+            echo "::warning::llama.cpp $BUILD did not pass on Windows ($ended): it is recorded without its Windows archives"
+          fi
+
       - name: Passed, so add it to the recipe in a PR
         if: needs.llamacpp.result == 'success'
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           GITHUB_TOKEN: ${{ github.token }}
+          WINDOWS: ${{ steps.windows.outputs.ended }}
         run: |
           set -euo pipefail
           # One branch and one open PR per runtime: llama.cpp tags several builds a day and
@@ -299,7 +329,10 @@ jobs:
             exit 0
           fi
           git switch -C "$branch"
-          python3 scripts/nightly_runtimes.py llamacpp append "$BUILD"
+          # Listed for Windows only where it passed there.
+          without=()
+          if [ "$WINDOWS" != success ]; then without=(--without win); fi
+          python3 scripts/nightly_runtimes.py llamacpp append "$BUILD" "${without[@]}"
           if git diff --quiet; then
             echo "the recipe on $BASE already lists $BUILD"
             exit 0
@@ -307,9 +340,13 @@ jobs:
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -am "$title"
           git push -f origin "$branch"
-          p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it, as $BASE has them, on Apple silicon (Metal) and ubuntu-24.04 (CPU): $RUN"
+          if [ "$WINDOWS" = success ]; then where="Apple silicon (Metal), ubuntu-24.04 (CPU) and windows-2025 (CPU)"; else where="Apple silicon (Metal) and ubuntu-24.04 (CPU)"; fi
+          p1="The nightly job installed llama.cpp $BUILD untested and ran the adapter's tests on it, as $BASE has them, on $where: $RUN"
           p2="This adds the build to the adapter's recipe as a tested build, with the size and SHA-256 GitHub lists for each of its assets, so the next release installs it on its own. The upstream release is https://github.com/ggml-org/llama.cpp/releases/tag/$BUILD."
           body="$p1"$'\n\n'"$p2"
+          if [ "$WINDOWS" != success ]; then
+            body="$body"$'\n\n'"The tests did not pass on windows-2025 (its leg ended: $WINDOWS), so the build is listed without its Windows archives, and a Windows install stays on the newest build that has them. The next build to pass there is listed with them again."
+          fi
           draft=
           if [ "$BASE" = main ]; then
             draft=--draft

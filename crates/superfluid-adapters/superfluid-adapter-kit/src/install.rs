@@ -27,14 +27,19 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn detect() -> Host {
-        let os = std::env::consts::OS;
+    /// This build's system and architecture and nothing else: enough for `platform()`, with no
+    /// driver or device looked for.
+    pub fn here() -> Host {
         let arch = match std::env::consts::ARCH {
             "aarch64" => "arm64",
             "x86_64" => "x64",
             other => other,
         };
-        let mut host = Host { os: os.into(), arch: arch.into(), ..Host::default() };
+        Host { os: std::env::consts::OS.into(), arch: arch.into(), ..Host::default() }
+    }
+
+    pub fn detect() -> Host {
+        let mut host = Host::here();
         if host.os == "windows" {
             // The loader every Vulkan driver installs; which GPU it finds is llama.cpp's to say.
             host.vulkan = std::env::var_os("SystemRoot").is_some_and(|root| Path::new(&root).join("System32").join("vulkan-1.dll").is_file());
