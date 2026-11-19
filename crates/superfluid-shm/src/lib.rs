@@ -2,6 +2,7 @@
 
 pub mod control;
 pub mod fdpass;
+pub mod os;
 pub mod rings;
 pub mod segment;
 

@@ -217,7 +217,7 @@ fn spawn_ticking(tick_delay: std::time::Duration) -> Served {
     let host = EngineHost::spawn(move || (MockEngine::new(cfg), None)).unwrap();
     let daemon = Arc::new(Daemon::new(store, host, Box::new(MockCodec), 8));
     let socket = dir.join("d.sock");
-    let uds = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let uds = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let d = Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(uds, d);

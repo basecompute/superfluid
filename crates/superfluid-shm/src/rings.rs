@@ -111,7 +111,7 @@ impl SharedRing {
         })
     }
 
-    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+    pub fn raw_fd(&self) -> crate::os::RawFd {
         self.seg.raw_fd()
     }
 
@@ -316,8 +316,7 @@ mod tests {
     use super::*;
     use crate::fdpass::{recv_fd, send_fd};
     use crate::segment::ShmSegment;
-    use std::os::fd::FromRawFd;
-    use std::os::unix::net::UnixStream;
+    use crate::os::UnixStream;
 
     #[test]
     fn ring_push_get_and_staleness() {
@@ -387,9 +386,7 @@ mod tests {
     fn a_reader_racing_the_writer_sees_whole_payloads_or_staleness() {
         let (slots, rounds) = (4u32, 20_000u64);
         let mut writer = SharedRing::create(5, slots, 16 + 64, RingRole::Writer).unwrap();
-        let dup = writer.seg.raw_fd();
-        // SAFETY: dup(2) of a live fd; the new descriptor is owned below.
-        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(libc::dup(dup)) };
+        let fd = writer.seg.dup_fd().unwrap();
         let seg = ShmSegment::from_fd(fd, writer.seg_len()).unwrap();
         let reader = SharedRing::attach(seg, 5, slots, 16 + 64, RingRole::Reader).unwrap();
         let read = std::thread::spawn(move || {

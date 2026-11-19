@@ -1,7 +1,6 @@
 //! A fleet node serving several models: each on an engine of its own, each session and request
 //! run on the model the head names, and a head from before heads named models offered the first.
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +19,7 @@ use superfluid_engine::{EngineConfig, MockEngine};
 use superfluid_linkf::{Endpoint, Role};
 use superfluid_proto::handshake::{HelloAckF, Hello, LinkRole};
 use superfluid_proto::linkf::{self, msg_type, Lease};
+use superfluid_shm::os::UnixStream;
 
 static DIRS: AtomicU64 = AtomicU64::new(0);
 const TOKEN: &[u8] = b"a fleet token";

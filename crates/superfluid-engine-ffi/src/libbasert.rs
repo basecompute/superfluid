@@ -223,7 +223,7 @@ pub fn candidates() -> (Vec<PathBuf>, bool) {
             dirs.push(PathBuf::from(built));
         }
     }
-    if let Some(home) = runtime_home(std::env::var_os("SUPERFLUID_HOME"), std::env::var_os("HOME")) {
+    if let Some(home) = runtime_home(std::env::var_os("SUPERFLUID_HOME"), std::env::home_dir().map(Into::into)) {
         dirs.push(home.join("runtimes").join("basert").join("current").join("lib"));
     }
     let found = dirs.into_iter().flat_map(|d| file_names().iter().map(move |n| d.join(n))).collect();

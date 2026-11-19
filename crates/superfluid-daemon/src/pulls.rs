@@ -239,7 +239,6 @@ pub(crate) struct Lock(#[allow(dead_code)] std::fs::File);
 
 impl Lock {
     pub(crate) fn take(dir: &Path, id: &str, what: &str) -> Result<Lock, String> {
-        use std::os::unix::io::AsRawFd;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = dir.join(format!("{}.lock", stem(id)));
         let file = std::fs::OpenOptions::new()
@@ -248,21 +247,18 @@ impl Lock {
             .write(true)
             .open(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        // SAFETY: flock on a descriptor this process owns; the lock goes
-        // with the file when it closes.
-        unsafe {
-            if libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 {
-                eprintln!("superfluid: another {what} is running; waiting for it");
-                if libc::flock(file.as_raw_fd(), libc::LOCK_EX) != 0 {
-                    return Err(format!("{}: {}", path.display(), std::io::Error::last_os_error()));
-                }
-            }
+        // The lock goes with the file when it closes.
+        let locked = |wait: bool| crate::sys::lock_exclusive(&file, wait).map_err(|e| format!("{}: {e}", path.display()));
+        if !locked(false)? {
+            eprintln!("superfluid: another {what} is running; waiting for it");
+            locked(true)?;
         }
         Ok(Lock(file))
     }
 }
 
-#[cfg(test)]
+// The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

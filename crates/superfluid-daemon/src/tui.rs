@@ -4,8 +4,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -28,12 +27,16 @@ use ratatui::{Frame, Terminal};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use superfluid_shm::os::OwnedFd;
+
 use crate::scheduler::SchedStats;
 use crate::telemetry::{push_ring_line, LogLines, LogRing};
 use crate::Daemon;
 
-static SAVED_STDERR: AtomicI32 = AtomicI32::new(-1);
-static PIPE_W: AtomicI32 = AtomicI32::new(-1);
+/// The live capture's number and the standard error it stands in front of, for
+/// `restore_terminal` to put back.
+static SAVED_STDERR: Mutex<Option<(u64, std::fs::File)>> = Mutex::new(None);
+static CAPTURES: AtomicU64 = AtomicU64::new(0);
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TUI_THREAD: Mutex<Option<ThreadId>> = Mutex::new(None);
 static PANIC_HOOK: Once = Once::new();
@@ -43,7 +46,9 @@ const DRAIN_MARK: &[u8] = b"\x00superfluid-stderr-drain:";
 const MAX_LINE_BYTES: u64 = 16 * 1024;
 
 pub struct StderrCapture {
-    saved: OwnedFd,
+    id: u64,
+    /// The pipe's write end: what stands for stderr while the TUI draws, and a worker's own.
+    pipe: std::fs::File,
     pipe_w: Arc<OwnedFd>,
 }
 
@@ -56,10 +61,7 @@ impl StderrCapture {
         use std::io::Write;
         let seq = DRAIN_REQUESTED.fetch_add(1, Ordering::SeqCst) + 1;
         let mark = format!("\x00superfluid-stderr-drain:{seq}\n");
-        // SAFETY: a borrowed, non-owning handle on the write end for the
-        // duration of one write; the OwnedFd keeps it open.
-        let mut w = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(self.pipe_w.as_raw_fd()) });
-        if w.write_all(mark.as_bytes()).is_err() {
+        if (&self.pipe).write_all(mark.as_bytes()).is_err() {
             return;
         }
         let deadline = Instant::now() + timeout;
@@ -70,30 +72,12 @@ impl StderrCapture {
 }
 
 pub fn capture_stderr(ring: LogRing) -> io::Result<StderrCapture> {
-    use std::io::Write;
-    // SAFETY: fd syscalls on descriptors this process owns; every fd is
-    // wrapped in an OwnedFd as soon as it exists, so a failure path closes
-    // what it opened.
-    unsafe {
-        let saved = libc::fcntl(2, libc::F_DUPFD_CLOEXEC, 3);
-        if saved < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let saved = OwnedFd::from_raw_fd(saved);
-        let mut fds = [0i32; 2];
-        if libc::pipe(fds.as_mut_ptr()) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let (pipe_r, pipe_w) = (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]));
-        libc::fcntl(pipe_r.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
-        libc::fcntl(pipe_w.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
-        let mirror = libc::fcntl(saved.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3);
-        if mirror < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut mirror = std::fs::File::from_raw_fd(mirror);
-        let mirror_always = libc::isatty(saved.as_raw_fd()) == 0;
-        let mut reader = std::fs::File::from(pipe_r);
+    use std::io::{IsTerminal, Write};
+    let saved = crate::sys::stderr_clone()?;
+    let (mut reader, pipe) = crate::sys::pipe()?;
+    let mut mirror = saved.try_clone()?;
+    let mirror_always = !saved.is_terminal();
+    {
         std::thread::Builder::new()
             .name("superfluid-stderr-ring".into())
             .spawn(move || {
@@ -139,8 +123,8 @@ pub fn capture_stderr(ring: LogRing) -> io::Result<StderrCapture> {
                     emit(&carry);
                 }
             })?;
-        SAVED_STDERR.store(saved.as_raw_fd(), Ordering::SeqCst);
-        PIPE_W.store(pipe_w.as_raw_fd(), Ordering::SeqCst);
+        let id = CAPTURES.fetch_add(1, Ordering::SeqCst) + 1;
+        *SAVED_STDERR.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, saved));
         PANIC_HOOK.call_once(|| {
             let prev = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
@@ -152,10 +136,8 @@ pub fn capture_stderr(ring: LogRing) -> io::Result<StderrCapture> {
                 prev(info);
             }));
         });
-        Ok(StderrCapture {
-            saved,
-            pipe_w: Arc::new(pipe_w),
-        })
+        let pipe_w = Arc::new(OwnedFd::from(pipe.try_clone()?));
+        Ok(StderrCapture { id, pipe, pipe_w })
     }
 }
 
@@ -164,13 +146,10 @@ impl Drop for StderrCapture {
         if TUI_ACTIVE.load(Ordering::SeqCst) {
             restore_terminal();
         }
-        let _ = SAVED_STDERR.compare_exchange(
-            self.saved.as_raw_fd(),
-            -1,
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        );
-        let _ = PIPE_W.compare_exchange(self.pipe_w.as_raw_fd(), -1, Ordering::SeqCst, Ordering::SeqCst);
+        let mut saved = SAVED_STDERR.lock().unwrap_or_else(|e| e.into_inner());
+        if saved.as_ref().is_some_and(|(id, _)| *id == self.id) {
+            *saved = None;
+        }
     }
 }
 
@@ -182,11 +161,10 @@ fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
     let _ = io::stdout().execute(ratatui::crossterm::cursor::Show);
-    let saved = SAVED_STDERR.load(Ordering::SeqCst);
-    if saved >= 0 {
-        // SAFETY: `saved` is a descriptor the live capture owns.
-        unsafe {
-            libc::dup2(saved, 2);
+    // Not waited for: this also runs from the panic hook.
+    if let Ok(saved) = SAVED_STDERR.try_lock() {
+        if let Some((_, saved)) = saved.as_ref() {
+            let _ = crate::sys::set_stderr(saved);
         }
     }
 }
@@ -224,10 +202,7 @@ pub fn run(
             *g = Some(std::thread::current().id());
         }
         TUI_ACTIVE.store(true, Ordering::SeqCst);
-        // SAFETY: dup2 of a descriptor the capture owns onto fd 2.
-        unsafe {
-            libc::dup2(c.pipe_w.as_raw_fd(), 2);
-        }
+        crate::sys::set_stderr(&c.pipe)?;
     }
 
     let res = event_loop(&mut term, daemon, ring, node);
@@ -1016,12 +991,18 @@ mod capture_tests {
     #[test]
     fn worker_end_lines_reach_the_ring_and_fd2_is_untouched() {
         let ring = crate::telemetry::new_log_ring();
-        // SAFETY: fstat of our own fd 2 into a zeroed buffer.
-        let before = unsafe {
-            let mut st: libc::stat = std::mem::zeroed();
-            assert_eq!(libc::fstat(2, &mut st), 0);
-            (st.st_dev, st.st_ino)
+        // What descriptor 2 is, by device and inode; Windows has no such name for a handle.
+        #[cfg(unix)]
+        let fd2 = || {
+            // SAFETY: fstat of our own fd 2 into a zeroed buffer.
+            unsafe {
+                let mut st: libc::stat = std::mem::zeroed();
+                assert_eq!(libc::fstat(2, &mut st), 0);
+                (st.st_dev, st.st_ino)
+            }
         };
+        #[cfg(unix)]
+        let before = fd2();
         let cap = capture_stderr(ring.clone()).expect("capture");
         let w = cap.worker_stderr();
         let mut f = std::fs::File::from(w.try_clone().expect("clone"));
@@ -1046,13 +1027,8 @@ mod capture_tests {
             assert!(Instant::now() < deadline, "ring never saw the lines: {:?}", ring.lock().unwrap());
             std::thread::sleep(Duration::from_millis(10));
         }
-        // SAFETY: as above.
-        let after = unsafe {
-            let mut st: libc::stat = std::mem::zeroed();
-            assert_eq!(libc::fstat(2, &mut st), 0);
-            (st.st_dev, st.st_ino)
-        };
-        assert_eq!(before, after, "installing the capture must not move fd 2");
+        #[cfg(unix)]
+        assert_eq!(before, fd2(), "installing the capture must not move fd 2");
         let lines: Vec<String> = ring.lock().unwrap().iter().cloned().collect();
         assert!(lines.iter().any(|l| l == "[capture-test] one"), "{lines:?}");
         assert!(lines.iter().any(|l| l == "[capture-test] two"), "{lines:?}");

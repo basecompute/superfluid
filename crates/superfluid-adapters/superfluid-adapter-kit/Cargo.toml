@@ -13,6 +13,7 @@ description = "What every superfluid runtime adapter is built from: the Runtime 
 superfluid-engine = { workspace = true }
 superfluid-executor = { workspace = true }
 superfluid-proto = { workspace = true }
+superfluid-shm = { workspace = true }
 superfluid-worker = { workspace = true }
 serde_json = "1"
 sha2 = "0.10"

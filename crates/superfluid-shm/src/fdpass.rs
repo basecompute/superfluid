@@ -1,11 +1,22 @@
-//! `SCM_RIGHTS` fd passing over a dedicated unix socket.
+//! Passing a shared-memory segment to the process at the other end of a
+//! dedicated unix socket.
+//!
+//! On Unix the descriptor rides the socket as `SCM_RIGHTS`. Windows sockets
+//! carry no handles, so there the sender duplicates the handle within itself
+//! and writes the duplicate's value with its own process id, and the receiver
+//! takes that duplicate out of the sender ([`windows`]).
 
+#[cfg(unix)]
+pub use unix::{recv_fd, send_fd};
+#[cfg(windows)]
+pub use windows::{recv_fd, send_fd};
+
+#[cfg(unix)]
+mod unix {
 use std::io;
 use std::mem;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
-
-use std::os::fd::AsRawFd;
 
 pub fn send_fd(stream: &UnixStream, fd: RawFd, tag: u64) -> io::Result<()> {
     let payload = tag.to_le_bytes();
@@ -115,11 +126,91 @@ pub fn recv_fd(stream: &UnixStream) -> io::Result<(OwnedFd, u64)> {
         )),
     }
 }
+}
+
+/// The message is the tag, the sender's process id and the value of a handle
+/// in the sender, each eight bytes little-endian. That handle is a duplicate
+/// made for this one message: the receiver moves it into itself
+/// (`DUPLICATE_CLOSE_SOURCE`), so the sender may close its own handle as soon
+/// as the send returns, as it may its descriptor on Unix. A message nobody
+/// reads leaves the duplicate open in the sender until it exits.
+///
+/// The receiver opens the process the message names, so what it trusts is who
+/// may write to the socket: the daemon holds the other end of a pair it made,
+/// or of a socket in a directory only its user reaches.
+#[cfg(windows)]
+mod windows {
+    use std::io::{self, Read, Write};
+    use std::os::windows::io::FromRawHandle;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, HANDLE};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcess, PROCESS_DUP_HANDLE};
+
+    use crate::os::{OwnedFd, RawFd, UnixStream};
+
+    // A handle is a pointer in type only: the system looks it up, and refuses one that is not open.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
+    pub fn send_fd(mut stream: &UnixStream, fd: RawFd, tag: u64) -> io::Result<()> {
+        let mut transit: HANDLE = std::ptr::null_mut();
+        // SAFETY: duplicates a handle the caller holds open, within this process.
+        let ok = unsafe { DuplicateHandle(GetCurrentProcess(), fd, GetCurrentProcess(), &mut transit, 0, 0, DUPLICATE_SAME_ACCESS) };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut message = [0u8; 24];
+        message[..8].copy_from_slice(&tag.to_le_bytes());
+        // SAFETY: takes no arguments and cannot fail.
+        message[8..16].copy_from_slice(&u64::from(unsafe { GetCurrentProcessId() }).to_le_bytes());
+        message[16..].copy_from_slice(&(transit as usize as u64).to_le_bytes());
+        stream.write_all(&message).inspect_err(|_| {
+            // SAFETY: the duplicate made above, which nobody was told of.
+            unsafe { CloseHandle(transit) };
+        })
+    }
+
+    pub fn recv_fd(mut stream: &UnixStream) -> io::Result<(OwnedFd, u64)> {
+        let mut message = [0u8; 24];
+        stream.read_exact(&mut message)?;
+        let word = |at: usize| u64::from_le_bytes(message[at..at + 8].try_into().expect("eight bytes"));
+        let (tag, pid, transit) = (word(0), word(8), word(16) as usize as HANDLE);
+        let pid = u32::try_from(pid).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "fd-pass message names no process"))?;
+        // SAFETY: a process handle opened here is closed below; GetCurrentProcess
+        // returns a pseudo-handle that needs no closing.
+        let (sender, opened) = unsafe {
+            if pid == GetCurrentProcessId() {
+                (GetCurrentProcess(), false)
+            } else {
+                let p = OpenProcess(PROCESS_DUP_HANDLE, 0, pid);
+                if p.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                (p, true)
+            }
+        };
+        let mut mine: HANDLE = std::ptr::null_mut();
+        // SAFETY: moves the handle the sender duplicated for this message into
+        // this process; a value that names no handle there is an error.
+        let ok = unsafe { DuplicateHandle(sender, transit, GetCurrentProcess(), &mut mine, 0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE) };
+        let err = io::Error::last_os_error();
+        if opened {
+            // SAFETY: the process handle opened above.
+            unsafe { CloseHandle(sender) };
+        }
+        if ok == 0 {
+            return Err(err);
+        }
+        // SAFETY: mine is a fresh handle nothing else owns.
+        Ok((unsafe { OwnedFd::from_raw_handle(mine) }, tag))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::os::UnixStream;
     use crate::segment::ShmSegment;
+    #[cfg(unix)]
+    use std::{io, mem, os::fd::{AsRawFd, RawFd}};
 
     #[test]
     fn fd_roundtrip_shares_memory() {
@@ -139,6 +230,7 @@ mod tests {
         assert_eq!(&out2, b"back");
     }
 
+    #[cfg(unix)]
     fn send_fds(stream: &UnixStream, fds: &[RawFd]) {
         let payload = 7u64.to_le_bytes();
         let iov = libc::iovec { iov_base: payload.as_ptr() as *mut libc::c_void, iov_len: payload.len() };
@@ -161,6 +253,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_message_carrying_more_than_one_descriptor_is_refused() {
         let seg = ShmSegment::create(4096).unwrap();
@@ -183,5 +276,18 @@ mod tests {
         let (fd, _) = recv_fd(&b).unwrap();
         let err = ShmSegment::from_fd(fd, 1 << 20).unwrap_err();
         assert!(matches!(err, crate::ShmError::Short { announced: 1048576, .. }), "{err}");
+    }
+
+    #[test]
+    fn the_sender_may_close_its_segment_once_it_is_sent() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let seg = ShmSegment::create(4096).unwrap();
+        seg.write_at(0, b"kept").unwrap();
+        send_fd(&a, seg.raw_fd(), 3).unwrap();
+        drop(seg);
+        let (fd, _) = recv_fd(&b).unwrap();
+        let mut out = [0u8; 4];
+        ShmSegment::from_fd(fd, 4096).unwrap().read_at(0, &mut out).unwrap();
+        assert_eq!(&out, b"kept");
     }
 }

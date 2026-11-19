@@ -7,7 +7,6 @@
 //! id its name gives back, flagged as guessed, since the name does not keep `/`, `:` and `_` apart.
 
 use std::collections::HashSet;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -102,7 +101,7 @@ fn walk(dir: &Path, seen: &mut HashSet<(u64, u64)>, total: &mut u64) {
                 _ => continue,
             }
         };
-        if seen.insert((meta.dev(), meta.ino())) {
+        if seen.insert(crate::sys::file_identity(&entry.path(), &meta)) {
             *total += meta.len();
         }
     }
@@ -601,6 +600,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_json_document_has_both_lists_and_its_version() {
         let home = scratch("json");
@@ -650,8 +650,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_models_size_counts_each_file_once_and_walks_no_linked_directory() {
+        #[cfg(unix)]
         use std::os::unix::fs::symlink;
         let dir = scratch("size");
         let blobs = dir.join("hub/blobs");

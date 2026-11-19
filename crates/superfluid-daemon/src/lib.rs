@@ -75,6 +75,7 @@ use superfluid_proto::linkw as proto_linkw;
 pub mod telemetry;
 pub mod store;
 pub mod store_id;
+pub mod sys;
 pub mod wal;
 pub mod workerd;
 
@@ -3566,11 +3567,7 @@ mod latency_tests {
         let ctl = superfluid_shm::ControlSegment::create().unwrap();
         let worker = superfluid_shm::ControlSegment::attach(
             superfluid_shm::ShmSegment::from_fd(
-                {
-                    use std::os::fd::FromRawFd;
-                    // SAFETY: a fresh duplicate of the segment's fd, owned here.
-                    unsafe { std::os::fd::OwnedFd::from_raw_fd(libc::dup(ctl.raw_fd())) }
-                },
+                ctl.dup_fd().unwrap(),
                 superfluid_shm::CONTROL_BYTES,
             )
             .unwrap(),

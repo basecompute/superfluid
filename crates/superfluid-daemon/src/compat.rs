@@ -76,7 +76,8 @@ pub fn text(c: &Value) -> String {
     out
 }
 
-#[cfg(test)]
+// The tests stand in for a worker with a POSIX shell script.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

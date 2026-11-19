@@ -54,12 +54,7 @@ impl MediaPool {
         {
             let mut o = std::fs::OpenOptions::new();
             o.create(true).write(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                o.mode(0o600);
-            }
-            let mut f = o.open(&tmp)?;
+            let mut f = crate::sys::open_private(&mut o, &tmp)?;
             f.write_all(bytes)?;
             f.sync_all()?;
         }

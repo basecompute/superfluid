@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use superfluid_shm::os::UnixStream;
 use std::time::Duration;
 
 use superfluid_proto::envelope::FrameClass;

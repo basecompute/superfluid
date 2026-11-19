@@ -5,6 +5,7 @@ pub mod recipe;
 pub mod runtime;
 pub mod sys;
 pub mod tokenizer;
+pub mod vcruntime;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,7 +27,8 @@ fn lib_given(args: &WorkerArgs) -> Option<&str> {
 
 impl Runtime for Llamacpp {
     fn compat(&self) -> serde_json::Value {
-        serde_json::json!({"tested": crate::recipe::tested().into_iter().map(|(v, _)| v).collect::<Vec<_>>()})
+        // The builds tested on this platform, which are the ones an install takes here.
+        serde_json::json!({"tested": crate::recipe::tested_on(&Host::here().platform())})
     }
 
     fn info(&self) -> RuntimeInfo {
@@ -123,7 +125,7 @@ impl Runtime for Llamacpp {
         let (id, tag) = pull.split()?;
         let lib = sys::load()?;
         let dir = lib.path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let tool = dir.join("llama");
+        let tool = dir.join(format!("llama{}", std::env::consts::EXE_SUFFIX));
         if !tool.is_file() {
             return Err(format!(
                 "the llama.cpp at {} has no `llama` tool beside it to pull with (a build from llama.cpp's releases has it: \
@@ -185,6 +187,14 @@ impl Runtime for Llamacpp {
             )
         })?;
         std::fs::copy(&found, lib.join(&name)).map_err(|e| format!("{}: {e}", found.display()))?;
+        // llama.cpp's Windows builds carry no C++ runtime: the install gets what the system lacks.
+        if cfg!(windows) {
+            let missing = vcruntime::place(&lib, &vcruntime::system_dir(), &vcruntime::shipped(&exe_dir))
+                .map_err(|e| format!("placing the Visual C++ runtime in {}: {e}", lib.display()))?;
+            if !missing.is_empty() {
+                eprintln!("superfluid: {}", vcruntime::advice(&missing));
+            }
+        }
         Ok(sources)
     }
 }
@@ -545,7 +555,9 @@ pub mod sized {
 }
 
 fn tokenizer_library_file() -> String {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        "superfluid_tokenizer_llamacpp.dll".into()
+    } else if cfg!(target_os = "macos") {
         "libsuperfluid_tokenizer_llamacpp.dylib".into()
     } else {
         "libsuperfluid_tokenizer_llamacpp.so".into()

@@ -4,11 +4,23 @@ name: Release
 # (bin/ and libexec/superfluid/, where the daemon looks for the runtime
 # adapters it ships), and attaches one tarball per platform, with its
 # SHA-256, to a draft GitHub release. Its notes come from
-# docs/release-notes/<version>.md. scripts/install.sh installs from it.
+# docs/release-notes/<version>.md. scripts/install.sh installs from it, and
+# scripts/install.ps1 on Windows.
+#
+# A pull request that changes what a release is built, installed or packaged
+# with runs the builds alone, so a platform that would not build is found
+# before the tag and not at it.
 
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .cargo/config.toml
+      - scripts/install.ps1
+      - scripts/build_runtime_adapters.sh
+      - packaging/**
   workflow_dispatch:
     inputs:
       tag:
@@ -19,8 +31,9 @@ on:
         type: boolean
         default: false
 
+# The release job alone writes (the draft release); the builds only read.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,8 +53,14 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             manylinux: aarch64
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    # Windows is new here: until a release has shipped with it, a Windows build
+    # that fails at a tag leaves the release without that tarball, not without
+    # every one (the release job needs this job). On a pull request it fails.
+    continue-on-error: ${{ matrix.target == 'x86_64-pc-windows-msvc' && github.event_name != 'pull_request' }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "15.0"
     steps:
@@ -60,6 +79,31 @@ jobs:
       - name: Build the runtime adapters a release ships
         if: runner.os == 'macOS'
         run: scripts/build_runtime_adapters.sh target/adapters
+
+      # Windows has no baseRT or MLX engine: the daemon is built with llama.cpp
+      # and the terminal monitor, and ships the llama.cpp adapter alone.
+      - name: Build the daemon and the llama.cpp adapter
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `shim` builds the launcher: the commands on PATH are copies of it (`superfluid self`).
+          cargo build --release --locked -p superfluid --no-default-features --features llamacpp,tui,shim
+          cargo build --release --locked -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+          mkdir -p target/adapters/vcruntime
+          cp target/release/superfluid-worker-llamacpp.exe target/release/superfluid_tokenizer_llamacpp.dll target/release/superfluid-shim.exe target/adapters/
+          # llama.cpp's Windows builds are linked against the Visual C++ runtime
+          # and carry none. The release carries the three libraries, from the
+          # redistributable folder of the Visual Studio that built it, and an
+          # install of llama.cpp is given what the machine lacks.
+          vs="$(cygpath -u "$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -property installationPath)")"
+          crt="$(ls -d "$vs"/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT | sort -V | tail -1)"
+          cp "$crt/msvcp140.dll" "$crt/vcruntime140.dll" "$crt/vcruntime140_1.dll" target/adapters/vcruntime/
+          printf '%s\n' \
+            "The Microsoft Visual C++ runtime libraries, from Visual Studio's redistributable" \
+            "folder ($(basename "$(dirname "$(dirname "$crt")")")). They are Microsoft's, redistributed under the Visual Studio" \
+            "license terms. superfluid puts them beside llama.cpp, which is linked against" \
+            "them, on a machine that has none installed." > target/adapters/vcruntime/README.txt
 
       # Linux builds link glibc 2.28 (manylinux_2_28), so the tarball runs on
       # Ubuntu 20.04, Debian 11, RHEL 8 and newer; the runner's own glibc would
@@ -90,23 +134,88 @@ jobs:
           name="superfluid-${{ matrix.target }}"
           root="dist/$name"
           mkdir -p "$root/bin" "$root/libexec/superfluid"
-          cp target/release/superfluid target/release/superfluid-workerd target/release/superfluid-noded "$root/bin/"
-          cp target/adapters/* "$root/libexec/superfluid/"
+          exe=""
+          # With nothing installed and nothing of this machine's in the
+          # environment; a Windows program still needs to know where Windows is.
+          bare() { env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$@"; }
+          if [ "$RUNNER_OS" = Windows ]; then
+            exe=.exe
+            bare() { env -i SYSTEMROOT="$SYSTEMROOT" USERPROFILE="$RUNNER_TEMP" TEMP="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$@"; }
+          fi
+          cp "target/release/superfluid$exe" "target/release/superfluid-workerd$exe" "target/release/superfluid-noded$exe" "$root/bin/"
+          cp -R target/adapters/. "$root/libexec/superfluid/"
           cp LICENSE NOTICE README.md "$root/"
+          # What is built here needs no Visual C++ runtime installed (.cargo/config.toml
+          # links it in): a machine without one must still start the daemon.
+          if [ "$RUNNER_OS" = Windows ]; then
+            vs="$(cygpath -u "$("/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -property installationPath)")"
+            dumpbin="$(ls "$vs"/VC/Tools/MSVC/*/bin/Hostx64/x64/dumpbin.exe | sort -V | tail -1)"
+            for f in "$root"/bin/*.exe "$root"/libexec/superfluid/*.exe "$root"/libexec/superfluid/*.dll; do
+              needs="$("$dumpbin" -nologo -dependents "$f" | grep -iE '^ +(vcruntime|msvcp|vcomp)[0-9_]*\.dll' || true)"
+              [ -z "$needs" ] || { echo "::error::$f needs the Visual C++ runtime: $needs"; exit 1; }
+            done
+          fi
           # The binary must start and describe itself with nothing installed.
-          env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" --version
-          env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" runtimes
+          bare "$root/bin/superfluid$exe" --version
+          bare "$root/bin/superfluid$exe" runtimes
           # What this build was built for, in the tarball and beside it, so a
           # host can pick a release that fits its engine before downloading.
-          env -i HOME="$RUNNER_TEMP" SUPERFLUID_HOME="$RUNNER_TEMP/sf" PATH=/usr/bin:/bin "$root/bin/superfluid" compat --json > "$root/compat.json"
+          bare "$root/bin/superfluid$exe" compat --json > "$root/compat.json"
           cp "$root/compat.json" "dist/$name.compat.json"
           # The engine ABI number in an asset name, so `superfluid self update`
           # and a host pick a release from the listing without a download.
-          abi="$(jq -r '.runtimes.basert.abi // empty' "$root/compat.json")"
+          abi="$(jq -r '.runtimes.basert.abi // empty' "$root/compat.json" | tr -d '\r')"
           if [ -n "$abi" ]; then echo "$abi" > "dist/superfluid-basert-abi-$abi.txt"; fi
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          # Git Bash on Windows has sha256sum, and shasum only with perl on PATH.
+          if command -v shasum >/dev/null 2>&1; then sum="shasum -a 256"; else sum=sha256sum; fi
+          (cd dist && $sum "$name.tar.gz" > "$name.tar.gz.sha256")
           echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+
+      # The tarball installs with the script a user runs, in the PowerShell
+      # Windows comes with and in the current one, over itself the second time.
+      - name: Install the release with scripts/install.ps1
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SUPERFLUID_RELEASE_URL="file:///$(cygpath -m "$PWD/dist")"
+          export SUPERFLUID_PREFIX="$(cygpath -w "$RUNNER_TEMP/sf-installed")" SUPERFLUID_NO_PATH=1
+          export SUPERFLUID_HOME="$(cygpath -w "$RUNNER_TEMP/sf-home")" SUPERFLUID_NO_UPDATE_CHECK=1
+          installed="$RUNNER_TEMP/sf-installed/bin/superfluid.exe"
+          for shell in powershell pwsh; do
+            "$shell" -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
+            "$installed" --version
+          done
+          # The command in the prefix is the launcher; the release is under versions, and current.
+          cmp "$installed" "${{ steps.pack.outputs.root }}/libexec/superfluid/superfluid-shim.exe"
+          v="$("$installed" --version | awk '{print $2}')"
+          test -f "$RUNNER_TEMP/sf-home/versions/$v/libexec/superfluid/vcruntime/msvcp140.dll"
+          # Shown, then searched: Git Bash on a runner has no /dev/stderr to tee into.
+          listed="$("$installed" self list)"
+          echo "$listed"
+          grep -q "^  $v  current" <<< "$listed"
+          # Its status is the program's own.
+          if "$installed" no-such-command 2>/dev/null; then echo "::error::the launcher lost the program's status"; exit 1; fi
+
+      # The wheel and the npm packages publish.yml makes of this tarball,
+      # installed here as it installs them. That workflow reads a release, and
+      # before a tag there is none with a Windows tarball in it, so a pull
+      # request tries them where the tarball was just built. Python and Node
+      # are the runner image's own.
+      - name: Package the release for pip and npm, and install each
+        if: runner.os == 'Windows' && github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner's jq is a Windows program and ends its line with CRLF,
+          # of which $( ) drops only the LF.
+          v="$(jq -r .superfluid "${{ steps.pack.outputs.root }}/compat.json" | tr -d '\r')"
+          python packaging/build.py dist "$RUNNER_TEMP/packages" --version "$v" --only pypi,npm --targets "${{ matrix.target }}"
+          for kind in pip npm; do
+            packaging/try-install.sh "$kind" "$RUNNER_TEMP/packages" "$v"
+          done
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -167,7 +276,10 @@ jobs:
 
   release:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -182,7 +294,7 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          cp scripts/install.sh dist/
+          cp scripts/install.sh scripts/install.ps1 dist/
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else

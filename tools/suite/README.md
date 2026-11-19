@@ -40,6 +40,7 @@ A box file is JSON with these keys (paths are relative to `root`):
 | `root` | the directory everything below lives in; results go to `root/results/` |
 | `superfluid`, `superfluid_home` | the `superfluid` binary and the `SUPERFLUID_HOME` it serves from |
 | `llama_server`, `llama_lib` | the `llama-server` binary and its library directory (`lib_env` names the loader variable; default by platform) |
+| `workers` | `{"superfluid-llamacpp": "superfluid-workerd"}`: the worker process a box's own build runs, where it is not the released one (a daemon with the adapter linked in) |
 | `mlx_python`, `mlx_site` | the Python that runs `mlx_lm.server` and its site-packages |
 | `ollama`, `ollama_model` | the `ollama` binary and the model name it creates from the GGUF |
 | `models.gguf`, `models.mlx` | the model under test in each format |
@@ -50,6 +51,12 @@ A box file is JSON with these keys (paths are relative to `root`):
 Measure on a dedicated machine, one driver per machine (the driver takes a
 lock file and kills stray listeners on its ports before it starts). On
 macOS set `ulimit -n 10240` first: non-interactive ssh sessions get 256.
+
+On Windows the suite runs as it does elsewhere, with python.org's Python
+(the embeddable build is enough). A box there names no `llama_lib`, since
+`llama-server.exe` finds its libraries beside it; a worker is matched by its
+program name, and a server is stopped by ending its processes, there being
+no signal to ask it with.
 
 ## Track 1 scenarios
 

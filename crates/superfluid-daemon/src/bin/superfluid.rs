@@ -394,12 +394,7 @@ fn session_cmd(args: &[String]) {
                     let path = dir.join(name);
                     let mut o = std::fs::OpenOptions::new();
                     o.create(true).write(true).truncate(true);
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::OpenOptionsExt;
-                        o.mode(0o600);
-                    }
-                    let mut f = o.open(&path).expect("open export file");
+                    let mut f = superfluid_daemon::sys::open_private(&mut o, &path).expect("open export file");
                     std::io::Write::write_all(&mut f, text.as_bytes()).expect("write export");
                     eprintln!("superfluid: wrote {}", path.display());
                 }

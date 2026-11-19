@@ -349,7 +349,8 @@ pub fn model(catalog: &Catalog, model: &Path) -> (String, Value, bool) {
     (out, json, serving.is_ok())
 }
 
-#[cfg(test)]
+// The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::runtime_pick::RuntimeId;

@@ -2,7 +2,10 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use superfluid_shm::os::UnixStream;
 use std::time::{Duration, Instant};
 
 use superfluid_proto::envelope::FrameClass;
@@ -37,10 +40,75 @@ impl Liveness {
     pub const DEFAULT: Liveness = Liveness { heartbeat: Duration::from_secs(5), silence: Duration::from_secs(30) };
 }
 
+/// A TCP stream whose read timeout is safe to hit on Windows too. Winsock's own cancels the
+/// read when the time is up, and a read cancelled as bytes arrive fails and leaves the socket
+/// in no known state (`superfluid_shm::os::UnixStream` has the account); there the timeout is
+/// kept here, and a read first waits that long for the socket to be readable.
+struct Tcp {
+    inner: TcpStream,
+    /// Microseconds; zero for none.
+    #[cfg(windows)]
+    read_timeout: std::sync::atomic::AtomicU64,
+}
+
+impl Tcp {
+    fn new(inner: TcpStream) -> Tcp {
+        Tcp {
+            inner,
+            #[cfg(windows)]
+            read_timeout: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    #[cfg(unix)]
+    fn set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
+        self.inner.set_read_timeout(dur)
+    }
+
+    #[cfg(windows)]
+    fn set_read_timeout(&self, dur: Option<Duration>) -> std::io::Result<()> {
+        let micros = match dur {
+            None => 0,
+            Some(d) if d.is_zero() => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "cannot set a zero duration timeout")),
+            Some(d) => d.as_micros().clamp(1, u64::MAX as u128) as u64,
+        };
+        self.read_timeout.store(micros, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        self.inner.shutdown(how)
+    }
+}
+
+impl Read for Tcp {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawSocket;
+            let micros = self.read_timeout.load(std::sync::atomic::Ordering::Relaxed);
+            if micros != 0 && !superfluid_shm::os::wait_readable(self.inner.as_raw_socket(), Duration::from_micros(micros))? {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+        }
+        self.inner.read(buf)
+    }
+}
+
+impl Write for Tcp {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 enum Transport {
     Unix(UnixStream),
-    Tcp(TcpStream),
-    Secure(Box<SecureStream<TcpStream>>),
+    Tcp(Tcp),
+    Secure(Box<SecureStream<Tcp>>),
 }
 
 impl Transport {
@@ -112,7 +180,7 @@ impl Endpoint {
 
     pub fn from_tcp(stream: TcpStream) -> Result<Endpoint, LinkFError> {
         stream.set_nodelay(true)?;
-        Endpoint::wrap(Transport::Tcp(stream))
+        Endpoint::wrap(Transport::Tcp(Tcp::new(stream)))
     }
 
     pub fn connect_tcp<A: ToSocketAddrs>(addr: A) -> Result<Endpoint, LinkFError> {
@@ -152,6 +220,7 @@ impl Endpoint {
 
     pub fn from_tcp_secure(stream: TcpStream, secret: &[u8], role: Role, handshake: Duration) -> Result<Endpoint, LinkFError> {
         stream.set_nodelay(true)?;
+        let stream = Tcp::new(stream);
         stream.set_read_timeout(Some(handshake))?;
         let secure = SecureStream::handshake(stream, &key_from(secret), role).map_err(|e| match e.kind() {
             std::io::ErrorKind::PermissionDenied => LinkFError::Unauthorized,

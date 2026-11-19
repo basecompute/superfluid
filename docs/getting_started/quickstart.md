@@ -58,7 +58,7 @@ curl http://127.0.0.1:8453/health      # {"status":"ok","models_loaded":1,"model
 | action | effect |
 |---|---|
 | `Ctrl-C` / `SIGTERM` | exit at once; in-flight requests are cut |
-| `kill -USR1 <pid>` | stop accepting connections, wait up to `--drain-timeout` (60 s) for in-flight requests, exit 0 |
+| `kill -USR1 <pid>`, `superfluid stop --drain [--pid <pid>]` on any system, or `Ctrl+Break` in the server's console on Windows | stop accepting connections, wait up to `--drain-timeout` (60 s) for in-flight requests, exit 0 |
 | `q` in the monitor | quit the monitor and the server |
 
 Every committed token is already in the session log under `~/.superfluid/sessions`, so sessions survive a restart.

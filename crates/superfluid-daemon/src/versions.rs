@@ -216,7 +216,8 @@ impl Listing {
     }
 }
 
-#[cfg(test)]
+// The tests stand in for a worker with a POSIX shell script.
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

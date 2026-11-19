@@ -26,7 +26,11 @@ first, so a human reviews a PR rather than typing digests. For llama.cpp
 that is the same asset names the previous tested build carries, with the
 size and SHA-256 GitHub lists for each; where upstream moved a backend's
 minor version (cuda-13.4 to cuda-13.5), the archive that took the old one's
-place. For MLX it is the whole environment
+place. A build is listed for the platforms it was tested on: `--without win`
+leaves a platform's archives out of a build whose tests did not pass there,
+and each platform's names are carried from the newest build that lists it,
+so one left out of a build is back in the next that passes. For MLX it is
+the whole environment
 pip resolved for the version on the runner, read from pip's install report
 (`pip install --dry-run --report`): every distribution's wheel, with the
 size and SHA-256 PyPI lists for it, which must agree with the digest pip
@@ -236,7 +240,35 @@ def carried_assets(previous: dict, version: str, published: list[dict]) -> tuple
     return assets, missing, moved
 
 
-def append_llamacpp(version: str) -> None:
+# The system an archive is for, as llama.cpp names it: the three the nightly has a leg for.
+PLATFORM = re.compile(r"-bin-(macos|ubuntu|win)-")
+
+
+def platform_of(name: str) -> str:
+    m = PLATFORM.search(name)
+    return m.group(1) if m else ""
+
+
+def carried_by_platform(tested: list[dict], version: str, published: list[dict], without: tuple[str, ...] = ()) -> tuple[list[dict], list[str], list[str]]:
+    """The recipe's assets for `version`, a platform at a time: each platform's
+    archives are those of the newest tested build that lists any for it, under
+    the new build's names (see `carried_assets`). A build is listed for the
+    platforms it was tested on, so the newest build may lack a platform, and
+    the names must not be lost with it. A platform in `without` is left out of
+    this build. Returns what `carried_assets` does, the assets in name order."""
+    assets, missing, moved = [], [], []
+    seen = {platform_of(a["name"]) for t in tested for a in t["assets"]}
+    for platform in sorted(seen):
+        if platform in without:
+            continue
+        source = next(t for t in tested if any(platform_of(a["name"]) == platform for a in t["assets"]))
+        part = {"version": source["version"], "assets": [a for a in source["assets"] if platform_of(a["name"]) == platform]}
+        a, mi, mo = carried_assets(part, version, published)
+        assets, missing, moved = assets + a, missing + mi, moved + mo
+    return sorted(assets, key=lambda a: a["name"]), missing, moved
+
+
+def append_llamacpp(version: str, without: tuple[str, ...] = ()) -> None:
     path = RECIPES["llamacpp"]
     r = recipe("llamacpp")
     tested = r.setdefault("tested", [])
@@ -245,9 +277,10 @@ def append_llamacpp(version: str) -> None:
         return
     if not tested:
         raise SystemExit("the recipe lists no tested build to take the asset names from")
-    previous = tested[0]
     release = fetch_json(LLAMACPP_RELEASE.format(version=version))
-    assets, missing, moved = carried_assets(previous, version, release.get("assets", []))
+    assets, missing, moved = carried_by_platform(tested, version, release.get("assets", []), without)
+    if without:
+        print(f"note: {version} is listed without its {', '.join(without)} archives: not tested there", file=sys.stderr)
     if moved:
         print(f"note: {version} moved {', '.join(moved)}", file=sys.stderr)
     if missing:
@@ -357,6 +390,9 @@ def main() -> int:
     a = sub.add_parser("append", help="record a release that passed as a tested one")
     a.add_argument("version")
     a.add_argument("--report", help="mlx: pip's install report (--dry-run --report) for the version on the runner")
+    # macOS and Linux are the platforms a build must pass on to be recorded at all.
+    a.add_argument("--without", action="append", default=[], choices=["win"],
+                   help="llamacpp: leave this platform's archives out of the build (its tests did not pass there)")
     args = ap.parse_args()
     if args.action == "pick":
         for key, value in pick(args.runtime, args.requested.strip() or None).items():
@@ -370,7 +406,7 @@ def main() -> int:
         print(walk_back(failed, start))
         return 0
     if args.runtime == "llamacpp":
-        append_llamacpp(args.version)
+        append_llamacpp(args.version, tuple(args.without))
         return 0
     if not args.report:
         raise SystemExit("mlx append needs --report, pip's install report for the version")

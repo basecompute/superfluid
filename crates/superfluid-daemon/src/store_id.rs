@@ -10,10 +10,7 @@ pub struct StoreId(pub [u8; 16]);
 impl StoreId {
     pub fn mint() -> StoreId {
         let mut b = [0u8; 16];
-        // SAFETY: `b` is a valid, writable 16-byte buffer; getentropy
-        // writes at most `len` (16 <= 256, its per-call limit) bytes.
-        let rc = unsafe { libc::getentropy(b.as_mut_ptr().cast(), b.len()) };
-        if rc != 0 {
+        if crate::sys::random(&mut b).is_err() {
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let t = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -74,11 +71,11 @@ impl StoreId {
     }
 
     pub fn lock(path: &Path) -> Result<StoreIdLock, DaemonError> {
-        Ok(StoreIdLock::acquire(path, libc::LOCK_EX)?.expect("a blocking flock returns held"))
+        Ok(StoreIdLock::acquire(path, true)?.expect("a blocking flock returns held"))
     }
 
     pub fn try_lock(path: &Path) -> Result<Option<StoreIdLock>, DaemonError> {
-        StoreIdLock::acquire(path, libc::LOCK_EX | libc::LOCK_NB)
+        StoreIdLock::acquire(path, false)
     }
 
     pub fn open(path: &Path, fresh_wal: bool, _lock: &StoreIdLock) -> Result<StoreId, DaemonError> {
@@ -134,8 +131,7 @@ pub struct StoreIdLock {
 }
 
 impl StoreIdLock {
-    fn acquire(id_path: &Path, op: libc::c_int) -> Result<Option<StoreIdLock>, DaemonError> {
-        use std::os::fd::AsRawFd;
+    fn acquire(id_path: &Path, wait: bool) -> Result<Option<StoreIdLock>, DaemonError> {
         let mut name = id_path
             .file_name()
             .map(|n| n.to_os_string())
@@ -147,25 +143,17 @@ impl StoreIdLock {
             .create(true)
             .truncate(false)
             .open(id_path.with_file_name(name))?;
-        loop {
-            // SAFETY: `file` is an open descriptor owned by this function
-            // for the duration of the call; flock only takes its number.
-            let rc = unsafe { libc::flock(file.as_raw_fd(), op) };
-            if rc == 0 {
-                return Ok(Some(StoreIdLock { _file: file }));
-            }
-            let err = std::io::Error::last_os_error();
-            match err.kind() {
-                std::io::ErrorKind::Interrupted => {}
-                std::io::ErrorKind::WouldBlock => return Ok(None),
-                _ => return Err(err.into()),
-            }
-        }
+        Ok(crate::sys::lock_exclusive(&file, wait)?.then_some(StoreIdLock { _file: file }))
     }
 }
 
+/// Has the directory's own entries reach the disk. Windows opens no directory as a file, and
+/// writes a rename through with the file it names.
 fn sync_dir(dir: &Path) -> Result<(), DaemonError> {
+    #[cfg(unix)]
     std::fs::File::open(dir)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dir;
     Ok(())
 }
 

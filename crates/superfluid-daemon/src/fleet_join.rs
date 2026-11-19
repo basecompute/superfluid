@@ -338,7 +338,11 @@ fn join(args: &[String]) {
         let _ = lane.join();
     }
     drop(node);
-    for daemon in &daemons {
+    // The node that starts next opens the session logs this one holds, and loads its model into
+    // the memory this one's worker has. An exec lets go of both. Windows has none: this process
+    // waits there for the next as its child, so it lets go of them itself, and each daemon ends
+    // here with its store's lock and its engine's worker.
+    for daemon in daemons {
         daemon.signal_shutdown();
         daemon.shutdown();
     }
@@ -804,12 +808,11 @@ fn busy(daemon: &Daemon) -> bool {
 /// Starts this node again as it was started: with no `--model`, it serves the model its head
 /// serves now, pulled and loaded as at the first start.
 fn restart() -> ! {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("cannot find this program to start it again: {e}")));
     eprintln!("superfluid: starting again to serve the head's model");
     // The next image writes its events to the stream this one wrote to, from its `start` on.
     crate::events::prepare_exec();
-    let e = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    let e = crate::sys::replace_process(std::process::Command::new(exe).args(std::env::args_os().skip(1)));
     fail(format!("cannot start again: {e}"))
 }
 
@@ -1371,6 +1374,12 @@ fn dial(addrs: &[SocketAddr], token: &[u8]) -> Result<(Endpoint, TcpStream), Lin
     for addr in addrs {
         match TcpStream::connect_timeout(addr, CONNECT) {
             Ok(sock) => {
+                // Asked before the clone: on Windows a connect with a timeout leaves the socket's
+                // own record of being connected to be brought up to date, a clone made first
+                // keeps the stale one, and a shutdown through it (`Links::stop`) is then refused
+                // as "not connected", so the lane it was to end never hears.
+                #[cfg(windows)]
+                sock.peer_addr()?;
                 let held = sock.try_clone()?;
                 let ep = if token.is_empty() {
                     Endpoint::from_tcp(sock)
@@ -1423,9 +1432,12 @@ impl NodeState {
         Ok(NodeState { wal, park: self.park.as_ref().map(|_| dir.join("park")) })
     }
 
-    /// A session store of this process's own, and no parking.
+    /// A session store of this process's own, and no parking. Each one is in a directory of
+    /// its own, so two in one process never open the same log.
     pub fn scratch() -> Result<NodeState, String> {
-        let dir = std::env::temp_dir().join(format!("superfluid-node-{}", std::process::id()));
+        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("superfluid-node-{}-{nth}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         Ok(NodeState { wal: dir.join("wal.log"), park: None })
     }
@@ -1775,6 +1787,17 @@ mod tests {
         let state = NodeState::scratch().unwrap();
         let opts = NodeOptions { lanes: 2, speculate: Some("eagle3".into()), ..NodeOptions::default() };
         assert!(load_mock_node(&opts, &state).is_err(), "a strategy the engine refuses fails the load");
+    }
+
+    /// Two nodes of one process, each on a scratch store, run side by side: neither finds its
+    /// session log held by the other.
+    #[test]
+    fn scratch_stores_of_one_process_do_not_share_a_log() {
+        let opts = NodeOptions { lanes: 2, ..NodeOptions::default() };
+        let first = load_mock_node(&opts, &NodeState::scratch().unwrap()).unwrap();
+        let second = load_mock_node(&opts, &NodeState::scratch().unwrap());
+        assert!(second.is_ok(), "the second loads while the first runs: {:?}", second.err());
+        drop(first);
     }
 
     fn node_options(args: &[&str]) -> Result<NodeOptions, String> {

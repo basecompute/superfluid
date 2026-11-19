@@ -3,7 +3,7 @@
 
 use crate as superfluid_daemon;
 
-use std::os::unix::net::UnixListener;
+use superfluid_shm::os::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -989,19 +989,12 @@ pub fn run(args: &[String], embedding: &Embedding) {
         worker_process = true;
     }
     if let Some(path) = &log_file {
-        use std::os::fd::AsRawFd;
         match std::fs::OpenOptions::new().create(true).append(true).open(path) {
             Ok(f) => {
                 // What was written before goes where stderr was (JSON mode: still in the relay).
                 superfluid_daemon::events::drain(std::time::Duration::from_secs(2));
-                // SAFETY: `f` is an open, valid fd for the duration of the
-                // call; dup2 onto stderr is the documented way to redirect a
-                // stream. The original stderr is closed by dup2. Under
-                // --log-format json that is the stderr the events relay to.
-                unsafe {
-                    libc::dup2(f.as_raw_fd(), superfluid_daemon::events::output_fd());
-                }
-                drop(f);
+                // Under --log-format json that is the stderr the events relay to.
+                superfluid_daemon::events::redirect_output(f);
             }
             Err(e) => {
                 superfluid_daemon::events::fail(1, format!("could not open --log-file {}: {e}", path.display()));
@@ -1079,7 +1072,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
     #[cfg(feature = "tui")]
     let worker_stderr = stderr_capture.as_ref().map(|c| c.worker_stderr());
     #[cfg(not(feature = "tui"))]
-    let worker_stderr: Option<std::sync::Arc<std::os::fd::OwnedFd>> = None;
+    let worker_stderr: Option<superfluid_daemon::runtime::WorkerStderr> = None;
     let log_dir_eff = log_dir.or(if tui_on { Some(sessions.join("logs")) } else { None });
     if let Some(url) = &otlp_metrics {
         if let Err(e) = superfluid_daemon::otlp::validate_http_url(url) {
@@ -1836,17 +1829,7 @@ pub fn run(args: &[String], embedding: &Embedding) {
 
 #[cfg(feature = "tui")]
 fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: `buf` is a valid 256-byte writable buffer and `buf.len()` is its
-    // exact capacity; gethostname writes at most that many bytes and NUL-
-    // terminates within it. We only read `buf` after checking rc == 0.
-    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
-    if rc == 0 {
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        String::from_utf8_lossy(&buf[..end]).into_owned()
-    } else {
-        "local".into()
-    }
+    superfluid_daemon::sys::hostname().unwrap_or_else(|| "local".into())
 }
 
 type StateNames = Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, String>>>;
@@ -1882,7 +1865,7 @@ struct ModelBuildCfg {
     completion_deadline_ms: u64,
     completion_bucket: superfluid_daemon::completion_bucket::BucketConfig,
     fim_satellite: Option<(String, Arc<Daemon>)>,
-    worker_stderr: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+    worker_stderr: Option<superfluid_daemon::runtime::WorkerStderr>,
 }
 
 struct FimSatelliteCfg {
@@ -1896,7 +1879,7 @@ struct FimSatelliteCfg {
     pressure_low: u8,
     os_pressure: bool,
     completion_deadline_ms: u64,
-    worker_stderr: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+    worker_stderr: Option<superfluid_daemon::runtime::WorkerStderr>,
 }
 
 fn build_fim_satellite(cfg: &FimSatelliteCfg) -> Result<Arc<Daemon>, superfluid_daemon::DaemonError> {
@@ -2308,7 +2291,6 @@ fn build_loaded_daemon(
 }
 
 fn lock_sessions_dir(sessions: &std::path::Path) -> std::fs::File {
-    use std::os::fd::AsRawFd;
     let path = sessions.join("serve.lock");
     let file = match std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path) {
         Ok(file) => file,
@@ -2316,26 +2298,14 @@ fn lock_sessions_dir(sessions: &std::path::Path) -> std::fs::File {
             superfluid_daemon::events::fail(1, format!("could not open {}: {e}", path.display()));
         }
     };
-    loop {
-        // SAFETY: `file` is an open descriptor for the duration of the call.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 {
-            return file;
-        }
-        let err = std::io::Error::last_os_error();
-        match err.kind() {
-            std::io::ErrorKind::Interrupted => continue,
-            std::io::ErrorKind::WouldBlock => {
-                superfluid_daemon::events::fail(1, format!(
-                    "another server is already using the sessions directory {}. \
-                     Stop it, or give this one its own --sessions directory.",
-                    sessions.display()
-                ));
-            }
-            _ => {
-                superfluid_daemon::events::fail(1, format!("could not lock {}: {err}", path.display()));
-            }
-        }
+    match superfluid_daemon::sys::lock_exclusive(&file, false) {
+        Ok(true) => file,
+        Ok(false) => superfluid_daemon::events::fail(1, format!(
+            "another server is already using the sessions directory {}. \
+             Stop it, or give this one its own --sessions directory.",
+            sessions.display()
+        )),
+        Err(err) => superfluid_daemon::events::fail(1, format!("could not lock {}: {err}", path.display())),
     }
 }
 

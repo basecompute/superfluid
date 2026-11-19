@@ -1,6 +1,9 @@
 //! A node with no `--model` follows only what a head states over a link the token
 //! authenticates: a peer without the token, a forged one, or a head that states nothing gets
 //! nothing pulled, and a real head's models reach the node in its hello.
+
+// These tests stand in for a worker with a POSIX shell script, so they run on Unix only.
+#![cfg(unix)]
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

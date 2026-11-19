@@ -19,5 +19,8 @@ postcard.workspace = true
 serde.workspace = true
 serde_json = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Console"] }
+
 [lints]
 workspace = true

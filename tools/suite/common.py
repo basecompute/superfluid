@@ -6,6 +6,7 @@ Standard library only, Python 3.9+, so it runs with whatever Python a box has.
 import http.client
 import json
 import os
+import re
 import signal
 import socket
 import statistics
@@ -219,9 +220,63 @@ def run_parallel(fns):
 # ------------------------------------------------------------ server process
 
 
+WINDOWS = os.name == "nt"
+
+
+def processes():
+    """(pid, parent pid, program name) of every process on Windows, which has
+    no pgrep: a snapshot from the system, read with the standard library."""
+    import ctypes
+    import ctypes.wintypes as w
+
+    class Entry(ctypes.Structure):
+        _fields_ = [("dwSize", w.DWORD), ("cntUsage", w.DWORD), ("th32ProcessID", w.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", w.DWORD), ("cntThreads", w.DWORD),
+                    ("th32ParentProcessID", w.DWORD), ("pcPriClassBase", w.LONG), ("dwFlags", w.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateToolhelp32Snapshot.restype = w.HANDLE
+    k.CreateToolhelp32Snapshot.argtypes = [w.DWORD, w.DWORD]
+    k.Process32FirstW.argtypes = k.Process32NextW.argtypes = [w.HANDLE, ctypes.POINTER(Entry)]
+    k.CloseHandle.argtypes = [w.HANDLE]
+    snap = k.CreateToolhelp32Snapshot(2, 0)  # TH32CS_SNAPPROCESS
+    entry, out = Entry(), []
+    entry.dwSize = ctypes.sizeof(Entry)
+    more = k.Process32FirstW(snap, ctypes.byref(entry))
+    while more:
+        out.append((entry.th32ProcessID, entry.th32ParentProcessID, entry.szExeFile))
+        more = k.Process32NextW(snap, ctypes.byref(entry))
+    k.CloseHandle(snap)
+    return out
+
+
+def pid_alive(pid):
+    if WINDOWS:
+        return any(p == pid for p, _, _ in processes())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def end_process(pid):
+    """End `pid` at once: SIGKILL, or TerminateProcess on Windows (what
+    os.kill does there with any number that is not a console event)."""
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
 class Server:
     """One server under test: started in its own process group so stop()
-    takes its workers with it."""
+    takes its workers with it. Windows has no group to signal: the server's
+    descendants are found by parent, remembered while it lives (a child
+    outlives the parent that names it), and ended one by one."""
 
     def __init__(self, name, argv, env, port, log_path, cwd=None, probe="/v1/models", model_id=None, worker_pattern=None,
                  after_start=None):
@@ -229,7 +284,10 @@ class Server:
         self.env = dict(os.environ, **env)
         self.cwd, self.probe = cwd, probe
         self.model_id = model_id
-        self.worker_pattern = worker_pattern  # pgrep -f pattern of a separate worker process, if the system has one
+        # A separate worker process, if the system has one: a pgrep -f pattern, matched on
+        # Windows against the program's name alone.
+        self.worker_pattern = worker_pattern
+        self.descendants = set()
         self.after_start = after_start
         self.proc = None
         self.url = f"http://127.0.0.1:{port}"
@@ -241,8 +299,10 @@ class Server:
         log.write(f"\n=== start {time.strftime('%H:%M:%S')} {' '.join(self.argv)}\n".encode())
         log.flush()
         t0 = time.perf_counter()
+        own = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
+        self.descendants = set()
         self.proc = subprocess.Popen(self.argv, env=self.env, cwd=self.cwd, stdout=log, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, start_new_session=True)
+                                     stdin=subprocess.DEVNULL, **own)
         self.wait_ready(timeout)
         if self.after_start:
             self.after_start(self)
@@ -273,26 +333,48 @@ class Server:
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
 
+    def _descend(self):
+        """Windows: the live processes that descend from the server, by name."""
+        procs = processes()
+        found, grew = {self.proc.pid} | self.descendants, True
+        while grew:
+            more = {p for p, parent, _ in procs if parent in found and p not in found}
+            found, grew = found | more, bool(more)
+        live = {p: exe for p, _, exe in procs if p in found and p != self.proc.pid}
+        self.descendants |= set(live)
+        return live
+
     def children(self):
         if not self.proc:
             return []
+        if WINDOWS:
+            return sorted(self._descend())
         out = subprocess.run(["pgrep", "-g", str(self.proc.pid)], capture_output=True, text=True).stdout.split()
         return [int(p) for p in out if int(p) != self.proc.pid]
 
     def worker_pids(self):
         if not self.worker_pattern or not self.proc:
             return []
+        if WINDOWS:
+            return sorted(p for p, exe in self._descend().items() if re.search(self.worker_pattern, exe))
         mine = set(self.children())
         out = subprocess.run(["pgrep", "-f", self.worker_pattern], capture_output=True, text=True).stdout.split()
         return [int(p) for p in out if int(p) in mine]
 
     def kill_main(self):
         """SIGKILL the server process alone (a crash), then reap its group."""
-        os.kill(self.proc.pid, signal.SIGKILL)
+        if WINDOWS:
+            self._descend()
+        end_process(self.proc.pid)
         self.proc.wait()
-        self._kill_group(signal.SIGKILL)
+        self._kill_group(9)
 
     def _kill_group(self, sig):
+        if WINDOWS:
+            # No signal asks a Windows process to stop, so every one is ended.
+            for pid in sorted(self._descend()) + ([self.proc.pid] if self.proc.poll() is None else []):
+                end_process(pid)
+            return
         try:
             os.killpg(self.proc.pid, sig)
         except (ProcessLookupError, PermissionError):
@@ -307,7 +389,7 @@ class Server:
                 self.proc.wait(grace)
             except subprocess.TimeoutExpired:
                 pass
-        self._kill_group(signal.SIGKILL)
+        self._kill_group(9)
         try:
             self.proc.wait(5)
         except subprocess.TimeoutExpired:
@@ -350,7 +432,9 @@ def r3(x):
 def thermal():
     """The machine's thermal state before and after a cell: `pmset -g therm`
     on macOS; on Linux the GPU's temperature and throttle reasons from
-    nvidia-smi, else the hottest thermal zone."""
+    nvidia-smi, else the hottest thermal zone; nothing on Windows."""
+    if WINDOWS:
+        return None
     if os.uname().sysname == "Darwin":
         try:
             out = subprocess.run(["pmset", "-g", "therm"], capture_output=True, text=True, timeout=5).stdout

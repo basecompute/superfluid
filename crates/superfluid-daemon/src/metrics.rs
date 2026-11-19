@@ -137,15 +137,5 @@ pub fn hostname() -> String {
             return name;
         }
     }
-    let mut buf = [0u8; 256];
-    // SAFETY: `buf` is a valid 256-byte writable buffer and `buf.len()` is its
-    // exact capacity; gethostname writes at most that many bytes and NUL-
-    // terminates within it. We only read `buf` after checking rc == 0.
-    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
-    if rc == 0 {
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        String::from_utf8_lossy(&buf[..end]).into_owned()
-    } else {
-        "unknown".into()
-    }
+    crate::sys::hostname().unwrap_or_else(|| "unknown".into())
 }

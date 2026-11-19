@@ -17,7 +17,7 @@ llguidance = "1.8"
 serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
-superfluid = { path = "../superfluid-daemon" }
+superfluid = { path = "../superfluid-daemon", default-features = false }
 
 [lints]
 workspace = true

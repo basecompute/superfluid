@@ -29,6 +29,8 @@ case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) target=x86_64-unknown-linux-gnu ;;
   Linux-aarch64 | Linux-arm64) target=aarch64-unknown-linux-gnu ;;
   Darwin-x86_64) fail "Intel Macs are not supported; build from source (see docs/getting_started/installation.md)" ;;
+  # Git Bash, MSYS2 and Cygwin on Windows: the release there has an installer of its own.
+  MINGW*|MSYS*|CYGWIN*) fail "on Windows, install from PowerShell instead: irm https://github.com/$REPO/releases/latest/download/install.ps1 | iex" ;;
   *) fail "no release for $(uname -s) $(uname -m); build from source (see docs/getting_started/installation.md)" ;;
 esac
 

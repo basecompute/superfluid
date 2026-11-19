@@ -1,3 +1,5 @@
+// These tests stand in for a worker with a POSIX shell script, so they run on Unix only.
+#![cfg(unix)]
 #![cfg(feature = "llamacpp")]
 
 use std::io::{Read, Write};

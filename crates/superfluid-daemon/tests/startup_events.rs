@@ -2,6 +2,10 @@
 //! reads on stderr. Every line is one JSON event; the steps of a start have names of their own,
 //! and a start that fails ends with why and the exit code.
 
+// The tests of `serve` stand in for a worker with a POSIX shell script, so those run on Unix
+// only. A node with the mock runtime needs none, and its tests run everywhere.
+
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -58,6 +62,7 @@ fn steps(events: &[Value]) -> Vec<&str> {
 /// A runtime of the test's own, `toyrt`: its worker answers `check` itself and is otherwise
 /// superfluid-workerd on the mock engine, which loads no weights. Its model is an empty
 /// `model.toy` beside a tokenizer of printable ASCII. Returns the worker and the model.
+#[cfg(unix)]
 fn toy_runtime(dir: &Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let report = json!({
@@ -96,6 +101,7 @@ fn toy_runtime(dir: &Path) -> (PathBuf, PathBuf) {
 
 /// `serve` of the toy model, its session socket and state under `home`, the HTTP API on a port
 /// the system picks, nothing fetched.
+#[cfg(unix)]
 fn serve_toy(home: &Path, more: &[&str]) -> Command {
     let (worker, model) = toy_runtime(home);
     let mut c = superfluid(home);
@@ -187,6 +193,7 @@ fn a_node_with_no_token_for_a_head_on_another_machine_says_so_as_an_event() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_serve_says_each_step_up_to_ready_and_ready_names_the_port_it_bound() {
     let home = scratch("ready");
@@ -232,6 +239,7 @@ fn a_serve_says_each_step_up_to_ready_and_ready_names_the_port_it_bound() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_model_that_does_not_load_says_so_before_the_error() {
     let home = scratch("load-failed");
@@ -249,6 +257,7 @@ fn a_model_that_does_not_load_says_so_before_the_error() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_pulls_progress_keeps_its_id_however_far_behind_the_relay_is() {
     let home = scratch("pull-id");
@@ -271,8 +280,10 @@ fn a_pulls_progress_keeps_its_id_however_far_behind_the_relay_is() {
 
 /// Which side of the exec the test's own program is on, in
 /// `a_process_that_starts_itself_again_keeps_its_events_on_the_real_stderr`.
+#[cfg(unix)]
 const EXEC_SIDE: &str = "SUPERFLUID_EVENTS_TEST_EXEC_SIDE";
 
+#[cfg(unix)]
 #[test]
 fn a_process_that_starts_itself_again_keeps_its_events_on_the_real_stderr() {
     use std::os::unix::process::CommandExt;
@@ -329,6 +340,7 @@ fn a_process_that_starts_itself_again_keeps_its_events_on_the_real_stderr() {
     assert!(took < Duration::from_secs(2), "the exit does not wait on a relay it no longer writes through: {took:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_panic_reaches_the_stream_as_one_log_event() {
     let home = scratch("panic");
@@ -344,6 +356,7 @@ fn a_panic_reaches_the_stream_as_one_log_event() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[cfg(unix)]
 #[test]
 fn under_log_file_the_events_go_to_the_file() {
     let home = scratch("log-file");
@@ -470,7 +483,11 @@ fn a_following_node_keeps_one_stream_across_its_restart_to_the_heads_new_model()
     let events = events(&std::fs::read(&log).unwrap());
     let starts: Vec<usize> = (0..events.len()).filter(|&i| events[i]["event"] == "start").collect();
     assert_eq!(starts.len(), 2, "{events:#?}");
-    assert!(starts.iter().all(|&i| events[i]["pid"] == json!(pid) && events[i]["command"] == "node join"), "the same process, exec'd: {events:#?}");
+    assert!(starts.iter().all(|&i| events[i]["command"] == "node join"), "{events:#?}");
+    // Unix execs the node again, in the same process. Windows has no exec: the node that
+    // starts again is a child the first waits for, with a process id of its own.
+    let same = starts.iter().all(|&i| events[i]["pid"] == json!(pid));
+    assert_eq!(same, cfg!(unix), "the same process only where it is exec'd: {events:#?}");
     let (before, after) = events.split_at(starts[1]);
     let named = |events: &[Value], name: &str| events.iter().filter(|e| e["event"] == name).cloned().collect::<Vec<_>>();
     assert_eq!(named(before, "node.dialing")[0]["model"], "org/a");

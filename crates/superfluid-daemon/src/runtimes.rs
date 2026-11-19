@@ -157,7 +157,7 @@ fn home_from(superfluid_home: Option<std::ffi::OsString>, user_home: Option<Path
 }
 
 pub fn worker_name(id: RuntimeId) -> String {
-    format!("superfluid-worker-{}", id.base().name())
+    crate::sys::exe_name(&format!("superfluid-worker-{}", id.base().name()))
 }
 
 pub fn worker_env(id: RuntimeId) -> String {
@@ -171,7 +171,7 @@ impl Catalog {
 
     pub fn from_env() -> Catalog {
         let beside = beside_this_executable();
-        let workerd = beside.clone().unwrap_or_default().join("superfluid-workerd");
+        let workerd = beside.clone().unwrap_or_default().join(crate::sys::exe_name("superfluid-workerd"));
         Catalog::new(default_home(), beside, workerd)
     }
 
@@ -202,7 +202,7 @@ impl Catalog {
         let Some(beside) = &self.beside else { return Vec::new() };
         [beside.join("..").join("libexec").join("superfluid"), beside.join("libexec").join("superfluid")]
             .into_iter()
-            .filter_map(|d| std::fs::canonicalize(d).ok())
+            .filter_map(|d| crate::sys::canonical(d).ok())
             .filter(|d| d.is_dir())
             .collect()
     }
@@ -257,7 +257,7 @@ impl Catalog {
     pub(crate) fn locate_plain(&self, id: RuntimeId) -> Option<Worker> {
         if let Some(install) = id.install() {
             let bin = self.package_dir(id).join(install).join("bin").join(worker_name(id));
-            return std::fs::canonicalize(bin).ok().filter(|p| p.is_file()).map(|bin| Worker {
+            return crate::sys::canonical(bin).ok().filter(|p| p.is_file()).map(|bin| Worker {
                 bin,
                 prefix: Vec::new(),
                 source: Source::Installed,
@@ -277,8 +277,8 @@ impl Catalog {
         if let Some(bin) = self.beside.as_ref().map(|d| d.join(&own)).filter(|p| is_executable(p)) {
             return Some(Worker { bin, prefix: Vec::new(), source: Source::BesideDaemon });
         }
-        let bin = self.package_dir(id).join("current").join("bin").join(&own);
-        let installed = std::fs::canonicalize(bin).ok().filter(|p| p.is_file()).map(|bin| Worker {
+        let bin = crate::sys::through_link(&self.package_dir(id).join("current")).join("bin").join(&own);
+        let installed = crate::sys::canonical(bin).ok().filter(|p| p.is_file()).map(|bin| Worker {
             bin,
             prefix: Vec::new(),
             source: Source::Installed,
@@ -383,7 +383,7 @@ impl Catalog {
             "the {id} runtime is not installed: no {w} in {pkg} or beside superfluid \
              (install it with `superfluid runtime install {id}`, or build {w} with `cargo build -p superfluid-adapter-{id}`)",
             w = worker_name(id),
-            pkg = self.package_dir(id).join("current").join("bin").display(),
+            pkg = crate::sys::through_link(&self.package_dir(id).join("current")).join("bin").display(),
         )
     }
 
@@ -539,15 +539,18 @@ fn workers_in(dir: &Path) -> Vec<RuntimeId> {
         .map(|rd| {
             rd.flatten()
                 .filter(|e| is_executable(&e.path()))
-                .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_prefix("superfluid-worker-")).and_then(RuntimeId::parse))
+                .filter_map(|e| {
+                    let name = e.file_name();
+                    let name = name.to_str()?;
+                    name.strip_suffix(std::env::consts::EXE_SUFFIX)?.strip_prefix("superfluid-worker-").and_then(RuntimeId::parse)
+                })
                 .collect()
         })
         .unwrap_or_default()
 }
 
 fn is_executable(p: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    crate::sys::is_executable(p)
 }
 
 pub fn check_worker(id: RuntimeId, worker: &Worker) -> Result<Runtime, String> {
@@ -585,7 +588,7 @@ pub fn sizing_of(rt: &Runtime, model: &Path) -> Result<superfluid_adapter_kit::S
 /// This executable's directory with links resolved, so a symlinked `superfluid` still finds its workerd and adapters.
 fn beside_this_executable() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let exe = crate::sys::canonical(&exe).unwrap_or(exe);
     exe.parent().map(Path::to_path_buf)
 }
 
@@ -668,7 +671,8 @@ fn devices_of(id: RuntimeId, reported: &Value) -> Vec<Device> {
         .collect()
 }
 
-#[cfg(test)]
+// The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

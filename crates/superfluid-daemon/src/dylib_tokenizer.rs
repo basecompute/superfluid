@@ -30,30 +30,78 @@ unsafe impl Send for DylibTokenizer {}
 // SAFETY: as above.
 unsafe impl Sync for DylibTokenizer {}
 
-fn dl_error() -> String {
-    // SAFETY: dlerror returns NULL or a NUL-terminated message owned by the
-    // loader, valid until the next dl* call on this thread.
-    let e = unsafe { libc::dlerror() };
-    if e.is_null() {
-        "unknown loader error".into()
-    } else {
-        // SAFETY: as above.
-        unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
-    }
-}
+/// Loading a library and finding its symbols, as each system does it.
+#[cfg(unix)]
+mod dl {
+    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::path::Path;
 
-impl DylibTokenizer {
-    pub fn open(library: &Path, model: &Path) -> Result<DylibTokenizer, String> {
+    fn error() -> String {
+        // SAFETY: dlerror returns NULL or a NUL-terminated message owned by the
+        // loader, valid until the next dl* call on this thread.
+        let e = unsafe { libc::dlerror() };
+        if e.is_null() {
+            "unknown loader error".into()
+        } else {
+            // SAFETY: as above.
+            unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
+        }
+    }
+
+    pub fn open(library: &Path) -> Result<*mut c_void, String> {
         let lib_c = CString::new(library.to_string_lossy().as_bytes()).map_err(|_| "NUL in library path".to_string())?;
         // SAFETY: a NUL-terminated path; RTLD_LOCAL keeps the library's
         // symbols (its own llama.cpp) out of the daemon's namespace.
         let lib = unsafe { libc::dlopen(lib_c.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
         if lib.is_null() {
-            return Err(format!("could not load the tokenizer library {}: {}", library.display(), dl_error()));
+            return Err(error());
         }
+        Ok(lib)
+    }
+
+    /// `name` is NUL-terminated.
+    pub fn sym(lib: *mut c_void, name: &[u8]) -> *mut c_void {
+        // SAFETY: `lib` is a live handle; `name` is NUL-terminated.
+        unsafe { libc::dlsym(lib, name.as_ptr().cast::<c_char>()) }
+    }
+}
+
+#[cfg(windows)]
+mod dl {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_WITH_ALTERED_SEARCH_PATH};
+
+    pub fn open(library: &Path) -> Result<*mut c_void, String> {
+        // The libraries it links (its own llama.cpp) are found beside it, not beside this
+        // program, when the path is whole and the search is the altered one.
+        let full = crate::sys::canonical(library).unwrap_or_else(|_| library.to_path_buf());
+        let wide: Vec<u16> = full.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        // SAFETY: a NUL-terminated path; the library's initializers run.
+        let lib = unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH) };
+        if lib.is_null() {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(lib)
+    }
+
+    /// `name` is NUL-terminated.
+    pub fn sym(lib: *mut c_void, name: &[u8]) -> *mut c_void {
+        // SAFETY: `lib` is a live module handle; `name` is NUL-terminated.
+        match unsafe { GetProcAddress(lib, name.as_ptr()) } {
+            Some(f) => f as *mut c_void,
+            None => std::ptr::null_mut(),
+        }
+    }
+}
+
+impl DylibTokenizer {
+    pub fn open(library: &Path, model: &Path) -> Result<DylibTokenizer, String> {
+        let lib = dl::open(library).map_err(|e| format!("could not load the tokenizer library {}: {e}", library.display()))?;
         let sym = |name: &[u8]| -> Result<*mut c_void, String> {
-            // SAFETY: `lib` is a live handle; `name` is NUL-terminated.
-            let p = unsafe { libc::dlsym(lib, name.as_ptr().cast::<c_char>()) };
+            let p = dl::sym(lib, name);
             if p.is_null() {
                 let name = String::from_utf8_lossy(&name[..name.len() - 1]).into_owned();
                 return Err(format!("{} is not a superfluid tokenizer library (no {name})", library.display()));
@@ -190,7 +238,9 @@ impl Tokenizer for DylibTokenizer {
 }
 
 pub fn library_file(stem: &str) -> String {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        format!("{stem}.dll")
+    } else if cfg!(target_os = "macos") {
         format!("lib{stem}.dylib")
     } else {
         format!("lib{stem}.so")

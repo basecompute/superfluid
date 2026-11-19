@@ -791,7 +791,7 @@ fn observer_subscription_with_provisional_deltas_real() {
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("superfluid.sock");
     let daemon = std::sync::Arc::new(real_daemon(&dir.join("wal.log"), model));
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = std::sync::Arc::clone(&daemon);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);

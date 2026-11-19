@@ -434,8 +434,12 @@ pub fn set_own_directory(dir: PathBuf) {
     *SELF_DIR.lock().expect("llama.cpp directory") = Some(dir);
 }
 
+/// The files a library called `stem` (`libllama`) may be: llama.cpp's Windows
+/// builds name theirs without the `lib` (`llama.dll`).
 pub fn file_names(stem: &str) -> Vec<String> {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        vec![format!("{}.dll", stem.strip_prefix("lib").unwrap_or(stem))]
+    } else if cfg!(target_os = "macos") {
         vec![format!("{stem}.dylib"), format!("{stem}.0.dylib")]
     } else {
         vec![format!("{stem}.so"), format!("{stem}.so.0")]
@@ -461,8 +465,8 @@ pub fn candidates() -> (Vec<PathBuf>, bool) {
         dirs.push(dir.clone());
         dirs.push(dir.join("..").join("lib"));
     }
-    if let Some(home) = runtime_home(std::env::var_os("SUPERFLUID_HOME"), std::env::var_os("HOME")) {
-        dirs.push(home.join("runtimes").join("llamacpp").join("current").join("lib"));
+    if let Some(home) = runtime_home(std::env::var_os("SUPERFLUID_HOME"), std::env::home_dir().map(Into::into)) {
+        dirs.push(superfluid_adapter_kit::install::through_link(&home.join("runtimes").join("llamacpp").join("current")).join("lib"));
     }
     (dirs, false)
 }
@@ -480,6 +484,28 @@ pub fn load() -> Result<Library, String> {
     match LOADED.get_or_init(open) {
         Ok(l) => Ok(l.info.clone()),
         Err(e) => Err(e.clone()),
+    }
+}
+
+/// Opens the library at `path`, with the libraries it links found beside it.
+/// The Windows loader looks for those beside the program, not the library,
+/// unless asked: llama.dll links the ggml.dll in its own directory.
+///
+/// # Safety
+/// As `libloading::Library::new`: the library's initializers run.
+unsafe fn open_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{Library, LOAD_WITH_ALTERED_SEARCH_PATH};
+        // The altered search wants an absolute path.
+        let path = superfluid_adapter_kit::install::canonical(path).unwrap_or_else(|_| path.to_path_buf());
+        // SAFETY: per this function's contract.
+        unsafe { Library::load_with_flags(&path, LOAD_WITH_ALTERED_SEARCH_PATH) }.map(Into::into)
+    }
+    #[cfg(not(windows))]
+    // SAFETY: per this function's contract.
+    unsafe {
+        libloading::Library::new(path)
     }
 }
 
@@ -502,12 +528,19 @@ fn open() -> Result<Loaded, String> {
     let dir = libllama.parent().map(Path::to_path_buf).unwrap_or_default();
     // SAFETY: loading a shared library runs its initializers; llama.cpp's
     // are its static registrations, safe to run once in this process.
-    let lib = unsafe { libloading::Library::new(&libllama) }.map_err(|e| format!("{}: {e}", libllama.display()))?;
+    let lib = unsafe { open_library(&libllama) }.map_err(|e| {
+        // Windows names the library asked for, never the one of its own it could not find.
+        let lacks = if cfg!(windows) { crate::vcruntime::missing(&dir, &crate::vcruntime::system_dir()) } else { Vec::new() };
+        match lacks.is_empty() {
+            true => format!("{}: {e}", libllama.display()),
+            false => format!("{}: {e} ({})", libllama.display(), crate::vcruntime::advice(&lacks)),
+        }
+    })?;
     let mut libs = vec![lib];
     for stem in ["libggml", "libggml-base"] {
         if let Some(p) = file_names(stem).into_iter().map(|n| dir.join(n)).find(|p| p.is_file()) {
             // SAFETY: as above; already loaded as libllama's dependency.
-            if let Ok(l) = unsafe { libloading::Library::new(&p) } {
+            if let Ok(l) = unsafe { open_library(&p) } {
                 libs.push(l);
             }
         }
@@ -684,25 +717,29 @@ struct Returned([u8; RETURN_ROOM]);
 /// # Safety
 /// `getter` is a C function that takes nothing and returns, by value, a
 /// struct larger than two machine words and no larger than [`RETURN_ROOM`].
-#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", unix)))]
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", any(unix, windows))))]
 unsafe fn returned(getter: *const ()) -> Returned {
     let mut room = Returned([FILL; RETURN_ROOM]);
     let out = room.0.as_mut_ptr();
     // SAFETY: per the caller's contract the getter writes at most
     // RETURN_ROOM bytes through the indirect-result register (x8 on AArch64,
-    // rdi on x86-64 System V) and clobbers no more than a C call may; the
-    // stack is call-aligned on entry to an asm block without `nostack`.
+    // rdi on x86-64 System V, rcx on x86-64 Windows, whose callee also owns
+    // the 32 bytes above its return address) and clobbers no more than a C
+    // call may; the stack is call-aligned on entry to an asm block without
+    // `nostack`.
     unsafe {
         #[cfg(target_arch = "aarch64")]
         std::arch::asm!("blr {f}", f = in(reg) getter, inout("x8") out => _, clobber_abi("C"));
         #[cfg(all(target_arch = "x86_64", unix))]
         std::arch::asm!("call {f}", f = in(reg) getter, inout("rdi") out => _, clobber_abi("C"));
+        #[cfg(all(target_arch = "x86_64", windows))]
+        std::arch::asm!("sub rsp, 32", "call {f}", "add rsp, 32", f = in(reg) getter, inout("rcx") out => _, clobber_abi("C"));
     }
     room
 }
 
-#[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", unix))))]
-compile_error!("superfluid: the llama.cpp adapter reads llama.cpp's parameter defaults on AArch64 and x86-64 System V only");
+#[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", any(unix, windows)))))]
+compile_error!("superfluid: the llama.cpp adapter reads llama.cpp's parameter defaults on AArch64 and x86-64 only");
 
 /// How the library lays out `llama_context_params`: as the builds up to b11479
 /// do, with the field b11480 inserted, or with the one b12191 added after it.

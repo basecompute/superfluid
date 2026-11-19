@@ -8,8 +8,10 @@ name: Publish packages
 #
 # It runs when a release is published (release.yml only drafts one) and by
 # hand for a tag. Every run builds every package and installs each on macOS
-# and on Linux x86-64 and arm64. A run uploads only when all of these hold,
-# and is otherwise a dry run:
+# and on Linux x86-64 and arm64, and on Windows x86-64 when the release has a
+# Windows tarball (release.yml lets a tag go out without one while Windows is
+# new; such a release is packaged for macOS and Linux alone). A run uploads
+# only when all of these hold, and is otherwise a dry run:
 #   - the repository variable PUBLISH_ENABLED is "true" and dry_run is not ticked;
 #   - the release is published: not a draft, not a pre-release;
 #   - this run's commit is the one the tag names, so the packages were built by
@@ -56,6 +58,8 @@ jobs:
     outputs:
       version: ${{ steps.plan.outputs.version }}
       upload: ${{ steps.plan.outputs.upload }}
+      windows: ${{ steps.plan.outputs.windows }}
+      installs: ${{ steps.plan.outputs.installs }}
       pypi: ${{ steps.registries.outputs.pypi }}
       npm: ${{ steps.registries.outputs.npm }}
     steps:
@@ -72,6 +76,20 @@ jobs:
             *) echo "::error::$TAG is not a release tag (vX.Y.Z)"; exit 1 ;;
           esac
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # Where each kind is installed: the test job's matrix. The Ubuntu
+          # x86-64 runner image has Homebrew, off PATH. Windows is tried when
+          # this release has its tarball.
+          installs='[{"os":"macos-15","kinds":"pip npm brew"},{"os":"ubuntu-24.04","kinds":"pip npm brew"},{"os":"ubuntu-24.04-arm","kinds":"pip npm"}]'
+          assets=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          if grep -qx 'superfluid-x86_64-pc-windows-msvc\.tar\.gz' <<< "$assets"; then
+            windows=true
+            installs=$(jq -c '. + [{"os":"windows-2025","kinds":"pip npm"}]' <<< "$installs")
+          else
+            windows=false
+            echo "::notice::$TAG has no Windows tarball: its packages are for macOS and Linux alone."
+          fi
+          echo "windows=$windows" >> "$GITHUB_OUTPUT"
+          echo "installs=$installs" >> "$GITHUB_OUTPUT"
           state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease \
             --jq 'if .isDraft then "a draft" elif .isPrerelease then "a pre-release" else "published" end')
           # The commit the tag names: the peeled line for an annotated tag, else the tag's own.
@@ -96,21 +114,28 @@ jobs:
         if: steps.plan.outputs.upload == 'true'
         env:
           V: ${{ steps.plan.outputs.version }}
+          WINDOWS: ${{ steps.plan.outputs.windows }}
         run: |
           set -euo pipefail
           agent="superfluid-publish (github.com/$GITHUB_REPOSITORY)"
+          wheels=("superfluid_cli-$V-py3-none-macosx_*_arm64.whl" "superfluid_cli-$V-py3-none-manylinux_*_x86_64.whl"
+                  "superfluid_cli-$V-py3-none-manylinux_*_aarch64.whl")
+          packages=(superfluid-darwin-arm64 superfluid-linux-x64 superfluid-linux-arm64)
+          if [ "$WINDOWS" = true ]; then
+            wheels+=("superfluid_cli-$V-py3-none-win_amd64.whl")
+            packages+=(superfluid-win32-x64)
+          fi
           # Every platform's wheel, not just the version: a run that uploaded
           # one wheel and then failed leaves the version on PyPI.
           pypi=false
           files=$(curl -sf -A "$agent" "https://pypi.org/pypi/superfluid-cli/$V/json" | jq -r '.urls[].filename') || files=""
-          for want in "superfluid_cli-$V-py3-none-macosx_*_arm64.whl" "superfluid_cli-$V-py3-none-manylinux_*_x86_64.whl" \
-                      "superfluid_cli-$V-py3-none-manylinux_*_aarch64.whl"; do
+          for want in "${wheels[@]}"; do
             found=no
             for f in $files; do case "$f" in $want) found=yes ;; esac; done
             [ "$found" = yes ] || pypi=true
           done
           npm=false
-          for pkg in superfluid-darwin-arm64 superfluid-linux-x64 superfluid-linux-arm64 superfluid; do
+          for pkg in "${packages[@]}" superfluid; do
             curl -sfo /dev/null -A "$agent" "https://registry.npmjs.org/@basecompute%2F$pkg/$V" || npm=true
           done
           echo "pypi=$pypi" >> "$GITHUB_OUTPUT"
@@ -162,14 +187,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            kinds: pip npm brew
-          # The runner image has Homebrew, off PATH.
-          - os: ubuntu-24.04
-            kinds: pip npm brew
-          - os: ubuntu-24.04-arm
-            kinds: pip npm
+        # An os and its kinds each, from the plan: Windows only when the release has it.
+        include: ${{ fromJSON(needs.plan.outputs.installs) }}
     runs-on: ${{ matrix.os }}
     env:
       V: ${{ needs.plan.outputs.version }}
@@ -190,7 +209,9 @@ jobs:
 
       # brew installs the formula from the release's own URLs, so this needs
       # the release published; pip and npm install the files just built.
+      # bash everywhere: on Windows it is Git Bash, which the script knows.
       - name: Install and run each package
+        shell: bash
         run: |
           set -eu
           for kind in ${{ matrix.kinds }}; do
@@ -246,11 +267,14 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           V: ${{ needs.plan.outputs.version }}
+          WINDOWS: ${{ needs.plan.outputs.windows }}
         run: |
           set -euo pipefail
           # The platform packages first, so the main package's optional
           # dependencies exist when it appears; any a previous run published are skipped.
-          for pkg in superfluid-darwin-arm64 superfluid-linux-x64 superfluid-linux-arm64 superfluid; do
+          packages=(superfluid-darwin-arm64 superfluid-linux-x64 superfluid-linux-arm64)
+          if [ "$WINDOWS" = true ]; then packages+=(superfluid-win32-x64); fi
+          for pkg in "${packages[@]}" superfluid; do
             if npm view "@basecompute/$pkg@$V" version > /dev/null 2>&1; then
               echo "@basecompute/$pkg@$V is on npm already"
             else

@@ -1,0 +1,8 @@
+# Windows, MSVC: the C runtime is linked into each program and library built
+# here, so a release runs on a machine where nothing has installed the Visual
+# C++ redistributable (which takes an administrator). release.yml checks that
+# none of them asks for vcruntime140.dll. llama.cpp's own libraries do ask for
+# it; an install of llama.cpp is given the runtime beside them (see
+# crates/superfluid-adapters/superfluid-adapter-llamacpp/src/vcruntime.rs).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

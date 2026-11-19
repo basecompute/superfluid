@@ -24,7 +24,7 @@ name = "superfluid-worker-llamacpp"
 path = "src/bin/superfluid-worker-llamacpp.rs"
 
 [dev-dependencies]
-superfluid = { path = "../../superfluid-daemon" }
+superfluid = { path = "../../superfluid-daemon", default-features = false }
 superfluid-tokenizer-hf = { workspace = true }
 
 [lints]

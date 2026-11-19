@@ -62,7 +62,7 @@ fn inspect_reports_state_and_residency_tier() {
     }
     assert!(matches!(tier, Tier::Parked { covered, .. } if covered >= 16), "{tier:?}");
     let socket = dir.join("sock");
-    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let listener = superfluid_shm::os::UnixListener::bind(&socket).unwrap();
     let serving = Arc::clone(&d);
     std::thread::spawn(move || {
         let _ = api::serve(listener, serving);
