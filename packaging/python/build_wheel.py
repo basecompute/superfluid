@@ -5,13 +5,15 @@
 Writes superfluid_cli-<v>-py3-none-<platform>.whl to <out-dir>: the release tree
 under superfluid_cli/release/ (packaging/release.py stages it, adding the
 installed-by file), and the commands `superfluid`, `superfluid-workerd` and
-`superfluid-noded`, launchers that exec the binaries in it
-(superfluid_cli/__init__.py). The platform tag is read from the binaries, so
-pip refuses the wheel on a machine they cannot run on.
+`superfluid-noded`, launchers that exec the binaries in it, or on Windows run
+them and wait (superfluid_cli/__init__.py). The platform tag is read from the
+binaries, so pip refuses the wheel on a machine they cannot run on.
 
 The wheel is written here, not by a build backend: its contents are fixed
 files, its binaries must keep their mode (a zip entry's external attributes,
-which pip and uv apply), and building it needs nothing from the network.
+which pip and uv apply), and building it needs nothing from the network. A
+Windows wheel is built the same way, on any machine: pip makes the commands
+there (Scripts\superfluid.exe and its siblings) from the same entry points.
 `superfluid` is taken on PyPI, so the distribution is superfluid-cli.
 """
 
@@ -48,6 +50,7 @@ CLASSIFIERS = [
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",

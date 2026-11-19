@@ -7,7 +7,7 @@ pip install superfluid-cli            # or: pipx install superfluid-cli, uv tool
 superfluid serve basecompute/Qwen3.8-27B
 ```
 
-This package is the prebuilt superfluid release for macOS on Apple silicon (macOS 15 or later) and Linux on x86-64 or arm64 (glibc 2.28 or later), with the `superfluid` command. It has no Python API and needs nothing from your Python beyond running the command. The runtimes themselves (llama.cpp, MLX, baseRT) are installed by superfluid on first use, under `~/.superfluid`, never into your Python environment.
+This package is the prebuilt superfluid release for macOS on Apple silicon (macOS 15 or later), Linux on x86-64 or arm64 (glibc 2.28 or later) and Windows on x86-64 (Windows 10 1803 or later, which serves GGUF models through llama.cpp), with the `superfluid` command. It has no Python API and needs nothing from your Python beyond running the command. The runtimes themselves (llama.cpp, MLX, baseRT) are installed by superfluid on first use, under `~/.superfluid`, never into your Python environment.
 
 Update it with pip (`pip install --upgrade superfluid-cli`); `superfluid self update` leaves a pip install to pip and says so.
 

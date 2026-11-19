@@ -70,7 +70,8 @@ The superfluid basert installs for `basert serve` is basert's: this command runs
 
 On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds
 the version's name, and each command on PATH is a small launcher that reads it and runs that
-version's program.
+version's program. A copy npm, pip, pipx or uv installed there has its manager's command
+named and not run: Windows lets nothing replace a program that is running.
 
 `superfluid serve` checks for a newer release once a day, after the server is up, and prints
 one line; SUPERFLUID_NO_UPDATE_CHECK=1 or --offline turns that off. A release is announced a
@@ -485,14 +486,44 @@ impl Delegate {
 /// file names, or from where it is for packages published before they carried the file; `None` for a copy no package
 /// manager or basert placed.
 fn delegate(exe: &Path) -> Option<Delegate> {
+    let found = delegate_by_place(exe)?;
+    Some(if cfg!(windows) { named_while_it_runs(found) } else { found })
+}
+
+/// On Windows a program that is running can be neither deleted nor written over, nor its folder renamed, so a manager
+/// started from the copy it is to update fails part of the way through: there its command is named, for the user to
+/// run once superfluid has ended. basert is handed this process (`update_by_manager`) and stays as it is.
+fn named_while_it_runs(found: Delegate) -> Delegate {
+    match found {
+        Delegate::Run { manager, command, .. } if manager != "basert" => Delegate::Name { why: while_it_runs(&manager), manager, command },
+        other => other,
+    }
+}
+
+fn while_it_runs(manager: &str) -> String {
+    format!("Windows lets {manager} replace no program that is running: run it yourself, with no superfluid running")
+}
+
+/// `p` as the checks on where a copy is read it. A Windows path has `/` for each `\` and is in lower case, as its
+/// names match there; both keep every byte's place, so what is found in the result is at the same place in `p`.
+fn shape(p: &str, windows: bool) -> String {
+    if windows {
+        p.replace('\\', "/").to_ascii_lowercase()
+    } else {
+        p.to_string()
+    }
+}
+
+fn delegate_by_place(exe: &Path) -> Option<Delegate> {
     let p = exe.to_string_lossy().into_owned();
+    let at = shape(&p, cfg!(windows));
     let bin = exe.parent()?;
     let root = bin.parent()?;
     // pipx and uv keep the wheel in a venv of their own, whose file says pip.
-    if p.contains("/pipx/venvs/") {
+    if at.contains("/pipx/venvs/") {
         return Some(on_path("pipx", &["upgrade", "superfluid-cli"]));
     }
-    if p.contains("/uv/tools/") {
+    if at.contains("/uv/tools/") {
         return Some(on_path("uv", &["tool", "upgrade", "superfluid-cli"]));
     }
     let named = package_manager(exe);
@@ -509,9 +540,9 @@ fn delegate(exe: &Path) -> Option<Delegate> {
         }
         None if root.join(BASERT_STAMP).is_file() => basert(root),
         None if p.contains("/Cellar/") => homebrew(&p),
-        None if p.contains("/node_modules/") => npm(&p),
-        None if p.contains("/site-packages/") => pip(&p),
-        None if p.contains("/.cargo/bin/") => cargo(bin),
+        None if at.contains("/node_modules/") => npm(&p),
+        None if at.contains("/site-packages/") => pip(&p),
+        None if at.contains("/.cargo/bin/") => cargo(bin),
         // A release unpacked in one place on Windows: the script installs one with versions beside it.
         None if cfg!(windows) && root.join("libexec").join("superfluid").is_dir() => install_ps1(),
         None => return None,
@@ -527,10 +558,13 @@ fn executable(path: &Path) -> bool {
     crate::sys::is_executable(path)
 }
 
-/// `tool args…` with `tool` from PATH, or named when PATH has none.
+/// `tool args…` with `tool` from PATH, or named when PATH has none. On Windows a tool is a program or a script
+/// (`uv.exe`, `npm.cmd`).
 fn on_path(tool: &str, args: &[&str]) -> Delegate {
     let command = std::iter::once(tool).chain(args.iter().copied()).collect::<Vec<_>>().join(" ");
-    let found = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join(tool)).find(|p| executable(p)));
+    let files: Vec<String> = if cfg!(windows) { ["exe", "cmd", "bat"].iter().map(|ext| format!("{tool}.{ext}")).collect() } else { vec![tool.to_string()] };
+    let found = std::env::var_os("PATH")
+        .and_then(|path| std::env::split_paths(&path).flat_map(|d| files.iter().map(move |f| d.join(f))).find(|p| executable(p)));
     match found {
         Some(bin) => Delegate::Run {
             manager: tool.to_string(),
@@ -585,17 +619,35 @@ fn homebrew(p: &str) -> Delegate {
     Delegate::Name { manager, command, why }
 }
 
+/// The prefix of the npm global folder that holds the copy at `p`, if one does. On Unix the folder is
+/// `<prefix>/lib/node_modules`, which no project has. On Windows it is `<prefix>\node_modules`, as a project's is, and
+/// what tells it apart is the command npm wrote beside it, `<prefix>\superfluid.cmd`; a project's commands are in
+/// `node_modules\.bin`.
+fn npm_global_prefix(p: &str, windows: bool) -> Option<&str> {
+    let at = shape(p, windows);
+    if !windows {
+        return at.find("/lib/node_modules/").map(|i| &p[..i]);
+    }
+    let prefix = &p[..at.find("/node_modules/")?];
+    Path::new(prefix).join("superfluid.cmd").is_file().then_some(prefix)
+}
+
 /// `npm install --global` by the npm whose global folder holds the copy, told that folder's prefix (npm's
 /// configuration or NPM_CONFIG_PREFIX may name another); a project's dependency (or pnpm's, yarn's, bun's) is that
-/// project's to update.
+/// project's to update. On Windows the command is named (`named_while_it_runs`).
 fn npm(p: &str) -> Delegate {
     let manager = "npm".to_string();
     let command = "npm install --global @basecompute/superfluid@latest".to_string();
-    let Some(i) = p.find("/lib/node_modules/") else {
+    let Some(prefix) = npm_global_prefix(p, cfg!(windows)) else {
         let why = "it is a project's dependency (or pnpm's, yarn's or bun's): update it in that project".to_string();
         return Delegate::Name { manager, command: "npm install @basecompute/superfluid@latest".into(), why };
     };
-    let prefix = Path::new(&p[..i]);
+    let prefix = Path::new(prefix);
+    if cfg!(windows) {
+        // Its npm is not looked for: it may be anywhere (Node's installer keeps the global folder apart from npm
+        // itself), and it is not run.
+        return Delegate::Name { why: while_it_runs(&manager), manager, command };
+    }
     let bin = prefix.join("bin");
     let npm = bin.join("npm");
     let why = if !executable(&npm) {
@@ -619,14 +671,27 @@ fn npm(p: &str) -> Delegate {
 /// pip is only named: the environment may be a project's, which a lock file (Poetry, uv, pip-tools) pins, or the
 /// system's, which refuses or needs root.
 fn pip(p: &str) -> Delegate {
-    // .../<env>/lib/python3.x/site-packages/superfluid_cli/release/bin/superfluid
-    let python = p.find("/lib/python").map(|i| Path::new(&p[..i]).join("bin").join("python")).filter(|py| executable(py));
+    let python = python_of(p, cfg!(windows)).filter(|py| executable(py));
     let command = match python {
         Some(py) => format!("{} -m pip install --upgrade superfluid-cli", py.display()),
         None => "pip install --upgrade superfluid-cli".to_string(),
     };
     let why = "its environment may be a project's, pinned by a lock file, or the system's: run it in that environment yourself";
     Delegate::Name { manager: "pip".into(), command, why: why.into() }
+}
+
+/// Where the Python of the environment that holds the copy at `p` would be:
+/// `<env>/lib/python3.x/site-packages/superfluid_cli/release/bin/superfluid` has `<env>/bin/python`. On Windows
+/// `<env>\Lib\site-packages\…` has `<env>\Scripts\python.exe` when the environment is a venv, and `<env>\python.exe`
+/// when it is a Python install.
+fn python_of(p: &str, windows: bool) -> Option<PathBuf> {
+    let at = shape(p, windows);
+    if !windows {
+        return at.find("/lib/python").map(|i| Path::new(&p[..i]).join("bin").join("python"));
+    }
+    let env = Path::new(&p[..at.find("/lib/site-packages/")?]);
+    let venv = env.join("Scripts").join("python.exe");
+    Some(if venv.is_file() { venv } else { env.join("python.exe") })
 }
 
 /// The Windows install script, which replaces a release where it is. Only named: the copy it replaces is the one that
@@ -641,7 +706,7 @@ fn install_ps1() -> Delegate {
 
 /// `cargo install superfluid` by the cargo beside the copy.
 fn cargo(bin: &Path) -> Delegate {
-    let cargo = bin.join("cargo");
+    let cargo = bin.join(crate::sys::exe_name("cargo"));
     if !executable(&cargo) {
         return on_path("cargo", &["install", "superfluid"]);
     }
@@ -1692,6 +1757,58 @@ mod install_script_tests {
         assert!(refused.contains(INSTALL_PS1_COMMAND), "{refused}");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    // Where npm and pip put a copy on Windows, read here on any platform: the files are laid out as there.
+    #[test]
+    fn a_copy_npm_or_pip_placed_on_windows_is_told_by_where_it_is() {
+        assert_eq!(shape(r"C:\Users\Me\AppData\Roaming\npm\node_modules\X", true), "c:/users/me/appdata/roaming/npm/node_modules/x");
+        assert_eq!(shape(r"/home/me/a\B", false), r"/home/me/a\B", "a Unix name may hold a backslash, and its case counts");
+        let root = std::env::temp_dir().join(format!("sf-self-places-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let file = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        };
+
+        // npm keeps a global package's own dependencies inside it, and writes its commands beside node_modules.
+        let npm = root.join("npm");
+        let platform = Path::new("node_modules").join("@basecompute").join("superfluid-win32-x64").join("release").join("bin").join("superfluid.exe");
+        let global = npm.join("node_modules").join("@basecompute").join("superfluid").join(&platform);
+        file(&global);
+        assert_eq!(npm_global_prefix(&global.to_string_lossy(), true), None, "node_modules with no command beside it is a project's");
+        file(&npm.join("superfluid.cmd"));
+        assert_eq!(npm_global_prefix(&global.to_string_lossy(), true), npm.to_str());
+        let project = root.join("app").join(&platform);
+        file(&project);
+        assert_eq!(npm_global_prefix(&project.to_string_lossy(), true), None);
+        assert_eq!(npm_global_prefix("/usr/local/lib/node_modules/@basecompute/superfluid-linux-x64/release/bin/superfluid", false), Some("/usr/local"));
+        assert_eq!(npm_global_prefix("/srv/app/node_modules/@basecompute/superfluid-linux-x64/release/bin/superfluid", false), None);
+
+        // A venv has its Python in Scripts; a Python install has it at its root.
+        let env = root.join("env");
+        let copy = env.join("Lib").join("site-packages").join("superfluid_cli").join("release").join("bin").join("superfluid.exe");
+        file(&copy);
+        assert_eq!(python_of(&copy.to_string_lossy(), true), Some(env.join("python.exe")));
+        file(&env.join("Scripts").join("python.exe"));
+        assert_eq!(python_of(&copy.to_string_lossy(), true), Some(env.join("Scripts").join("python.exe")));
+        assert_eq!(python_of(r"C:\Users\Me\AppData\Roaming\Python\Python313\site-packages\superfluid_cli\release\bin\superfluid.exe", true), None, "a user site has no Lib");
+        assert_eq!(
+            python_of("/opt/env/lib/python3.12/site-packages/superfluid_cli/release/bin/superfluid", false),
+            Some(PathBuf::from("/opt/env/bin/python"))
+        );
+
+        let run = Delegate::Run { manager: "uv".into(), command: "uv tool upgrade superfluid-cli".into(), argv: vec!["uv".into()], path_first: None };
+        match named_while_it_runs(run) {
+            Delegate::Name { manager, command, why } => {
+                assert_eq!((manager.as_str(), command.as_str()), ("uv", "uv tool upgrade superfluid-cli"));
+                assert!(why.contains("replace no program that is running"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let basert = Delegate::Run { manager: "basert".into(), command: "basert superfluid install".into(), argv: vec!["basert".into()], path_first: None };
+        assert_eq!(named_while_it_runs(basert.clone()), basert, "basert is handed the process, and replaces a copy nothing runs from");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 // The Windows layout, on files that stand in for a release: the launcher is whatever bytes the version carries.
@@ -1783,6 +1900,64 @@ mod windows_tests {
         assert_eq!(versions.link(&prefix, true).unwrap(), Vec::<String>::new());
         assert_eq!(std::fs::read(prefix.join("superfluid.exe")).unwrap(), b"superfluid-shim-revision:0001");
         assert_eq!((launcher_revision(b"superfluid-shim-revision:0012 x"), launcher_revision(b"an .exe"), launcher_revision(b"superfluid-shim-revision:1")), (Some(12), None, None));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A release a package carries at `root`, its `installed-by` saying `line`; the program's real path.
+    fn packaged(root: &Path, line: &str) -> PathBuf {
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::create_dir_all(root.join("libexec").join("superfluid")).unwrap();
+        std::fs::write(root.join("bin").join("superfluid.exe"), b"").unwrap();
+        std::fs::write(root.join(INSTALLED_BY), format!("{line}\n")).unwrap();
+        crate::sys::canonical(root.join("bin").join("superfluid.exe")).unwrap()
+    }
+
+    #[test]
+    fn a_copy_npm_or_pip_installed_is_theirs_and_their_command_is_named_never_run() {
+        let root = std::env::temp_dir().join(format!("sf-self-win-packages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let npm_line = "npm: npm install --global @basecompute/superfluid@latest";
+        let pip_line = "pip: pip install --upgrade superfluid-cli";
+        let named = |exe: &Path| match delegate(exe) {
+            Some(Delegate::Name { manager, command, why }) => (manager, command, why),
+            other => panic!("{}: {other:?}", exe.display()),
+        };
+
+        // npm's global folder, with the command npm wrote beside it.
+        let prefix = root.join("npm");
+        let in_main = prefix.join("node_modules").join("@basecompute").join("superfluid").join("node_modules");
+        let global = packaged(&in_main.join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
+        std::fs::write(prefix.join("superfluid.cmd"), b"").unwrap();
+        assert!(matches!(installed_as(&global), Installed::Other(_)), "it is npm's, not a release unpacked in one place");
+        let (manager, command, why) = named(&global);
+        assert_eq!((manager.as_str(), command.as_str()), ("npm", "npm install --global @basecompute/superfluid@latest"));
+        assert!(why.contains("Windows lets npm replace no program that is running"), "{why}");
+        assert_eq!(update_command(&global), "npm install --global @basecompute/superfluid@latest");
+        let yes = Options { yes: true, ..Options::default() };
+        let refused = update(&root, &Catalog::from_env(), &global, &yes).unwrap_err();
+        assert!(refused.contains("was installed by npm, which updates it: run `npm install --global @basecompute/superfluid@latest`"), "{refused}");
+        // A project's dependency is that project's.
+        let project = packaged(&root.join("app").join("node_modules").join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
+        let (_, command, why) = named(&project);
+        assert_eq!(command, "npm install @basecompute/superfluid@latest");
+        assert!(why.contains("update it in that project"), "{why}");
+
+        // pip, with the Python of the environment the copy is in.
+        let env = root.join("venv");
+        let pip_copy = packaged(&env.join("Lib").join("site-packages").join("superfluid_cli").join("release"), pip_line);
+        std::fs::create_dir_all(env.join("Scripts")).unwrap();
+        std::fs::write(env.join("Scripts").join("python.exe"), b"").unwrap();
+        let python = crate::sys::canonical(env.join("Scripts").join("python.exe")).unwrap();
+        let (manager, command, _) = named(&pip_copy);
+        assert_eq!((manager.as_str(), command), ("pip", format!("{} -m pip install --upgrade superfluid-cli", python.display())));
+        // pipx and uv are told apart by their folders, and are named too, with or without one on PATH.
+        let site = Path::new("Lib").join("site-packages").join("superfluid_cli").join("release");
+        let pipx = packaged(&root.join("pipx").join("venvs").join("superfluid-cli").join(&site), pip_line);
+        let (manager, command, _) = named(&pipx);
+        assert_eq!((manager.as_str(), command.as_str()), ("pipx", "pipx upgrade superfluid-cli"));
+        let uv = packaged(&root.join("uv").join("tools").join("superfluid-cli").join(&site), pip_line);
+        let (manager, command, _) = named(&uv);
+        assert_eq!((manager.as_str(), command.as_str()), ("uv", "uv tool upgrade superfluid-cli"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

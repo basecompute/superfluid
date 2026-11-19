@@ -10,7 +10,7 @@ NOTICE. Staging changes two things:
 * it writes an `installed-by` file at the root, `<manager>: <command>`, which
   tells `superfluid self update`, and the line `serve` prints when a newer
   release is out, that a package manager owns this copy and how it is updated;
-* it sets each file's mode by what the file is, 0755 for a Mach-O or ELF
+* it sets each file's mode by what the file is, 0755 for a Mach-O, ELF or PE
   binary and 0644 for the rest, since neither a wheel nor an npm tarball is
   trusted to carry modes through.
 
@@ -39,11 +39,14 @@ TARGETS = {
     "aarch64-apple-darwin": {"format": "macho", "arch": "arm64"},
     "x86_64-unknown-linux-gnu": {"format": "elf", "arch": "x86_64"},
     "aarch64-unknown-linux-gnu": {"format": "elf", "arch": "aarch64"},
+    "x86_64-pc-windows-msvc": {"format": "pe", "arch": "x86_64"},
 }
-# Released as a tarball only, which scripts/install.ps1 installs: no wheel, npm
-# package or bottle carries it yet.
-TARBALL_ONLY = ("x86_64-pc-windows-msvc",)
+# A release may come without these: release.yml lets a tag's release go out
+# without a platform that is new to it and did not build. One is packaged when
+# the release has its tarball, and every other target must be there.
+OPTIONAL = ("x86_64-pc-windows-msvc",)
 # The commands a release puts on PATH: LINKED in crates/superfluid-daemon/src/selfupdate.rs.
+# On Windows each file has .exe after the name (command_file).
 COMMANDS = ("superfluid", "superfluid-workerd", "superfluid-noded")
 # INSTALLED_BY in crates/superfluid-daemon/src/selfupdate.rs.
 INSTALLED_BY = "installed-by"
@@ -56,6 +59,11 @@ LC_VERSION_MIN_MACOSX = 0x24
 ELF_MAGIC = b"\x7fELF"
 ELF_MACHINE = {62: "x86_64", 183: "aarch64"}
 GLIBC_RE = re.compile(rb"GLIBC_2\.(\d+)(?:\.\d+)?\x00")
+PE_MACHINE = {0x8664: "x86_64", 0xAA64: "arm64"}
+WHEEL_WINDOWS = {"x86_64": "win_amd64", "arm64": "win_arm64"}
+# How much of a file binary_kind is given: a PE file's header sits after its
+# DOS program, a few hundred bytes in.
+HEAD = 4096
 
 
 class ReleaseError(Exception):
@@ -69,6 +77,16 @@ class Release:
     version: str
 
 
+def command_file(target: str, command: str) -> str:
+    """The name of a command's file in the bin/ of a release for `target`."""
+    return command + (".exe" if TARGETS[target]["format"] == "pe" else "")
+
+
+def targets_in(assets: Path) -> list[str]:
+    """The targets to package from a folder of release assets: every one, less an optional one it has no tarball for."""
+    return [t for t in TARGETS if t not in OPTIONAL or (assets / f"superfluid-{t}.tar.gz").is_file()]
+
+
 def target_of(tarball: Path) -> str:
     """The target in a release asset's name, superfluid-<target>.tar.gz."""
     m = re.fullmatch(r"superfluid-(.+)\.tar\.gz", tarball.name)
@@ -78,7 +96,7 @@ def target_of(tarball: Path) -> str:
 
 
 def binary_kind(data: bytes) -> tuple[str, str] | None:
-    """('macho' or 'elf', architecture) for an executable or library, read from its header; None for anything else."""
+    """('macho', 'elf' or 'pe', architecture) for an executable or library, read from its first HEAD bytes; None for anything else."""
     if len(data) >= 8 and struct.unpack_from("<I", data)[0] == MH_MAGIC_64:
         cpu = struct.unpack_from("<I", data, 4)[0]
         return "macho", MACHO_CPU.get(cpu, hex(cpu))
@@ -87,6 +105,12 @@ def binary_kind(data: bytes) -> tuple[str, str] | None:
     if len(data) >= 20 and data[:4] == ELF_MAGIC:
         machine = struct.unpack_from("<H" if data[5] == 1 else ">H", data, 18)[0]
         return "elf", ELF_MACHINE.get(machine, str(machine))
+    if len(data) >= 64 and data[:2] == b"MZ":
+        # The DOS header ends with where the PE header is: its signature, then the machine.
+        pe = struct.unpack_from("<I", data, 60)[0]
+        if pe + 6 <= len(data) and data[pe:pe + 4] == b"PE\0\0":
+            machine = struct.unpack_from("<H", data, pe + 4)[0]
+            return "pe", PE_MACHINE.get(machine, hex(machine))
     return None
 
 
@@ -119,12 +143,12 @@ def glibc_minimum(data: bytes) -> int | None:
 
 
 def binaries(root: Path) -> list[Path]:
-    """Every Mach-O or ELF file in a release tree."""
+    """Every Mach-O, ELF or PE file in a release tree."""
     out = []
     for f in sorted(root.rglob("*")):
         if f.is_file() and not f.is_symlink():
             with open(f, "rb") as fh:
-                if binary_kind(fh.read(64)) is not None:
+                if binary_kind(fh.read(HEAD)) is not None:
                     out.append(f)
     return out
 
@@ -166,7 +190,7 @@ def unpack(tarball: Path, dest: Path) -> None:
 
 
 def set_modes(root: Path) -> None:
-    """0755 for folders and for Mach-O or ELF files, found by header rather than by name; 0644 for every other file."""
+    """0755 for folders and for Mach-O, ELF or PE files, found by header rather than by name; 0644 for every other file."""
     executables = set(binaries(root))
     for p in [root, *root.rglob("*")]:
         p.chmod(0o755 if p.is_dir() or p in executables else 0o644)
@@ -186,19 +210,20 @@ def check(root: Path, target: str, version: str | None) -> str:
     for name in ("LICENSE", "NOTICE"):
         if not (root / name).is_file():
             raise ReleaseError(f"{target}: no {name} in the release")
-    for name in COMMANDS:
+    commands = [command_file(target, name) for name in COMMANDS]
+    for name in commands:
         if not (root / "bin" / name).is_file():
             raise ReleaseError(f"{target}: no bin/{name} in the release")
     workers = root / "libexec" / "superfluid"
     if not workers.is_dir() or not any(workers.glob("superfluid-worker-*")):
         raise ReleaseError(f"{target}: no runtime workers in libexec/superfluid")
     found_binaries = binaries(root)
-    for name in COMMANDS:
+    for name in commands:
         if root / "bin" / name not in found_binaries:
             raise ReleaseError(f"{target}: bin/{name} is not an executable")
     for f in found_binaries:
         with open(f, "rb") as fh:
-            kind = binary_kind(fh.read(64))
+            kind = binary_kind(fh.read(HEAD))
         if kind != (want["format"], want["arch"]):
             raise ReleaseError(f"{target}: {f.relative_to(root)} is {kind[0]} {kind[1]}, not {want['format']} {want['arch']}")
     if (root / INSTALLED_BY).exists():
@@ -240,12 +265,13 @@ def wheel_platform(root: Path) -> str:
     knows X_0 tags, so a minimum of 15.4 becomes macosx_16_0 rather than
     macosx_15_0, which would let it onto 15.0-15.3. Linux: manylinux_2_N, N the
     newest glibc symbol version any ELF file needs (2.28 for the release builds).
+    Windows: win_amd64, which has no version in it.
     """
     kinds = set()
     glibc = []
     for f in binaries(root):
         data = f.read_bytes()
-        kind = binary_kind(data[:64])
+        kind = binary_kind(data[:HEAD])
         assert kind is not None
         kinds.add(kind)
         if kind[0] == "elf":
@@ -260,6 +286,10 @@ def wheel_platform(root: Path) -> str:
         if major >= 11 and minor > 0:
             major, minor = major + 1, 0
         return f"macosx_{major}_{minor}_{arch}"
+    if fmt == "pe":
+        if arch not in WHEEL_WINDOWS:
+            raise ReleaseError(f"{root}: no wheel platform for Windows on {arch}")
+        return WHEEL_WINDOWS[arch]
     if not glibc:
         raise ReleaseError(f"{root}: no ELF binary names a glibc version")
     return f"manylinux_2_{max(glibc)}_{arch}"

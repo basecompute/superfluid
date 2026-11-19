@@ -7,9 +7,9 @@ name: Release
 # docs/release-notes/<version>.md. scripts/install.sh installs from it, and
 # scripts/install.ps1 on Windows.
 #
-# A pull request that changes what a release is built or installed with runs
-# the builds alone, so a platform that would not build is found before the tag
-# and not at it.
+# A pull request that changes what a release is built, installed or packaged
+# with runs the builds alone, so a platform that would not build is found
+# before the tag and not at it.
 
 on:
   push:
@@ -20,6 +20,7 @@ on:
       - .cargo/config.toml
       - scripts/install.ps1
       - scripts/build_runtime_adapters.sh
+      - packaging/**
   workflow_dispatch:
     inputs:
       tag:
@@ -194,6 +195,22 @@ jobs:
           "$installed" self list | tee /dev/stderr | grep -q "^  $v  current"
           # Its status is the program's own.
           if "$installed" no-such-command 2>/dev/null; then echo "::error::the launcher lost the program's status"; exit 1; fi
+
+      # The wheel and the npm packages publish.yml makes of this tarball,
+      # installed here as it installs them. That workflow reads a release, and
+      # before a tag there is none with a Windows tarball in it, so a pull
+      # request tries them where the tarball was just built. Python and Node
+      # are the runner image's own.
+      - name: Package the release for pip and npm, and install each
+        if: runner.os == 'Windows' && github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(jq -r .superfluid "${{ steps.pack.outputs.root }}/compat.json")"
+          python packaging/build.py dist "$RUNNER_TEMP/packages" --version "$v" --only pypi,npm --targets "${{ matrix.target }}"
+          for kind in pip npm; do
+            packaging/try-install.sh "$kind" "$RUNNER_TEMP/packages" "$v"
+          done
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
