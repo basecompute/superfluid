@@ -410,6 +410,47 @@ fn default_max_tokens_fills_the_remaining_context() {
     assert_eq!(pinned.resolve(Some(9), || 100), 9);
 }
 
+/// As [`post_hdrs`], the body sent a while after the headers and the answer read a while after
+/// that: a client still sending its body when a layer answers on the headers alone.
+fn post_body_late(addr: std::net::SocketAddr, path: &str, body: &str, hdrs: &[(&str, &str)]) -> (u16, String) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    let extra: String = hdrs.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n{extra}content-type: application/json\r\ncontent-length: {}\r\n\r\n",
+        body.len()
+    );
+    let pause = std::time::Duration::from_millis(50);
+    s.write_all(head.as_bytes()).unwrap();
+    std::thread::sleep(pause);
+    s.write_all(body.as_bytes()).unwrap();
+    // Time for a reset the body drew to arrive ahead of the read, as it does on a slow machine.
+    std::thread::sleep(pause);
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8_lossy(&raw).into_owned();
+    let (head, payload) = raw.split_once("\r\n\r\n").expect("split");
+    let status: u16 = head.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, payload.to_string())
+}
+
+#[test]
+fn a_refusal_made_on_the_headers_reaches_a_client_still_sending_its_body() {
+    let body = r#"{"model":"mock-model","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#;
+    // An address past its limit.
+    let limited = spawn_config_stack(openai::ServeConfig { rate_limit_per_minute: 1, ..Default::default() });
+    assert_eq!(http_hdr(limited, "GET", "/v1/models", None).0, 200);
+    let (st, refused) = post_body_late(limited, "/v1/chat/completions", body, &[]);
+    assert_eq!(st, 429, "{refused}");
+    // A key the server does not know.
+    let keyed = spawn_auth_stack("sk-right");
+    let (st, refused) = post_body_late(keyed, "/v1/chat/completions", body, &[("authorization", "Bearer sk-wrong")]);
+    assert_eq!(st, 401, "{refused}");
+    // A key that may not administer the server.
+    let (tenant, _d, _t) = spawn_key_stack(r#"{"keys":[{"name":"t","key":"sk-t"}]}"#, Some("sk-global"), 0);
+    let (st, refused) = post_body_late(tenant, "/v1/models/unload", r#"{"model":"nope"}"#, &[("authorization", "Bearer sk-t")]);
+    assert_eq!(st, 403, "{refused}");
+}
+
 #[test]
 fn rate_limit_throttles_then_exempts_probes_and_metrics() {
     let dir = std::env::temp_dir().join(format!(
