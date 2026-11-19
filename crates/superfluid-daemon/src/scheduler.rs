@@ -908,10 +908,11 @@ fn prefill_rank(class: u8, remaining: u64, tag: u64, starved_ticks: u32, bound: 
 ///
 /// The engine faults a lane whose chunk ends inside a run, so a run the offer would cut
 /// is left to the next chunk, or, when it starts the chunk, taken whole past the offer.
-/// A chunk also carries at most one run: baseRT through 0.5.0 splices one image per
-/// engine chunk and faults a chunk that holds two. An engine with the fix splits such a
-/// chunk at the second run itself, so cutting it here costs it only a tick.
-fn media_prefill_chunk(start: u64, offered: u64, left: u64, runs: &[(u64, u32)]) -> u64 {
+/// With `one_run` a chunk also carries at most one run: baseRT through 0.5.0 splices
+/// one image per engine chunk and faults a chunk that holds two, and a lane decoding
+/// beside the prompt then waits one image's prefill, not several. Without it the chunk
+/// takes every whole run the offer holds (see `media_one_run_a_chunk`).
+fn media_prefill_chunk(start: u64, offered: u64, left: u64, runs: &[(u64, u32)], one_run: bool) -> u64 {
     if offered == 0 {
         return 0;
     }
@@ -924,7 +925,7 @@ fn media_prefill_chunk(start: u64, offered: u64, left: u64, runs: &[(u64, u32)])
         if rs >= end {
             break;
         }
-        if taken {
+        if taken && one_run {
             end = rs;
             break;
         }
@@ -938,6 +939,20 @@ fn media_prefill_chunk(start: u64, offered: u64, left: u64, runs: &[(u64, u32)])
         taken = true;
     }
     end - start
+}
+
+/// Whether a media lane's chunk carries one image at most.
+///
+/// An engine that prefills the images of a chunk in one pass says so
+/// (`serving.media_runs_per_chunk`, baseRT from the release that has it): there a pass
+/// per image only repays the pass's fixed cost for each (8 small images: 1.8-2.3x the
+/// prefill time), so the tick's budget decides how many whole images a chunk holds.
+/// Any other engine gets one: baseRT through 0.5.0 faults a chunk that holds two, and
+/// one that splits the chunk itself gains nothing from a larger one. A lane decoding
+/// beside the prompt keeps it at one as well, whatever the engine: its next tokens
+/// wait out the media lane's chunk, and one image is the shortest chunk there is.
+fn media_one_run_a_chunk(runs_per_chunk: crate::capabilities::Cap<'_>, a_lane_decodes: bool) -> bool {
+    a_lane_decodes || !matches!(runs_per_chunk, crate::capabilities::Cap::Yes)
 }
 
 #[cfg(test)]
@@ -1011,7 +1026,7 @@ mod prefill_order_tests {
 
     #[test]
     fn a_media_chunk_ends_at_an_image_and_carries_one() {
-        use super::media_prefill_chunk as chunk;
+        let chunk = |start, offered, left, runs: &[(u64, u32)]| super::media_prefill_chunk(start, offered, left, runs, true);
         // Text 0..10, an image 10..110, text, an image 120..220, text to 400.
         let runs = [(120, 100), (10, 100)];
         assert_eq!(chunk(0, 512, 400, &runs), 120, "the first image whole, then up to the second");
@@ -1026,6 +1041,37 @@ mod prefill_order_tests {
         let adjacent = [(10, 100), (110, 100)];
         assert_eq!(chunk(0, 4096, 300, &adjacent), 110);
         assert_eq!(chunk(110, 4096, 190, &adjacent), 190);
+    }
+
+    #[test]
+    fn a_media_chunk_carries_every_whole_image_the_offer_holds() {
+        let chunk = |start, offered, left, runs: &[(u64, u32)]| super::media_prefill_chunk(start, offered, left, runs, false);
+        // Text 0..10, an image 10..110, text, an image 120..220, text to 400.
+        let runs = [(120, 100), (10, 100)];
+        assert_eq!(chunk(0, 512, 400, &runs), 400, "both images and the text around them");
+        assert_eq!(chunk(0, 250, 400, &runs), 250, "both images whole, the offer as given");
+        assert_eq!(chunk(0, 200, 400, &runs), 120, "the second image would be cut: it waits for the next chunk");
+        assert_eq!(chunk(120, 64, 280, &runs), 100, "which it starts, so it goes whole past the offer");
+        assert_eq!(chunk(0, 50, 400, &runs), 10, "an image the offer would cut waits for the next chunk");
+        assert_eq!(chunk(10, 50, 390, &runs), 100, "an image that starts the chunk goes whole past the offer");
+        assert_eq!(chunk(10, 0, 390, &runs), 0, "nothing offered, nothing taken");
+        assert_eq!(chunk(0, 512, 400, &[]), 400);
+        // Four images back to back, 100 tokens each from 10.
+        let four = [(10, 100), (110, 100), (210, 100), (310, 100)];
+        assert_eq!(chunk(0, 4096, 420, &four), 420, "all four in one chunk");
+        assert_eq!(chunk(0, 350, 420, &four), 310, "three whole images; the fourth waits");
+        assert_eq!(chunk(310, 350, 110, &four), 110);
+    }
+
+    #[test]
+    fn one_image_a_chunk_unless_the_engine_takes_several_and_no_lane_decodes() {
+        use super::media_one_run_a_chunk as one_run;
+        use crate::capabilities::Cap;
+        assert!(!one_run(Cap::Yes, false), "an engine that prefills a chunk's images in one pass, nothing decoding");
+        assert!(one_run(Cap::Yes, true), "a decoding lane waits one image, whatever the engine");
+        assert!(one_run(Cap::Unknown, false), "baseRT through 0.5.0 faults a chunk that holds two");
+        assert!(one_run(Cap::No("no media tower in bundle"), false));
+        assert!(one_run(Cap::Unknown, true));
     }
 
     #[test]
@@ -3630,9 +3676,10 @@ impl Scheduler {
                 .all(|l| matches!(l.phase, LanePhase::Prefilling));
         let solo_budget = if solo { rate_cap(SOLO_PREFILL_BUDGET) } else { None };
         let open = self.joiner_waits_on_this_tick();
-        // A media lane prefills under the same budget as any other, one image at a
-        // time (media_prefill_chunk): the decoding lanes' rounds follow each image's
-        // prefill instead of the whole prompt's.
+        // A media lane prefills under the same budget as any other, in chunks that
+        // never cut an image (media_prefill_chunk): one image at a time beside a
+        // decoding lane, so its rounds follow each image's prefill instead of the
+        // whole prompt's, and on an engine that takes one image a pass.
         let tick_prefill_budget = if open {
             // One chunk until two ticks have taught the rate; then the slower of the
             // average and the last tick.
@@ -3707,6 +3754,10 @@ impl Scheduler {
             + self.queues.iter().map(|q| q.jobs.len()).sum::<usize>();
         self.plan_prefix_checkpoints();
         let mut budget = PrefillBudget::new(tick_prefill_budget as u64);
+        let media_one_run = media_one_run_a_chunk(
+            self.host.capabilities().read().expect("capability record").get("serving", "media_runs_per_chunk"),
+            self.lanes.iter().any(|l| matches!(l.phase, LanePhase::Decoding) && !l.preempted),
+        );
         let mut retiring: Vec<u64> = Vec::new();
         let starvation = self.starvation_ticks;
         let mut order: Vec<usize> = (0..self.lanes.len()).collect();
@@ -3777,7 +3828,8 @@ impl Scheduler {
                 }
                 if !lane.job.media.is_empty() {
                     let runs: Vec<(u64, u32)> = lane.job.media.iter().map(|&(off, _, n)| (off, n)).collect();
-                    chunk = media_prefill_chunk(lane.prefilled, chunk as u64, total - lane.prefilled, &runs) as u32;
+                    chunk = media_prefill_chunk(lane.prefilled, chunk as u64, total - lane.prefilled, &runs, media_one_run)
+                        as u32;
                 }
                 if chunk > 0 {
                     lane.prefill_starved_ticks = 0;

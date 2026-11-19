@@ -1,6 +1,9 @@
 //! A prompt carrying images prefills one image a tick, in open-tick-sized
 //! chunks that never end inside an image's placeholder run, so the lanes
-//! decoding beside it keep getting rounds between its images.
+//! decoding beside it keep getting rounds between its images. On an engine
+//! that prefills a chunk's images in one pass (`serving.media_runs_per_chunk`)
+//! a prompt with no lane decoding beside it takes every whole image its
+//! chunk's budget holds.
 
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -16,10 +19,16 @@ const TICK: Duration = Duration::from_millis(5);
 
 type TickLog = Arc<Mutex<Vec<TickRecord>>>;
 
+/// The mock's record with the capability an engine advertises when it prefills
+/// the images of a chunk in one pass.
+const TAKES_SEVERAL_RUNS: &str = r#"{"descriptor_version":1,"architecture":"mock","backend":"mock","workload":{"causal_generation":true},"modalities":{"image_encode":true},"serving":{"media_runs_per_chunk":true}}"#;
+
 /// A daemon on a mock that keeps a log of its ticks. `runs_per_chunk` 1 faults a
 /// chunk carrying two images, as baseRT through 0.5.0 does; 0 takes any number.
+/// `advertises` says so in the capability record (only with 0).
 fn daemon(
     runs_per_chunk: u32,
+    advertises: bool,
     tokens_per_image: u32,
     prefill_token_delay: Duration,
     prefill_budget: Option<u32>,
@@ -46,7 +55,11 @@ fn daemon(
     };
     // No recurrent space: image lanes share the engine instead of running alone.
     cfg.spaces.retain(|s| s.kind == superfluid_abi::space_kind::PAGED_TOKEN_KV);
-    let host = EngineHost::spawn(move || (MockEngine::new(cfg), None)).unwrap();
+    let host = EngineHost::spawn(move || {
+        let engine = MockEngine::new(cfg);
+        (if advertises { engine.with_capability_descriptor(TAKES_SEVERAL_RUNS) } else { engine }, None)
+    })
+    .unwrap();
     let mut opts = DaemonOptions { max_lanes: 4, media_dir: Some(dir.join("media")), ..Default::default() };
     if let Some(b) = prefill_budget {
         opts.prefill_budget = b;
@@ -104,16 +117,16 @@ impl Decoding {
     }
 }
 
-/// Every prefill chunk in the log ends outside any image run and carries one
-/// image at most; the lane whose chunks carried images, with its ticks.
-fn image_lane_ticks(log: &TickLog) -> (u64, Vec<TickRecord>) {
+/// Every prefill chunk in the log ends outside any image run and carries
+/// `max_runs` images at most; the lane whose chunks carried images, with its ticks.
+fn image_lane_ticks(log: &TickLog, max_runs: usize) -> (u64, Vec<TickRecord>) {
     let log = log.lock().unwrap();
     for t in log.iter() {
         for p in &t.prefills {
             for &(rs, re) in &p.runs {
                 assert!(p.start <= rs && re <= p.end, "chunk {}..{} cuts the image at {rs}..{re}", p.start, p.end);
             }
-            assert!(p.runs.len() <= 1, "chunk {}..{} carries {} images", p.start, p.end, p.runs.len());
+            assert!(p.runs.len() <= max_runs, "chunk {}..{} carries {} images", p.start, p.end, p.runs.len());
         }
     }
     let lanes: HashSet<u64> =
@@ -126,15 +139,18 @@ fn image_lane_ticks(log: &TickLog) -> (u64, Vec<TickRecord>) {
 
 #[test]
 fn a_multi_image_prompt_prefills_an_image_a_tick_beside_a_decoding_lane() {
-    for runs_per_chunk in [0, 1] {
-        let (d, log) = daemon(runs_per_chunk, 4, Duration::ZERO, None);
+    // Also on an engine that takes several images a pass: a lane is decoding.
+    for (runs_per_chunk, advertises) in [(0, false), (1, false), (0, true)] {
+        let (d, log) = daemon(runs_per_chunk, advertises, 4, Duration::ZERO, None);
         let running = start_decoding(&d);
         let s = image_session(&d, 8, "beside");
-        let out = d.generate(s, 4).unwrap_or_else(|e| panic!("runs_per_chunk {runs_per_chunk}: {e}"));
+        let out = d
+            .generate(s, 4)
+            .unwrap_or_else(|e| panic!("runs_per_chunk {runs_per_chunk}, advertises {advertises}: {e}"));
         assert_eq!(out.tokens_generated, 4);
         running.stop(&d);
 
-        let (image_lane, ticks) = image_lane_ticks(&log);
+        let (image_lane, ticks) = image_lane_ticks(&log, 1);
         let with_image =
             ticks.iter().filter(|t| t.prefills.iter().any(|p| p.lane_tag == image_lane && !p.runs.is_empty()));
         assert_eq!(with_image.count(), 8, "one tick for each image");
@@ -151,25 +167,58 @@ fn a_multi_image_prompt_prefills_an_image_a_tick_beside_a_decoding_lane() {
 fn a_lone_multi_image_prompt_is_served_one_image_a_chunk() {
     // Nothing else runs, so its tick takes the whole lone budget: the images
     // still go one a chunk, which baseRT through 0.5.0 needs.
-    let (d, log) = daemon(1, 4, Duration::ZERO, None);
+    let (d, log) = daemon(1, false, 4, Duration::ZERO, None);
     let s = image_session(&d, 3, "lone");
     let out = d.generate(s, 4).expect("served");
     assert_eq!(out.tokens_generated, 4);
-    let (_, ticks) = image_lane_ticks(&log);
+    let (_, ticks) = image_lane_ticks(&log, 1);
     assert!(ticks.len() >= 3, "{} ticks for three images", ticks.len());
+}
+
+#[test]
+fn a_lone_multi_image_prompt_shares_a_chunk_on_an_engine_that_takes_several() {
+    // The engine prefills a chunk's images in one pass and says so, and nothing
+    // decodes beside the prompt: the lone budget holds all eight images, so they
+    // go in one chunk instead of eight.
+    let (d, log) = daemon(0, true, 4, Duration::ZERO, None);
+    let s = image_session(&d, 8, "together");
+    let out = d.generate(s, 4).expect("served");
+    assert_eq!(out.tokens_generated, 4);
+    let (image_lane, ticks) = image_lane_ticks(&log, 8);
+    let per_chunk: Vec<usize> = ticks
+        .iter()
+        .flat_map(|t| &t.prefills)
+        .filter(|p| p.lane_tag == image_lane && !p.runs.is_empty())
+        .map(|p| p.runs.len())
+        .collect();
+    assert_eq!(per_chunk.iter().sum::<usize>(), 8, "every image prefilled once: {per_chunk:?}");
+    assert_eq!(per_chunk, [8], "all eight images in one chunk: {per_chunk:?}");
+}
+
+#[test]
+fn an_engine_that_does_not_say_so_gets_one_image_a_chunk() {
+    // The same lone prompt on an engine that would take several but does not
+    // advertise it (an older record): one image a chunk, as before.
+    let (d, log) = daemon(0, false, 4, Duration::ZERO, None);
+    let s = image_session(&d, 8, "unsaid");
+    let out = d.generate(s, 4).expect("served");
+    assert_eq!(out.tokens_generated, 4);
+    let (image_lane, ticks) = image_lane_ticks(&log, 1);
+    let chunks = ticks.iter().flat_map(|t| &t.prefills).filter(|p| p.lane_tag == image_lane && !p.runs.is_empty());
+    assert_eq!(chunks.count(), 8, "one chunk for each image");
 }
 
 #[test]
 fn an_image_larger_than_the_tick_budget_prefills_whole() {
     // 200 placeholders against a 64-token budget: the chunk that starts with
     // the image takes it whole, and the plan's budget covers it.
-    let (d, log) = daemon(1, 200, Duration::ZERO, Some(64));
+    let (d, log) = daemon(1, false, 200, Duration::ZERO, Some(64));
     let running = start_decoding(&d);
     let s = image_session(&d, 2, "large");
     let out = d.generate(s, 4).expect("served");
     assert_eq!(out.tokens_generated, 4);
     running.stop(&d);
-    let (image_lane, ticks) = image_lane_ticks(&log);
+    let (image_lane, ticks) = image_lane_ticks(&log, 1);
     let whole: Vec<(u32, u32)> = ticks
         .iter()
         .flat_map(|t| &t.prefills)
@@ -185,7 +234,7 @@ fn a_decoding_lane_waits_one_image_not_the_whole_prompt() {
     // Each prompt token takes 1 ms to prefill: eight 48-token images are
     // ~0.4 s of prefill, which the decoding lane used to wait out at once.
     let per_token = Duration::from_millis(1);
-    let (d, _log) = daemon(0, 48, per_token, None);
+    let (d, _log) = daemon(0, false, 48, per_token, None);
     let running = start_decoding(&d);
     let s = image_session(&d, 8, "stall");
     let t0 = Instant::now();
