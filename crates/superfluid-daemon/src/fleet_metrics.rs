@@ -50,51 +50,50 @@ pub(crate) fn head_count(counts: &Counts, key: &str) -> u64 {
 }
 
 /// A node's counters as the head keeps them: what it counted over every start the head has
-/// seen, which only grows. Each status gives the counters since the node's last start
-/// ([`NodeStatsMsg::run`]); a new start's are added whole, a later status of the same start
-/// adds what it counted since the highest the head had, and one lower than that (read late,
-/// from another of the node's connections) or from a start that has ended adds nothing.
+/// seen, which only grows. Each status gives the counters since one start of the node
+/// ([`NodeStatsMsg::run`]) and adds what it counted beyond the highest the head has of that
+/// start: the first status of a start adds its counters whole, and one lower than the highest
+/// (read late, from another of the node's connections) adds nothing. Each start is kept by
+/// itself, because the order statuses are read in does not say which start is the running one:
+/// the first status read of a start that ended can come after the next start's.
 #[derive(Debug, Default, Clone)]
 pub struct NodeCounts {
-    run: Option<u64>,
-    /// The highest of each counter in the current start.
-    last: Counts,
+    /// The highest of each counter in each start, the start read last at the end.
+    runs: Vec<(u64, Counts)>,
     total: Counts,
-    /// Starts that ended, newest last.
-    ended: Vec<u64>,
 }
 
 impl NodeCounts {
-    /// How many ended starts are remembered, to drop a late status of one.
-    const ENDED: usize = 8;
+    /// How many starts are kept, the ones read longest ago dropped first. A status of a
+    /// dropped start would add its counters whole again, so this is far more than the starts
+    /// a node's connections can still hold a status of.
+    const RUNS: usize = 8;
 
     /// Takes in a status's counters; what they add to the node's totals.
     pub fn absorb(&mut self, stats: &NodeStatsMsg) -> Counts {
-        let mut added = [0; NODE_COUNTERS.len()];
-        if self.ended.contains(&stats.run) {
-            return added;
-        }
-        if self.run != Some(stats.run) {
-            if let Some(ended) = self.run.replace(stats.run) {
-                if self.ended.len() == Self::ENDED {
-                    self.ended.remove(0);
+        let mut high = match self.runs.iter().position(|(run, _)| *run == stats.run) {
+            Some(known) => self.runs.remove(known).1,
+            None => {
+                if self.runs.len() == Self::RUNS {
+                    self.runs.remove(0);
                 }
-                self.ended.push(ended);
+                [0; NODE_COUNTERS.len()]
             }
-            self.last = [0; NODE_COUNTERS.len()];
-        }
+        };
+        let mut added = [0; NODE_COUNTERS.len()];
         for (i, (_, _, read)) in NODE_COUNTERS.iter().enumerate() {
             let now = read(stats);
-            added[i] = now.saturating_sub(self.last[i]);
-            self.last[i] = self.last[i].max(now);
+            added[i] = now.saturating_sub(high[i]);
+            high[i] = high[i].max(now);
             self.total[i] = self.total[i].saturating_add(added[i]);
         }
+        self.runs.push((stats.run, high));
         added
     }
 
     /// The node's totals; `None` until it has reported any (a node released before them).
     pub fn total(&self) -> Option<Counts> {
-        self.run.map(|_| self.total)
+        (!self.runs.is_empty()).then_some(self.total)
     }
 }
 
@@ -214,11 +213,40 @@ mod tests {
         // The node restarted: its counters start from 0 again, and add whole.
         let added = c.absorb(&spec(2, 4, 3));
         assert_eq!(at(&added, "superfluid_spec_proposed_total"), 4);
-        // A status of the start that ended, read after the restart, adds nothing.
-        assert_eq!(c.absorb(&spec(1, 30, 22)), [0; NODE_COUNTERS.len()]);
-        c.absorb(&spec(2, 9, 7));
+        // A status of the start that ended, read after the restart, adds what that start
+        // counted beyond the highest the head had of it, and leaves the running start's alone.
+        let added = c.absorb(&spec(1, 30, 22));
+        assert_eq!((at(&added, "superfluid_spec_proposed_total"), at(&added, "superfluid_spec_accepted_total")), (5, 2));
+        let added = c.absorb(&spec(2, 9, 7));
+        assert_eq!((at(&added, "superfluid_spec_proposed_total"), at(&added, "superfluid_spec_accepted_total")), (5, 4));
         let total = c.total().unwrap();
-        assert_eq!((at(&total, "superfluid_spec_proposed_total"), at(&total, "superfluid_spec_accepted_total")), (34, 27));
+        assert_eq!((at(&total, "superfluid_spec_proposed_total"), at(&total, "superfluid_spec_accepted_total")), (39, 29));
+    }
+
+    #[test]
+    fn the_first_status_of_a_start_that_ended_read_late_does_not_stop_the_running_starts() {
+        let mut c = NodeCounts::default();
+        // The running start is read first; the start before it has a status still unread on
+        // another connection, the first the head reads of it.
+        assert_eq!(at(&c.absorb(&spec(2, 4, 0)), "superfluid_spec_proposed_total"), 4);
+        assert_eq!(at(&c.absorb(&spec(1, 10, 0)), "superfluid_spec_proposed_total"), 10);
+        assert_eq!(at(&c.absorb(&spec(2, 9, 0)), "superfluid_spec_proposed_total"), 5, "the running start keeps counting");
+        assert_eq!(at(&c.absorb(&spec(1, 10, 0)), "superfluid_spec_proposed_total"), 0);
+        assert_eq!(at(&c.total().unwrap(), "superfluid_spec_proposed_total"), 19);
+    }
+
+    #[test]
+    fn a_start_read_again_is_kept_past_the_starts_read_before_it() {
+        let mut c = NodeCounts::default();
+        for run in 1..=NodeCounts::RUNS as u64 {
+            c.absorb(&spec(run, 10, 0));
+        }
+        // The first start reports again, then one more start than is kept: the start read
+        // longest ago is the one dropped, which is no longer the first.
+        c.absorb(&spec(1, 12, 0));
+        c.absorb(&spec(100, 1, 0));
+        assert_eq!(at(&c.absorb(&spec(1, 12, 0)), "superfluid_spec_proposed_total"), 0, "still known");
+        assert_eq!(at(&c.total().unwrap(), "superfluid_spec_proposed_total"), 10 * NodeCounts::RUNS as u64 + 2 + 1);
     }
 
     #[test]
