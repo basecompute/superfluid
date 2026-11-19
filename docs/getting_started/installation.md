@@ -140,7 +140,7 @@ What differs from macOS and Linux:
 | | on Windows |
 |---|---|
 | `superfluid self update` | names the install script, which replaces the release where it is; `self use` and `self install` are not offered, since versions side by side sit behind symbolic links |
-| draining a server | `Ctrl+Break` in its console, where `kill -USR1` is elsewhere; a server with no console (one `superfluid launch` started) cannot be asked |
+| draining a server | `superfluid stop --drain` (with `--pid <pid>` for one you started yourself), or `Ctrl+Break` in its console, where `kill -USR1` is elsewhere |
 | `superfluid stop` | ends the server outright, as `SIGTERM` does elsewhere |
 | `$SUPERFLUID_HOME/runtimes/<id>/current` | a file that holds the default install's name, not a link: an ordinary user may make neither a symbolic link nor a junction every process follows |
 | npm, PyPI, Homebrew | no Windows package yet: the install script or a source build |

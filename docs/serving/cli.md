@@ -89,7 +89,7 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--api-key-file <path>` | | The key, read from this file with the whitespace around it trimmed; a missing or empty file is refused, one group or others can read is warned about. Refused beside `--api-key`. With neither flag, `SUPERFLUID_API_KEY` gives the key. |
 | `--key-policy <file.json>` | none | Per-key class, rate, concurrency and admin rights; turns authentication on. See [Security](../deployment/security.md#key-policy). |
 | `--rate-limit <rpm>` | 0 (off) | Requests per minute per client IP. |
-| `--drain-timeout <sec>` | 60 | On `SIGUSR1` (`Ctrl+Break` on Windows), how long in-flight requests get before exit. |
+| `--drain-timeout <sec>` | 60 | On `SIGUSR1` (`superfluid stop --drain`, or `Ctrl+Break` on Windows), how long in-flight requests get before exit. |
 | `--nonstream-keepalive <sec>` | 0 (off) | Write a space every `<sec>` into a pending non-streaming response. |
 | `--web <127.0.0.1:port>` | off | Loopback browser transport for the [session API](session_api.md), with a minted token. |
 | `--web-origin <url>` | none | An allowed `Origin` for `--web`; repeatable. |
@@ -237,7 +237,15 @@ Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `
 
 ## `superfluid stop`
 
-Sends the server `launch` started SIGTERM, which ends it without draining: in-flight requests are cut. It then waits up to 90 s for the process to exit. For a graceful drain, send `kill -USR1 <pid>` instead (see [Quickstart](../getting_started/quickstart.md#stop)). A server started with `superfluid serve` is not touched.
+```sh
+superfluid stop                       # end the server `launch` started
+superfluid stop --drain               # ask it to drain, and wait for it to exit
+superfluid stop --drain --pid <pid>   # ask a server you started yourself
+```
+
+Sends the server `launch` started SIGTERM, which ends it without draining: in-flight requests are cut. It then waits up to 90 s for the process to exit. A server started with `superfluid serve` is not touched.
+
+With `--drain` the server is asked to drain instead (see [Quickstart](../getting_started/quickstart.md#stop)), and the command waits until it has exited. `--pid` names a server you started yourself: what `kill -USR1 <pid>` does, and the way to ask on Windows, which has no signal to send.
 
 ## `superfluid runtimes`
 

@@ -50,7 +50,7 @@ pub const SERVE: &[Group] = &[
             f("--api-key-file", Some("<path>"), "", "The key, read from this file (whitespace trimmed). With neither flag, $SUPERFLUID_API_KEY gives the key."),
             f("--key-policy", Some("<file.json>"), "", "Per-key classes, rate and concurrency limits; turns authentication on."),
             f("--rate-limit", Some("<rpm>"), "0 (off)", "Requests per minute per client IP."),
-            f("--drain-timeout", Some("<sec>"), "60", "On SIGUSR1 (Ctrl+Break on Windows), stop accepting and give in-flight requests this long."),
+            f("--drain-timeout", Some("<sec>"), "60", "On SIGUSR1 (`superfluid stop --drain`; Ctrl+Break on Windows), stop accepting and give in-flight requests this long."),
             f("--nonstream-keepalive", Some("<sec>"), "0 (off)", "Send 200 at admission and a space every <sec> until a non-streaming body is ready."),
             f("--web", Some("<127.0.0.1:port>"), "off", "The browser-facing API, with a token minted to <sessions>/web-token. Loopback only."),
             f("--web-origin", Some("<url>"), "", "An allowed Origin for --web, repeatable."),

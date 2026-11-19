@@ -618,6 +618,22 @@ pub fn serve_blocking_config(
         let drain_deadline = Arc::new(std::sync::OnceLock::<std::time::Instant>::new());
         let drain_deadline_sig = Arc::clone(&drain_deadline);
         let watchdog_registry = Arc::clone(&shutdown_registry);
+        // Windows has no signal to send a process. A server is asked to drain through an event
+        // named for its process id, which `superfluid stop --drain` sets, and one with a console
+        // also by Ctrl+Break there: the one key a program may take without it also meaning
+        // "stop now", as Ctrl+C does.
+        #[cfg(windows)]
+        let drain_request = crate::sys::DrainRequest::listen().ok().and_then(|request| {
+            let (asked, hears) = tokio::sync::oneshot::channel::<()>();
+            std::thread::Builder::new()
+                .name("drain-request".into())
+                .spawn(move || {
+                    request.wait();
+                    let _ = asked.send(());
+                })
+                .ok()
+                .map(|_| hears)
+        });
         let shutdown = async move {
             #[cfg(unix)]
             let asked = {
@@ -628,17 +644,32 @@ pub fn serve_blocking_config(
                 sig.recv().await;
                 "SIGUSR1"
             };
-            // Windows has no signal to send a process: Ctrl+Break in the server's console is
-            // the one event a program may take without it also meaning "stop now", as Ctrl+C
-            // does. A server with no console (one `launch` started) runs until it is ended.
             #[cfg(windows)]
             let asked = {
-                let mut sig = match tokio::signal::windows::ctrl_break() {
-                    Ok(s) => s,
-                    Err(_) => return std::future::pending::<()>().await,
+                let mut key = tokio::signal::windows::ctrl_break().ok();
+                // Either may be missing (no console; no event): the other still asks.
+                let by_key = async {
+                    let pressed = match key.as_mut() {
+                        Some(k) => k.recv().await.is_some(),
+                        None => false,
+                    };
+                    if !pressed {
+                        std::future::pending::<()>().await;
+                    }
                 };
-                sig.recv().await;
-                "Ctrl+Break"
+                let by_request = async {
+                    let heard = match drain_request {
+                        Some(hears) => hears.await.is_ok(),
+                        None => false,
+                    };
+                    if !heard {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                tokio::select! {
+                    () = by_key => "Ctrl+Break",
+                    () = by_request => "a drain request",
+                }
             };
             let _ = drain_deadline_sig
                 .set(std::time::Instant::now() + std::time::Duration::from_secs(drain));

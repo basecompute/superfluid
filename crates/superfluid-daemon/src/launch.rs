@@ -415,11 +415,16 @@ Examples:
 
 pub const STOP_HELP: &str = "Stop the server `superfluid launch` started.
 
-Usage: superfluid stop
+Usage: superfluid stop [--drain [--pid <pid>]]
 
-  Sends it SIGTERM, which ends it without draining (in-flight requests are cut), and waits
-  up to 90 s for it to exit. For a graceful drain, send `kill -USR1 <pid>` instead. A server
-  you started yourself with `superfluid serve` is yours to stop.
+  Ends it without draining (SIGTERM; in-flight requests are cut) and waits up to 90 s for it
+  to exit. A server you started yourself with `superfluid serve` is yours to stop.
+
+  --drain        Ask it to drain instead: it stops accepting connections, gives in-flight
+                 requests its --drain-timeout, and exits. This waits for that.
+  --pid <pid>    With --drain: the server to ask, one you started yourself. What
+                 `kill -USR1 <pid>` does, and the way to ask on Windows, where a server with
+                 a console also drains on Ctrl+Break.
 ";
 
 #[derive(Debug, Default, PartialEq)]
@@ -878,27 +883,70 @@ fn quote(s: &str) -> String {
     }
 }
 
-pub fn stop(args: &[String]) {
-    if let Some(a) = args.first() {
-        eprintln!("superfluid stop: unexpected argument {a}\n\n{STOP_HELP}");
-        std::process::exit(2);
+/// `stop`'s arguments: whether to drain, and the server to ask when it is not `launch`'s.
+fn parse_stop(args: &[String]) -> Result<(bool, Option<i32>), String> {
+    let (mut drain, mut pid) = (false, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--drain" => drain = true,
+            "--pid" => {
+                let given = it.next().ok_or("--pid needs a process id")?;
+                pid = Some(given.parse::<i32>().ok().filter(|p| *p > 0).ok_or(format!("--pid {given}: not a process id"))?);
+            }
+            _ => return Err(format!("unexpected argument {a}")),
+        }
     }
-    let Some((pid, addr)) = read_server() else {
-        let _ = std::fs::remove_file(server_file());
-        eprintln!("superfluid stop: no server started by `superfluid launch` is running");
-        std::process::exit(1);
+    if pid.is_some() && !drain {
+        return Err("--pid goes with --drain: a server you started yourself is yours to end".into());
+    }
+    Ok((drain, pid))
+}
+
+pub fn stop(args: &[String]) {
+    let (drain, named) = parse_stop(args).unwrap_or_else(|e| {
+        eprintln!("superfluid stop: {e}\n\n{STOP_HELP}");
+        std::process::exit(2);
+    });
+    let (pid, server) = match named {
+        Some(pid) if alive(pid) => (pid, format!("pid {pid}")),
+        Some(pid) => {
+            eprintln!("superfluid stop: no process {pid} is running");
+            std::process::exit(1);
+        }
+        None => match read_server() {
+            Some((pid, addr)) => (pid, format!("on {addr} (pid {pid})")),
+            None => {
+                let _ = std::fs::remove_file(server_file());
+                eprintln!("superfluid stop: no server started by `superfluid launch` is running");
+                std::process::exit(1);
+            }
+        },
     };
-    crate::sys::terminate(pid);
+    // A drain ends within the server's own --drain-timeout, which is not known here.
+    let wait = if drain { Duration::from_secs(60 * 60) } else { Duration::from_secs(90) };
+    if drain {
+        if let Err(e) = crate::sys::ask_to_drain(pid) {
+            eprintln!("superfluid stop: the server {server} could not be asked to drain: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("superfluid stop: asked the server {server} to drain; waiting for it to exit");
+    } else {
+        crate::sys::terminate(pid);
+    }
     let started = Instant::now();
-    while alive(pid) && started.elapsed() < Duration::from_secs(90) {
+    while alive(pid) && started.elapsed() < wait {
         std::thread::sleep(Duration::from_millis(200));
     }
     if alive(pid) {
-        eprintln!("superfluid stop: the server on {addr} (pid {pid}) is still finishing; it got SIGTERM");
+        let got = if drain { "was asked to drain" } else { "got SIGTERM" };
+        eprintln!("superfluid stop: the server {server} is still finishing; it {got}");
         std::process::exit(1);
     }
-    let _ = std::fs::remove_file(server_file());
-    eprintln!("superfluid stop: stopped the server on {addr}");
+    if named.is_none() {
+        let _ = std::fs::remove_file(server_file());
+    }
+    eprintln!("superfluid stop: {} the server {server}", if drain { "drained and stopped" } else { "stopped" });
 }
 
 #[cfg(test)]
@@ -1131,6 +1179,17 @@ mod tests {
         assert!(v["agents"].as_array().unwrap().iter().all(|r| r["installed"] == false));
         let ollama = v["agents"].as_array().unwrap().iter().find(|r| r["name"] == "ollama").unwrap();
         assert_eq!(ollama["aliases"], serde_json::json!([]), "an agent with no alias has an empty list");
+    }
+
+    #[test]
+    fn stop_drains_when_asked_and_takes_a_pid_only_to_drain() {
+        assert_eq!(parse_stop(&[]), Ok((false, None)));
+        assert_eq!(parse_stop(&strings(&["--drain"])), Ok((true, None)));
+        assert_eq!(parse_stop(&strings(&["--pid", "4242", "--drain"])), Ok((true, Some(4242))));
+        assert!(parse_stop(&strings(&["--pid", "4242"])).unwrap_err().contains("--drain"), "ending a named process is not stop's");
+        for bad in [&["--pid"][..], &["--drain", "--pid", "0"], &["--drain", "--pid", "x"], &["now"]] {
+            assert!(parse_stop(&strings(bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -270,6 +270,91 @@ pub fn kill_hard(pid: i32) {
     }
 }
 
+/// Asks the server with this process id to drain: stop accepting, finish what it runs, exit.
+/// SIGUSR1 on Unix. Windows has no signal to send, so a server there waits on an event named
+/// for its process id ([`DrainRequest`]), which this sets; a process that made no such event
+/// is not a server that drains, and is left alone.
+pub fn ask_to_drain(pid: i32) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        // SAFETY: plain POSIX kill; the caller names a server it started or was given.
+        if unsafe { libc::kill(pid, libc::SIGUSR1) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+        for name in drain_event_names(pid as u32) {
+            // SAFETY: `name` is NUL-terminated and outlives the call; a handle opened here is
+            // closed here.
+            unsafe {
+                let h = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+                if h.is_null() {
+                    continue;
+                }
+                let set = SetEvent(h) != 0;
+                let err = std::io::Error::last_os_error();
+                CloseHandle(h);
+                return if set { Ok(()) } else { Err(err) };
+            }
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no superfluid server that drains has that process id"))
+    }
+}
+
+/// The names a server's drain event may have, as wide strings: one every session of this user
+/// finds (a server started over ssh, asked from the desktop), then one this session alone has,
+/// for where the first may not be made.
+#[cfg(windows)]
+fn drain_event_names(pid: u32) -> [Vec<u16>; 2] {
+    let wide = |space: &str| format!("{space}\\superfluid-drain-{pid}\0").encode_utf16().collect::<Vec<u16>>();
+    [wide("Global"), wide("Local")]
+}
+
+/// A Windows server's standing request to be asked to drain: an event named for this process,
+/// which [`ask_to_drain`] sets from another.
+#[cfg(windows)]
+pub struct DrainRequest(windows_sys::Win32::Foundation::HANDLE);
+
+// SAFETY: an event handle is used from any thread.
+#[cfg(windows)]
+unsafe impl Send for DrainRequest {}
+
+#[cfg(windows)]
+impl DrainRequest {
+    /// Makes the event. It lasts as long as this process.
+    pub fn listen() -> std::io::Result<DrainRequest> {
+        Self::listen_as(std::process::id())
+    }
+
+    fn listen_as(pid: u32) -> std::io::Result<DrainRequest> {
+        use windows_sys::Win32::System::Threading::CreateEventW;
+        let mut last = std::io::Error::other("no event name");
+        for name in drain_event_names(pid) {
+            // SAFETY: `name` is NUL-terminated and outlives the call; default security gives the
+            // event to this user. Manual reset: once asked, it stays asked.
+            let h = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
+            if !h.is_null() {
+                return Ok(DrainRequest(h));
+            }
+            last = std::io::Error::last_os_error();
+        }
+        Err(last)
+    }
+
+    /// Returns once another process has asked.
+    pub fn wait(&self) {
+        use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+        // SAFETY: the handle is this value's, open for as long as it lives.
+        unsafe {
+            WaitForSingleObject(self.0, INFINITE);
+        }
+    }
+}
+
 /// Has `cmd` start in a session of its own, so it outlives this process and its terminal.
 pub fn detached(cmd: &mut Command) -> &mut Command {
     #[cfg(unix)]
@@ -445,6 +530,24 @@ mod tests {
         assert!(lock_exclusive(&second, true).unwrap());
         assert!(alive(std::process::id() as i32) && !alive(0));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Under a process id no process has: this test binary may hold servers of its own, which
+    // an event named for it would drain.
+    #[cfg(windows)]
+    #[test]
+    fn a_server_asked_to_drain_hears_it_and_a_process_that_never_listened_is_left_alone() {
+        let nobody = 0x7fff_fff0 - (std::process::id() % 1024);
+        assert_eq!(ask_to_drain(nobody as i32).unwrap_err().kind(), std::io::ErrorKind::NotFound, "nothing listens yet");
+        let request = DrainRequest::listen_as(nobody).unwrap();
+        let (heard, hears) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            request.wait();
+            let _ = heard.send(());
+        });
+        assert!(hears.recv_timeout(std::time::Duration::from_millis(100)).is_err(), "not asked yet");
+        ask_to_drain(nobody as i32).unwrap();
+        hears.recv_timeout(std::time::Duration::from_secs(10)).expect("the request was heard");
     }
 
     #[test]
