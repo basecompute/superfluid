@@ -814,7 +814,8 @@ mod tests {
         }
         assert_eq!(resolve("dflash:/x.base", &t).unwrap().as_deref(), Some("dflash:/x.base"));
         assert_eq!(resolve("prompt-lookup", &t).unwrap().as_deref(), Some("prompt-lookup"));
-        let home = std::env::var("HOME").unwrap();
+        // Where `~` leads, as the code under test finds it: Windows has no HOME outside a POSIX shell.
+        let home = std::env::home_dir().unwrap().display().to_string();
         assert_eq!(resolve("dflash:~/d/x.base", &t).unwrap().unwrap(), format!("dflash:{home}/d/x.base"));
         assert_eq!(resolve("draft-model:~", &t).unwrap().unwrap(), format!("draft-model:{home}"));
         assert_eq!(resolve("dspark:~user/x.base", &t).unwrap().as_deref(), Some("dspark:~user/x.base"));

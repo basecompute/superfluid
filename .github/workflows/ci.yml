@@ -42,10 +42,11 @@ jobs:
       - name: cargo test
         run: cargo test
 
-  # Windows builds the daemon with llama.cpp linked and without what has no
-  # Windows build yet: baseRT's engine and the terminal monitor (the default
-  # features), and MLX. The tests that stand in for a worker with a shell
-  # script, or for a link with a symlink, are Unix-only and compile to nothing.
+  # Windows builds the daemon with llama.cpp and the terminal monitor linked,
+  # the launcher its release puts on PATH (`shim`), and without what has no
+  # Windows build yet: baseRT's engine (the default feature) and MLX. The tests
+  # that stand in for a worker with a shell script, or for a link with a
+  # symlink, are Unix-only and compile to nothing.
   windows:
     name: build, clippy, test (windows-2025)
     runs-on: windows-2025
