@@ -246,21 +246,23 @@ fn a_server_that_is_not_a_fleet_head_has_no_nodes() {
 #[test]
 fn removing_a_joined_node_moves_its_session_and_refuses_the_node_when_it_dials_again() {
     let (fleet, join_addr) = head(Vec::new(), PlacementPolicy::RoundRobin);
-    // Steps slow enough that the generation is still running when its node is removed.
-    let removed = join(&join_addr, "box-a", 1, Duration::from_millis(40));
+    // A step decodes up to a few hundred tokens, so it takes slow steps and a generation many
+    // of them long (over a second of them here) to be still running when its node is removed.
+    const NEW_TOKENS: usize = 3000;
+    let removed = join(&join_addr, "box-a", 1, Duration::from_millis(100));
     wait_for("box-a joined", || listed(&fleet) == ["box-a"]);
     join(&join_addr, "box-b", 1, Duration::from_millis(5));
     wait_for("box-b joined", || listed(&fleet).len() == 2);
 
     let prompt: Vec<u32> = (200..232).collect();
-    fleet.place(1, GenParams::default(), 0, "chatml", "mock", &prompt, 60).expect("placed");
+    fleet.place(1, GenParams::default(), 0, "chatml", "mock", &prompt, NEW_TOKENS as u64).expect("placed");
     assert_eq!(fleet.node_of(1).as_deref(), Some("box-a"));
     assert_eq!(fleet.nodes().iter().find(|n| n.status.name == "box-a").map(|n| n.sessions), Some(1));
     let got = Arc::new(AtomicUsize::new(0));
     let run = {
         let (fleet, got) = (Arc::clone(&fleet), Arc::clone(&got));
         std::thread::spawn(move || {
-            fleet.generate_streaming(1, 60, 60_000, |b| {
+            fleet.generate_streaming(1, NEW_TOKENS as u64, 60_000, |b| {
                 got.fetch_add(b.len(), Ordering::SeqCst);
             })
         })
@@ -270,7 +272,7 @@ fn removing_a_joined_node_moves_its_session_and_refuses_the_node_when_it_dials_a
     assert_eq!(entry.status.name, "box-a");
     let generated = run.join().unwrap().expect("the generation finished on another node");
     assert!(!generated.expired);
-    assert_eq!(got.load(Ordering::SeqCst), 60, "every token, once");
+    assert_eq!(got.load(Ordering::SeqCst), NEW_TOKENS, "every token, once");
     assert_eq!(fleet.node_of(1).as_deref(), Some("box-b"), "the session moved");
     fleet.finish(1);
 
@@ -366,6 +368,32 @@ impl Drop for Child {
 }
 
 #[test]
+fn a_node_join_process_serves_each_model_it_is_given_and_dials_for_each_ones_lanes() {
+    let fleet = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, LEASE, 90, 0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let join_addr = listener.local_addr().unwrap().to_string();
+    let f = Arc::clone(&fleet);
+    let models = HeadModels::fixed(Arc::clone(&f), vec!["mock-a".into(), "mock-b".into()]);
+    std::thread::spawn(move || accept_nodes(listener, f, Vec::new(), models));
+    let home = dir("join-several-home");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_superfluid"))
+        .args(["node", "join", &join_addr, "--runtime", "mock", "--model", "mock-a", "--model", "mock-b"])
+        .args(["--identity", "proc-two", "--max-batch", "2"])
+        .env("HOME", &home)
+        .env("SUPERFLUID_HOME", home.join(".superfluid"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn superfluid node join");
+    let _child = Child(child);
+    wait_for("the node joined on a lane for each of each model's", || fleet.status().first().is_some_and(|n| n.up && n.lanes == 4));
+    assert_eq!(fleet.status()[0].models, ["mock-a", "mock-b"]);
+    assert_eq!(fleet.serving("mock-b").0, 1);
+    let state = home.join(".superfluid/fleet/nodes/proc-two");
+    assert!(state.join("wal.log").exists(), "the first model keeps the node's session store");
+    assert!(state.join("models/mock-b/wal.log").exists(), "the second its own");
+}
+
+#[test]
 fn a_node_join_process_the_head_removes_exits_saying_so() {
     use std::io::Read;
     let (fleet, join_addr) = {
@@ -382,6 +410,7 @@ fn a_node_join_process_the_head_removes_exits_saying_so() {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_superfluid"))
         .args(["node", "join", &join_addr, "--model", "mock", "--runtime", "mock", "--identity", "proc-join", "--max-batch", "2"])
         .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .env("SUPERFLUID_HOME", home.join(".superfluid"))
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -419,6 +448,7 @@ fn the_fleet_command_lists_a_heads_nodes_and_removes_one() {
             .arg("fleet")
             .args(args)
             .env("HOME", &home)
+        .env("USERPROFILE", &home)
             .env("SUPERFLUID_HOME", home.join(".superfluid"))
             .env_remove("SUPERFLUID_API_KEY")
             .output()
@@ -517,6 +547,7 @@ fn follower(head: &str, identity: &str, home: &std::path::Path) -> Child {
         .args(["node", "join", head, "--token", std::str::from_utf8(TOKEN).unwrap(), "--identity", identity])
         .args(["--runtime", "mock", "--max-batch", "1"])
         .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("SUPERFLUID_HOME", home.join(".superfluid"))
         .env_remove("RUST_LOG")
         .stdout(std::process::Stdio::null())

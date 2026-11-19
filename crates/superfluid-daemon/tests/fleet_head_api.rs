@@ -12,6 +12,7 @@ use superfluid_daemon::nodeagent::NodeAgent;
 use superfluid_daemon::registry::ModelRegistry;
 use superfluid_daemon::{openai, Daemon, DaemonOptions, EngineHost, MockCodec, SessionStore};
 use superfluid_engine::{EngineConfig, MockEngine};
+use superfluid_proto::handshake::BATCH_INVARIANT;
 use superfluid_proto::linkf::Lease;
 use serde_json::Value;
 
@@ -33,11 +34,15 @@ fn engine() -> EngineHost {
 }
 
 fn serve(daemon: Daemon) -> String {
-    let registry = Arc::new(ModelRegistry::single("mock-model", Arc::new(daemon)));
+    serve_with(Arc::new(daemon), openai::ServeConfig::default())
+}
+
+fn serve_with(daemon: Arc<Daemon>, cfg: openai::ServeConfig) -> String {
+    let registry = Arc::new(ModelRegistry::single("mock-model", daemon));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
-        let _ = openai::serve_blocking_config(listener, registry, openai::ServeConfig::default());
+        let _ = openai::serve_blocking_config(listener, registry, cfg);
     });
     addr
 }
@@ -47,10 +52,14 @@ fn local() -> String {
 }
 
 fn node() -> String {
+    node_serving(Daemon::new(store("node"), engine(), Box::new(MockCodec), 8))
+}
+
+fn node_serving(daemon: Daemon) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     std::thread::spawn(move || {
-        let daemon = Arc::new(Daemon::new(store("node"), engine(), Box::new(MockCodec), 8));
+        let daemon = Arc::new(daemon);
         let node = NodeAgent::new(daemon, "api-node", "mock-model").with_max_lanes(8);
         for sock in listener.incoming() {
             let Ok(sock) = sock else { break };
@@ -65,12 +74,15 @@ fn node() -> String {
 }
 
 fn head(node: String) -> String {
+    serve(head_daemon(node))
+}
+
+fn head_daemon(node: String) -> Daemon {
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
     let fleet = Arc::new(FleetManager::new(vec![NodeSpec { addr: node, auth: Vec::new() }], PlacementPolicy::LeastLoaded, lease));
     let _ = fleet.probe();
-    let daemon = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), DaemonOptions::default())
-        .expect("a daemon over the fleet");
-    serve(daemon)
+    Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), DaemonOptions::default())
+        .expect("a daemon over the fleet")
 }
 
 fn agent() -> ureq::Agent {
@@ -818,7 +830,7 @@ fn a_placed_completion_whose_connection_is_taken_past_its_deadline_expires_unsta
     let fleet = Arc::new(FleetManager::with_options(vec![node], PlacementPolicy::LeastLoaded, lease, 90, 1));
     let _ = fleet.probe();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
-    let placed = fleet.place_by(1, GenParams::default(), 0, "raw", "mock-model", &[1, 2, 3], 8, Some(deadline)).unwrap();
+    let placed = fleet.place_by(1, GenParams::default(), 0, 0, "raw", "mock-model", &[1, 2, 3], 8, Some(deadline)).unwrap();
     assert!(placed.is_some(), "placed before its deadline");
     fleet.place(2, GenParams::default(), 0, "raw", "mock-model", &[4, 5, 6], 20_000).unwrap();
     let long_done = Arc::new(AtomicBool::new(false));
@@ -847,41 +859,132 @@ fn a_placed_completion_whose_connection_is_taken_past_its_deadline_expires_unsta
     fleet.finish(2);
 }
 
-#[test]
-fn a_fleet_head_refuses_a_batch_invariant_lane_its_nodes_cannot_keep() {
-    // Nodes batch every generation with the others they run, and Link F has no way to ask one
-    // not to: a head that took the request would answer it from a shared batch.
-    use superfluid_daemon::{qos, GenParams};
-    let fleet = fleet_of(sharing_node(Arc::new(Bytes), 2, std::time::Duration::ZERO));
-    let head = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet, "mock-model".into(), DaemonOptions::default()).unwrap();
-    let s = head.create(None, GenParams::default()).unwrap();
-    match head.set_qos(s, qos::FOREGROUND_AGENT, true) {
-        Err(superfluid_daemon::DaemonError::Unsupported(r)) => {
-            assert_eq!(r.code, "unsupported_on_fleet");
-            assert!(r.message.contains("batch-invariant"), "{}", r.message);
-        }
-        other => panic!("a batch-invariant lane was taken on a fleet head: {:?}", other.map(|_| ()).map_err(|e| e.to_string())),
-    }
-    head.set_qos(s, qos::FOREGROUND_AGENT, false).expect("any other QoS is taken");
-
-    // A session made batch-invariant before its store was served over the fleet is not run.
-    let mut kept = store("kept");
-    let old = kept.create(None, GenParams::default()).unwrap();
-    kept.append(old, None, vec![1, 2, 3]).unwrap();
-    kept.set_qos(old, qos::FOREGROUND_AGENT, true).unwrap();
-    let over = Daemon::over_fleet(kept, Box::new(MockChatCodec), fleet_of(sharing_node(Arc::new(Bytes), 2, std::time::Duration::ZERO)), "mock-model".into(), DaemonOptions::default()).unwrap();
-    let refused = over.generate(old, 4).map(|o| o.tokens_generated).map_err(|e| e.to_string());
-    assert!(refused.as_ref().is_err_and(|e| e.contains("batch-invariant")), "{refused:?}");
-
-    // Over HTTP, a key whose policy grants it is answered 400, streamed or not.
-    let keys = superfluid_daemon::keypolicy::KeyTable::parse(r#"{"keys":[{"key":"sk-det","name":"det","batch_invariant":true}]}"#, |_| None).unwrap();
-    let registry = Arc::new(ModelRegistry::single("mock-model", Arc::new(head)));
+/// A node on the mock engine with `lanes` lanes and `class_lanes` caps, ticking every `tick`:
+/// its address, and its scheduler's counters. An `old` node does not state what a node from
+/// before batch-invariant lanes does not.
+fn qos_node(
+    identity: &'static str,
+    lanes: u32,
+    class_lanes: [usize; 4],
+    tick: std::time::Duration,
+    old: bool,
+) -> (String, Arc<superfluid_daemon::scheduler::SchedStats>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
+    let config = EngineConfig { vocab: 512, tick_delay: tick, ..EngineConfig::default() };
+    let host = EngineHost::spawn(move || (MockEngine::new(config), None)).unwrap();
+    let opts = DaemonOptions { max_lanes: lanes as usize, class_lanes, ..DaemonOptions::default() };
+    let daemon = Arc::new(Daemon::with_options(store("node"), host, Box::new(MockCodec), opts).unwrap());
+    let stats = daemon.sched_stats();
+    let mut node = NodeAgent::new(daemon, identity, "mock-model").with_max_lanes(lanes);
+    if old {
+        node = node.without_feature(BATCH_INVARIANT);
+    }
     std::thread::spawn(move || {
-        let _ = openai::serve_blocking_config(listener, registry, openai::ServeConfig { keys: Some(Arc::new(keys)), ..Default::default() });
+        for sock in listener.incoming() {
+            let Ok(sock) = sock else { break };
+            let ep = superfluid_linkf::Endpoint::from_tcp(sock).unwrap();
+            let mut conn = node.connection();
+            std::thread::spawn(move || {
+                let _ = conn.serve(ep);
+            });
+        }
     });
-    for (invariant, stream) in [(true, false), (true, true), (false, false)] {
+    (addr, stats)
+}
+
+/// The options of a generation that asks only to run alone.
+fn alone() -> superfluid_proto::linkf::GenerateOptsMsg {
+    superfluid_proto::linkf::GenerateOptsMsg {
+        session_id: 0,
+        generation_id: 0,
+        presence_penalty_bits: 0,
+        frequency_penalty_bits: 0,
+        repeat_penalty_bits: superfluid_daemon::scheduler::GenExtras::default().repeat_penalty.to_bits(),
+        ignore_eos: false,
+        top_logprobs: None,
+        grammar: None,
+        logit_bias: None,
+        media: Vec::new(),
+        batch_invariant: true,
+    }
+}
+
+#[test]
+fn a_batch_invariant_generation_runs_alone_on_its_node() {
+    // Two lanes, and a generation asked to run alone: one beside it waits until it ends, as on a
+    // single server.
+    let (addr, _) = qos_node("alone", 2, [0; 4], std::time::Duration::from_millis(20), false);
+    let fleet = fleet_of(addr);
+    let agent = superfluid_daemon::qos::FOREGROUND_AGENT;
+    fleet.place_by(1, superfluid_daemon::GenParams::default(), agent, BATCH_INVARIANT, "raw", "mock-model", &[1, 2, 3], 600, None).unwrap();
+    fleet.place(2, superfluid_daemon::GenParams::default(), agent, "raw", "mock-model", &[4, 5, 6], 48).unwrap();
+    let (started, first) = std::sync::mpsc::channel();
+    let alone_run = {
+        let fleet = Arc::clone(&fleet);
+        std::thread::spawn(move || {
+            let opts = alone();
+            let ask = superfluid_daemon::fleet::Ask { opts: &opts, blobs: &[] };
+            fleet
+                .generate_streaming_by(1, 600, 60_000, None, Some(&ask), &mut |_| {}, |_| {
+                    let _ = started.send(());
+                })
+                .unwrap();
+            std::time::Instant::now()
+        })
+    };
+    first.recv_timeout(std::time::Duration::from_secs(20)).expect("the batch-invariant generation runs");
+    let mut beside = None;
+    fleet
+        .generate_streaming(2, 8, 60_000, |_| {
+            beside.get_or_insert_with(std::time::Instant::now);
+        })
+        .unwrap();
+    let ended = alone_run.join().unwrap();
+    assert!(beside.expect("tokens") >= ended, "a generation ran beside one that asked to run alone");
+}
+
+#[test]
+fn a_batch_invariant_lane_goes_to_a_node_that_can_run_it_alone() {
+    // An old node and a new one: round robin takes them in turn, but a batch-invariant session
+    // only ever lands on the new one.
+    use superfluid_daemon::{qos, GenParams};
+    let (old, _) = qos_node("old", 2, [0; 4], std::time::Duration::ZERO, true);
+    let (new, _) = qos_node("new", 2, [0; 4], std::time::Duration::ZERO, false);
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let specs = vec![NodeSpec { addr: old, auth: Vec::new() }, NodeSpec { addr: new, auth: Vec::new() }];
+    let fleet = FleetManager::new(specs, PlacementPolicy::RoundRobin, lease);
+    let _ = fleet.probe();
+    for s in 1..=4u64 {
+        fleet.place_by(s, GenParams::default(), qos::FOREGROUND_AGENT, BATCH_INVARIANT, "raw", "mock-model", &[1, 2, 3], 8, None).unwrap();
+        assert_eq!(fleet.node_of(s).as_deref(), Some("new"), "session {s}");
+        fleet.finish(s);
+    }
+    let mut plain: Vec<_> = (5..=8u64)
+        .map(|s| {
+            fleet.place(s, GenParams::default(), qos::FOREGROUND_AGENT, "raw", "mock-model", &[1, 2, 3], 8).unwrap();
+            fleet.node_of(s).unwrap()
+        })
+        .collect();
+    plain.sort();
+    plain.dedup();
+    assert_eq!(plain, ["new", "old"], "any other session goes to either");
+}
+
+#[test]
+fn a_fleet_head_runs_a_batch_invariant_lane_on_a_node_that_can_and_names_one_that_cannot() {
+    use superfluid_daemon::{qos, wal::role, GenParams};
+    let serve_keyed = |daemon: Daemon| {
+        let registry = Arc::new(ModelRegistry::single("mock-model", Arc::new(daemon)));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let keys = superfluid_daemon::keypolicy::KeyTable::parse(r#"{"keys":[{"key":"sk-det","name":"det","batch_invariant":true}]}"#, |_| None).unwrap();
+        std::thread::spawn(move || {
+            let _ = openai::serve_blocking_config(listener, registry, openai::ServeConfig { keys: Some(Arc::new(keys)), ..Default::default() });
+        });
+        addr
+    };
+    let ask = |addr: &str, invariant: bool, stream: bool| {
         let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4, "stream": stream});
         let mut req = agent()
             .post(&format!("http://{addr}/v1/chat/completions"))
@@ -891,12 +994,248 @@ fn a_fleet_head_refuses_a_batch_invariant_lane_its_nodes_cannot_keep() {
             req = req.header("x-superfluid-batch-invariant", "true");
         }
         let mut resp = req.send(body.to_string().as_bytes()).unwrap();
-        let (status, said) = (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap());
+        (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap())
+    };
+
+    // A node of this release takes the lane, by SetQos and over HTTP, streamed or not.
+    let (new, _) = qos_node("new", 2, [0; 4], std::time::Duration::ZERO, false);
+    let head = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet_of(new), "mock-model".into(), DaemonOptions::default()).unwrap();
+    let s = head.create(None, GenParams::default()).unwrap();
+    head.set_qos(s, qos::FOREGROUND_AGENT, true).expect("a node that can run it alone is up");
+    head.append_message(s, role::USER, "hi".into()).unwrap();
+    assert!(head.generate(s, 4).unwrap().tokens_generated > 0);
+    let addr = serve_keyed(head);
+    for stream in [false, true] {
+        let (status, said) = ask(&addr, true, stream);
+        assert_eq!(status, 200, "stream={stream}: {said}");
+    }
+
+    // A node from before is named in the refusal, which comes before a stream starts.
+    let (old, _) = qos_node("box-old", 2, [0; 4], std::time::Duration::ZERO, true);
+    let head = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), fleet_of(old.clone()), "mock-model".into(), DaemonOptions::default()).unwrap();
+    let s = head.create(None, GenParams::default()).unwrap();
+    match head.set_qos(s, qos::FOREGROUND_AGENT, true) {
+        Err(superfluid_daemon::DaemonError::Unsupported(r)) => {
+            assert_eq!(r.code, "unsupported_on_fleet");
+            assert!(r.message.contains("box-old") && r.message.contains("batch-invariant"), "{}", r.message);
+        }
+        other => panic!("a node that cannot run alone was given a batch-invariant lane: {:?}", other.map(|_| ()).map_err(|e| e.to_string())),
+    }
+    head.set_qos(s, qos::FOREGROUND_AGENT, false).expect("any other QoS is taken");
+
+    // A session the store already holds as batch-invariant is refused there too.
+    let mut kept = store("kept");
+    let held = kept.create(None, GenParams::default()).unwrap();
+    kept.append(held, None, vec![1, 2, 3]).unwrap();
+    kept.set_qos(held, qos::FOREGROUND_AGENT, true).unwrap();
+    let over = Daemon::over_fleet(kept, Box::new(MockChatCodec), fleet_of(old), "mock-model".into(), DaemonOptions::default()).unwrap();
+    let refused = over.generate(held, 4).map(|o| o.tokens_generated).map_err(|e| e.to_string());
+    assert!(refused.as_ref().is_err_and(|e| e.contains("box-old") && e.contains("batch-invariant")), "{refused:?}");
+
+    let addr = serve_keyed(head);
+    for (invariant, stream) in [(true, false), (true, true), (false, false)] {
+        let (status, said) = ask(&addr, invariant, stream);
         if invariant {
             assert_eq!(status, 400, "stream={stream}: {said}");
-            assert!(said.contains("unsupported_on_fleet") && said.contains("batch-invariant"), "stream={stream}: {said}");
+            assert!(said.contains("unsupported_on_fleet") && said.contains("box-old"), "stream={stream}: {said}");
         } else {
             assert_eq!(status, 200, "{said}");
         }
     }
+}
+
+#[test]
+fn a_fleet_head_sends_each_request_in_the_class_it_resolves() {
+    // Each class may hold one of the node's two lanes: a request sent while another of its class
+    // runs waits in that class's queue on the node, which says what class the head sent. The
+    // second takes a few of the node's ticks to reach it, so the first is long, to be running
+    // still, and the second is sent once the first holds its lane.
+    use superfluid_daemon::qos;
+    let (addr, stats) = qos_node("classes", 2, [1, 1, 1, 1], std::time::Duration::from_millis(20), false);
+    let fleet = fleet_of(addr);
+    let until = |what: &str, met: &dyn Fn() -> bool| {
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !met() {
+            assert!(std::time::Instant::now() < by, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    let queued_in = |head: &str, headers: &[(&'static str, &'static str)]| -> usize {
+        let ask = |i: usize, max_tokens: u32| {
+            let (head, headers) = (head.to_string(), headers.to_vec());
+            std::thread::spawn(move || {
+                let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": format!("hello {i}")}], "max_tokens": max_tokens, "ignore_eos": true});
+                let mut req = agent().post(&format!("http://{head}/v1/chat/completions")).header("content-type", "application/json");
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
+                let mut resp = req.send(body.to_string().as_bytes()).unwrap();
+                (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap())
+            })
+        };
+        let queued = || (0..4).find(|&c| stats.queue_depth[c].load(Ordering::Relaxed) > 0);
+        until("the node is idle", &|| stats.lanes_active.load(Ordering::Relaxed) == 0);
+        let first = ask(0, 6000);
+        until("the first request took a lane on the node", &|| stats.lanes_active.load(Ordering::Relaxed) == 1);
+        let second = ask(1, 8);
+        until("the second request waited in a class queue on the node", &|| queued().is_some());
+        let class = queued().expect("the first request is running still");
+        for run in [first, second] {
+            let (status, said) = run.join().unwrap();
+            assert_eq!(status, 200, "{said}");
+        }
+        class
+    };
+    let serving = |cfg: openai::ServeConfig| {
+        let daemon = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), Arc::clone(&fleet), "mock-model".into(), DaemonOptions::default()).unwrap();
+        let registry = Arc::new(ModelRegistry::single("mock-model", Arc::new(daemon)));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let _ = openai::serve_blocking_config(listener, registry, cfg);
+        });
+        addr
+    };
+
+    // --http-default-qos background, and the header over it.
+    let background = openai::RequestQos { class: qos::BACKGROUND_AGENT, batch_invariant: false };
+    let head = serving(openai::ServeConfig { qos: openai::HttpQosPolicy { default: background, ..Default::default() }, ..Default::default() });
+    assert_eq!(queued_in(&head, &[]), qos::BACKGROUND_AGENT as usize, "the default class");
+    assert_eq!(queued_in(&head, &[("x-superfluid-qos", "interactive")]), qos::INTERACTIVE_CHAT as usize, "the header's class");
+
+    // --no-http-qos-header: the default, whatever the header says.
+    let head = serving(openai::ServeConfig {
+        qos: openai::HttpQosPolicy { default: background, honor_headers: false, ..Default::default() },
+        ..Default::default()
+    });
+    assert_eq!(queued_in(&head, &[("x-superfluid-qos", "interactive")]), qos::BACKGROUND_AGENT as usize, "the header is ignored");
+
+    // A key policy's class.
+    let keys = superfluid_daemon::keypolicy::KeyTable::parse(r#"{"keys":[{"key":"sk-tab","name":"tab","class":"completion"}]}"#, |_| None).unwrap();
+    let head = serving(openai::ServeConfig { keys: Some(Arc::new(keys)), ..Default::default() });
+    assert_eq!(queued_in(&head, &[("authorization", "Bearer sk-tab")]), qos::INLINE_COMPLETION as usize, "the key's class");
+}
+
+/// The operator's sampling defaults (`--repeat-penalty`, `--presence-penalty`,
+/// `--spec-max-temperature`) are the head's: it resolves each request before a node sees it, and
+/// a node applies only what the request carries, so a request's own value still wins. The head
+/// takes from the node's capability record what the node's own server would from its engine:
+/// whether the engine applies penalties itself (the presence default) and whether it speculates
+/// (the temperature cap), and answers as one machine would.
+#[test]
+fn the_head_resolves_the_operators_sampling_defaults_as_its_nodes_own_server_would() {
+    let op = openai::SamplingOverrides {
+        repeat_penalty: Some(1.3),
+        presence_penalty: Some(0.5),
+        spec_max_temperature: Some(0.2),
+        ..Default::default()
+    };
+    for (speculates, penalties) in [(true, true), (false, false), (true, false), (false, true)] {
+        let record = if penalties {
+            r#"{"descriptor_version":1,"architecture":"mock","workload":{"causal_generation":true},"sampling":{"engine_penalties":true}}"#
+        } else {
+            r#"{"descriptor_version":1,"architecture":"mock","workload":{"causal_generation":true}}"#
+        };
+        let engine = || {
+            EngineHost::spawn(move || (MockEngine::new(EngineConfig { vocab: 512, ..EngineConfig::default() }).with_capability_descriptor(record), None))
+                .unwrap()
+        };
+        let opts = || DaemonOptions { speculate: speculates.then(|| "prompt-lookup".to_string()), ..DaemonOptions::default() };
+        let local = Arc::new(Daemon::with_options(store("op-local"), engine(), Box::new(MockChatCodec), opts()).unwrap());
+        let node = Daemon::with_options(store("op-node"), engine(), Box::new(MockCodec), opts()).unwrap();
+        assert_eq!(node.speculation().is_some(), speculates);
+        let head = Arc::new(head_daemon(node_serving(node)));
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while head.capabilities().record().and_then(|r| r.get("architecture")).is_none() {
+            assert!(std::time::Instant::now() < by, "the head learned its node's capability record");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let (here, there) = (op.for_daemon(&local), op.for_daemon(&head));
+        assert_eq!(there, here, "speculates={speculates} penalties={penalties}: resolved as one machine would");
+        assert_eq!((there.spec_max_temperature.is_some(), there.presence_penalty.is_some()), (speculates, penalties));
+        assert_eq!(there.repeat_penalty, Some(1.3));
+        if !(speculates && penalties) {
+            continue;
+        }
+        let cfg = || openai::ServeConfig { sampling: op, ..Default::default() };
+        let (local, head) = (serve_with(local, cfg()), serve_with(head, cfg()));
+        let props = |addr: &str| {
+            let mut resp = agent().get(&format!("http://{addr}/props")).call().unwrap();
+            json(&resp.body_mut().read_to_string().unwrap())["default_generation_settings"].clone()
+        };
+        let (l, h) = (props(&local), props(&head));
+        assert_eq!((h["repeat_penalty"].as_f64(), h["presence_penalty"].as_f64()), (Some(1.3f32 as f64), Some(0.5)), "{h}");
+        assert_eq!((&h["repeat_penalty"], &h["presence_penalty"]), (&l["repeat_penalty"], &l["presence_penalty"]));
+        // No temperature or penalty named: the defaults apply, through the head as on one machine;
+        // one named wins over them. (What each says of its speculation is the engine's own state.)
+        for extra in [serde_json::json!({}), serde_json::json!({"repeat_penalty": 1.0, "presence_penalty": 0, "temperature": 0})] {
+            let mut body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": "hello there"}], "max_tokens": 12, "seed": 7});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let (l, h) = (post(&local, "/v1/chat/completions", &body), post(&head, "/v1/chat/completions", &body));
+            assert_eq!((h.0, l.0), (200, 200), "{body}: {} / {}", l.1, h.1);
+            assert_eq!(said(&h.1)["choices"], said(&l.1)["choices"], "{body}: the head said otherwise");
+        }
+    }
+}
+
+/// What the head takes from its nodes' capability record is the record of the node serving now,
+/// not of the first that answered: a node can be removed and another join in its place, started
+/// otherwise. The head reads the record again when its nodes change, so the temperature cap
+/// (`--spec-max-temperature`) comes with a node that speculates and goes with one that does not.
+#[test]
+fn the_head_reads_its_nodes_record_again_when_another_node_takes_over() {
+    const TOKEN: &[u8] = b"a fleet token";
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let fleet = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LeastLoaded, lease, 90, 0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let join_addr = listener.local_addr().unwrap().to_string();
+    let models = superfluid_daemon::fleet_models::HeadModels::fixed(Arc::clone(&fleet), vec!["mock-model".into()]);
+    let accepting = Arc::clone(&fleet);
+    std::thread::spawn(move || superfluid_daemon::fleet_join::accept_nodes(listener, accepting, TOKEN.to_vec(), models));
+    let head = Daemon::over_fleet(store("head"), Box::new(MockChatCodec), Arc::clone(&fleet), "mock-model".into(), DaemonOptions::default())
+        .expect("a daemon over the fleet");
+
+    // A node that dials the head as `identity`, speculating or not, until the head removes it.
+    let join = |identity: &'static str, speculates: bool| {
+        let record = r#"{"descriptor_version":1,"architecture":"mock","workload":{"causal_generation":true}}"#;
+        let engine = EngineHost::spawn(move || {
+            (MockEngine::new(EngineConfig { vocab: 512, ..EngineConfig::default() }).with_capability_descriptor(record), None)
+        })
+        .unwrap();
+        let opts = DaemonOptions { speculate: speculates.then(|| "prompt-lookup".to_string()), ..DaemonOptions::default() };
+        let daemon = Daemon::with_options(store("joined"), engine, Box::new(MockCodec), opts).unwrap();
+        assert_eq!(daemon.speculation().is_some(), speculates);
+        let mut conn = NodeAgent::new(Arc::new(daemon), identity, "mock-model").with_max_lanes(1).with_auth(TOKEN.to_vec()).connection();
+        let head = join_addr.clone();
+        std::thread::spawn(move || loop {
+            let Ok(sock) = std::net::TcpStream::connect(&head) else { break };
+            let secure = superfluid_linkf::Endpoint::from_tcp_secure(sock, TOKEN, superfluid_linkf::Role::Responder, std::time::Duration::from_secs(5));
+            let Ok(ep) = secure else { break };
+            if matches!(conn.serve(ep), Err(superfluid_daemon::DaemonError::Fleet(superfluid_linkf::LinkFError::Removed))) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+    };
+    let wait_for = |what: &str, ok: &dyn Fn() -> bool| {
+        let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !ok() {
+            assert!(std::time::Instant::now() < by, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    let op = openai::SamplingOverrides { spec_max_temperature: Some(0.2), ..Default::default() };
+    let capped = || op.for_daemon(&head).spec_max_temperature.is_some();
+
+    join("plain", false);
+    wait_for("the head learned its node's capability record", &|| head.capabilities().record().and_then(|r| r.get("architecture")).is_some());
+    assert!(!capped(), "no cap over a node that does not speculate");
+
+    fleet.remove("plain").expect("the plain node is listed");
+    join("speculating", true);
+    wait_for("the cap applies once a node that speculates serves", &capped);
+
+    fleet.remove("speculating").expect("the speculating node is listed");
+    join("plain-again", false);
+    wait_for("the cap is gone once the node serving does not speculate", &|| !capped());
 }

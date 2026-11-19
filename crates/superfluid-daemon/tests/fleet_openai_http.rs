@@ -556,6 +556,11 @@ fn fleet_head_cancels_a_disconnected_stream_and_holds_its_slot_until_then() {
     drop(s);
     let left = std::time::Instant::now();
     let mut saw_held = false;
+    // The cancel crosses five threads, each of which waits its turn. Windows gives turns in
+    // whole clock ticks, and a server edition long ones: 40 to 65 ms on an idle machine there,
+    // 460 ms on one core, and over a second on a loaded CI runner. Uncancelled, the stream
+    // would hold the slot for its 4000 tokens, some 200 s.
+    let within = std::time::Duration::from_secs(if cfg!(windows) { 10 } else { 1 });
     loop {
         let n = key.in_flight();
         assert!(n <= 1, "slot count never exceeds the cap");
@@ -563,7 +568,7 @@ fn fleet_head_cancels_a_disconnected_stream_and_holds_its_slot_until_then() {
             break;
         }
         saw_held = true;
-        assert!(left.elapsed() < std::time::Duration::from_secs(1), "the node was not cancelled: slot held {:?}", left.elapsed());
+        assert!(left.elapsed() < within, "the node was not cancelled: slot held {:?}", left.elapsed());
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert!(saw_held || left.elapsed() < std::time::Duration::from_millis(5), "the slot was released with the body");

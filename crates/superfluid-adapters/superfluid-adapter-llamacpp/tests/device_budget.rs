@@ -316,6 +316,61 @@ fn the_ledger_follows_copy_chains_and_the_limits_follow_the_config() {
     assert_eq!(rt.mem_counters().cells_used, 0);
 }
 
+/// A shared pool is sized by what its context takes on the device, which is
+/// more than its KV. Eight lanes of Qwen3-0.6B's trained 40,960 on a 48 GB Mac
+/// were given a pool of 208k cells, 60% of the free memory by their KV; the
+/// context llama.cpp b12503 made for it reserved another 28.6 GB to gather K
+/// and V rows into, 52 GB in all on a device of 40. Metal allocated it, the
+/// device's free figure read zero, and every request failed: Metal refused the
+/// first step's command buffers (`kIOGPUCommandBufferCallbackErrorOutOfMemory`)
+/// and llama.cpp the step after it. Sized by what a context takes, the pool
+/// leaves the device its headroom and its steps compute what a small pool's do.
+#[test]
+fn a_shared_pool_is_sized_by_what_its_context_takes_on_the_device() {
+    let _device = device_alone();
+    let Some(path) = gguf() else {
+        eprintln!("SKIP: no GGUF model");
+        return;
+    };
+    let before = superfluid_adapter_llamacpp::runtime::device_free_bytes();
+    let Some(gpu) = superfluid_adapter_llamacpp::devices().into_iter().find(|d| d.budget > 0).filter(|_| before > 0) else {
+        eprintln!("SKIP: no GPU device reports a budget");
+        return;
+    };
+    let tok = LlamaTokenizer::load(&path).expect("tokenizer");
+    let prompt = tok.encode("The capital of France is Paris, and the capital of Germany is");
+    let next_two = |rt: &mut LlamaRuntime| {
+        let seq = rt.seq_create().unwrap();
+        let row = rt.step(&[Feed { seq, input: Input::Tokens(&prompt), wants_row: true }]).expect("the prompt's step").remove(0);
+        let first = superfluid_executor::sampling::argmax(&row);
+        let row = rt.step(&[Feed { seq, input: Input::Tokens(&[first]), wants_row: true }]).expect("the step after it").remove(0);
+        (first, superfluid_executor::sampling::argmax(&row))
+    };
+    let expected = next_two(&mut runtime(&path));
+
+    let (lanes, window) = (8u32, 40_960u32);
+    let mut rt = LlamaRuntime::open(LlamaConfig {
+        model_path: path.clone(),
+        max_seq_len: window,
+        max_batch: lanes,
+        streams: Some(false),
+        ..Default::default()
+    })
+    .expect("open gguf");
+    let left = superfluid_adapter_llamacpp::runtime::device_free_bytes();
+    let cells = rt.describe().cells_total;
+    let headroom = superfluid_executor::sizing::headroom_bytes(gpu.budget);
+    assert!(left >= headroom, "a pool of {cells} cells left {left} bytes of the device free, under the {headroom} it keeps clear");
+    if cells > window as u64 && cells < lanes as u64 * window as u64 {
+        // The pool's share of what the weights left free, the weights themselves, and the
+        // cells llama.cpp rounds a context up by.
+        let weights = std::fs::metadata(&path).unwrap().len();
+        let share = (superfluid_executor::sizing::POOL_SHARE_OF_FREE * before as f64) as u64 + weights + (256 << 20);
+        assert!(before - left <= share, "the model and a pool of {cells} cells took {} bytes of the {before} free", before - left);
+    }
+    assert_eq!(next_two(&mut rt), expected, "the pool's steps compute what a small pool's do");
+}
+
 #[test]
 fn the_pool_budget_counts_the_weights() {
     let _device = device_alone();
@@ -336,4 +391,66 @@ fn the_pool_budget_counts_the_weights() {
         "free device memory went {before} -> {after} with a {weights}-byte model open"
     );
     assert_eq!(rt.describe().cells_total, 8 * 512, "a shape this small is granted whole");
+}
+
+/// On Metal a decode returns before the device has run it, so a device that
+/// refuses the work says so only when the step's rows are read, as error
+/// lines in llama.cpp's log, and what the read hands back then is whatever
+/// the buffer held. The pool here is the one the adapter made when it priced
+/// a shared pool by its KV alone: KV to 60% of what is free and, with 32
+/// sequence ids, llama.cpp's reservation beside it, for a context larger than
+/// the device. Which step the device refuses varies from run to run; whichever
+/// it is fails. It used to return a row, and the step after it failed.
+///
+/// Not run with the rest: it asks the device for more than it has, and what
+/// that does to the tests after it on the same machine is not known.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "takes more Metal memory than the device has: run by hand, needs SUPERFLUID_TEST_GGUF and nothing else on the device"]
+fn a_step_the_device_refuses_fails_and_returns_no_row() {
+    use superfluid_adapter_llamacpp::sys;
+    let _device = device_alone();
+    let Some(path) = gguf() else {
+        eprintln!("SKIP: no GGUF model");
+        return;
+    };
+    let Ok(sizing) = superfluid_adapter_llamacpp::runtime::sizing(&path, None, None) else {
+        eprintln!("SKIP: no device memory to size a pool against");
+        return;
+    };
+    let free = superfluid_adapter_llamacpp::runtime::device_free_bytes();
+    let cells = ((0.6 * free as f64) as u64 / sizing.kv_bytes_per_token.max(1)).min(u32::MAX as u64) as u32;
+    let opened = LlamaRuntime::open(LlamaConfig {
+        model_path: path.clone(),
+        max_seq_len: 4096,
+        max_batch: 8,
+        cells_total: cells,
+        streams: Some(false),
+        ..Default::default()
+    });
+    let Ok(mut rt) = opened else {
+        eprintln!("SKIP: llama.cpp made no context of {cells} cells");
+        return;
+    };
+    let tok = LlamaTokenizer::load(&path).expect("tokenizer");
+    let mut feed = tok.encode("The capital of France is Paris, and the capital of Germany is");
+    let seq = rt.seq_create().unwrap();
+    for step in 0..8 {
+        let logged = sys::errors_logged();
+        let stepped = rt.step(&[Feed { seq, input: Input::Tokens(&feed), wants_row: true }]);
+        let said = sys::errors_since(logged);
+        match stepped {
+            Ok(rows) => {
+                assert_eq!(said, None, "step {step} returned a row, and llama.cpp had logged an error in it");
+                feed = vec![superfluid_executor::sampling::argmax(&rows[0])];
+            }
+            Err(why) => {
+                assert_eq!(why, PrimError::Fatal, "step {step}");
+                assert!(said.is_some(), "step {step} failed and llama.cpp logged no error in it");
+                eprintln!("the device refused step {step} of a pool of {cells} cells: {}", said.unwrap_or_default());
+                return;
+            }
+        }
+    }
+    eprintln!("NOTE: the device took a pool of {cells} cells, so no step was refused");
 }

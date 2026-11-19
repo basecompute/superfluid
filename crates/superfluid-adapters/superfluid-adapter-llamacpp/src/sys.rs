@@ -2,6 +2,7 @@
 
 #![allow(non_camel_case_types)]
 
+use std::cell::Cell;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -433,8 +434,12 @@ pub fn set_own_directory(dir: PathBuf) {
     *SELF_DIR.lock().expect("llama.cpp directory") = Some(dir);
 }
 
+/// The files a library called `stem` (`libllama`) may be: llama.cpp's Windows
+/// builds name theirs without the `lib` (`llama.dll`).
 pub fn file_names(stem: &str) -> Vec<String> {
-    if cfg!(target_os = "macos") {
+    if cfg!(windows) {
+        vec![format!("{}.dll", stem.strip_prefix("lib").unwrap_or(stem))]
+    } else if cfg!(target_os = "macos") {
         vec![format!("{stem}.dylib"), format!("{stem}.0.dylib")]
     } else {
         vec![format!("{stem}.so"), format!("{stem}.so.0")]
@@ -460,8 +465,8 @@ pub fn candidates() -> (Vec<PathBuf>, bool) {
         dirs.push(dir.clone());
         dirs.push(dir.join("..").join("lib"));
     }
-    if let Some(home) = runtime_home(std::env::var_os("SUPERFLUID_HOME"), std::env::var_os("HOME")) {
-        dirs.push(home.join("runtimes").join("llamacpp").join("current").join("lib"));
+    if let Some(home) = runtime_home(std::env::var_os("SUPERFLUID_HOME"), std::env::home_dir().map(Into::into)) {
+        dirs.push(superfluid_adapter_kit::install::through_link(&home.join("runtimes").join("llamacpp").join("current")).join("lib"));
     }
     (dirs, false)
 }
@@ -479,6 +484,28 @@ pub fn load() -> Result<Library, String> {
     match LOADED.get_or_init(open) {
         Ok(l) => Ok(l.info.clone()),
         Err(e) => Err(e.clone()),
+    }
+}
+
+/// Opens the library at `path`, with the libraries it links found beside it.
+/// The Windows loader looks for those beside the program, not the library,
+/// unless asked: llama.dll links the ggml.dll in its own directory.
+///
+/// # Safety
+/// As `libloading::Library::new`: the library's initializers run.
+unsafe fn open_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{Library, LOAD_WITH_ALTERED_SEARCH_PATH};
+        // The altered search wants an absolute path.
+        let path = superfluid_adapter_kit::install::canonical(path).unwrap_or_else(|_| path.to_path_buf());
+        // SAFETY: per this function's contract.
+        unsafe { Library::load_with_flags(&path, LOAD_WITH_ALTERED_SEARCH_PATH) }.map(Into::into)
+    }
+    #[cfg(not(windows))]
+    // SAFETY: per this function's contract.
+    unsafe {
+        libloading::Library::new(path)
     }
 }
 
@@ -501,12 +528,19 @@ fn open() -> Result<Loaded, String> {
     let dir = libllama.parent().map(Path::to_path_buf).unwrap_or_default();
     // SAFETY: loading a shared library runs its initializers; llama.cpp's
     // are its static registrations, safe to run once in this process.
-    let lib = unsafe { libloading::Library::new(&libllama) }.map_err(|e| format!("{}: {e}", libllama.display()))?;
+    let lib = unsafe { open_library(&libllama) }.map_err(|e| {
+        // Windows names the library asked for, never the one of its own it could not find.
+        let lacks = if cfg!(windows) { crate::vcruntime::missing(&dir, &crate::vcruntime::system_dir()) } else { Vec::new() };
+        match lacks.is_empty() {
+            true => format!("{}: {e}", libllama.display()),
+            false => format!("{}: {e} ({})", libllama.display(), crate::vcruntime::advice(&lacks)),
+        }
+    })?;
     let mut libs = vec![lib];
     for stem in ["libggml", "libggml-base"] {
         if let Some(p) = file_names(stem).into_iter().map(|n| dir.join(n)).find(|p| p.is_file()) {
             // SAFETY: as above; already loaded as libllama's dependency.
-            if let Ok(l) = unsafe { libloading::Library::new(&p) } {
+            if let Ok(l) = unsafe { open_library(&p) } {
                 libs.push(l);
             }
         }
@@ -555,13 +589,9 @@ fn open() -> Result<Loaded, String> {
         (None, None) => format!("llama.cpp (unversioned build {})", libllama.display()),
     };
     let loaded = Loaded { _libs: libs, api, info: Library { path: libllama, version }, layout };
-    // SAFETY: plain FFI on the library just resolved; the callback keeps
+    // SAFETY: plain FFI on the library just resolved; either callback counts
     // error lines and takes no user data.
-    unsafe {
-        if !keeps_log() {
-            (loaded.api.llama_log_set)(Some(quiet), std::ptr::null_mut());
-        }
-    }
+    unsafe { (loaded.api.llama_log_set)(Some(if keeps_log() { shown } else { quiet }), std::ptr::null_mut()) };
     // SAFETY: registry queries and the loader, on the library just resolved.
     unsafe {
         if (loaded.api.ggml_backend_dev_count)() == 0 {
@@ -588,9 +618,18 @@ const LOG_CONT: ggml_log_level = 5;
 
 static ERRORS: Mutex<(Vec<String>, bool)> = Mutex::new((Vec::new(), false));
 
+thread_local! {
+    /// The error lines llama.cpp has logged on this thread.
+    static ERROR_LINES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The log callback that keeps the error lines and drops the rest.
 unsafe extern "C" fn quiet(level: ggml_log_level, text: *const c_char, _user: *mut c_void) {
     if text.is_null() {
         return;
+    }
+    if level == LOG_ERROR {
+        ERROR_LINES.with(|n| n.set(n.get() + 1));
     }
     let Ok(mut kept) = ERRORS.lock() else { return };
     let continues = level == LOG_CONT && kept.1;
@@ -604,10 +643,28 @@ unsafe extern "C" fn quiet(level: ggml_log_level, text: *const c_char, _user: *m
         Some(last) if continues || !last.ends_with('\n') => last.push_str(&line),
         _ => kept.0.push(line.into_owned()),
     }
-    if kept.0.len() > 8 {
+    if kept.0.len() > KEPT_LINES {
         kept.0.remove(0);
     }
 }
+
+/// The log callback under `SUPERFLUID_LLAMA_LOG=1`: every line to stderr, as
+/// llama.cpp writes them itself, with the error lines counted as [`quiet`]
+/// counts them.
+unsafe extern "C" fn shown(level: ggml_log_level, text: *const c_char, _user: *mut c_void) {
+    use std::io::Write;
+    if text.is_null() {
+        return;
+    }
+    if level == LOG_ERROR {
+        ERROR_LINES.with(|n| n.set(n.get() + 1));
+    }
+    // SAFETY: llama.cpp passes a NUL-terminated string that outlives the call.
+    let line = unsafe { CStr::from_ptr(text) };
+    let _ = std::io::stderr().write_all(line.to_bytes());
+}
+
+const KEPT_LINES: usize = 8;
 
 pub fn clear_errors() {
     if let Ok(mut kept) = ERRORS.lock() {
@@ -616,8 +673,32 @@ pub fn clear_errors() {
 }
 
 pub fn last_error() -> String {
+    last_errors(KEPT_LINES as u64)
+}
+
+/// The newest `n` of the error lines kept, joined.
+fn last_errors(n: u64) -> String {
     let Ok(kept) = ERRORS.lock() else { return String::new() };
-    kept.0.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ")
+    let from = kept.0.len().saturating_sub(n.min(KEPT_LINES as u64) as usize);
+    kept.0[from..].iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ")
+}
+
+/// How many error lines llama.cpp has logged on this thread. A backend whose
+/// work is queued has no other way to say the device refused it: on Metal a
+/// decode returns 0 with its command buffers only committed, and the refusal
+/// is an error line from the call that waits for them, which is the read of
+/// the step's rows. The count is the thread's own, so an error in another
+/// context of the process is not this one's.
+pub fn errors_logged() -> u64 {
+    ERROR_LINES.with(Cell::get)
+}
+
+/// What llama.cpp said in the error lines this thread has logged since
+/// `mark`, a value [`errors_logged`] returned; `None` when there were none.
+/// The text is empty when the lines went to stderr and were not kept.
+pub fn errors_since(mark: u64) -> Option<String> {
+    let n = errors_logged().saturating_sub(mark);
+    (n > 0).then(|| last_errors(n))
 }
 
 const RETURN_ROOM: usize = 1024;
@@ -636,25 +717,29 @@ struct Returned([u8; RETURN_ROOM]);
 /// # Safety
 /// `getter` is a C function that takes nothing and returns, by value, a
 /// struct larger than two machine words and no larger than [`RETURN_ROOM`].
-#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", unix)))]
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", any(unix, windows))))]
 unsafe fn returned(getter: *const ()) -> Returned {
     let mut room = Returned([FILL; RETURN_ROOM]);
     let out = room.0.as_mut_ptr();
     // SAFETY: per the caller's contract the getter writes at most
     // RETURN_ROOM bytes through the indirect-result register (x8 on AArch64,
-    // rdi on x86-64 System V) and clobbers no more than a C call may; the
-    // stack is call-aligned on entry to an asm block without `nostack`.
+    // rdi on x86-64 System V, rcx on x86-64 Windows, whose callee also owns
+    // the 32 bytes above its return address) and clobbers no more than a C
+    // call may; the stack is call-aligned on entry to an asm block without
+    // `nostack`.
     unsafe {
         #[cfg(target_arch = "aarch64")]
         std::arch::asm!("blr {f}", f = in(reg) getter, inout("x8") out => _, clobber_abi("C"));
         #[cfg(all(target_arch = "x86_64", unix))]
         std::arch::asm!("call {f}", f = in(reg) getter, inout("rdi") out => _, clobber_abi("C"));
+        #[cfg(all(target_arch = "x86_64", windows))]
+        std::arch::asm!("sub rsp, 32", "call {f}", "add rsp, 32", f = in(reg) getter, inout("rcx") out => _, clobber_abi("C"));
     }
     room
 }
 
-#[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", unix))))]
-compile_error!("superfluid: the llama.cpp adapter reads llama.cpp's parameter defaults on AArch64 and x86-64 System V only");
+#[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", any(unix, windows)))))]
+compile_error!("superfluid: the llama.cpp adapter reads llama.cpp's parameter defaults on AArch64 and x86-64 only");
 
 /// How the library lays out `llama_context_params`: as the builds up to b11479
 /// do, with the field b11480 inserted, or with the one b12191 added after it.
@@ -797,6 +882,33 @@ pub unsafe fn text(p: *const c_char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_lines_are_counted_on_the_thread_that_logged_them() {
+        let log = |callback: ggml_log_callback, level, text: &CStr| {
+            // SAFETY: a NUL-terminated string that outlives the call, and no user data.
+            unsafe { callback.unwrap()(level, text.as_ptr(), std::ptr::null_mut()) }
+        };
+        let mark = errors_logged();
+        assert_eq!(errors_since(mark), None);
+        log(Some(quiet), 2, c"llama_context: n_ctx = 4096\n");
+        log(Some(quiet), 3, c"decode: failed to find a memory slot for batch of size 512\n");
+        assert_eq!(errors_logged(), mark, "only error lines count");
+        log(Some(quiet), LOG_ERROR, c"ggml_metal_synchronize: error: command buffer 0 failed with status 5\n");
+        log(Some(quiet), LOG_ERROR, c"error: Insufficient Memory");
+        log(Some(quiet), LOG_CONT, c" (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)\n");
+        assert_eq!(errors_logged(), mark + 2, "a continued line is the line it continues");
+        assert!(errors_since(mark).is_some());
+        log(Some(shown), LOG_ERROR, c"");
+        assert_eq!(errors_logged(), mark + 3, "a line that is shown is counted as one that is kept");
+        let elsewhere = std::thread::spawn(move || {
+            let mark = errors_logged();
+            log(Some(quiet), LOG_ERROR, c"llama_decode: failed to decode, ret = -3\n");
+            errors_logged() - mark
+        });
+        assert_eq!(elsewhere.join().unwrap(), 1);
+        assert_eq!(errors_logged(), mark + 3, "another thread's errors are not this one's");
+    }
 
     #[test]
     fn the_structs_have_the_headers_layout() {

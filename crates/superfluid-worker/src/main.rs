@@ -1,7 +1,6 @@
 //! Standalone engine-worker.
 
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+use superfluid_shm::os::UnixListener;
 use std::path::PathBuf;
 
 use superfluid_engine::{EngineConfig, MockEngine};
@@ -16,8 +15,11 @@ fn main() {
             std::process::exit(2);
         });
     std::fs::create_dir_all(&dir).expect("create socket dir");
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
-        .expect("restrict socket dir");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("restrict socket dir");
+    }
 
     let frames_path = dir.join("frames.sock");
     let fds_path = dir.join("fds.sock");

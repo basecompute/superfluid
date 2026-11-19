@@ -50,15 +50,7 @@ pub(crate) fn stderr_tail(stderr: &[u8]) -> String {
     format!(": {}", tail.into_iter().rev().collect::<Vec<_>>().join(" / "))
 }
 
-pub(crate) fn kill_hard(pid: i32) {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    // SAFETY: plain POSIX kill on a child this process spawned.
-    unsafe {
-        kill(pid, 9);
-    }
-}
+pub(crate) use crate::sys::kill_hard;
 
 /// A runtime's programs come from wherever its project publishes them; they get this
 /// environment without the credentials in it. A pull is the exception, and does not use this:
@@ -83,6 +75,7 @@ fn is_secret(name: &std::ffi::OsStr) -> bool {
 mod tests {
     use super::*;
     use std::io::{Error, ErrorKind};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -115,6 +108,7 @@ mod tests {
         assert_eq!((missing.unwrap_err().kind(), calls), (ErrorKind::NotFound, 1), "not a file that will be there in a moment");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_program_that_hangs_is_stopped_and_one_that_fails_is_quoted() {
         let dir = std::env::temp_dir().join(format!("superfluid-exec-{}", std::process::id()));

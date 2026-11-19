@@ -1052,26 +1052,8 @@ fn nanos(duration: std::time::Duration) -> u64 {
 
 pub(crate) fn timestamp(time: SystemTime) -> String {
     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = duration.as_secs().min(libc::time_t::MAX as u64) as libc::time_t;
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    // SAFETY: seconds and tm are valid pointers to appropriately sized
-    // objects; gmtime_r initializes tm on success and retains neither.
-    let tm = unsafe {
-        if libc::gmtime_r(&seconds, tm.as_mut_ptr()).is_null() {
-            return "1970-01-01T00:00:00Z".into();
-        }
-        tm.assume_init()
-    };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec,
-        duration.subsec_nanos()
-    )
+    let (year, month, day, hour, minute, second) = crate::sys::utc(duration.as_secs());
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{:09}Z", duration.subsec_nanos())
 }
 
 #[cfg(test)]

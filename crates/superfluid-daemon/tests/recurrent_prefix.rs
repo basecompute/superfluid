@@ -35,6 +35,55 @@ fn daemon_with(codec: Box<dyn TextCodec + Send + Sync>, max_lanes: usize, prefil
     Arc::new(Daemon::with_options(store, host, codec, opts).unwrap())
 }
 
+fn until(what: &str, met: impl Fn() -> bool) {
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !met() {
+        assert!(std::time::Instant::now() < by, "{what}");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Generations of their own on every lane of a daemon, each on a prompt no other shares, so
+/// that what is asked meanwhile queues behind them.
+struct LanesHeld {
+    d: Arc<Daemon>,
+    runs: Vec<(u64, std::thread::JoinHandle<()>)>,
+}
+
+impl LanesHeld {
+    fn hold(d: &Arc<Daemon>, lanes: u32) -> LanesHeld {
+        let stats = d.sched_stats();
+        let runs = (0..lanes)
+            .map(|i| {
+                let s = d.create(None, GenParams::default()).unwrap();
+                d.append(s, None, (0..8).map(|t| 1000 + i * 8 + t).collect()).unwrap();
+                let dd = Arc::clone(d);
+                let run = std::thread::spawn(move || {
+                    let _ = dd.generate(s, 3000);
+                });
+                (s, run)
+            })
+            .collect();
+        until("a generation holds every lane", || stats.lanes_active.load(Ordering::Relaxed) == lanes as u64);
+        LanesHeld { d: Arc::clone(d), runs }
+    }
+
+    /// Ends them once `queued` requests wait behind them: whichever of those is admitted first
+    /// has the others queued behind it, however late a thread got to ask.
+    fn release_behind(self, queued: u64) {
+        let stats = self.d.sched_stats();
+        until("the requests queued behind the held lanes", || {
+            stats.queue_depth.iter().map(|q| q.load(Ordering::Relaxed)).sum::<u64>() == queued
+        });
+        for (s, _) in &self.runs {
+            self.d.cancel_registry().cancel(*s);
+        }
+        for (_, run) in self.runs {
+            run.join().unwrap();
+        }
+    }
+}
+
 #[test]
 fn a_burst_sharing_a_long_prefix_starts_from_the_state_kept_where_it_ends() {
     let d = daemon(4, 64);
@@ -49,6 +98,10 @@ fn a_burst_sharing_a_long_prefix_starts_from_the_state_kept_where_it_ends() {
             s
         })
         .collect();
+    // The five ask while every lane is held, so all are queued when the first is admitted: one
+    // that reached the scheduler after the first had prefilled the prefix would prefill it again.
+    let held = LanesHeld::hold(&d, 4);
+    let before = stats.cold_admissions.load(Ordering::Relaxed);
     let calls: Vec<_> = sessions
         .iter()
         .map(|&s| {
@@ -56,10 +109,11 @@ fn a_burst_sharing_a_long_prefix_starts_from_the_state_kept_where_it_ends() {
             std::thread::spawn(move || dd.generate(s, 8))
         })
         .collect();
+    held.release_behind(5);
     for h in calls {
         assert_eq!(h.join().unwrap().unwrap().tokens_generated, 8);
     }
-    let cold = stats.cold_admissions.load(Ordering::Relaxed);
+    let cold = stats.cold_admissions.load(Ordering::Relaxed) - before;
     let warm = stats.warm_prefix_tokens.load(Ordering::Relaxed);
     assert_eq!(cold, 1, "one request prefilled the shared prefix; the rest started from its state (warm {warm})");
     assert!(warm >= 4 * PREFIX as u64, "the other four were seeded with the whole prefix: {warm}");
@@ -182,6 +236,11 @@ fn a_prefill_keeps_a_shared_prefix_and_then_its_turn_checkpoint() {
         .map(|q| history(&[(role::SYSTEM, &system), (role::USER, q)]))
         .collect();
     let opened: Vec<(u64, u64)> = chats.iter().map(|h| open_chat(&d, h)).collect();
+    // The two ask while every lane is held, so both are queued when the first is admitted: a
+    // second that reached the scheduler after the first had prefilled the system prompt would
+    // find no state kept where it ends, and prefill it again.
+    let held = LanesHeld::hold(&d, 4);
+    let cold = stats.cold_admissions.load(Ordering::Relaxed);
     let calls: Vec<_> = opened
         .iter()
         .map(|&(s, input)| {
@@ -189,8 +248,9 @@ fn a_prefill_keeps_a_shared_prefix_and_then_its_turn_checkpoint() {
             std::thread::spawn(move || (input, dd.generate(s, 6).unwrap()))
         })
         .collect();
+    held.release_behind(2);
     let firsts: Vec<_> = calls.into_iter().map(|c| c.join().unwrap()).collect();
-    assert_eq!(stats.cold_admissions.load(Ordering::Relaxed), 1, "one prefilled the system prompt");
+    assert_eq!(stats.cold_admissions.load(Ordering::Relaxed) - cold, 1, "one prefilled the system prompt");
     let shared = system.len() as u64;
     let warm: Vec<u64> = firsts.iter().map(|(_, o)| o.warm_prefix).collect();
     assert!(warm.contains(&0) && warm.iter().any(|&w| w > shared), "the other started past it: {warm:?}");

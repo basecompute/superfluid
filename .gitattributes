@@ -1,0 +1,4 @@
+# Text is LF in a checkout on every platform. Git for Windows would otherwise
+# write CRLF (core.autocrlf), and the golden files tests compare byte for byte
+# would no longer match what the code writes.
+* text=auto eol=lf

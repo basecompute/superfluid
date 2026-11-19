@@ -415,11 +415,16 @@ Examples:
 
 pub const STOP_HELP: &str = "Stop the server `superfluid launch` started.
 
-Usage: superfluid stop
+Usage: superfluid stop [--drain [--pid <pid>]]
 
-  Sends it SIGTERM, which ends it without draining (in-flight requests are cut), and waits
-  up to 90 s for it to exit. For a graceful drain, send `kill -USR1 <pid>` instead. A server
-  you started yourself with `superfluid serve` is yours to stop.
+  Ends it without draining (SIGTERM; in-flight requests are cut) and waits up to 90 s for it
+  to exit. A server you started yourself with `superfluid serve` is yours to stop.
+
+  --drain        Ask it to drain instead: it stops accepting connections, gives in-flight
+                 requests its --drain-timeout, and exits. This waits for that.
+  --pid <pid>    With --drain: the server to ask, one you started yourself. What
+                 `kill -USR1 <pid>` does, and the way to ask on Windows, where a server with
+                 a console also drains on Ctrl+Break.
 ";
 
 #[derive(Debug, Default, PartialEq)]
@@ -552,10 +557,13 @@ fn served_id(model: &str) -> String {
 
 fn on_path(binary: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(binary)).find(|p| {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-    })
+    let names: Vec<String> = if cfg!(windows) {
+        // An agent npm installs is a `.cmd` beside a script of the bare name, which is not a program.
+        ["exe", "cmd", "bat"].iter().map(|ext| format!("{binary}.{ext}")).collect()
+    } else {
+        vec![binary.to_string()]
+    };
+    std::env::split_paths(&path).flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>()).find(|p| crate::sys::is_executable(p))
 }
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -582,8 +590,7 @@ fn read_server() -> Option<(i32, String)> {
 }
 
 fn alive(pid: i32) -> bool {
-    // SAFETY: signal 0 checks for the process without sending anything.
-    pid > 0 && unsafe { libc::kill(pid, 0) } == 0
+    crate::sys::alive(pid)
 }
 
 pub fn run(args: &[String]) {
@@ -768,7 +775,6 @@ fn remembered() -> Option<String> {
 /// Starts `superfluid serve <model>` in its own session, so it outlives the agent and the
 /// terminal, and waits until it lists its models.
 fn start_server(model: &str, addr: &str, api_key: Option<&str>) -> Vec<Served> {
-    use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().unwrap_or_else(|e| fail(format!("could not find this program: {e}")));
     let logs = crate::runtimes::default_home().join("logs");
     let log = logs.join("serve.log");
@@ -787,13 +793,7 @@ fn start_server(model: &str, addr: &str, api_key: Option<&str>) -> Vec<Served> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(stdout.map(std::process::Stdio::from).unwrap_or_else(|_| std::process::Stdio::null()))
         .stderr(std::process::Stdio::null());
-    // SAFETY: setsid is async-signal-safe and touches only the child.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
+    crate::sys::detached(&mut cmd);
     let mut child = cmd.spawn().unwrap_or_else(|e| fail(format!("could not start the server: {e}")));
     let pid = child.id() as i32;
     let _ = std::fs::write(server_file(), format!("{pid}\n{addr}\n"));
@@ -835,7 +835,6 @@ fn tail(log: &Path, from: u64, n: usize) -> String {
 }
 
 fn exec(plan: &Plan) -> ! {
-    use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(&plan.program);
     cmd.args(&plan.args);
     for k in &plan.env_remove {
@@ -847,7 +846,7 @@ fn exec(plan: &Plan) -> ! {
             cmd.env(k, v);
         }
     }
-    let err = cmd.exec();
+    let err = crate::sys::replace_process(&mut cmd);
     fail(format!("could not run {}: {err}", plan.program))
 }
 
@@ -884,28 +883,70 @@ fn quote(s: &str) -> String {
     }
 }
 
-pub fn stop(args: &[String]) {
-    if let Some(a) = args.first() {
-        eprintln!("superfluid stop: unexpected argument {a}\n\n{STOP_HELP}");
-        std::process::exit(2);
+/// `stop`'s arguments: whether to drain, and the server to ask when it is not `launch`'s.
+fn parse_stop(args: &[String]) -> Result<(bool, Option<i32>), String> {
+    let (mut drain, mut pid) = (false, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--drain" => drain = true,
+            "--pid" => {
+                let given = it.next().ok_or("--pid needs a process id")?;
+                pid = Some(given.parse::<i32>().ok().filter(|p| *p > 0).ok_or(format!("--pid {given}: not a process id"))?);
+            }
+            _ => return Err(format!("unexpected argument {a}")),
+        }
     }
-    let Some((pid, addr)) = read_server() else {
-        let _ = std::fs::remove_file(server_file());
-        eprintln!("superfluid stop: no server started by `superfluid launch` is running");
-        std::process::exit(1);
+    if pid.is_some() && !drain {
+        return Err("--pid goes with --drain: a server you started yourself is yours to end".into());
+    }
+    Ok((drain, pid))
+}
+
+pub fn stop(args: &[String]) {
+    let (drain, named) = parse_stop(args).unwrap_or_else(|e| {
+        eprintln!("superfluid stop: {e}\n\n{STOP_HELP}");
+        std::process::exit(2);
+    });
+    let (pid, server) = match named {
+        Some(pid) if alive(pid) => (pid, format!("pid {pid}")),
+        Some(pid) => {
+            eprintln!("superfluid stop: no process {pid} is running");
+            std::process::exit(1);
+        }
+        None => match read_server() {
+            Some((pid, addr)) => (pid, format!("on {addr} (pid {pid})")),
+            None => {
+                let _ = std::fs::remove_file(server_file());
+                eprintln!("superfluid stop: no server started by `superfluid launch` is running");
+                std::process::exit(1);
+            }
+        },
     };
-    // SAFETY: pid is a live process launch started (read_server checked it).
-    unsafe { libc::kill(pid, libc::SIGTERM) };
+    // A drain ends within the server's own --drain-timeout, which is not known here.
+    let wait = if drain { Duration::from_secs(60 * 60) } else { Duration::from_secs(90) };
+    if drain {
+        if let Err(e) = crate::sys::ask_to_drain(pid) {
+            eprintln!("superfluid stop: the server {server} could not be asked to drain: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("superfluid stop: asked the server {server} to drain; waiting for it to exit");
+    } else {
+        crate::sys::terminate(pid);
+    }
     let started = Instant::now();
-    while alive(pid) && started.elapsed() < Duration::from_secs(90) {
+    while alive(pid) && started.elapsed() < wait {
         std::thread::sleep(Duration::from_millis(200));
     }
     if alive(pid) {
-        eprintln!("superfluid stop: the server on {addr} (pid {pid}) is still finishing; it got SIGTERM");
+        let got = if drain { "was asked to drain" } else { "got SIGTERM" };
+        eprintln!("superfluid stop: the server {server} is still finishing; it {got}");
         std::process::exit(1);
     }
-    let _ = std::fs::remove_file(server_file());
-    eprintln!("superfluid stop: stopped the server on {addr}");
+    if named.is_none() {
+        let _ = std::fs::remove_file(server_file());
+    }
+    eprintln!("superfluid stop: {} the server {server}", if drain { "drained and stopped" } else { "stopped" });
 }
 
 #[cfg(test)]
@@ -978,7 +1019,7 @@ mod tests {
         assert!(joined.ends_with("-m Qwen3.6-27B-Q4_K_M exec hi"), "{joined}");
         assert_eq!(env(&p, "SUPERFLUID_LAUNCH_KEY"), Some("superfluid"));
         let (path, text) = &p.files[0];
-        assert!(joined.contains(&path.to_string_lossy().to_string()));
+        assert!(joined.contains(&toml_str(&path.to_string_lossy())), "{joined}");
         let catalog: serde_json::Value = serde_json::from_str(text).unwrap();
         assert_eq!(catalog["models"][0]["slug"], "Qwen3.6-27B-Q4_K_M");
         assert_eq!(catalog["models"][0]["context_window"], 131_072);
@@ -1138,6 +1179,17 @@ mod tests {
         assert!(v["agents"].as_array().unwrap().iter().all(|r| r["installed"] == false));
         let ollama = v["agents"].as_array().unwrap().iter().find(|r| r["name"] == "ollama").unwrap();
         assert_eq!(ollama["aliases"], serde_json::json!([]), "an agent with no alias has an empty list");
+    }
+
+    #[test]
+    fn stop_drains_when_asked_and_takes_a_pid_only_to_drain() {
+        assert_eq!(parse_stop(&[]), Ok((false, None)));
+        assert_eq!(parse_stop(&strings(&["--drain"])), Ok((true, None)));
+        assert_eq!(parse_stop(&strings(&["--pid", "4242", "--drain"])), Ok((true, Some(4242))));
+        assert!(parse_stop(&strings(&["--pid", "4242"])).unwrap_err().contains("--drain"), "ending a named process is not stop's");
+        for bad in [&["--pid"][..], &["--drain", "--pid", "0"], &["--drain", "--pid", "x"], &["now"]] {
+            assert!(parse_stop(&strings(bad)).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

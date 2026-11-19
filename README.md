@@ -36,6 +36,13 @@ curl -fsSL https://basecompute.co/sf/install.sh | sh
 superfluid serve basecompute/Qwen3.8-27B
 ```
 
+On Windows, in PowerShell (GGUF models through llama.cpp; see [Installation](docs/getting_started/installation.md#windows)):
+
+```powershell
+irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex
+superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
+```
+
 The first run installs the BaseRT runtime, downloads the model and serves it at `http://127.0.0.1:8453`. BaseRT runs on Apple silicon, on Linux arm64 with an NVIDIA GPU and on Linux x86-64 with an AMD Strix Halo or Strix Point GPU.
 
 You can also use llama.cpp or MLX. The model id picks the runtime: a GGUF repo such as `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` runs on llama.cpp, and an `mlx-community/...` repo runs on MLX (Apple silicon only).

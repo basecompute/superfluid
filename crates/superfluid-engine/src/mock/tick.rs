@@ -19,6 +19,26 @@ const PREFILL_NS_PER_TOKEN: u64 = 1_563;
 
 const DECODE_NS_PER_ROUND: u64 = 2_344;
 
+/// The runs of `itok` in `prompt` that overlap `[start, end)`, each whole.
+fn placeholder_runs(prompt: &[u32], itok: u32, start: usize, end: usize) -> Vec<(u32, u32)> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while itok != 0 && i < prompt.len() {
+        if prompt[i] != itok {
+            i += 1;
+            continue;
+        }
+        let rs = i;
+        while i < prompt.len() && prompt[i] == itok {
+            i += 1;
+        }
+        if rs < end && i > start {
+            runs.push((rs as u32, i as u32));
+        }
+    }
+    runs
+}
+
 fn ring_status(e: RingError) -> Status {
     match e {
         RingError::StaleGeneration { .. } => Status::RejectBadRefGeneration,
@@ -557,6 +577,7 @@ impl MockEngine {
 
         let mut budget_left = plan.prefill_token_budget as u64;
         let mut prefill_tokens_ran: u64 = 0;
+        let mut record = self.cfg.tick_log.is_some().then(crate::TickRecord::default);
         for p in &plan.prefills {
             let Some(lane) = self.lanes.get_mut(&p.lane_tag) else {
                 continue;
@@ -573,6 +594,14 @@ impl MockEngine {
                 } else {
                     lane.prompt[start..end].iter().filter(|&&t| t == itok).count() as u32
                 };
+                if let Some(r) = record.as_mut() {
+                    r.prefills.push(crate::PrefillRecord {
+                        lane_tag: p.lane_tag,
+                        start: start as u32,
+                        end: end as u32,
+                        runs: placeholder_runs(&lane.prompt, itok, start, end),
+                    });
+                }
                 let mut used = 0usize;
                 let mut covered = 0u32;
                 let mut fault = false;
@@ -593,7 +622,8 @@ impl MockEngine {
                         }
                     }
                 }
-                if fault || covered != placeholders {
+                let runs_per_chunk = self.cfg.media_runs_per_chunk as usize;
+                if fault || covered != placeholders || (runs_per_chunk > 0 && used > runs_per_chunk) {
                     faults.push(LaneFault {
                         lane_tag: p.lane_tag,
                         code: superfluid_abi::fault::MEDIA,
@@ -641,6 +671,14 @@ impl MockEngine {
                     tokens: dropped,
                 });
             }
+        }
+
+        if !self.cfg.prefill_token_delay.is_zero() && prefill_tokens_ran > 0 {
+            std::thread::sleep(self.cfg.prefill_token_delay * prefill_tokens_ran as u32);
+        }
+        if let (Some(log), Some(mut r)) = (&self.cfg.tick_log, record) {
+            r.decodes = plan.decodes.iter().filter(|d| d.max_new_tokens > 0).map(|d| d.lane_tag).collect();
+            log.lock().expect("tick log").push(r);
         }
 
         let mut decode_rounds_ran: u64 = 0;

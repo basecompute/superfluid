@@ -70,8 +70,11 @@ The default install is the pinned one, else the best-ranked: a GPU backend (`met
 | Linux x86-64 with ROCm | `rocm` | Vulkan, CPU |
 | Linux with a Vulkan loader | `vulkan` | CPU |
 | any Linux | `cpu` | |
+| Windows x86-64 with an NVIDIA driver | newest CUDA the driver runs, by the same rule | Vulkan, CPU |
+| Windows x86-64 with a Vulkan driver | `vulkan` | CPU |
+| any Windows x86-64 | `cpu` | |
 
-SYCL and OpenVINO builds are installed only with `--backend`. Of the tested builds, only b11284 has an OpenVINO build, so `--backend openvino` needs `--version b11284`.
+SYCL and OpenVINO builds are installed only with `--backend`. So is the ROCm build on Windows: it carries its own HIP runtime, and nothing on the machine says whether the display driver serves it, so `--backend rocm` names it and the install is kept only if it finds the GPU. Of the tested builds, only b11284 has an OpenVINO build, so `--backend openvino` needs `--version b11284`.
 
 **MLX.** Apple silicon only. Fetches CPython 3.12.14 (python-build-standalone) and, from PyPI, `mlx`, `mlx-metal`, `mlx-lm` and their dependencies, every wheel pinned by hash (tested: mlx 0.32.4 with mlx-lm 0.32.2, and mlx 0.32.2 with mlx-lm 0.31.3; `superfluid compat` lists them). Installs with `pip --require-hashes --no-deps --only-binary=:all:`; your own Python and `PYTHON*`/`PIP_*` settings are not used (pip's network settings excepted).
 
@@ -184,10 +187,21 @@ mlx-lm's own `--max-kv-size`, `--kv-bits` and `--adapter-path` are not options: 
 | option | value | default | meaning |
 |---|---|---|---|
 | `--basert-neural-engine` | on, off | on | Run part of each prefill on the Neural Engine where that is faster (Apple silicon); off runs every prefill on the GPU alone. It needs an engine that has the switch: with one that has none (BaseRT 0.4.6 and earlier, which prefill on the GPU alone), `off` fails the load. |
+| `--basert-npu` | on, off | on | Run part of each prefill on the XDNA NPU where the machine has one and its runtime (AMD Strix on Linux); off runs every prefill on the GPU alone. The same switch as `--basert-neural-engine`: the engine has one for whichever of the two its backend uses, and either option `off` turns it off. |
 
 Its other knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
 
 An engine that can compile a model's Neural Engine programs ahead has them compiled after a pull, by the worker that will load the model, since macOS keeps the compiled programs for each executable: once per Mac, macOS version and Superfluid build. A load that finds them uncompiled compiles them in the background while the GPU runs the prefill alone. Nothing is compiled with `--basert-neural-engine off`.
+
+On an AMD Strix machine (Strix Halo, Strix Point) an engine whose bundle carries the NPU module (`baseRT_rocm_npu.so` and `npu-designs/` in the install's `lib/`) splits the prefill of a prompt of 1024 tokens or more between the GPU and the XDNA NPU. Nothing is configured in Superfluid for it. The machine needs three things, and without one of them the engine serves on the GPU alone and prints which is missing in one `[npu_ffn]` line at each load:
+
+| what | how |
+|---|---|
+| the NPU's kernel driver and firmware (`/dev/accel/accel0` exists) | the in-tree `amdxdna` driver and `linux-firmware`; Ubuntu 26.04 has both |
+| XRT, the NPU's runtime | Ubuntu 26.04: `sudo apt install libxrt2 libxrt-npu2` |
+| an unlimited locked-memory limit for the server's process (XRT locks a 64 MiB heap) | a shell: `ulimit -l unlimited`; a systemd unit: `LimitMEMLOCK=infinity`. `/etc/security/limits.d` reaches only logins that pass through PAM, not a service |
+
+The NPU's part of a prefill is int8, so its logits are close to the GPU's and not bit-identical; `--basert-npu off` serves on the GPU alone. If an NPU job fails during a request, the engine fails that request with a GPU fault rather than answer from an output the NPU never wrote, and serves the following ones on the GPU alone.
 
 ## How an upstream release becomes a tested one
 
@@ -200,12 +214,12 @@ Each adapter installs on its own only the upstream versions it was built and tes
 - `superfluid compat` lists the llama.cpp builds this adapter was built and tested against, which it installs on its own; another build installs with `--untested`, and is still checked at load for the functions and parameter layouts the adapter drives.
 
 - A build whose C API differs from the tested one is refused by name at load. `SUPERFLUID_LLAMA_LIB` or `--llamacpp-lib` loads your own build instead of an install.
-- With no `--max-context`, the window is sized for the device on Metal, and on CUDA with a dedicated GPU; elsewhere it is 8192. Once a context exists, one that left the device short of its reserve is made again with fewer cells; a pool cut below one sequence serves that model at the shorter window.
+- With no `--max-context`, the window is sized for the device on Metal, and on CUDA with a dedicated GPU; elsewhere it is 8192. A shared pool is sized by what its context takes on the device, which is more than its KV: llama.cpp reserves working memory that grows with the pool (on Metal since b12059, room to gather one layer's K and V rows for each of the pool's sequence ids, which for a shallow model is more than the KV itself). The adapter measures it on two small contexts before it makes the pool, and the two together keep to 60% of the memory the weights leave free; the startup line gives what a token takes. Neither of the two is larger than the pool the KV alone would be given, and where the device holds neither, at any size down to a batch, the pool is priced by its KV as before: the measurement never keeps a model from opening. Once a context exists, one that left the device short of its reserve is made again with fewer cells; a pool cut below one sequence serves that model at the shorter window.
 - Plain-attention models get a KV buffer per sequence (lanes plus two, at least 4, at most 256), so a decode step attends only over its own sequence. Recurrent, hybrid and sliding-window models (Qwen3.5/3.6-class, gemma) use one shared pool and reuse prefixes only at a sequence's head.
 - The prefix cache keeps at most one lane's context in a shared pool, where every step attends over the cells up to the highest one in use. The rest of the cache, and any entry that gives up its sequence to a lane, is held in host memory as llama.cpp's own state export and imported when a request reuses it: as many tokens as the pool has cells, within 8 GiB and 60% of the memory the model and its context leave free. On a host without an accelerator, or with the model on the CPU, the 8 GiB alone bounds it.
 - On Metal, a prompt batch on a shared pool is filled to a multiple of 8 tokens: the attention kernel computes a last group short of 8 queries against every cell in use.
 - No lossy park, no media, no batch invariance. Greedy rounds take llama.cpp's argmax; sampled rounds are sampled on the host.
-- llama.cpp's own log is silenced unless `SUPERFLUID_LLAMA_LOG=1`.
+- llama.cpp's own log is silenced unless `SUPERFLUID_LLAMA_LOG=1`. Its error lines are read either way: a step during which llama.cpp logs one fails and returns no token, with what it said on the worker's stderr. On Metal a decode returns before the device has run it, and an error line is the only word of a device that then refuses the work.
 
 ### mlx
 

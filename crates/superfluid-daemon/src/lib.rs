@@ -61,6 +61,7 @@ pub mod versions;
 pub mod selfupdate;
 pub mod linked;
 pub mod dylib_tokenizer;
+pub mod engine_flags;
 pub mod events;
 pub mod export;
 pub mod otlp;
@@ -74,6 +75,7 @@ use superfluid_proto::linkw as proto_linkw;
 pub mod telemetry;
 pub mod store;
 pub mod store_id;
+pub mod sys;
 pub mod wal;
 pub mod workerd;
 
@@ -732,6 +734,11 @@ pub struct SpeculationOptions {
     pub dspark_confidence: Option<f32>,
 }
 
+/// Where in its capability record a fleet node says it speculates, for the head, which resolves
+/// the speculation cap on a request's default temperature (`--spec-max-temperature`) before
+/// the node sees it.
+pub const NODE_SPECULATES: (&str, &str) = ("fleet", "speculates");
+
 #[derive(Debug, Clone)]
 pub struct DaemonOptions {
     pub max_lanes: usize,
@@ -1350,11 +1357,11 @@ impl Daemon {
         extras: scheduler::GenExtras,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
     ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
-        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, qos::INLINE_COMPLETION, extras, Vec::new(), on_tokens, |_| {})
+        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, qos::INLINE_COMPLETION, false, extras, Vec::new(), on_tokens, |_| {})
     }
 
-    /// As [`Self::generate_tokens_streaming`] in QoS class `class`, telling `on_logprobs` the
-    /// log-probabilities the extras ask for.
+    /// As [`Self::generate_tokens_streaming`] in QoS class `class`, in a lane of its own when
+    /// `batch_invariant`, telling `on_logprobs` the log-probabilities the extras ask for.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_tokens_streaming_lp(
         &self,
@@ -1363,6 +1370,7 @@ impl Daemon {
         max_tokens: u32,
         deadline_ms: u64,
         class: u8,
+        batch_invariant: bool,
         extras: scheduler::GenExtras,
         media: Vec<(u64, std::path::PathBuf, u32)>,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
@@ -1380,6 +1388,7 @@ impl Daemon {
             max_tokens,
             deadline,
             class,
+            batch_invariant,
             extras,
             media,
             on_tokens,
@@ -1640,6 +1649,12 @@ impl Daemon {
 
     pub fn speculation(&self) -> Option<scheduler::SpeculationGrant> {
         self.serving().speculation.grant()
+    }
+
+    /// Whether this model's generations speculate: its own engine registered a strategy, or, for
+    /// a daemon over a fleet, the nodes serving it said they do ([`NODE_SPECULATES`]).
+    pub fn speculates(&self) -> bool {
+        self.speculation().is_some() || self.capable(NODE_SPECULATES.0, NODE_SPECULATES.1)
     }
 
     pub fn tool_lease_ms(&self) -> u64 {
@@ -1993,7 +2008,14 @@ impl Daemon {
     /// As [`Self::metrics_text`]; over a fleet, the head's info names every model in `served`
     /// after this daemon's own, where a server with several models knows them all.
     pub fn metrics_text_serving(&self, served: &[String]) -> String {
-        let mut out = metrics::render_prometheus(&self.stats);
+        let mut out = match &self.fleet {
+            // A head's scheduler routes; its nodes' count what it would, and it adds theirs.
+            Some((fleet, _)) => {
+                let counts = fleet.node_counts();
+                metrics::render_prometheus_adding(&self.stats, &|key| fleet_metrics::head_count(&counts, key))
+            }
+            None => metrics::render_prometheus(&self.stats),
+        };
         if let Some((fleet, model)) = &self.fleet {
             let models: Vec<String> =
                 std::iter::once(model.clone()).chain(served.iter().filter(|m| *m != model).cloned()).collect();
@@ -2075,8 +2097,12 @@ impl Daemon {
         class: u8,
         batch_invariant: bool,
     ) -> Result<CommittedEvent, DaemonError> {
-        if batch_invariant && self.fleet.is_some() {
-            return Err(fleet_daemon::batch_invariant_refused());
+        // Over a fleet, refused before a stream starts when no node serving the model can run
+        // the session alone; one that can is where its generations are placed.
+        if let Some((fleet, model)) = &self.fleet {
+            if let Some(e) = fleet.needs_refusal(model, fleet_daemon::needs(batch_invariant)) {
+                return Err(e);
+            }
         }
         self.store
             .lock()
@@ -3541,11 +3567,7 @@ mod latency_tests {
         let ctl = superfluid_shm::ControlSegment::create().unwrap();
         let worker = superfluid_shm::ControlSegment::attach(
             superfluid_shm::ShmSegment::from_fd(
-                {
-                    use std::os::fd::FromRawFd;
-                    // SAFETY: a fresh duplicate of the segment's fd, owned here.
-                    unsafe { std::os::fd::OwnedFd::from_raw_fd(libc::dup(ctl.raw_fd())) }
-                },
+                ctl.dup_fd().unwrap(),
                 superfluid_shm::CONTROL_BYTES,
             )
             .unwrap(),

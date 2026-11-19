@@ -57,11 +57,8 @@ pub fn responses_dir_for(sessions_dir: &Path) -> PathBuf {
 
 /// A fresh `resp_` id: 128 random bits, so an id is not guessed from another.
 pub fn new_response_id() -> Result<String, DaemonError> {
-    use std::io::Read;
     let mut buf = [0u8; 16];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .map_err(DaemonError::Io)?;
+    crate::sys::random(&mut buf).map_err(DaemonError::Io)?;
     Ok(format!("resp_{}", buf.iter().map(|b| format!("{b:02x}")).collect::<String>()))
 }
 
@@ -79,6 +76,9 @@ fn write_durable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     crate::wal::durable_flush(&f)?;
     drop(f);
     std::fs::rename(&tmp, path)?;
+    // The directory's entry too, where a directory opens as a file; Windows opens none, and
+    // writes a rename through with the file it names.
+    #[cfg(unix)]
     if let Some(dir) = path.parent() {
         crate::wal::durable_flush(&std::fs::File::open(dir)?)?;
     }

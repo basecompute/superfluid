@@ -1,5 +1,9 @@
 //! `superfluid self update|list|use|check|install`: releases side by side under `$SUPERFLUID_HOME/versions`, a
 //! `current` link the commands on PATH go through, and the daily check `serve` runs.
+//!
+//! On Windows an ordinary user may make no symbolic link. `current` is there a file that holds the version's name
+//! (`sys::link_dir`), and each command on PATH is a copy of the release's launcher (`superfluid-shim.exe`), which
+//! reads `current` and runs that version's program of its own name.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -21,12 +25,21 @@ pub const NO_CHECK_ENV: &str = "SUPERFLUID_NO_UPDATE_CHECK";
 /// Where the release listing is read from, for a mirror or a test: a URL or a file.
 pub const LISTING_ENV: &str = "SUPERFLUID_RELEASES";
 const LINKED: &[&str] = &["superfluid", "superfluid-workerd", "superfluid-noded"];
+/// The launcher a Windows release carries in `libexec\superfluid`, copied to the prefix under each command's name.
+const SHIM: &str = "superfluid-shim.exe";
+/// The file beside the launchers that tells them where the versions are.
+#[cfg(windows)]
+const VERSIONS_FILE: &str = "superfluid-versions";
 /// The file at the root of a release a package manager installed (Homebrew, pip, npm), one line `<manager>: <command>`:
 /// the copy is that manager's to update, with that command.
 pub const INSTALLED_BY: &str = "installed-by";
 /// The stamp basert writes at the root of the superfluid it installs for `basert serve`, before it also wrote an
 /// `installed-by` file naming itself: such a copy is basert's, not the install script's.
 const BASERT_STAMP: &str = ".release";
+/// The name `installed-by` gives a release that was put in one place on Windows, with no versions beside it, and the
+/// command that installs one with them.
+const INSTALL_PS1: &str = "install.ps1";
+const INSTALL_PS1_COMMAND: &str = "irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex";
 /// How long a new copy's `--version` or `runtimes --json` may take: it runs under the lock, which a copy that hangs
 /// would hold for every later update. Longer than the runtime checks `runtimes --json` makes, a minute each at most.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -55,6 +68,11 @@ a terminal), and for pip in an environment or a project's npm dependency it name
 The superfluid basert installs for `basert serve` is basert's: this command runs
 `basert superfluid install`, which picks the release that serves basert's engine.
 
+On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds
+the version's name, and each command on PATH is a small launcher that reads it and runs that
+version's program. A copy npm, pip, pipx or uv installed there has its manager's command
+named and not run: Windows lets nothing replace a program that is running.
+
 `superfluid serve` checks for a newer release once a day, after the server is up, and prints
 one line; SUPERFLUID_NO_UPDATE_CHECK=1 or --offline turns that off. A release is announced a
 few days after it is published.
@@ -66,6 +84,7 @@ pub fn target() -> Option<&'static str> {
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
         ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
         _ => None,
     }
 }
@@ -118,11 +137,16 @@ impl Versions {
     }
 
     fn binary(&self, v: &str) -> PathBuf {
-        self.version_dir(v).join("bin").join("superfluid")
+        self.version_dir(v).join("bin").join(crate::sys::exe_name("superfluid"))
     }
 
     pub fn current(&self) -> Option<String> {
-        let target = std::fs::read_link(self.dir.join("current")).ok()?;
+        let link = self.dir.join("current");
+        let target = match cfg!(windows) {
+            // A file that holds the name: read through, it is the version's directory.
+            true => Some(crate::sys::through_link(&link)).filter(|t| *t != link)?,
+            false => std::fs::read_link(&link).ok()?,
+        };
         target.file_name().and_then(|n| n.to_str()).map(str::to_string)
     }
 
@@ -161,8 +185,8 @@ impl Versions {
         }
         let tmp = self.dir.join(".current.tmp");
         let _ = std::fs::remove_file(&tmp);
-        std::os::unix::fs::symlink(v, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, self.dir.join("current")).map_err(|e| format!("{}: {e}", self.dir.join("current").display()))
+        crate::sys::link_dir(v, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        crate::sys::replace_dir_link(&tmp, &self.dir.join("current")).map_err(|e| format!("{}: {e}", self.dir.join("current").display()))
     }
 
     /// Removes every version but `current`, `previous`, one with a `keep` file, and one a running process started from.
@@ -181,6 +205,7 @@ impl Versions {
     }
 
     /// The names in `prefix` that are the install script's real files, not links.
+    #[cfg(unix)]
     fn legacy_files(&self, prefix: &Path) -> Vec<&'static str> {
         LINKED.iter().copied().filter(|name| prefix.join(name).symlink_metadata().is_ok_and(|m| m.file_type().is_file())).collect()
     }
@@ -190,6 +215,7 @@ impl Versions {
     /// workers by that path), which a `migrating` note has the next link finish once nothing runs from there. The note
     /// names the processes that ran from there, by pid and start time: once a link is renamed over a server's own
     /// executable, macOS may give no path for it, and a server found by its path alone would be missed.
+    #[cfg(unix)]
     pub fn link(&self, prefix: &Path, replace_files: bool) -> Result<Vec<String>, String> {
         std::fs::create_dir_all(prefix).map_err(|e| format!("{}: {e}", prefix.display()))?;
         std::fs::write(self.dir.join("prefix"), format!("{}\n", prefix.display())).map_err(|e| format!("{}: {e}", self.dir.display()))?;
@@ -225,7 +251,7 @@ impl Versions {
         let relink = |link: &Path, target: &Path| -> Result<(), String> {
             let tmp = link.with_file_name(format!(".{}.tmp", link.file_name().and_then(|n| n.to_str()).unwrap_or("link")));
             let _ = std::fs::remove_file(&tmp);
-            std::os::unix::fs::symlink(target, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+            crate::sys::symlink_file(target, &tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
             std::fs::rename(&tmp, link).map_err(|e| format!("{}: {e}", link.display()))
         };
         for name in LINKED {
@@ -286,6 +312,89 @@ impl Versions {
         }
         Ok(notes)
     }
+
+    /// The commands in `prefix` on Windows: a copy of the current version's launcher under each command's name, and
+    /// beside them the file that tells a launcher where the versions are. A launcher says its revision
+    /// (`launcher_revision`), and one in the prefix stays unless the release carries a newer one, so most updates
+    /// place nothing. A file that is no launcher is replaced only in a prefix an install here keeps or with
+    /// `replace_files` (the install script's run), and is otherwise left and said.
+    #[cfg(windows)]
+    pub fn link(&self, prefix: &Path, replace_files: bool) -> Result<Vec<String>, String> {
+        std::fs::create_dir_all(prefix).map_err(|e| format!("{}: {e}", prefix.display()))?;
+        std::fs::write(self.dir.join("prefix"), format!("{}\n", prefix.display())).map_err(|e| format!("{}: {e}", self.dir.display()))?;
+        let current = self.current().ok_or_else(|| format!("no version is current in {}", self.dir.display()))?;
+        let shim = self.version_dir(&current).join("libexec").join("superfluid").join(SHIM);
+        let noted = prefix.join(VERSIONS_FILE);
+        let ours = noted.is_file();
+        let launcher = match std::fs::read(&shim) {
+            Ok(launcher) => launcher,
+            // The launchers an earlier release placed run this version as they ran that one.
+            Err(_) if ours => return Ok(Vec::new()),
+            Err(e) => return Err(format!("{}: {e}", shim.display())),
+        };
+        let revision = launcher_revision(&launcher).unwrap_or(0);
+        let mut notes = Vec::new();
+        // What an earlier run set aside while it was running.
+        if let Ok(rd) = std::fs::read_dir(prefix) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with(".superfluid") && (name.contains(".exe.old-") || name.contains(".exe.new-")) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        std::fs::write(&noted, format!("{}\n", self.dir.display())).map_err(|e| format!("{}: {e}", noted.display()))?;
+        for name in LINKED {
+            let name = crate::sys::exe_name(name);
+            let dest = prefix.join(&name);
+            match std::fs::read(&dest).ok().map(|have| launcher_revision(&have)) {
+                Some(Some(have)) if have >= revision => continue,
+                Some(None) if !(ours || replace_files) => {
+                    notes.push(format!("{} is not a launcher an install here placed; left as it is", dest.display()));
+                    continue;
+                }
+                _ => {}
+            }
+            place_launcher(&launcher, &dest)?;
+        }
+        Ok(notes)
+    }
+}
+
+/// The revision a launcher's program carries after its marker (`REVISION` in src/bin/superfluid-shim.rs); none for a
+/// file that is not a launcher.
+#[cfg(windows)]
+fn launcher_revision(program: &[u8]) -> Option<u32> {
+    const MARK: &[u8] = b"superfluid-shim-revision:";
+    let at = program.windows(MARK.len()).position(|w| w == MARK)? + MARK.len();
+    std::str::from_utf8(program.get(at..at + 4)?).ok()?.parse().ok()
+}
+
+/// Puts a launcher at `dest`. One that is there may be running (it is what this command was typed as): Windows lets
+/// a running program be renamed, not written over or removed, so it steps aside and goes the next time one is placed.
+#[cfg(windows)]
+fn place_launcher(launcher: &[u8], dest: &Path) -> Result<(), String> {
+    let name = dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let new = dest.with_file_name(format!(".{name}.new-{}", std::process::id()));
+    let aside = dest.with_file_name(format!(".{name}.old-{}", std::process::id()));
+    std::fs::write(&new, launcher).map_err(|e| format!("{}: {e}", new.display()))?;
+    let had = dest.exists();
+    if had {
+        let _ = std::fs::remove_file(&aside);
+        std::fs::rename(dest, &aside).map_err(|e| {
+            let _ = std::fs::remove_file(&new);
+            format!("{}: {e}", dest.display())
+        })?;
+    }
+    if let Err(e) = std::fs::rename(&new, dest) {
+        let _ = std::fs::remove_file(&new);
+        if had {
+            let _ = std::fs::rename(&aside, dest);
+        }
+        return Err(format!("{}: {e}", dest.display()));
+    }
+    let _ = std::fs::remove_file(&aside);
+    Ok(())
 }
 
 /// Where the running executable came from, which decides who updates it.
@@ -300,7 +409,7 @@ pub enum Installed {
 }
 
 pub fn installed_as(exe: &Path) -> Installed {
-    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let exe = crate::sys::canonical(exe).unwrap_or_else(|_| exe.to_path_buf());
     let parts: Vec<&std::ffi::OsStr> = exe.iter().collect();
     let n = parts.len();
     if n >= 4 && parts[n - 2] == "bin" && parts[n - 4] == "versions" {
@@ -312,7 +421,9 @@ pub fn installed_as(exe: &Path) -> Installed {
         if prefix.join(INSTALLED_BY).is_file() || prefix.join(BASERT_STAMP).is_file() {
             return Installed::Other(exe);
         }
-        if prefix.join("libexec").join("superfluid").is_dir() {
+        // The layout before versions never shipped on Windows: a release unpacked in one place there is not one
+        // to move under versions, and the install script is named for it (`delegate`).
+        if prefix.join("libexec").join("superfluid").is_dir() && !cfg!(windows) {
             return Installed::InPlace { prefix: prefix.to_path_buf() };
         }
     }
@@ -329,7 +440,7 @@ fn package_manager(exe: &Path) -> Option<(String, String)> {
 
 /// The command that updates the running superfluid, for the line `serve` prints when a newer release is out.
 fn update_command(exe: &Path) -> String {
-    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let exe = crate::sys::canonical(exe).unwrap_or_else(|_| exe.to_path_buf());
     match installed_as(&exe) {
         Installed::Other(p) => delegate(&p).map(|d| d.command().to_string()),
         _ => None,
@@ -342,7 +453,7 @@ fn not_ours(exe: &Path) -> String {
     if let Some(d) = delegate(exe) {
         return format!("{p} was installed by {}; `{}` updates it", d.manager(), d.command());
     }
-    let how = if p.contains("/target/") { "it is a source build: build it again" } else { "update it the way it was installed" };
+    let how = if p.contains("/target/") || p.contains("\\target\\") { "it is a source build: build it again" } else { "update it the way it was installed" };
     format!("{p} was not installed by the install script or by `superfluid self update`; {how}")
 }
 
@@ -375,14 +486,74 @@ impl Delegate {
 /// file names, or from where it is for packages published before they carried the file; `None` for a copy no package
 /// manager or basert placed.
 fn delegate(exe: &Path) -> Option<Delegate> {
+    let found = delegate_by_place(exe)?;
+    Some(if cfg!(windows) { named_while_it_runs(found) } else { found })
+}
+
+/// On Windows a program that is running can be neither deleted nor written over, nor its folder renamed, so a manager
+/// started from the copy it is to update fails part of the way through: there its command is named, for the user to
+/// run once superfluid has ended. basert is handed this process (`update_by_manager`) and stays as it is.
+fn named_while_it_runs(found: Delegate) -> Delegate {
+    match found {
+        Delegate::Run { manager, command, .. } if manager != "basert" => Delegate::Name { why: while_it_runs(&manager), manager, command },
+        other => other,
+    }
+}
+
+fn while_it_runs(manager: &str) -> String {
+    format!("Windows lets {manager} replace no program that is running: run it yourself, with no superfluid running")
+}
+
+/// `p` as the checks on where a copy is read it. A Windows path has `/` for each `\` and is in lower case, as its
+/// names match there; both keep every byte's place, so what is found in the result is at the same place in `p`.
+fn shape(p: &str, windows: bool) -> String {
+    if windows {
+        p.replace('\\', "/").to_ascii_lowercase()
+    } else {
+        p.to_string()
+    }
+}
+
+/// `word` as one word of a command a user is shown to type. A path no shell splits or reads into stays as it is; any
+/// other goes in single quotes, which PowerShell reads on Windows (a `'` in it doubled) and a POSIX shell elsewhere.
+fn shell_word(word: &str, windows: bool) -> String {
+    let plain = |c: char| c.is_alphanumeric() || matches!(c, '/' | ':' | '.' | '_' | '-' | '+') || (windows && matches!(c, '\\' | '~'));
+    if !word.is_empty() && word.chars().all(plain) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', if windows { "''" } else { r"'\''" }))
+}
+
+/// The start of a command that runs the program at `program`. PowerShell takes a quoted path for a string, and runs
+/// it only after `&`.
+fn shell_program(program: &str, windows: bool) -> String {
+    let word = shell_word(program, windows);
+    if windows && word.starts_with('\'') {
+        format!("& {word}")
+    } else {
+        word
+    }
+}
+
+/// `why`, saying which shell a quoted Windows command is for: cmd reads neither `'` nor `&` as PowerShell does.
+fn for_powershell(command: &str, why: String, windows: bool) -> String {
+    if windows && command.contains('\'') {
+        format!("{why}; the command is written for PowerShell")
+    } else {
+        why
+    }
+}
+
+fn delegate_by_place(exe: &Path) -> Option<Delegate> {
     let p = exe.to_string_lossy().into_owned();
+    let at = shape(&p, cfg!(windows));
     let bin = exe.parent()?;
     let root = bin.parent()?;
     // pipx and uv keep the wheel in a venv of their own, whose file says pip.
-    if p.contains("/pipx/venvs/") {
+    if at.contains("/pipx/venvs/") {
         return Some(on_path("pipx", &["upgrade", "superfluid-cli"]));
     }
-    if p.contains("/uv/tools/") {
+    if at.contains("/uv/tools/") {
         return Some(on_path("uv", &["tool", "upgrade", "superfluid-cli"]));
     }
     let named = package_manager(exe);
@@ -392,36 +563,38 @@ fn delegate(exe: &Path) -> Option<Delegate> {
         Some("npm") => npm(&p),
         Some("pip") => pip(&p),
         Some("cargo") => cargo(bin),
+        Some(INSTALL_PS1) => install_ps1(),
         Some(_) => {
             let (manager, command) = named?;
             Delegate::Name { manager, command, why: "superfluid runs only Homebrew, npm, pipx, uv, cargo and basert itself".into() }
         }
         None if root.join(BASERT_STAMP).is_file() => basert(root),
         None if p.contains("/Cellar/") => homebrew(&p),
-        None if p.contains("/node_modules/") => npm(&p),
-        None if p.contains("/site-packages/") => pip(&p),
-        None if p.contains("/.cargo/bin/") => cargo(bin),
+        None if at.contains("/node_modules/") => npm(&p),
+        None if at.contains("/site-packages/") => pip(&p),
+        None if at.contains("/.cargo/bin/") => cargo(bin),
+        // A release unpacked in one place on Windows: the script installs one with versions beside it.
+        None if cfg!(windows) && root.join("libexec").join("superfluid").is_dir() => install_ps1(),
         None => return None,
     })
 }
 
 /// Whether this user may write `path`, as the manager would need to.
 fn writable(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
-    // SAFETY: `c` is a NUL-terminated path that outlives the call.
-    unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+    crate::sys::writable(path)
 }
 
 fn executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    crate::sys::is_executable(path)
 }
 
-/// `tool args…` with `tool` from PATH, or named when PATH has none.
+/// `tool args…` with `tool` from PATH, or named when PATH has none. On Windows a tool is a program or a script
+/// (`uv.exe`, `npm.cmd`).
 fn on_path(tool: &str, args: &[&str]) -> Delegate {
     let command = std::iter::once(tool).chain(args.iter().copied()).collect::<Vec<_>>().join(" ");
-    let found = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|d| d.join(tool)).find(|p| executable(p)));
+    let files: Vec<String> = if cfg!(windows) { ["exe", "cmd", "bat"].iter().map(|ext| format!("{tool}.{ext}")).collect() } else { vec![tool.to_string()] };
+    let found = std::env::var_os("PATH")
+        .and_then(|path| std::env::split_paths(&path).flat_map(|d| files.iter().map(move |f| d.join(f))).find(|p| executable(p)));
     match found {
         Some(bin) => Delegate::Run {
             manager: tool.to_string(),
@@ -476,17 +649,46 @@ fn homebrew(p: &str) -> Delegate {
     Delegate::Name { manager, command, why }
 }
 
+/// The prefix of the npm global folder that holds the copy at `p`, if one does. On Unix the folder is
+/// `<prefix>/lib/node_modules`, which no project has. On Windows it is `<prefix>\node_modules`, as a project's is, and
+/// what tells it apart is the command npm wrote beside it, `<prefix>\superfluid.cmd`; a project's commands are in
+/// `node_modules\.bin`.
+fn npm_global_prefix(p: &str, windows: bool) -> Option<&str> {
+    let at = shape(p, windows);
+    if !windows {
+        return at.find("/lib/node_modules/").map(|i| &p[..i]);
+    }
+    let prefix = &p[..at.find("/node_modules/")?];
+    Path::new(prefix).join("superfluid.cmd").is_file().then_some(prefix)
+}
+
+/// What a user types to update the copy in the npm global folder under `prefix`. On Windows it names the prefix: the
+/// command is all the update there is there, and typed as it is elsewhere it would install into whichever folder
+/// npm's configuration names, leaving this copy as it was.
+fn npm_global_command(prefix: &str, windows: bool) -> String {
+    if windows {
+        format!("npm install --global --prefix {} @basecompute/superfluid@latest", shell_word(prefix, true))
+    } else {
+        "npm install --global @basecompute/superfluid@latest".to_string()
+    }
+}
+
 /// `npm install --global` by the npm whose global folder holds the copy, told that folder's prefix (npm's
 /// configuration or NPM_CONFIG_PREFIX may name another); a project's dependency (or pnpm's, yarn's, bun's) is that
-/// project's to update.
+/// project's to update. On Windows the command is named (`named_while_it_runs`).
 fn npm(p: &str) -> Delegate {
     let manager = "npm".to_string();
-    let command = "npm install --global @basecompute/superfluid@latest".to_string();
-    let Some(i) = p.find("/lib/node_modules/") else {
+    let Some(prefix) = npm_global_prefix(p, cfg!(windows)) else {
         let why = "it is a project's dependency (or pnpm's, yarn's or bun's): update it in that project".to_string();
         return Delegate::Name { manager, command: "npm install @basecompute/superfluid@latest".into(), why };
     };
-    let prefix = Path::new(&p[..i]);
+    let command = npm_global_command(prefix, cfg!(windows));
+    let prefix = Path::new(prefix);
+    if cfg!(windows) {
+        // Its npm is not looked for: it may be anywhere (Node's installer keeps the global folder apart from npm
+        // itself), and it is not run.
+        return Delegate::Name { why: for_powershell(&command, while_it_runs(&manager), true), manager, command };
+    }
     let bin = prefix.join("bin");
     let npm = bin.join("npm");
     let why = if !executable(&npm) {
@@ -510,19 +712,48 @@ fn npm(p: &str) -> Delegate {
 /// pip is only named: the environment may be a project's, which a lock file (Poetry, uv, pip-tools) pins, or the
 /// system's, which refuses or needs root.
 fn pip(p: &str) -> Delegate {
-    // .../<env>/lib/python3.x/site-packages/superfluid_cli/release/bin/superfluid
-    let python = p.find("/lib/python").map(|i| Path::new(&p[..i]).join("bin").join("python")).filter(|py| executable(py));
-    let command = match python {
-        Some(py) => format!("{} -m pip install --upgrade superfluid-cli", py.display()),
-        None => "pip install --upgrade superfluid-cli".to_string(),
-    };
+    let python = python_of(p, cfg!(windows)).filter(|py| executable(py));
+    let command = pip_command(python.as_deref(), cfg!(windows));
     let why = "its environment may be a project's, pinned by a lock file, or the system's: run it in that environment yourself";
-    Delegate::Name { manager: "pip".into(), command, why: why.into() }
+    Delegate::Name { manager: "pip".into(), why: for_powershell(&command, why.into(), cfg!(windows)), command }
+}
+
+/// pip's update by the environment's own `python`, its path quoted where a shell would split it (a home folder named
+/// with a space), or by whichever `pip` is on PATH when that Python is not found.
+fn pip_command(python: Option<&Path>, windows: bool) -> String {
+    match python {
+        Some(py) => format!("{} -m pip install --upgrade superfluid-cli", shell_program(&py.to_string_lossy(), windows)),
+        None => "pip install --upgrade superfluid-cli".to_string(),
+    }
+}
+
+/// Where the Python of the environment that holds the copy at `p` would be:
+/// `<env>/lib/python3.x/site-packages/superfluid_cli/release/bin/superfluid` has `<env>/bin/python`. On Windows
+/// `<env>\Lib\site-packages\…` has `<env>\Scripts\python.exe` when the environment is a venv, and `<env>\python.exe`
+/// when it is a Python install.
+fn python_of(p: &str, windows: bool) -> Option<PathBuf> {
+    let at = shape(p, windows);
+    if !windows {
+        return at.find("/lib/python").map(|i| Path::new(&p[..i]).join("bin").join("python"));
+    }
+    let env = Path::new(&p[..at.find("/lib/site-packages/")?]);
+    let venv = env.join("Scripts").join("python.exe");
+    Some(if venv.is_file() { venv } else { env.join("python.exe") })
+}
+
+/// The Windows install script, which replaces a release where it is. Only named: the copy it replaces is the one that
+/// would be running it, and a server started from that copy keeps its files open.
+fn install_ps1() -> Delegate {
+    Delegate::Name {
+        manager: "the install script".into(),
+        command: INSTALL_PS1_COMMAND.into(),
+        why: "in PowerShell: it installs a release under versions, which `superfluid self update` then keeps up to date".into(),
+    }
 }
 
 /// `cargo install superfluid` by the cargo beside the copy.
 fn cargo(bin: &Path) -> Delegate {
-    let cargo = bin.join("cargo");
+    let cargo = bin.join(crate::sys::exe_name("cargo"));
     if !executable(&cargo) {
         return on_path("cargo", &["install", "superfluid"]);
     }
@@ -566,11 +797,11 @@ fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
     // ~/.cargo/bin with other tools).
     let root = exe.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
     let watched = if manager == "cargo" { exe.parent().unwrap_or(root) } else { root };
-    let watched = std::fs::canonicalize(watched).unwrap_or_else(|_| watched.to_path_buf());
+    let watched = crate::sys::canonical(watched).unwrap_or_else(|_| watched.to_path_buf());
     let idle = || -> Result<(), String> {
         let busy: Vec<String> = other_processes()
             .into_iter()
-            .filter(|(_, e)| e.starts_with(&watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
+            .filter(|(_, e)| runs_under(e, &watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
             .map(|(pid, _)| pid.to_string())
             .collect();
         if busy.is_empty() {
@@ -836,14 +1067,80 @@ fn started_at(pid: i32) -> Option<u64> {
     (got == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn other_processes() -> Vec<(i32, PathBuf)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
+    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    let me = std::process::id();
+    let mut found = Vec::new();
+    // SAFETY: the snapshot and each process handle are closed here; `entry` is plain data whose size is set as the
+    // call requires; the path buffer's length is what is passed, and only what the call filled is read.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return found;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+        while more {
+            let pid = entry.th32ProcessID;
+            if pid != 0 && pid != me {
+                // Another user's process gives no handle, and is not this user's server.
+                let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if !process.is_null() {
+                    let mut path = [0u16; 1024];
+                    let mut len = path.len() as u32;
+                    if QueryFullProcessImageNameW(process, 0, path.as_mut_ptr(), &mut len) != 0 {
+                        found.push((pid as i32, PathBuf::from(String::from_utf16_lossy(&path[..len as usize]))));
+                    }
+                    CloseHandle(process);
+                }
+            }
+            more = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+    }
+    found
+}
+
+/// When `pid` started, in 100 ns ticks since 1601.
+#[cfg(windows)]
+fn started_at(pid: i32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: the handle is closed here; the four times are plain data the call fills.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if process.is_null() {
+            return None;
+        }
+        let mut times: [FILETIME; 4] = std::mem::zeroed();
+        let got = GetProcessTimes(process, &mut times[0], &mut times[1], &mut times[2], &mut times[3]) != 0;
+        CloseHandle(process);
+        got.then(|| (u64::from(times[0].dwHighDateTime) << 32) | u64::from(times[0].dwLowDateTime))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn other_processes() -> Vec<(i32, PathBuf)> {
     Vec::new()
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn started_at(_pid: i32) -> Option<u64> {
     None
+}
+
+/// Whether the executable `exe` is under the directory `dir`, both real paths. Windows names are compared without
+/// regard to case: a process's path is as it was started, not as the directory spells it.
+fn under(exe: &Path, dir: &Path) -> bool {
+    if cfg!(windows) {
+        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        return lower(exe).starts_with(lower(dir));
+    }
+    exe.starts_with(dir)
 }
 
 /// Whether another process runs an executable under `dir`.
@@ -853,8 +1150,15 @@ pub fn running_from(dir: &Path) -> bool {
 
 /// The other processes running an executable under `dir`, by pid and when each started.
 fn processes_from(dir: &Path) -> Vec<(i32, u64)> {
-    let Ok(dir) = std::fs::canonicalize(dir) else { return Vec::new() };
-    other_processes().into_iter().filter(|(_, exe)| exe.starts_with(&dir)).map(|(p, _)| (p, started_at(p).unwrap_or(0))).collect()
+    let Ok(dir) = crate::sys::canonical(dir) else { return Vec::new() };
+    other_processes().into_iter().filter(|(_, exe)| runs_under(exe, &dir)).map(|(p, _)| (p, started_at(p).unwrap_or(0))).collect()
+}
+
+/// Whether the process whose executable the system reports as `exe` runs from under the real path `dir`. Windows
+/// reports the path the process was started by, which may reach the file by a short name (`C:\Users\RUNNER~1`) or
+/// through a junction; such a path is resolved as `dir` was. Elsewhere the system reports the real path.
+fn runs_under(exe: &Path, dir: &Path) -> bool {
+    under(exe, dir) || (cfg!(windows) && crate::sys::canonical(exe).is_ok_and(|real| under(&real, dir)))
 }
 
 
@@ -909,7 +1213,7 @@ fn probe(versions: &Versions, v: &str, home: &Path, engine: &Engine) -> Result<(
 /// The same proof of a copy wherever it is, so a replacement is proved before anything it replaces is touched.
 fn probe_binary(binary: &Path, v: &str, home: &Path, engine: &Engine) -> Result<(), String> {
     // A copy cut short can hold the command and nothing beside it; it starts, and its server finds no workerd.
-    if !binary.with_file_name("superfluid-workerd").is_file() {
+    if !binary.with_file_name(crate::sys::exe_name("superfluid-workerd")).is_file() {
         return Err(format!("{} has no superfluid-workerd beside it", binary.display()));
     }
     let said = version_of(binary)?;
@@ -940,6 +1244,19 @@ fn move_tree(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::remove_dir_all(from).map_err(|e| format!("{}: {e}", from.display()))
 }
 
+/// `move_tree` for a tree the caller unpacked and removes itself, which may hold the program that is running this:
+/// the install script runs the release it unpacked. Where the tree cannot be renamed (another volume) it is copied,
+/// and what cannot then be removed is left to the caller. Windows deletes no program that is running, so there the
+/// removal always stops at this one.
+fn take_tree(from: &Path, to: &Path) -> Result<(), String> {
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_tree(from, to)?;
+    let _ = std::fs::remove_dir_all(from);
+    Ok(())
+}
+
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
     for e in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))?.flatten() {
@@ -949,7 +1266,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
             copy_tree(&src, &dest)?;
         } else if kind.is_symlink() {
             let target = std::fs::read_link(&src).map_err(|e| format!("{}: {e}", src.display()))?;
-            std::os::unix::fs::symlink(target, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+            crate::sys::symlink_file(&target, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
         } else {
             std::fs::copy(&src, &dest).map_err(|e| format!("{} -> {}: {e}", src.display(), dest.display()))?;
         }
@@ -980,8 +1297,11 @@ fn place_through(versions: &Versions, release: &Release, staging: &Path, report:
     let unpacked = staging.join("unpacked");
     unpack(&archive, &unpacked)?;
     let top = single_top(&unpacked)?;
-    for needed in ["bin/superfluid", "bin/superfluid-workerd"] {
-        if !top.join(needed).is_file() {
+    let exe = std::env::consts::EXE_SUFFIX;
+    // On Windows the launcher too: the commands on PATH are copies of it.
+    let needed = [Some(format!("bin/superfluid{exe}")), Some(format!("bin/superfluid-workerd{exe}")), cfg!(windows).then(|| format!("libexec/superfluid/{SHIM}"))];
+    for needed in needed.into_iter().flatten() {
+        if !top.join(&needed).is_file() {
             return Err(format!("{} holds no {needed}", asset.name));
         }
     }
@@ -1206,13 +1526,18 @@ pub fn use_version(home: &Path, catalog: &Catalog, exe: &Path, v: &str) -> Resul
 }
 
 /// `self install --from <dir> [--prefix <dir>]`: an unpacked release placed
-/// into the layout and made current; the install script's last step.
+/// into the layout and made current; the install script's last step. `<dir>` is moved there, or copied when it is on
+/// another volume, and then what is left of it is the script's to remove.
 pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<&Path>) -> Result<Report, String> {
     let versions = Versions::of(home);
     let mut report = Report::default();
     std::fs::create_dir_all(&versions.dir).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
     let _one_at_a_time = crate::pulls::Lock::take(&versions.dir, "self", "install of superfluid")?;
-    let v = version_of(&from.join("bin").join("superfluid"))?;
+    let command = from.join("bin").join(crate::sys::exe_name("superfluid"));
+    let v = version_of(&command)?;
+    if cfg!(windows) && !from.join("libexec").join("superfluid").join(SHIM).is_file() {
+        return Err(format!("{} holds no libexec\\superfluid\\{SHIM}, which the commands on PATH are copies of", from.display()));
+    }
     let engine = engine_here(catalog);
     let dest = versions.version_dir(&v);
     if dest == from {
@@ -1222,11 +1547,11 @@ pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<
         report.say(format!("superfluid {v} is installed here already and works; the copy given was not used"));
     } else {
         // Proved where it is, then set in place of a copy that does not work.
-        probe_binary(&from.join("bin").join("superfluid"), &v, home, &engine).map_err(|e| format!("{v} was not made current: {e}"))?;
-        replace_tree(from, &dest, &versions.dir.join(format!(".replaced-{v}")), move_tree)?;
+        probe_binary(&command, &v, home, &engine).map_err(|e| format!("{v} was not made current: {e}"))?;
+        replace_tree(from, &dest, &versions.dir.join(format!(".replaced-{v}")), take_tree)?;
     }
     // The install script's earlier copy under the prefix is kept as the version to go back to.
-    let kept = match prefix.and_then(|p| match installed_as(&p.join("superfluid")) {
+    let kept = match prefix.and_then(|p| match installed_as(&p.join(crate::sys::exe_name("superfluid"))) {
         Installed::InPlace { prefix: root } => Some(root),
         _ => None,
     }) {
@@ -1245,7 +1570,7 @@ pub fn install_from(home: &Path, catalog: &Catalog, from: &Path, prefix: Option<
         for note in versions.link(&prefix, true)? {
             report.say(note);
         }
-        report.say(format!("{} links to it", prefix.join("superfluid").display()));
+        report.say(format!("{} {} it", prefix.join(crate::sys::exe_name("superfluid")).display(), if cfg!(windows) { "runs" } else { "links to" }));
     }
     Ok(report)
 }
@@ -1433,10 +1758,9 @@ pub fn run(args: &[String]) -> i32 {
             }
             match update(&home, &catalog, &exe, &opts) {
                 Ok(Report { hand_off: Some(mut cmd), .. }) => {
-                    use std::os::unix::process::CommandExt;
                     let _ = std::io::stdout().flush();
                     // Only returns when the command could not be run.
-                    let e = cmd.exec();
+                    let e = crate::sys::replace_process(&mut cmd);
                     eprintln!("superfluid: running {}: {e}", cmd.get_program().to_string_lossy());
                     1
                 }
@@ -1476,6 +1800,343 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 #[cfg(test)]
+mod install_script_tests {
+    use super::*;
+
+    #[test]
+    fn a_release_the_windows_install_script_placed_is_updated_by_running_it_again() {
+        let root = std::env::temp_dir().join(format!("sf-self-ps1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::create_dir_all(root.join("libexec").join("superfluid")).unwrap();
+        let exe = root.join("bin").join(crate::sys::exe_name("superfluid"));
+        std::fs::write(&exe, b"").unwrap();
+        std::fs::write(root.join(INSTALLED_BY), format!("{INSTALL_PS1}: {INSTALL_PS1_COMMAND}\n")).unwrap();
+        assert!(matches!(installed_as(&exe), Installed::Other(_)), "it is the script's, not a version here");
+        let exe = crate::sys::canonical(&exe).unwrap();
+        match delegate(&exe) {
+            Some(Delegate::Name { manager, command, .. }) => {
+                assert_eq!((manager.as_str(), command.as_str()), ("the install script", INSTALL_PS1_COMMAND));
+            }
+            other => panic!("the script is named, never run: {other:?}"),
+        }
+        assert_eq!(update_command(&exe), INSTALL_PS1_COMMAND, "what `serve` says installs a newer release");
+        let refused = update(&root, &Catalog::from_env(), &exe, &Options::default()).unwrap_err();
+        assert!(refused.contains(INSTALL_PS1_COMMAND), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Where npm and pip put a copy on Windows, read here on any platform: the files are laid out as there.
+    #[test]
+    fn a_copy_npm_or_pip_placed_on_windows_is_told_by_where_it_is() {
+        assert_eq!(shape(r"C:\Users\Me\AppData\Roaming\npm\node_modules\X", true), "c:/users/me/appdata/roaming/npm/node_modules/x");
+        assert_eq!(shape(r"/home/me/a\B", false), r"/home/me/a\B", "a Unix name may hold a backslash, and its case counts");
+        let root = std::env::temp_dir().join(format!("sf-self-places-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let file = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        };
+
+        // npm keeps a global package's own dependencies inside it, and writes its commands beside node_modules.
+        let npm = root.join("npm");
+        let platform = Path::new("node_modules").join("@basecompute").join("superfluid-win32-x64").join("release").join("bin").join("superfluid.exe");
+        let global = npm.join("node_modules").join("@basecompute").join("superfluid").join(&platform);
+        file(&global);
+        assert_eq!(npm_global_prefix(&global.to_string_lossy(), true), None, "node_modules with no command beside it is a project's");
+        file(&npm.join("superfluid.cmd"));
+        assert_eq!(npm_global_prefix(&global.to_string_lossy(), true), npm.to_str());
+        let project = root.join("app").join(&platform);
+        file(&project);
+        assert_eq!(npm_global_prefix(&project.to_string_lossy(), true), None);
+        assert_eq!(npm_global_prefix("/usr/local/lib/node_modules/@basecompute/superfluid-linux-x64/release/bin/superfluid", false), Some("/usr/local"));
+        assert_eq!(npm_global_prefix("/srv/app/node_modules/@basecompute/superfluid-linux-x64/release/bin/superfluid", false), None);
+
+        // A venv has its Python in Scripts; a Python install has it at its root.
+        let env = root.join("env");
+        let copy = env.join("Lib").join("site-packages").join("superfluid_cli").join("release").join("bin").join("superfluid.exe");
+        file(&copy);
+        assert_eq!(python_of(&copy.to_string_lossy(), true), Some(env.join("python.exe")));
+        file(&env.join("Scripts").join("python.exe"));
+        assert_eq!(python_of(&copy.to_string_lossy(), true), Some(env.join("Scripts").join("python.exe")));
+        assert_eq!(python_of(r"C:\Users\Me\AppData\Roaming\Python\Python313\site-packages\superfluid_cli\release\bin\superfluid.exe", true), None, "a user site has no Lib");
+        assert_eq!(
+            python_of("/opt/env/lib/python3.12/site-packages/superfluid_cli/release/bin/superfluid", false),
+            Some(PathBuf::from("/opt/env/bin/python"))
+        );
+
+        let run = Delegate::Run { manager: "uv".into(), command: "uv tool upgrade superfluid-cli".into(), argv: vec!["uv".into()], path_first: None };
+        match named_while_it_runs(run) {
+            Delegate::Name { manager, command, why } => {
+                assert_eq!((manager.as_str(), command.as_str()), ("uv", "uv tool upgrade superfluid-cli"));
+                assert!(why.contains("replace no program that is running"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let basert = Delegate::Run { manager: "basert".into(), command: "basert superfluid install".into(), argv: vec!["basert".into()], path_first: None };
+        assert_eq!(named_while_it_runs(basert.clone()), basert, "basert is handed the process, and replaces a copy nothing runs from");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // On Windows the command a user is shown is the whole update, so it has to be one a shell runs as it is typed.
+    #[test]
+    fn a_command_a_user_is_to_type_updates_the_copy_it_is_about_and_survives_a_space() {
+        // npm is told the folder the copy is in: npm's own configuration may name another (%AppData%\npm).
+        assert_eq!(npm_global_command(r"D:\sf-tools", true), r"npm install --global --prefix D:\sf-tools @basecompute/superfluid@latest");
+        assert_eq!(
+            npm_global_command(r"C:\Users\Jane Doe\AppData\Roaming\npm", true),
+            r"npm install --global --prefix 'C:\Users\Jane Doe\AppData\Roaming\npm' @basecompute/superfluid@latest"
+        );
+        assert_eq!(npm_global_command("/usr/local", false), "npm install --global @basecompute/superfluid@latest", "elsewhere superfluid runs npm, with the prefix");
+
+        // A path no shell splits is as it is; another is quoted, and PowerShell runs a quoted program after `&`.
+        let python = |p: &str, windows| pip_command(Some(Path::new(p)), windows);
+        assert_eq!(python(r"C:\Users\me\venv\Scripts\python.exe", true), r"C:\Users\me\venv\Scripts\python.exe -m pip install --upgrade superfluid-cli");
+        assert_eq!(python(r"C:\Users\RUNNER~1\venv\Scripts\python.exe", true), r"C:\Users\RUNNER~1\venv\Scripts\python.exe -m pip install --upgrade superfluid-cli");
+        assert_eq!(
+            python(r"C:\Users\Jane Doe\venv\Scripts\python.exe", true),
+            r"& 'C:\Users\Jane Doe\venv\Scripts\python.exe' -m pip install --upgrade superfluid-cli"
+        );
+        assert_eq!(python(r"C:\Users\O'Brien & Co\python.exe", true), r"& 'C:\Users\O''Brien & Co\python.exe' -m pip install --upgrade superfluid-cli");
+        assert_eq!(python("/opt/env/bin/python", false), "/opt/env/bin/python -m pip install --upgrade superfluid-cli");
+        assert_eq!(python("/home/jane doe/it's/bin/python", false), r"'/home/jane doe/it'\''s/bin/python' -m pip install --upgrade superfluid-cli");
+        assert_eq!(pip_command(None, true), "pip install --upgrade superfluid-cli");
+        assert_eq!(shell_word("", true), "''");
+        assert_eq!(shell_word(r"a\b", false), r"'a\b'", "a backslash is a name's on Unix, and a shell's too");
+
+        // cmd reads a quoted command another way, so the reason says whose it is.
+        let why = for_powershell(&python(r"C:\Users\Jane Doe\python.exe", true), "run it yourself".into(), true);
+        assert_eq!(why, "run it yourself; the command is written for PowerShell");
+        assert_eq!(for_powershell(&python(r"C:\Users\me\python.exe", true), "run it yourself".into(), true), "run it yourself");
+        assert_eq!(for_powershell("'/a b/python' -m pip", "run it yourself".into(), false), "run it yourself");
+    }
+
+    // The install script hands over the folder it unpacked, with the program it runs inside.
+    #[test]
+    fn an_unpacked_release_is_taken_whole_and_what_cannot_be_removed_is_left_to_its_owner() {
+        let root = std::env::temp_dir().join(format!("sf-self-take-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let release = |dir: &Path| {
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::write(dir.join("bin").join("superfluid"), b"a release").unwrap();
+        };
+        // On one volume it is renamed.
+        release(&root.join("unpacked"));
+        take_tree(&root.join("unpacked"), &root.join("moved")).unwrap();
+        assert_eq!(std::fs::read(root.join("moved").join("bin").join("superfluid")).unwrap(), b"a release");
+        assert!(!root.join("unpacked").exists());
+        // Where it cannot be (here, something is in the way, as another volume would refuse), it is copied; a source
+        // that cannot then be removed, as a running program's on Windows, does not undo the install.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let from = root.join("held");
+            release(&from);
+            std::fs::create_dir_all(root.join("dest").join("in-the-way")).unwrap();
+            std::fs::set_permissions(from.join("bin"), std::fs::Permissions::from_mode(0o555)).unwrap();
+            take_tree(&from, &root.join("dest")).unwrap();
+            assert_eq!(std::fs::read(root.join("dest").join("bin").join("superfluid")).unwrap(), b"a release");
+            if from.exists() {
+                std::fs::set_permissions(from.join("bin"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+// The Windows layout, on files that stand in for a release: the launcher is whatever bytes the version carries.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    fn release(versions: &Versions, v: &str, launcher: &[u8]) {
+        let dir = versions.version_dir(v);
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::create_dir_all(dir.join("libexec").join("superfluid")).unwrap();
+        for name in LINKED {
+            std::fs::write(dir.join("bin").join(crate::sys::exe_name(name)), v).unwrap();
+        }
+        std::fs::write(dir.join("libexec").join("superfluid").join(SHIM), launcher).unwrap();
+    }
+
+    #[test]
+    fn the_commands_on_path_are_launchers_that_are_told_where_the_versions_are() {
+        let root = std::env::temp_dir().join(format!("sf-self-win-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let versions = Versions::of(&root.join("home"));
+        let prefix = root.join("programs").join("bin");
+        // Two builds of one revision: the same program, not the same bytes.
+        release(&versions, "0.2.0", b"superfluid-shim-revision:0001 built monday");
+        release(&versions, "0.2.1", b"superfluid-shim-revision:0001 built tuesday");
+        assert_eq!(versions.current(), None);
+        assert!(versions.link(&prefix, true).unwrap_err().contains("no version is current"));
+
+        versions.set_current("0.2.0").unwrap();
+        assert_eq!(versions.current().as_deref(), Some("0.2.0"));
+        assert_eq!(versions.link(&prefix, true).unwrap(), Vec::<String>::new());
+        let said = std::fs::read_to_string(prefix.join(VERSIONS_FILE)).unwrap();
+        assert_eq!(Path::new(said.trim()), versions.dir);
+        for name in LINKED {
+            assert_eq!(std::fs::read(prefix.join(crate::sys::exe_name(name))).unwrap(), b"superfluid-shim-revision:0001 built monday", "{name}");
+        }
+        assert_eq!(versions.prefix().as_deref(), Some(prefix.as_path()));
+
+        // A switch changes the file the launchers read and places nothing.
+        versions.set_current("0.2.1").unwrap();
+        assert_eq!((versions.current().as_deref(), versions.previous().as_deref()), (Some("0.2.1"), Some("0.2.0")));
+        assert_eq!(versions.link(&prefix, false).unwrap(), Vec::<String>::new());
+        assert_eq!(std::fs::read(prefix.join("superfluid.exe")).unwrap(), b"superfluid-shim-revision:0001 built monday");
+
+        // A release with a newer launcher has it take the place of the one there, and nothing is left aside.
+        release(&versions, "0.3.0", b"superfluid-shim-revision:0002");
+        versions.set_current("0.3.0").unwrap();
+        assert_eq!(versions.link(&prefix, false).unwrap(), Vec::<String>::new());
+        assert_eq!(std::fs::read(prefix.join("superfluid.exe")).unwrap(), b"superfluid-shim-revision:0002");
+        // Going back to an older release keeps the newer launcher, which runs it as well.
+        versions.set_current("0.2.0").unwrap();
+        assert_eq!(versions.link(&prefix, false).unwrap(), Vec::<String>::new());
+        assert_eq!(std::fs::read(prefix.join("superfluid.exe")).unwrap(), b"superfluid-shim-revision:0002");
+        let left: Vec<String> = std::fs::read_dir(&prefix).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with('.')).collect();
+        assert_eq!(left, Vec::<String>::new());
+
+        // A version with no launcher of its own is run by the ones there.
+        release(&versions, "0.3.1", b"");
+        std::fs::remove_file(versions.version_dir("0.3.1").join("libexec").join("superfluid").join(SHIM)).unwrap();
+        versions.set_current("0.3.1").unwrap();
+        assert_eq!(versions.link(&prefix, false).unwrap(), Vec::<String>::new());
+        assert_eq!(std::fs::read(prefix.join("superfluid.exe")).unwrap(), b"superfluid-shim-revision:0002");
+        assert!(versions.link(&root.join("elsewhere"), true).unwrap_err().contains(SHIM), "a new prefix needs one");
+
+        assert_eq!(
+            installed_as(&versions.binary("0.3.0")),
+            Installed::Managed { versions: crate::sys::canonical(&versions.dir).unwrap(), version: "0.3.0".into() }
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_program_no_install_here_placed_is_left_unless_the_install_script_asks() {
+        let root = std::env::temp_dir().join(format!("sf-self-win-theirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let versions = Versions::of(&root.join("home"));
+        let prefix = root.join("bin");
+        release(&versions, "0.2.0", b"superfluid-shim-revision:0001");
+        versions.set_current("0.2.0").unwrap();
+        std::fs::create_dir_all(&prefix).unwrap();
+        std::fs::write(prefix.join("superfluid.exe"), b"someone's own build").unwrap();
+        let notes = versions.link(&prefix, false).unwrap();
+        assert!(notes.len() == 1 && notes[0].contains("left as it is"), "{notes:?}");
+        assert_eq!(std::fs::read(prefix.join("superfluid.exe")).unwrap(), b"someone's own build");
+        assert_eq!(std::fs::read(prefix.join("superfluid-workerd.exe")).unwrap(), b"superfluid-shim-revision:0001", "what was not there is placed");
+        // From then on the prefix is one an install here keeps.
+        std::fs::remove_file(prefix.join(VERSIONS_FILE)).unwrap();
+        assert_eq!(versions.link(&prefix, true).unwrap(), Vec::<String>::new());
+        assert_eq!(std::fs::read(prefix.join("superfluid.exe")).unwrap(), b"superfluid-shim-revision:0001");
+        assert_eq!((launcher_revision(b"superfluid-shim-revision:0012 x"), launcher_revision(b"an .exe"), launcher_revision(b"superfluid-shim-revision:1")), (Some(12), None, None));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A release a package carries at `root`, its `installed-by` saying `line`; the program's real path.
+    fn packaged(root: &Path, line: &str) -> PathBuf {
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::create_dir_all(root.join("libexec").join("superfluid")).unwrap();
+        std::fs::write(root.join("bin").join("superfluid.exe"), b"").unwrap();
+        std::fs::write(root.join(INSTALLED_BY), format!("{line}\n")).unwrap();
+        crate::sys::canonical(root.join("bin").join("superfluid.exe")).unwrap()
+    }
+
+    #[test]
+    fn a_copy_npm_or_pip_installed_is_theirs_and_their_command_is_named_never_run() {
+        let root = std::env::temp_dir().join(format!("sf-self-win-packages-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let npm_line = "npm: npm install --global @basecompute/superfluid@latest";
+        let pip_line = "pip: pip install --upgrade superfluid-cli";
+        let named = |exe: &Path| match delegate(exe) {
+            Some(Delegate::Name { manager, command, why }) => (manager, command, why),
+            other => panic!("{}: {other:?}", exe.display()),
+        };
+
+        // npm's global folder, with the command npm wrote beside it.
+        let prefix = root.join("npm");
+        let in_main = prefix.join("node_modules").join("@basecompute").join("superfluid").join("node_modules");
+        let global = packaged(&in_main.join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
+        std::fs::write(prefix.join("superfluid.cmd"), b"").unwrap();
+        assert!(matches!(installed_as(&global), Installed::Other(_)), "it is npm's, not a release unpacked in one place");
+        // The command names the folder this copy is in, which need not be the one npm is set to.
+        let update_it = format!("npm install --global --prefix {} @basecompute/superfluid@latest", crate::sys::canonical(&prefix).unwrap().display());
+        let (manager, command, why) = named(&global);
+        assert_eq!((manager.as_str(), command.as_str()), ("npm", update_it.as_str()));
+        assert!(why.contains("Windows lets npm replace no program that is running") && !why.contains("PowerShell"), "{why}");
+        assert_eq!(update_command(&global), update_it);
+        let yes = Options { yes: true, ..Options::default() };
+        let refused = update(&root, &Catalog::from_env(), &global, &yes).unwrap_err();
+        assert!(refused.contains(&format!("was installed by npm, which updates it: run `{update_it}`")), "{refused}");
+        // A folder named with a space is quoted, as PowerShell reads it.
+        let spaced = root.join("my tools");
+        let in_spaced = packaged(&spaced.join("node_modules").join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
+        std::fs::write(spaced.join("superfluid.cmd"), b"").unwrap();
+        let (_, command, why) = named(&in_spaced);
+        assert_eq!(command, format!("npm install --global --prefix '{}' @basecompute/superfluid@latest", crate::sys::canonical(&spaced).unwrap().display()));
+        assert!(why.contains("written for PowerShell"), "{why}");
+        // A project's dependency is that project's.
+        let project = packaged(&root.join("app").join("node_modules").join("@basecompute").join("superfluid-win32-x64").join("release"), npm_line);
+        let (_, command, why) = named(&project);
+        assert_eq!(command, "npm install @basecompute/superfluid@latest");
+        assert!(why.contains("update it in that project"), "{why}");
+
+        // pip, with the Python of the environment the copy is in.
+        let env = root.join("venv");
+        let pip_copy = packaged(&env.join("Lib").join("site-packages").join("superfluid_cli").join("release"), pip_line);
+        std::fs::create_dir_all(env.join("Scripts")).unwrap();
+        std::fs::write(env.join("Scripts").join("python.exe"), b"").unwrap();
+        let python = crate::sys::canonical(env.join("Scripts").join("python.exe")).unwrap();
+        let (manager, command, _) = named(&pip_copy);
+        assert_eq!((manager.as_str(), command), ("pip", format!("{} -m pip install --upgrade superfluid-cli", python.display())));
+        // A home folder named with a space: the program is quoted, and run with `&`.
+        let env = root.join("Jane Doe").join("venv");
+        let pip_copy = packaged(&env.join("Lib").join("site-packages").join("superfluid_cli").join("release"), pip_line);
+        std::fs::create_dir_all(env.join("Scripts")).unwrap();
+        std::fs::write(env.join("Scripts").join("python.exe"), b"").unwrap();
+        let python = crate::sys::canonical(env.join("Scripts").join("python.exe")).unwrap();
+        let (_, command, why) = named(&pip_copy);
+        assert_eq!(command, format!("& '{}' -m pip install --upgrade superfluid-cli", python.display()));
+        assert!(why.contains("written for PowerShell"), "{why}");
+        // pipx and uv are told apart by their folders, and are named too, with or without one on PATH.
+        let site = Path::new("Lib").join("site-packages").join("superfluid_cli").join("release");
+        let pipx = packaged(&root.join("pipx").join("venvs").join("superfluid-cli").join(&site), pip_line);
+        let (manager, command, _) = named(&pipx);
+        assert_eq!((manager.as_str(), command.as_str()), ("pipx", "pipx upgrade superfluid-cli"));
+        let uv = packaged(&root.join("uv").join("tools").join("superfluid-cli").join(&site), pip_line);
+        let (manager, command, _) = named(&uv);
+        assert_eq!((manager.as_str(), command.as_str()), ("uv", "uv tool upgrade superfluid-cli"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_running_program_is_found_by_where_it_runs_from_whatever_the_case() {
+        // Something that stays up for the length of the test, started from a directory of its own.
+        let root = std::env::temp_dir().join(format!("sf-self-win-running-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Bin")).unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let program = root.join("Bin").join("waits.exe");
+        std::fs::copy(system.join("ping.exe"), &program).unwrap();
+        assert!(!running_from(&root));
+        let mut child = Command::new(&program).args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+        let found = processes_from(&root);
+        assert_eq!(found.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(), [child.id() as i32]);
+        assert!(found[0].1 > 0 && started_at(child.id() as i32) == Some(found[0].1), "it has a start time: {found:?}");
+        assert!(under(Path::new(r"C:\Users\Me\BIN\x.exe"), Path::new(r"c:\users\me\bin")));
+        assert!(!under(Path::new(r"C:\Users\Me\binary\x.exe"), Path::new(r"C:\Users\Me\bin")), "a name that only starts the same is another directory");
+        child.kill().unwrap();
+        let _ = child.wait();
+        assert!(!running_from(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+// The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

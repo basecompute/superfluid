@@ -193,12 +193,13 @@ async fn auth_layer(
     if let Some(key) = keyed {
         if admin_route && !key.admin {
             if key.admit(false, true).is_err() {
-                return error_response_typed(
+                let refusal = error_response_typed(
                     StatusCode::TOO_MANY_REQUESTS,
                     format!("API key '{}' exceeded its rate limit ({}/min)", key.name, key.rate_limit_rpm),
                     "rate_limit_error",
                     "rate_limit_exceeded",
                 );
+                return refuse(req, refusal).await;
             }
             let ip_ok = key.rate_limit_rpm > 0
                 || req
@@ -206,15 +207,16 @@ async fn auth_layer(
                     .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                     .is_none_or(|c| auth.ip_limiter.allow(c.0.ip()));
             if !ip_ok {
-                return error_response_typed(
+                let refusal = error_response_typed(
                     StatusCode::TOO_MANY_REQUESTS,
                     "Rate limit exceeded".to_string(),
                     "rate_limit_error",
                     "rate_limit_exceeded",
                 );
+                return refuse(req, refusal).await;
             }
             key.note_admin_reject();
-            return (
+            let refusal = (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"error": {
                     "message": format!(
@@ -228,6 +230,7 @@ async fn auth_layer(
                 }})),
             )
                 .into_response();
+            return refuse(req, refusal).await;
         }
         let slot = if exempt {
             None
@@ -246,7 +249,7 @@ async fn auth_layer(
                             "rate_limit_exceeded",
                         ),
                     };
-                    return (
+                    let refusal = (
                         StatusCode::TOO_MANY_REQUESTS,
                         Json(serde_json::json!({"error": {
                             "message": message,
@@ -256,6 +259,7 @@ async fn auth_layer(
                         }})),
                     )
                         .into_response();
+                    return refuse(req, refusal).await;
                 }
             }
         };
@@ -296,7 +300,7 @@ async fn auth_layer(
         }
         return next.run(req).await;
     }
-    (
+    let refusal = (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({"error": {
             "message": "Invalid or missing API key",
@@ -305,7 +309,16 @@ async fn auth_layer(
             "code": "invalid_api_key",
         }})),
     )
-        .into_response()
+        .into_response();
+    refuse(req, refusal).await
+}
+
+/// Answers `refusal` to a request a layer turns away, its body read first
+/// ([`crate::http_state::drain_body`]): a layer refuses before any handler has taken the body,
+/// and a client still sending it would lose the refusal to a reset connection.
+async fn refuse(req: axum::extract::Request, refusal: Response) -> Response {
+    crate::http_state::drain_body(req.into_body()).await;
+    refusal
 }
 
 struct HeldBody {
@@ -367,7 +380,7 @@ async fn rate_limit_layer(
     if limiter.allow(peer.ip()) {
         return next.run(req).await;
     }
-    (
+    let refusal = (
         StatusCode::TOO_MANY_REQUESTS,
         Json(serde_json::json!({"error": {
             "message": "Rate limit exceeded",
@@ -376,7 +389,8 @@ async fn rate_limit_layer(
             "code": "rate_limit_exceeded",
         }})),
     )
-        .into_response()
+        .into_response();
+    refuse(req, refusal).await
 }
 
 const MAX_BODY_SIZE: usize = 100 * 1024 * 1024;
@@ -445,13 +459,8 @@ impl HostGuard {
 }
 
 fn machine_host_names() -> Vec<String> {
-    let mut buf = [0u8; 256];
-    // SAFETY: buf is writable for its full length; gethostname NUL-terminates within it or fails.
-    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
-        return Vec::new();
-    }
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    let name = String::from_utf8_lossy(&buf[..len]).trim_end_matches('.').to_ascii_lowercase();
+    let Some(name) = crate::sys::hostname() else { return Vec::new() };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
     if name.is_empty() {
         return Vec::new();
     }
@@ -623,19 +632,64 @@ pub fn serve_blocking_config(
         let drain_deadline = Arc::new(std::sync::OnceLock::<std::time::Instant>::new());
         let drain_deadline_sig = Arc::clone(&drain_deadline);
         let watchdog_registry = Arc::clone(&shutdown_registry);
+        // Windows has no signal to send a process. A server is asked to drain through an event
+        // named for its process id, which `superfluid stop --drain` sets, and one with a console
+        // also by Ctrl+Break there: the one key a program may take without it also meaning
+        // "stop now", as Ctrl+C does.
+        #[cfg(windows)]
+        let drain_request = crate::sys::DrainRequest::listen().ok().and_then(|request| {
+            let (asked, hears) = tokio::sync::oneshot::channel::<()>();
+            std::thread::Builder::new()
+                .name("drain-request".into())
+                .spawn(move || {
+                    request.wait();
+                    let _ = asked.send(());
+                })
+                .ok()
+                .map(|_| hears)
+        });
         let shutdown = async move {
-            let mut sig = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::user_defined1(),
-            ) {
-                Ok(s) => s,
-                Err(_) => return std::future::pending::<()>().await,
+            #[cfg(unix)]
+            let asked = {
+                let mut sig = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
+                    Ok(s) => s,
+                    Err(_) => return std::future::pending::<()>().await,
+                };
+                sig.recv().await;
+                "SIGUSR1"
             };
-            sig.recv().await;
+            #[cfg(windows)]
+            let asked = {
+                let mut key = tokio::signal::windows::ctrl_break().ok();
+                // Either may be missing (no console; no event): the other still asks.
+                let by_key = async {
+                    let pressed = match key.as_mut() {
+                        Some(k) => k.recv().await.is_some(),
+                        None => false,
+                    };
+                    if !pressed {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                let by_request = async {
+                    let heard = match drain_request {
+                        Some(hears) => hears.await.is_ok(),
+                        None => false,
+                    };
+                    if !heard {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                tokio::select! {
+                    () = by_key => "Ctrl+Break",
+                    () = by_request => "a drain request",
+                }
+            };
             let _ = drain_deadline_sig
                 .set(std::time::Instant::now() + std::time::Duration::from_secs(drain));
             draining_sig.store(true, std::sync::atomic::Ordering::SeqCst);
             eprintln!(
-                "superfluid: SIGUSR1 — no longer accepting connections, draining for up to {drain}s"
+                "superfluid: {asked} — no longer accepting connections, draining for up to {drain}s"
             );
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(drain)).await;
@@ -649,7 +703,7 @@ pub fn serve_blocking_config(
                          a non-zero --park-budget-gb AND the directory is over that budget"
                     );
                 }
-                std::process::exit(0);
+                crate::events::exit(0);
             });
         };
         axum::serve(
@@ -673,7 +727,7 @@ pub fn serve_blocking_config(
                 .map(|d| d.saturating_duration_since(std::time::Instant::now()))
                 .unwrap_or_default();
             crate::otlp::shutdown(left.min(std::time::Duration::from_secs(2)));
-            std::process::exit(0);
+            crate::events::exit(0);
         }
         Ok(())
     })
@@ -1166,12 +1220,11 @@ fn audio_extension(filename: &str) -> Option<&str> {
 fn stage_audio(dir: &std::path::Path, ext: &str, audio: &[u8]) -> std::io::Result<std::path::PathBuf> {
     use std::hash::{BuildHasher, Hasher};
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let mut last = None;
     for _ in 0..8 {
         let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
         let path = dir.join(format!("superfluid-audio-{nonce:016x}.{ext}"));
-        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        match crate::sys::open_private(std::fs::OpenOptions::new().write(true).create_new(true), &path) {
             Ok(mut f) => {
                 if let Err(e) = f.write_all(audio) {
                     let _ = std::fs::remove_file(&path);
@@ -2175,7 +2228,10 @@ mod browser_guard_tests {
 
 #[cfg(test)]
 mod audio_staging_tests {
-    use super::{audio_extension, stage_audio};
+    use super::audio_extension;
+    #[cfg(unix)]
+    use super::stage_audio;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -2188,6 +2244,7 @@ mod audio_staging_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn staged_audio_is_owner_only_and_never_reuses_a_path() {
         let dir = std::env::temp_dir().join(format!("superfluid-audio-stage-{}", std::process::id()));

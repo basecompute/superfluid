@@ -2,20 +2,24 @@
 
     python3 packaging/npm/build_packages.py <assets-dir> <out-dir> --version <v>
 
-<assets-dir> holds the release's three tarballs and their .sha256 files. Writes
-four tarballs to <out-dir>, each ready for `npm publish <tarball>`:
+<assets-dir> holds the release's tarballs and their .sha256 files. Writes one
+tarball per platform to <out-dir> and the main package's, each ready for
+`npm publish <tarball>`:
 
     basecompute-superfluid-darwin-arm64-<v>.tgz   the release for macOS on Apple silicon
     basecompute-superfluid-linux-x64-<v>.tgz      ... for Linux on x86-64 (glibc)
     basecompute-superfluid-linux-arm64-<v>.tgz    ... for Linux on arm64 (glibc)
+    basecompute-superfluid-win32-x64-<v>.tgz      ... for Windows on x86-64, when the release has it
     basecompute-superfluid-<v>.tgz                the `superfluid` commands
 
 Each platform package carries the release tree in release/ (packaging/release.py
 stages it, adding the installed-by file), restricted by os, cpu and libc so npm
-only installs it where it runs. The main package lists all three as optional
-dependencies, so each machine downloads only its own (as esbuild ships), and
-its commands run the binaries from that one (packaging/npm/launch.js).
-`superfluid` is taken on npm, hence the @basecompute scope. Needs npm.
+only installs it where it runs. The main package lists each as an optional
+dependency, so each machine downloads only its own (as esbuild ships), and
+its commands run the binaries from that one (packaging/npm/launch.js). It
+names the platforms that were packaged and no other, so npm refuses it where
+this release has nothing to run. `superfluid` is taken on npm, hence the
+@basecompute scope. Needs npm.
 """
 
 from __future__ import annotations
@@ -43,19 +47,21 @@ TARGETS = {
     "aarch64-apple-darwin": {"name": f"{SCOPE}/superfluid-darwin-arm64", "os": ["darwin"], "cpu": ["arm64"], "what": "macOS on Apple silicon"},
     "x86_64-unknown-linux-gnu": {"name": f"{SCOPE}/superfluid-linux-x64", "os": ["linux"], "cpu": ["x64"], "libc": ["glibc"], "what": "Linux on x86-64 (glibc 2.28 or later)"},
     "aarch64-unknown-linux-gnu": {"name": f"{SCOPE}/superfluid-linux-arm64", "os": ["linux"], "cpu": ["arm64"], "libc": ["glibc"], "what": "Linux on arm64 (glibc 2.28 or later)"},
+    "x86_64-pc-windows-msvc": {"name": f"{SCOPE}/superfluid-win32-x64", "os": ["win32"], "cpu": ["x64"], "what": "Windows on x86-64"},
 }
 
 
 def write_json(path: Path, obj: dict) -> None:
-    path.write_text(json.dumps(obj, indent=2) + "\n")
+    release.put_text(path, json.dumps(obj, indent=2) + "\n")
 
 
 def pack(folder: Path, out: Path) -> Path:
     """`npm pack` a staged folder into out; return the tarball, under out as given."""
     # npm runs inside the staged folder, so a relative out would name a folder
-    # under it: it gets the absolute path. publish.yml passes `out`.
+    # under it: it gets the absolute path. publish.yml passes `out`. On Windows
+    # npm is npm.cmd, which is only run when named in full.
     res = subprocess.run(
-        ["npm", "pack", "--json", "--ignore-scripts", "--pack-destination", str(out.resolve())],
+        [shutil.which("npm") or "npm", "pack", "--json", "--ignore-scripts", "--pack-destination", str(out.resolve())],
         cwd=folder, check=True, stdout=subprocess.PIPE, text=True,
     )
     name = json.loads(res.stdout)[0]["filename"]
@@ -71,9 +77,10 @@ def platform_package(tarball: Path, stage: Path, version: str) -> dict:
     t = TARGETS[r.target]
     for name in ("LICENSE", "NOTICE"):
         shutil.copyfile(r.root / name, stage / name)
-    (stage / "README.md").write_text(
+    release.put_text(
+        stage / "README.md",
         f"# {t['name']}\n\nThe superfluid {version} release for {t['what']}. "
-        f"[`{MAIN}`](https://www.npmjs.com/package/{MAIN}) installs it and runs it; depend on that, not on this.\n"
+        f"[`{MAIN}`](https://www.npmjs.com/package/{MAIN}) installs it and runs it; depend on that, not on this.\n",
     )
     manifest = {
         "name": t["name"],
@@ -92,15 +99,16 @@ def platform_package(tarball: Path, stage: Path, version: str) -> dict:
     return manifest
 
 
-def main_package(stage: Path, version: str, legal: Path) -> None:
-    """Stage the main package, whose commands run the platform package's binaries."""
+def main_package(stage: Path, version: str, legal: Path, targets: list[str]) -> None:
+    """Stage the main package, whose commands run the binaries of the platform package, one of `targets`'."""
+    platforms = [TARGETS[target] for target in targets]
     (stage / "bin").mkdir(parents=True)
     (stage / "lib").mkdir()
     shutil.copyfile(HERE / "launch.js", stage / "lib" / "launch.js")
     bins = {}
     for command in release.COMMANDS:
         script = stage / "bin" / f"{command}.js"
-        script.write_text(f'#!/usr/bin/env node\n"use strict";\nrequire("../lib/launch.js")("{command}");\n')
+        release.put_text(script, f'#!/usr/bin/env node\n"use strict";\nrequire("../lib/launch.js")("{command}");\n')
         script.chmod(0o755)
         bins[command] = f"bin/{command}.js"
     shutil.copyfile(HERE / "README.md", stage / "README.md")
@@ -118,27 +126,35 @@ def main_package(stage: Path, version: str, legal: Path) -> None:
         "bin": bins,
         "files": ["bin/", "lib/", "LICENSE", "NOTICE", "README.md"],
         "engines": {"node": ">=18"},
-        "os": ["darwin", "linux"],
-        "cpu": ["arm64", "x64"],
-        "optionalDependencies": {t["name"]: version for t in TARGETS.values()},
+        "os": sorted({os for t in platforms for os in t["os"]}),
+        "cpu": sorted({cpu for t in platforms for cpu in t["cpu"]}),
+        "optionalDependencies": {t["name"]: version for t in platforms},
     })
 
 
-def build(assets: Path, out: Path, version: str) -> list[Path]:
-    """Write the four npm tarballs for a release; return them, the main package last."""
+def build(assets: Path, out: Path, version: str, targets: list[str] | None = None) -> list[Path]:
+    """Write the npm tarballs for a release, one per target and the main package last; return them.
+
+    The targets are every one the release must have and an optional one it does
+    have (release.targets_in), unless `targets` names them.
+    """
+    targets = release.targets_in(assets) if targets is None else targets
+    if not targets:
+        raise release.ReleaseError("no target to package")
     out.mkdir(parents=True, exist_ok=True)
     built = []
     with tempfile.TemporaryDirectory() as tmp:
         stages = Path(tmp)
-        for target, t in TARGETS.items():
+        for target in targets:
             tarball = assets / f"superfluid-{target}.tar.gz"
             if not tarball.is_file():
                 raise release.ReleaseError(f"no {tarball.name} in {assets}")
-            stage = stages / t["name"].split("/")[1]
+            stage = stages / TARGETS[target]["name"].split("/")[1]
             platform_package(tarball, stage, version)
             built.append(pack(stage, out))
         main = stages / "superfluid"
-        main_package(main, version, stages / TARGETS["aarch64-apple-darwin"]["name"].split("/")[1])
+        # LICENSE and NOTICE are the release's own, the same in every tarball.
+        main_package(main, version, stages / TARGETS[targets[0]]["name"].split("/")[1], targets)
         built.append(pack(main, out))
     return built
 

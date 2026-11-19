@@ -14,12 +14,27 @@ use superfluid_engine_ffi::{libbasert, FfiEngineConfig, NativeEngine, TokenizerH
 pub struct Basert;
 
 /// The options `superfluid serve` takes for this runtime, as `--basert-<name> <value>`.
-const OPTIONS: &[ServeOption] = &[ServeOption {
-    name: "neural-engine",
-    kind: OptionKind::OnOff,
-    default: "on",
-    about: "Run part of each prefill on the Neural Engine where that is faster (Apple silicon); off runs it on the GPU alone.",
-}];
+const OPTIONS: &[ServeOption] = &[
+    ServeOption {
+        name: "neural-engine",
+        kind: OptionKind::OnOff,
+        default: "on",
+        about: "Run part of each prefill on the Neural Engine where that is faster (Apple silicon); off runs it on the GPU alone.",
+    },
+    ServeOption {
+        name: "npu",
+        kind: OptionKind::OnOff,
+        default: "on",
+        about: "Run part of each prefill on the XDNA NPU where the machine has one and its runtime (AMD Strix on Linux); off runs it on the GPU alone. The same switch as --basert-neural-engine.",
+    },
+];
+
+/// The option that turns the prefill's coprocessor split off, when one does: the engine has one switch
+/// (`baseRT_set_neural_engine`) for whichever split its backend has, the Neural Engine's on Metal and the XDNA NPU's
+/// on ROCm, and each machine's users know it by their own name. Either one `off` is off.
+fn split_off(args: &WorkerArgs) -> Option<&'static str> {
+    ["neural-engine", "npu"].into_iter().find(|name| option(args, name) == Some("off"))
+}
 
 impl Runtime for Basert {
     fn compat(&self) -> serde_json::Value {
@@ -58,7 +73,7 @@ impl Runtime for Basert {
     }
 
     fn ahead(&self, args: &WorkerArgs) -> Result<Option<String>, String> {
-        if option(args, "neural-engine") == Some("off") {
+        if split_off(args).is_some() {
             return Ok(None);
         }
         let model = superfluid_adapter_kit::model(args)?;
@@ -102,11 +117,13 @@ impl Runtime for Basert {
     fn open(&self, args: &WorkerArgs) -> Result<Loaded, String> {
         let model = superfluid_adapter_kit::model(args)?.to_path_buf();
         superfluid_engine_ffi::set_kv_bits(args.kv_bits);
-        if option(args, "neural-engine") == Some("off") && !libbasert::set_neural_engine(false) {
-            return Err(format!(
-                "--basert-neural-engine off: the libbaseRT at {} has no Neural Engine switch (an older engine; it predates the option)",
-                libbasert::load()?.path.display()
-            ));
+        if let Some(name) = split_off(args) {
+            if !libbasert::set_neural_engine(false) {
+                return Err(format!(
+                    "--basert-{name} off: the libbaseRT at {} has no switch for the prefill's split (an older engine; it predates the option)",
+                    libbasert::load()?.path.display()
+                ));
+            }
         }
         let engine = NativeEngine::load(FfiEngineConfig {
             model_path: model,
@@ -519,6 +536,21 @@ fn named(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn either_name_turns_the_prefill_split_off() {
+        superfluid_adapter_kit::check_declaration(OPTIONS).unwrap();
+        // The worker gets `--basert-<name> <value>` as `--<name> <value>`.
+        let with = |pairs: &[(&str, &str)]| WorkerArgs {
+            extra: pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            ..Default::default()
+        };
+        assert_eq!(split_off(&with(&[])), None, "on by default");
+        assert_eq!(split_off(&with(&[("--neural-engine", "on"), ("--npu", "on")])), None);
+        assert_eq!(split_off(&with(&[("--neural-engine", "off")])), Some("neural-engine"));
+        assert_eq!(split_off(&with(&[("--npu", "off")])), Some("npu"));
+        assert_eq!(split_off(&with(&[("--neural-engine", "on"), ("--npu", "off")])), Some("npu"), "either one off is off");
+    }
 
     #[test]
     fn the_device_is_named_by_the_gpu_the_engine_runs_on() {

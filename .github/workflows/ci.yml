@@ -42,6 +42,52 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  # Windows builds the daemon with llama.cpp and the terminal monitor linked,
+  # the launcher its release puts on PATH (`shim`), and without what has no
+  # Windows build yet: baseRT's engine (the default feature) and MLX. The tests
+  # that stand in for a worker with a shell script, or for a link with a
+  # symlink, are Unix-only and compile to nothing.
+  windows:
+    name: build, clippy, test (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CRATES: >-
+        -p superfluid-abi -p superfluid-fingerprint -p superfluid-proto
+        -p superfluid-engine -p superfluid-shm -p superfluid-worker
+        -p superfluid-agent -p superfluid-linkf -p superfluid-executor
+        -p superfluid-tokenizer-hf -p superfluid-adapter-kit
+        -p superfluid-adapter-mock -p superfluid-adapter-llamacpp
+        -p superfluid-tokenizer-llamacpp
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: cargo clippy
+        shell: bash
+        run: |
+          cargo clippy -p superfluid --no-default-features --features llamacpp,tui,shim --all-targets -- -D warnings
+          cargo clippy $CRATES --all-targets -- -D warnings
+      - name: cargo build
+        shell: bash
+        run: |
+          cargo build -p superfluid --no-default-features --features llamacpp,tui,shim
+          cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+      # The tests keep their session logs under the temp directory, and a log
+      # syncs after every record. The runner's own temp directory is on its
+      # system disk, where a synced append took 3.34 ms against 0.13 ms on the
+      # work disk: slow enough that a different timing test failed on most runs.
+      - name: cargo test
+        shell: bash
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+        run: |
+          cargo test -p superfluid --no-default-features --features llamacpp,tui,shim
+          cargo test $CRATES
+
   adapters:
     name: runtime adapters
     runs-on: macos-15

@@ -585,6 +585,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn what_was_there_is_not_counted_and_a_file_is_known_through_its_renames() {
         let dir = std::env::temp_dir().join(format!("superfluid-progress-{}", std::process::id()));

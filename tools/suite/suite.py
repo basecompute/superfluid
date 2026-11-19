@@ -33,7 +33,7 @@ def lock(path):
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         pid = open(path).read().strip()
-        if pid and subprocess.run(["kill", "-0", pid], capture_output=True).returncode == 0:
+        if pid.isdigit() and common.pid_alive(int(pid)):
             sys.exit(f"another suite driver (pid {pid}) holds {path}")
         os.unlink(path)
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -45,9 +45,15 @@ def kill_strays():
     """Servers left by an earlier, killed driver would answer our probes."""
     for port in systems.PORTS.values():
         if common.port_open(port):
-            out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
+            if common.WINDOWS:
+                # netstat's line for a listener: proto, local address, 0.0.0.0:0, LISTENING, pid.
+                table = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True).stdout
+                out = sorted({l.split()[-1] for l in table.splitlines()
+                              if "LISTENING" in l and l.split()[1].endswith(f":{port}")})
+            else:
+                out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
             for pid in out:
-                subprocess.run(["kill", "-9", pid])
+                common.end_process(int(pid))
             print(f"killed stray listener(s) {out} on {port}", flush=True)
 
 

@@ -35,6 +35,8 @@ superfluid launch claude --model basecompute/Qwen3.8-27B
 superfluid node join --model basecompute/Qwen3.8-27B --token <token>
 ```
 
+On Windows the install line is PowerShell's, `irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex`, and the model is a GGUF one, such as `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` ([Windows](getting_started/installation.md#windows)).
+
 ## How it fits
 
 ![Coding agents and any OpenAI, Anthropic or Ollama client reach one Superfluid server, which drives baseRT, llama.cpp and MLX workers on this machine and on other machines that join it](assets/diagrams/overview-dark.png)
@@ -52,5 +54,5 @@ The model file picks the runtime. Each runtime runs in its own worker process, i
 
 ## Requirements
 
-- macOS on Apple silicon, or Linux x86-64 / arm64 (glibc 2.28+). Other platforms build from source.
-- Runtimes, models and the Hugging Face cache need disk space; nothing else is installed outside `~/.local` and `~/.superfluid`.
+- macOS on Apple silicon, Linux x86-64 / arm64 (glibc 2.28+), or Windows x86-64 (Windows 10 1803 or later), which serves GGUF models through llama.cpp. Other platforms build from source.
+- Runtimes, models and the Hugging Face cache need disk space; nothing else is installed outside `~/.local` and `~/.superfluid` (`%LOCALAPPDATA%\Programs\superfluid` and `%USERPROFILE%\.superfluid` on Windows).

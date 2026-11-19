@@ -25,9 +25,8 @@ pub fn suggest_max_context(
     max_batch: i32,
     kv_bits: i32,
 ) -> Option<i32> {
-    use std::os::unix::ffi::OsStrExt;
     let cstrs = |ps: &[std::path::PathBuf]| -> Option<Vec<std::ffi::CString>> {
-        ps.iter().map(|p| std::ffi::CString::new(p.as_os_str().as_bytes())).collect::<Result<_, _>>().ok()
+        ps.iter().map(|p| std::ffi::CString::new(p.as_os_str().as_encoded_bytes())).collect::<Result<_, _>>().ok()
     };
     let spec_paths: Vec<std::path::PathBuf> = speculators.iter().map(|(p, _, _)| p.clone()).collect();
     let embedded: Vec<std::os::raw::c_int> = speculators.iter().map(|&(_, e, _)| e as std::os::raw::c_int).collect();

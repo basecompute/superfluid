@@ -145,6 +145,12 @@ pub const FOLLOWS_HEAD: u64 = 1;
 /// A head from before it takes the ack for a node's and reports that it left at the handshake.
 pub const ASKS_ONLY: u64 = 2;
 
+/// [`HelloAckF::feature_flags`]: the node reads [`crate::linkf::GenerateOptsMsg::batch_invariant`]
+/// and runs a generation that asks alone, as a single server runs a batch-invariant lane. A head
+/// asks a batch-invariant lane only of a node that states it: one from before it would read the
+/// options, leave the ask, and batch the generation with the others it runs.
+pub const BATCH_INVARIANT: u64 = 4;
+
 /// An ack from a node released before [`HelloAckF::model_ids`].
 #[derive(Deserialize)]
 struct HelloAckFBefore {

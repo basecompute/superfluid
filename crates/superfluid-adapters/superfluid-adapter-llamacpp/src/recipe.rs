@@ -14,20 +14,31 @@ pub struct Archive {
     pub cudart: bool,
 }
 
+/// llama.cpp's Windows archives are zips (`llama-b12470-bin-win-vulkan-x64.zip`), with the CPU
+/// build named for what it is (`win-cpu-x64`) and the CUDA runtime's archive for no build
+/// (`cudart-llama-bin-win-cuda-12.4-x64.zip`): a release carries the one its CUDA builds run on.
 pub fn parse_name(name: &str) -> Option<Archive> {
     let (cudart, rest) = match name.strip_prefix("cudart-") {
         Some(r) => (true, r),
         None => (false, name),
     };
-    let rest = rest.strip_prefix("llama-")?.strip_suffix(".tar.gz")?;
-    let (version, rest) = rest.split_once("-bin-")?;
-    if !version.starts_with('b') || !version[1..].chars().all(|c| c.is_ascii_digit()) {
+    let rest = rest.strip_prefix("llama-")?;
+    let (rest, zip) = match rest.strip_suffix(".tar.gz") {
+        Some(r) => (r, false),
+        None => (rest.strip_suffix(".zip")?, true),
+    };
+    let (version, rest) = match rest.strip_prefix("bin-") {
+        Some(r) if cudart && zip => ("", r),
+        _ => rest.split_once("-bin-")?,
+    };
+    if !version.is_empty() && (!version.starts_with('b') || !version[1..].chars().all(|c| c.is_ascii_digit())) {
         return None;
     }
     let (os, rest) = rest.split_once('-')?;
-    let os = match os {
-        "macos" => "macos",
-        "ubuntu" => "linux",
+    let os = match (os, zip) {
+        ("macos", false) => "macos",
+        ("ubuntu", false) => "linux",
+        ("win", true) => "windows",
         _ => return None,
     };
     let (backend, arch) = match rest.rsplit_once('-') {
@@ -77,6 +88,13 @@ pub fn tested() -> Vec<(String, Vec<Archive>)> {
         .unwrap_or_default();
     builds.sort_by_key(|(v, _)| std::cmp::Reverse(version_key(v)));
     builds
+}
+
+/// The tested builds that install on `platform` (`linux-x64`), newest first. A build is tested
+/// where its tests ran, and the recipe lists its archives for those platforms alone: one that
+/// failed on Windows, or was not tried there, is still a tested build for the rest.
+pub fn tested_on(platform: &str) -> Vec<String> {
+    tested().into_iter().filter(|(_, archives)| archives.iter().any(|a| a.platform == platform)).map(|(v, _)| v).collect()
 }
 
 fn archive_of(a: &Value) -> Option<Archive> {
@@ -144,6 +162,7 @@ fn choose(host: &Host, have: &[&Archive]) -> Vec<(String, String)> {
             out.push((b.to_string(), format!("{}: ROCm", host.describe())));
         }
     }
+    // No ROCm install is looked for on Windows (the kit's `Host::detect` says why): `--backend rocm` names one.
     if host.vulkan && has("vulkan") {
         out.push(("vulkan".to_string(), format!("{}: a Vulkan driver", host.describe())));
     }
@@ -188,10 +207,23 @@ fn beside_tested(version: &str, tested: &[&str]) -> String {
 pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
     let r = recipe();
     let builds = tested();
-    let tested_versions: Vec<&str> = builds.iter().map(|(v, _)| v.as_str()).collect();
+    let platform = host.platform();
+    let lists_here = |archives: &[Archive]| archives.iter().any(|a| a.platform == platform);
+    // Tested here: a build the recipe lists an archive of for this platform.
+    let tested_versions: Vec<&str> = builds.iter().filter(|(_, a)| lists_here(a)).map(|(v, _)| v.as_str()).collect();
     let untested = |version: &str| -> Result<(), String> {
         if tested_versions.contains(&version) || req.untested {
             return Ok(());
+        }
+        if builds.iter().any(|(v, _)| v == version) {
+            let here = match tested_versions.is_empty() {
+                true => "none is tested there".to_string(),
+                false => format!("tested there: {}", tested_versions.join(", ")),
+            };
+            return Err(format!(
+                "llama.cpp {version} was tested with this adapter on other platforms, not on {platform} ({here}); \
+                 pass --untested to install it anyway"
+            ));
         }
         Err(format!(
             "llama.cpp {version} is not a build this adapter was tested with (tested: {}); {}",
@@ -221,13 +253,16 @@ pub fn plan(req: &Request, host: &Host) -> Result<Vec<Plan>, String> {
         }]);
     }
 
-    let version = req.version.clone().or_else(|| builds.first().map(|(v, _)| v.clone())).ok_or("the recipe lists no build")?;
+    // The newest build tested on this platform: the recipe may list one for some platforms and
+    // not for the rest.
+    let newest = || tested_versions.first().map(|v| v.to_string()).or_else(|| builds.first().map(|(v, _)| v.clone()));
+    let version = req.version.clone().or_else(newest).ok_or("the recipe lists no build")?;
     untested(&version)?;
-    let archives = match builds.iter().find(|(v, _)| *v == version) {
+    let archives = match builds.iter().find(|(v, a)| *v == version && lists_here(a)) {
         Some((_, a)) => a.clone(),
+        // Not listed, or listed for other platforms alone: what its release publishes.
         None => published(&version)?,
     };
-    let platform = host.platform();
     let here: Vec<&Archive> = archives.iter().filter(|a| a.platform == platform).collect();
     if here.is_empty() {
         return Err(format!("llama.cpp {version} publishes no build for {platform}"));
@@ -330,9 +365,82 @@ mod tests {
         assert_eq!(parse_name("llama-b11284-bin-macos-x64.tar.gz").unwrap().backend, "cpu");
         assert_eq!(parse_name("llama-b11284-bin-ubuntu-x64.tar.gz").unwrap().backend, "cpu");
         assert_eq!(parse_name("llama-b11284-bin-ubuntu-openvino-2026.4-x64.tar.gz").unwrap().backend, "openvino-2026.4");
-        for bad in ["llama-b11284-bin-win-cpu-x64.zip", "llama-b11284-xcframework.zip", "llama-v1-bin-ubuntu-x64.tar.gz", "llama-b1-bin-ubuntu-s390x.tar.gz"] {
+        let a = parse_name("llama-b12470-bin-win-vulkan-x64.zip").unwrap();
+        assert_eq!((a.version.as_str(), a.platform.as_str(), a.backend.as_str(), a.cudart), ("b12470", "windows-x64", "vulkan", false));
+        assert_eq!(parse_name("llama-b12470-bin-win-cpu-x64.zip").unwrap().backend, "cpu");
+        let a = parse_name("cudart-llama-bin-win-cuda-12.4-x64.zip").unwrap();
+        assert_eq!((a.version.as_str(), a.platform.as_str(), a.backend.as_str(), a.cudart), ("", "windows-x64", "cuda-12.4", true));
+        for bad in ["llama-b11284-bin-win-cpu-x64.tar.gz", "llama-b11284-bin-ubuntu-x64.zip", "llama-bin-win-cuda-12.4-x64.zip", "llama-b11284-xcframework.zip", "llama-v1-bin-ubuntu-x64.tar.gz", "llama-b1-bin-ubuntu-s390x.tar.gz"] {
             assert_eq!(parse_name(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn windows_takes_the_vulkan_build_where_a_driver_is_and_the_cpu_build_beside_it() {
+        let mut win = host("windows", "x64");
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert_eq!(backends(&plans), ["cpu"]);
+        assert!(plans[0].assets[0].name.ends_with("-bin-win-cpu-x64.zip"), "{:?}", plans[0].assets);
+        win.vulkan = true;
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert_eq!(backends(&plans), ["vulkan", "cpu"]);
+        assert!(plans[0].why.starts_with("Windows x64, Vulkan"), "{}", plans[0].why);
+        // A CUDA build is taken by name, with the runtime its release carries.
+        let cuda = plan(&Request { backend: Some("cuda".into()), ..Request::default() }, &win).unwrap();
+        assert!(cuda[0].backend.starts_with("cuda-13."), "{}", cuda[0].backend);
+        let names: Vec<&str> = cuda[0].assets.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.len() == 2 && names[1].starts_with("cudart-llama-bin-win-cuda-13."), "{names:?}");
+    }
+
+    #[test]
+    fn windows_with_an_nvidia_driver_takes_the_cuda_build_it_runs_before_vulkan() {
+        let mut win = host("windows", "x64");
+        win.vulkan = true;
+        // A driver of the 580 branch runs CUDA 13; the machine has no CUDA runtime, so the release's comes too.
+        win.nvidia_driver = Some("581.15".into());
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert_eq!(plans.iter().map(|p| p.backend.split('-').next().unwrap()).collect::<Vec<_>>(), ["cuda", "vulkan", "cpu"]);
+        assert!(plans[0].backend.starts_with("cuda-13."), "{}", plans[0].backend);
+        assert!(plans[0].assets.len() == 2 && plans[0].assets[1].name.starts_with("cudart-llama-bin-win-cuda-13."), "{:?}", plans[0].assets);
+        // With the toolkit's runtime on PATH, the build alone.
+        win.cuda_runtime = Some(13);
+        assert_eq!(plan(&Request::default(), &win).unwrap()[0].assets.len(), 1);
+        // An older driver runs CUDA 12 and not 13.
+        win.nvidia_driver = Some("566.36".into());
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert!(plans[0].backend.starts_with("cuda-12."), "{}", plans[0].backend);
+        assert_eq!(plans[0].assets.len(), 2, "the runtime here is 13, so 12's comes with the build");
+        // One too old for either leaves Vulkan first.
+        win.nvidia_driver = Some("472.12".into());
+        assert_eq!(backends(&plan(&Request::default(), &win).unwrap()), ["vulkan", "cpu"]);
+    }
+
+    #[test]
+    fn a_build_is_tested_on_the_platforms_the_recipe_lists_it_for() {
+        let all: Vec<String> = tested().into_iter().map(|(v, _)| v).collect();
+        // The legs a nightly needs to pass: every build has their archives.
+        assert_eq!(tested_on("macos-arm64"), all);
+        assert_eq!(tested_on("linux-x64"), all);
+        // Windows came later, and a build that fails there is listed without it.
+        let windows = tested_on("windows-x64");
+        assert!(!windows.is_empty() && windows.len() < all.len(), "{windows:?}");
+        assert!(windows.iter().all(|v| all.contains(v)));
+        assert!(tested_on("windows-arm64").is_empty());
+
+        // With no version asked for, each platform takes the newest build tested on it.
+        let win = host("windows", "x64");
+        assert_eq!(plan(&Request::default(), &win).unwrap()[0].version, windows[0]);
+        assert_eq!(plan(&Request::default(), &host("linux", "x64")).unwrap()[0].version, all[0]);
+
+        // A build tested elsewhere alone is asked for by name: refused, with where it is tested.
+        let elsewhere = all.iter().find(|v| !windows.contains(v)).unwrap();
+        let asked = Request { version: Some(elsewhere.clone()), ..Request::default() };
+        let e = plan(&asked, &win).unwrap_err();
+        assert!(e.contains("on other platforms, not on windows-x64") && e.contains(&format!("tested there: {}", windows.join(", "))), "{e}");
+        assert!(e.contains("--untested"), "{e}");
+        assert!(plan(&asked, &host("linux", "x64")).unwrap()[0].tested);
+        let e = plan(&Request::default(), &host("windows", "arm64")).unwrap_err();
+        assert!(e.contains("not on windows-arm64 (none is tested there)"), "{e}");
     }
 
     #[test]

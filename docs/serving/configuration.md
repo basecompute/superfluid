@@ -9,7 +9,7 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 | variable | default | meaning |
 |---|---|---|
 | `SUPERFLUID_LOG_FORMAT` | `text` | `json` makes every stderr line of `serve` and `node join` one JSON event, as `--log-format json` does; the flag wins. See [Start-up events](events.md). |
-| `SUPERFLUID_HOME` | `~/.superfluid` | Home directory: the installed Superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
+| `SUPERFLUID_HOME` | `~/.superfluid` (`%USERPROFILE%\.superfluid` on Windows) | Home directory: the installed Superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
 | `SUPERFLUID_NO_UPDATE_CHECK` | unset | Set to anything but `0` to stop `serve` from checking once a day whether a newer Superfluid is out. See [Updating Superfluid](updating.md). |
 | `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |
 | `SUPERFLUID_WORKER_<ID>` | unset | Explicit worker executable for runtime `<ID>` (upper-cased, `-` and `.` as `_`, e.g. `SUPERFLUID_WORKER_LLAMACPP`). Also the installer `runtime install` uses. A runtime named this way is never auto-installed. |
@@ -96,6 +96,8 @@ Each `--spec-*` flag, when absent, falls back to a variable, then to a constant.
   cache/
     hub-catalog.json        the hub catalog, refreshed daily by `serve`
 ```
+
+On Windows `runtimes/<id>/current`, and the `current` beside the releases in `versions/`, are files that hold a name, where they are links elsewhere ([what differs on Windows](../getting_started/installation.md#windows)).
 
 Models pulled by id are not stored here; each runtime keeps them where its own tool does (llama.cpp and MLX use the Hugging Face cache; `basert` uses `BASERT_MODELS_DIR`).
 

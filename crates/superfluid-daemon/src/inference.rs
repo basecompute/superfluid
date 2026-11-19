@@ -100,7 +100,7 @@ pub struct SamplingFallback {
 impl SamplingOverrides {
     pub fn for_daemon(&self, daemon: &Daemon) -> Self {
         let mut o = *self;
-        if o.spec_max_temperature.is_some() && daemon.speculation().is_none() {
+        if o.spec_max_temperature.is_some() && !daemon.speculates() {
             o.spec_max_temperature = None;
         }
         // The presence default is for an engine that applies the penalty itself, as its capability

@@ -120,29 +120,48 @@ pub(crate) fn message(e: DaemonError) -> String {
     }
 }
 
-/// How often the head asks again for a node's capabilities until one answers.
+/// How often the head asks again for a node's capabilities while none has answered.
 const CAPABILITIES_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Takes the first node serving the model's capability descriptor as the daemon's, so a route
-/// refuses what the nodes cannot do as a local server refuses what its engine cannot.
+/// Keeps the daemon's capability record that of the first node serving the model, so a route
+/// refuses what the nodes cannot do as a local server refuses what its engine cannot. A node's
+/// record says what it was started with (whether it speculates, for one), and the node serving
+/// can be another, or the same one started again otherwise: the record is read again each time
+/// the nodes serving may have changed ([`FleetManager::changes`]). While no node answers, the
+/// record stays as it was last read and is asked for again every [`CAPABILITIES_EVERY`].
 fn learn_capabilities(d: std::sync::Weak<Dispatch>) {
-    let spawned = std::thread::Builder::new().name("superfluid-fleet-capabilities".into()).spawn(move || loop {
-        let Some(dispatch) = d.upgrade() else { return };
-        if let Ok(StateSyncOkMsg::Capabilities { json }) = dispatch.fleet.state_sync(&dispatch.model, StateSyncReqMsg::Capabilities, &[]) {
-            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("backend".into(), "fleet".into());
-                    *dispatch.capabilities.write().expect("capability record") = crate::capabilities::Capabilities::parse(&v.to_string());
-                    return;
-                }
+    let spawned = std::thread::Builder::new().name("superfluid-fleet-capabilities".into()).spawn(move || {
+        // The fleet's changes the record was last read at.
+        let mut read_at = None;
+        loop {
+            let Some(dispatch) = d.upgrade() else { return };
+            let fleet = Arc::clone(&dispatch.fleet);
+            // Counted before the node is asked, so a change while it answers is read after.
+            let now = fleet.changes();
+            if read_at != Some(now) && read_capabilities(&dispatch) {
+                read_at = Some(now);
             }
+            drop(dispatch);
+            fleet.wait_for_change(now, CAPABILITIES_EVERY);
         }
-        drop(dispatch);
-        std::thread::sleep(CAPABILITIES_EVERY);
     });
     if let Err(e) = spawned {
         tracing::warn!("fleet: cannot learn the nodes' capabilities: {e}");
     }
+}
+
+/// Takes the capability record of a node serving the model as the daemon's; `false` when none
+/// answered with one. Asked on the node's connection for short calls, not a lane's: the record
+/// is read when a node's connections change, which is when a session is taking one.
+fn read_capabilities(dispatch: &Dispatch) -> bool {
+    let Ok(StateSyncOkMsg::Capabilities { json }) = dispatch.fleet.state_sync_aside(&dispatch.model, StateSyncReqMsg::Capabilities) else {
+        return false;
+    };
+    let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&json) else { return false };
+    let Some(obj) = record.as_object_mut() else { return false };
+    obj.insert("backend".into(), "fleet".into());
+    *dispatch.capabilities.write().expect("capability record") = crate::capabilities::Capabilities::parse(&record.to_string());
+    true
 }
 
 type Reply = std::sync::mpsc::Sender<Result<StateSyncOkMsg, String>>;
@@ -285,7 +304,8 @@ fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<(GenerateOptsMsg, V
         && !x.want_logprobs
         && grammar.is_none()
         && logit_bias.is_none()
-        && job.media.is_empty();
+        && job.media.is_empty()
+        && !job.batch_invariant;
     if plain {
         return Ok(None);
     }
@@ -307,20 +327,18 @@ fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<(GenerateOptsMsg, V
         grammar,
         logit_bias,
         media,
+        batch_invariant: job.batch_invariant,
     };
     Ok(Some((opts, blobs)))
 }
 
-/// A batch-invariant lane asked of a fleet-backed daemon: a node batches each generation with
-/// the others it runs, and Link F cannot ask it not to, so the head refuses rather than answer
-/// from a shared batch.
-pub(crate) fn batch_invariant_refused() -> DaemonError {
-    DaemonError::Unsupported(crate::Refusal::new(
-        "unsupported_on_fleet",
-        None,
-        "a fleet head cannot give a batch-invariant lane: its nodes batch each generation with the others they run; \
-         ask a node's own server for one",
-    ))
+/// What a job asks of the node it is placed on ([`crate::fleet_manager::RequestShape::needs`]).
+pub(crate) fn needs(batch_invariant: bool) -> u64 {
+    if batch_invariant {
+        superfluid_proto::handshake::BATCH_INVARIANT
+    } else {
+        0
+    }
 }
 
 /// What a fleet-backed daemon says it can do: generation, and a reason for each thing that does
@@ -352,15 +370,12 @@ fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
 /// Places the job on a node, streams its tokens through a lane output, and ends the lane as
 /// the scheduler would.
 fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, DaemonError> {
-    // A session made batch-invariant before its store was served over the fleet still asks.
-    if job.batch_invariant {
-        return Err(batch_invariant_refused());
-    }
     let opts = options(d, job)?;
     let fs = NEXT_FLEET_SESSION.fetch_add(1, Ordering::Relaxed);
     // A deadline that passes while every connection to a node is held expires the job unstarted,
-    // as a local scheduler expires one it could not admit in time.
-    if d.fleet.place_by(fs, job.params, job.class, "raw", &d.model, &job.stream, job.max_tokens as u64, job.deadline)?.is_none() {
+    // as a local scheduler expires one it could not admit in time. The class goes to the node
+    // with the session; a batch-invariant job goes only to a node that can run it alone.
+    if d.fleet.place_by(fs, job.params, job.class, needs(job.batch_invariant), "raw", &d.model, &job.stream, job.max_tokens as u64, job.deadline)?.is_none() {
         return Ok(LaneEvent::Expired);
     }
     // Removes the session from the fleet however this ends.

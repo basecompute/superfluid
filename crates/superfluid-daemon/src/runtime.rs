@@ -1,4 +1,4 @@
-use std::os::unix::net::UnixStream;
+use superfluid_shm::os::UnixStream;
 use std::path::PathBuf;
 use std::thread::JoinHandle;
 
@@ -13,8 +13,11 @@ use crate::DaemonError;
 pub struct WorkerSpec {
     pub bin: PathBuf,
     pub args: Vec<String>,
-    pub stderr: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
+    pub stderr: Option<WorkerStderr>,
 }
+
+/// Where a worker's stdout and stderr go when not to this process's own.
+pub type WorkerStderr = std::sync::Arc<superfluid_shm::os::OwnedFd>;
 
 pub use superfluid_worker::ring_specs_for;
 
@@ -436,6 +439,18 @@ pub(crate) fn stream_ceiling(staged: u64, caps: &crate::capabilities::Capabiliti
     }
 }
 
+/// The worker's command line, less how it reaches this process.
+fn worker_command(spec: &WorkerSpec) -> std::io::Result<std::process::Command> {
+    let mut cmd = std::process::Command::new(&spec.bin);
+    crate::exec::without_secrets(&mut cmd).args(&spec.args);
+    if let Some(fd) = &spec.stderr {
+        cmd.stderr(std::process::Stdio::from(fd.try_clone()?));
+        cmd.stdout(std::process::Stdio::from(fd.try_clone()?));
+    }
+    Ok(cmd)
+}
+
+#[cfg(unix)]
 fn launch(spec: &WorkerSpec) -> Result<(std::process::Child, WorkerClient), DaemonError> {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -444,17 +459,8 @@ fn launch(spec: &WorkerSpec) -> Result<(std::process::Child, WorkerClient), Daem
     let (fds_a, fds_w) = UnixStream::pair()?;
     let frames_fd = frames_w.as_raw_fd();
     let fdchan_fd = fds_w.as_raw_fd();
-    let mut cmd = std::process::Command::new(&spec.bin);
-    crate::exec::without_secrets(&mut cmd)
-        .args(&spec.args)
-        .arg("--frames-fd")
-        .arg("3")
-        .arg("--fd-channel-fd")
-        .arg("4");
-    if let Some(fd) = &spec.stderr {
-        cmd.stderr(std::process::Stdio::from(fd.try_clone()?));
-        cmd.stdout(std::process::Stdio::from(fd.try_clone()?));
-    }
+    let mut cmd = worker_command(spec)?;
+    cmd.arg("--frames-fd").arg("3").arg("--fd-channel-fd").arg("4");
     // SAFETY: pre_exec runs in the forked child before exec. The two ends are first
     // moved above 10, since one of them may already be 3 or 4: dup2 onto itself keeps
     // CLOEXEC and the worker would inherit a closed descriptor, and dup2 onto the
@@ -474,6 +480,45 @@ fn launch(spec: &WorkerSpec) -> Result<(std::process::Child, WorkerClient), Daem
     drop(frames_w);
     drop(fds_w);
     let client = WorkerClient::connect(frames_a, fds_a)?;
+    Ok((child, client))
+}
+
+/// A Windows child is handed no sockets, so the worker connects its two streams to a socket
+/// made for it (`--link`): one in the user's own temporary directory, under a name no other
+/// start uses, gone once the worker has connected.
+#[cfg(windows)]
+fn launch(spec: &WorkerSpec) -> Result<(std::process::Child, WorkerClient), DaemonError> {
+    static LINKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut nonce = [0u8; 8];
+    crate::sys::random(&mut nonce)?;
+    let path = std::env::temp_dir().join(format!(
+        "sf-{}-{}-{:016x}.sock",
+        std::process::id(),
+        LINKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        u64::from_le_bytes(nonce)
+    ));
+    let _ = std::fs::remove_file(&path);
+    let listener = superfluid_shm::os::UnixListener::bind(&path)?;
+    let mut cmd = worker_command(spec)?;
+    cmd.arg("--link").arg(&path);
+    let mut child = crate::exec::when_not_busy(|| cmd.spawn()).inspect_err(|_| {
+        let _ = std::fs::remove_file(&path);
+    })?;
+    let streams = superfluid_worker::process::accept_streams(&listener, || match child.try_wait()? {
+        Some(status) => Err(std::io::Error::other(format!("the worker exited ({status}) before it connected"))),
+        None => Ok(()),
+    });
+    drop(listener);
+    let _ = std::fs::remove_file(&path);
+    let (frames, fds) = match streams {
+        Ok(streams) => streams,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e.into());
+        }
+    };
+    let client = WorkerClient::connect(frames, fds)?;
     Ok((child, client))
 }
 

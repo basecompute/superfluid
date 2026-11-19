@@ -1,6 +1,6 @@
 //! Link W end to end against the REAL engine, parameterized over BOTH back ends.
 
-use std::os::unix::net::UnixStream;
+use superfluid_shm::os::UnixStream;
 use std::path::PathBuf;
 use std::thread;
 

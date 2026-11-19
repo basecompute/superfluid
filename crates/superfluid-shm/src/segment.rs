@@ -1,8 +1,8 @@
 //! Anonymous shared-memory segments.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::atomic::AtomicU64;
 
+use crate::os::{OwnedFd, RawFd};
 use crate::ShmError;
 
 #[derive(Debug)]
@@ -17,8 +17,10 @@ pub struct ShmSegment {
 // validation), not by &mut aliasing.
 unsafe impl Send for ShmSegment {}
 
+#[cfg(unix)]
 impl ShmSegment {
     pub fn create(len: usize) -> Result<ShmSegment, ShmError> {
+        use std::os::fd::FromRawFd;
         #[cfg(target_os = "linux")]
         let fd: OwnedFd = {
             // SAFETY: memfd_create with a static name; returns -1 on error.
@@ -64,7 +66,7 @@ impl ShmSegment {
         };
 
         // SAFETY: fd is a valid shm fd we own.
-        if unsafe { libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) } != 0 {
+        if unsafe { libc::ftruncate(std::os::fd::AsRawFd::as_raw_fd(&fd), len as libc::off_t) } != 0 {
             return Err(ShmError::Io(std::io::Error::last_os_error()));
         }
         Self::map(fd, len)
@@ -74,7 +76,7 @@ impl ShmSegment {
         // SAFETY: all-zero is a valid stat; fstat fills it from an fd we own.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: as above.
-        if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+        if unsafe { libc::fstat(std::os::fd::AsRawFd::as_raw_fd(&fd), &mut st) } != 0 {
             return Err(ShmError::Io(std::io::Error::last_os_error()));
         }
         // Mapping past the object's end succeeds and then faults on first
@@ -95,7 +97,7 @@ impl ShmSegment {
                 len,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
-                fd.as_raw_fd(),
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
                 0,
             )
         };
@@ -110,7 +112,91 @@ impl ShmSegment {
     }
 
     pub fn raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+        std::os::fd::AsRawFd::as_raw_fd(&self.fd)
+    }
+
+    fn unmap(&mut self) {
+        // SAFETY: ptr/len came from a successful mmap.
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.len);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl ShmSegment {
+    /// A section backed by the paging file, with no name: another process
+    /// reaches it only through a handle it is given.
+    pub fn create(len: usize) -> Result<ShmSegment, ShmError> {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, PAGE_READWRITE};
+
+        let size = len as u64;
+        // SAFETY: no file, no security attributes and no name; returns null on error.
+        let raw = unsafe {
+            CreateFileMappingW(INVALID_HANDLE_VALUE, std::ptr::null(), PAGE_READWRITE, (size >> 32) as u32, size as u32, std::ptr::null())
+        };
+        if raw.is_null() {
+            return Err(ShmError::Io(std::io::Error::last_os_error()));
+        }
+        // SAFETY: raw is a freshly created, owned handle.
+        let fd = unsafe { OwnedFd::from_raw_handle(raw) };
+        Self::map(fd, len)
+    }
+
+    pub fn from_fd(fd: OwnedFd, len: usize) -> Result<ShmSegment, ShmError> {
+        Self::map(fd, len)
+    }
+
+    /// Maps the whole section and refuses one shorter than `len`: a view asked
+    /// to reach past the section's end is refused by the system as access
+    /// denied, which says nothing of why.
+    fn map(fd: OwnedFd, len: usize) -> Result<ShmSegment, ShmError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Memory::{MapViewOfFile, UnmapViewOfFile, VirtualQuery, FILE_MAP_ALL_ACCESS, MEMORY_BASIC_INFORMATION};
+
+        // SAFETY: fd is a handle this process owns; a handle that is not a
+        // section, or not one open for reading and writing, is refused.
+        let view = unsafe { MapViewOfFile(fd.as_raw_handle(), FILE_MAP_ALL_ACCESS, 0, 0, 0) };
+        if view.Value.is_null() {
+            return Err(ShmError::Io(std::io::Error::last_os_error()));
+        }
+        // SAFETY: all-zero is a valid MEMORY_BASIC_INFORMATION, and VirtualQuery
+        // fills it for the view just mapped.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: as above.
+        let got = unsafe { VirtualQuery(view.Value, &mut info, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+        if got == 0 || info.RegionSize < len {
+            let err = if got == 0 {
+                ShmError::Io(std::io::Error::last_os_error())
+            } else {
+                ShmError::Short { announced: len, actual: info.RegionSize as u64 }
+            };
+            // SAFETY: view came from the MapViewOfFile above.
+            unsafe { UnmapViewOfFile(view) };
+            return Err(err);
+        }
+        Ok(ShmSegment { fd, ptr: view.Value as *mut u8, len })
+    }
+
+    pub fn raw_fd(&self) -> RawFd {
+        std::os::windows::io::AsRawHandle::as_raw_handle(&self.fd)
+    }
+
+    fn unmap(&mut self) {
+        use windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
+        // SAFETY: ptr came from a successful MapViewOfFile.
+        unsafe {
+            UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr.cast() });
+        }
+    }
+}
+
+impl ShmSegment {
+    /// A second handle to the segment, as `dup` gives one.
+    pub fn dup_fd(&self) -> std::io::Result<OwnedFd> {
+        self.fd.try_clone()
     }
 
     pub fn len(&self) -> usize {
@@ -169,9 +255,6 @@ impl ShmSegment {
 
 impl Drop for ShmSegment {
     fn drop(&mut self) {
-        // SAFETY: ptr/len came from a successful mmap.
-        unsafe {
-            libc::munmap(self.ptr as *mut libc::c_void, self.len);
-        }
+        self.unmap();
     }
 }

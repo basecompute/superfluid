@@ -27,6 +27,8 @@ struct AbiStore<T> {
 }
 
 const MOCK_PIPELINE_LAYERS: u32 = 24;
+/// An image file whose bytes start with this probes but fails to encode.
+pub const MOCK_UNENCODABLE: &[u8] = b"MOCK-UNENCODABLE";
 
 type AdmitRefusal = (fn(&LaneAdmit) -> bool, Status);
 
@@ -789,6 +791,19 @@ impl Engine for MockEngine {
 
     fn media_encode(&mut self, image_path: &str) -> Result<(u64, superfluid_abi::MediaInfo), Status> {
         let info = self.media_probe(image_path)?;
+        if let Some(log) = &self.cfg.media_encode_log {
+            log.lock().expect("encode log").push(self.tick_count);
+        }
+        if !self.cfg.media_encode_delay.is_zero() {
+            std::thread::sleep(self.cfg.media_encode_delay);
+        }
+        // An image the tower cannot take: probing sizes it, encoding fails.
+        if std::fs::read(image_path).is_ok_and(|b| b.starts_with(MOCK_UNENCODABLE)) {
+            return Err(Status::EnvelopeMismatch);
+        }
+        if self.cfg.max_live_media > 0 && self.media.len() >= self.cfg.max_live_media {
+            return Err(Status::Busy);
+        }
         let h = self.next_media;
         self.next_media += 1;
         self.media.insert(h, info.n_tokens);

@@ -3,9 +3,16 @@ use std::sync::atomic::Ordering;
 use crate::scheduler::{SchedStats, TTFT_BUCKETS_MS};
 
 pub fn render_prometheus(s: &SchedStats) -> String {
+    render_prometheus_adding(s, &|_| 0)
+}
+
+/// As [`render_prometheus`], with what `more` gives each counter (by its series, labels
+/// included) added to it: a fleet head's nodes' counts, so the head reads as one server does.
+pub fn render_prometheus_adding(s: &SchedStats, more: &dyn Fn(&str) -> u64) -> String {
     let g = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed);
     let mut out = String::new();
     let mut counter = |name: &str, help: &str, value: u64| {
+        let value = value.saturating_add(more(name));
         out.push_str(&format!(
             "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
         ));
@@ -63,11 +70,11 @@ pub fn render_prometheus(s: &SchedStats) -> String {
     out.push_str("# HELP superfluid_parks_total Park artifacts handed to the writer.\n# TYPE superfluid_parks_total counter\n");
     out.push_str(&format!(
         "superfluid_parks_total{{encoding=\"lossless\"}} {}\nsuperfluid_parks_total{{encoding=\"lossy\"}} {}\n",
-        g(&s.parks_lossless),
-        g(&s.parks_lossy)
+        g(&s.parks_lossless).saturating_add(more("superfluid_parks_total{encoding=\"lossless\"}")),
+        g(&s.parks_lossy).saturating_add(more("superfluid_parks_total{encoding=\"lossy\"}"))
     ));
     out.push_str("# HELP superfluid_resumes_total Admissions that restored a park artifact and seeded from it.\n# TYPE superfluid_resumes_total counter\n");
-    out.push_str(&format!("superfluid_resumes_total {}\n", g(&s.resumes)));
+    out.push_str(&format!("superfluid_resumes_total {}\n", g(&s.resumes).saturating_add(more("superfluid_resumes_total"))));
     out.push_str("# HELP superfluid_lanes_active Lanes resident after the last tick.\n# TYPE superfluid_lanes_active gauge\n");
     out.push_str(&format!("superfluid_lanes_active {}\n", g(&s.lanes_active)));
     out.push_str("# HELP superfluid_pool_blocks_used KV paged blocks in use.\n# TYPE superfluid_pool_blocks_used gauge\n");
@@ -130,15 +137,5 @@ pub fn hostname() -> String {
             return name;
         }
     }
-    let mut buf = [0u8; 256];
-    // SAFETY: `buf` is a valid 256-byte writable buffer and `buf.len()` is its
-    // exact capacity; gethostname writes at most that many bytes and NUL-
-    // terminates within it. We only read `buf` after checking rc == 0.
-    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast::<libc::c_char>(), buf.len()) };
-    if rc == 0 {
-        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-        String::from_utf8_lossy(&buf[..end]).into_owned()
-    } else {
-        "unknown".into()
-    }
+    crate::sys::hostname().unwrap_or_else(|| "unknown".into())
 }

@@ -371,7 +371,6 @@ pub fn global_key(
 /// The key `path` holds, with the whitespace around it trimmed, and a warning when group or
 /// others may read or change the file (ssh refuses such a private key; this only says so).
 pub fn read_key_file(path: &std::path::Path) -> Result<(String, Option<String>), String> {
-    use std::os::unix::fs::PermissionsExt;
     let shown = path.display();
     let text = std::fs::read_to_string(path).map_err(|e| format!("--api-key-file {shown}: {e}"))?;
     let key = text.trim();
@@ -381,7 +380,7 @@ pub fn read_key_file(path: &std::path::Path) -> Result<(String, Option<String>),
     if key.contains(['\n', '\r']) {
         return Err(format!("--api-key-file {shown} holds more than one line; it should hold the key alone"));
     }
-    let mode = std::fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+    let mode = std::fs::metadata(path).map(|m| crate::sys::mode(&m)).unwrap_or(0);
     let open = (mode & 0o077 != 0).then(|| {
         format!("--api-key-file {shown} is open to group or others (mode {mode:03o}); `chmod 600 {shown}` keeps the key yours")
     });
@@ -491,7 +490,9 @@ mod tests {
         assert!(!m.contains("sk-") && !m.contains("\"k\""), "no secret in metrics: {m}");
     }
 
+    #[cfg(unix)]
     fn key_file(tag: &str, text: &str, mode: u32) -> std::path::PathBuf {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("superfluid-keyfile-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -502,10 +503,12 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     fn quiet(w: String) {
         panic!("no warning was expected: {w}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_flag_wins_over_the_file_and_the_file_over_the_environment() {
         let file = key_file("order", "from-file\n", 0o600);
@@ -520,6 +523,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_key_file_is_trimmed_and_an_empty_or_missing_one_is_refused() {
         let file = key_file("trim", "  sk-local-1 \r\n\n", 0o600);
@@ -535,6 +539,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_key_file_others_can_read_is_used_with_a_warning() {
         let file = key_file("open", "sk-shared\n", 0o644);

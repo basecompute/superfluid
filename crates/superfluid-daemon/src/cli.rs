@@ -50,7 +50,7 @@ pub const SERVE: &[Group] = &[
             f("--api-key-file", Some("<path>"), "", "The key, read from this file (whitespace trimmed). With neither flag, $SUPERFLUID_API_KEY gives the key."),
             f("--key-policy", Some("<file.json>"), "", "Per-key classes, rate and concurrency limits; turns authentication on."),
             f("--rate-limit", Some("<rpm>"), "0 (off)", "Requests per minute per client IP."),
-            f("--drain-timeout", Some("<sec>"), "60", "On SIGUSR1, stop accepting and give in-flight requests this long."),
+            f("--drain-timeout", Some("<sec>"), "60", "On SIGUSR1 (`superfluid stop --drain`; Ctrl+Break on Windows), stop accepting and give in-flight requests this long."),
             f("--nonstream-keepalive", Some("<sec>"), "0 (off)", "Send 200 at admission and a space every <sec> until a non-streaming body is ready."),
             f("--web", Some("<127.0.0.1:port>"), "off", "The browser-facing API, with a token minted to <sessions>/web-token. Loopback only."),
             f("--web-origin", Some("<url>"), "", "An allowed Origin for --web, repeatable."),
@@ -604,10 +604,14 @@ pub fn default_socket(home: &Path, sun_path_len: usize) -> PathBuf {
     if sock.as_os_str().len() < sun_path_len {
         return sock;
     }
+    #[cfg(unix)]
     // SAFETY: getuid has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
+    // The temporary directory is the user's own on Windows.
+    #[cfg(windows)]
+    let uid = 0;
     let tmp = std::env::temp_dir().join(format!("superfluid-{uid}.sock"));
-    if tmp.as_os_str().len() < sun_path_len {
+    if tmp.as_os_str().len() < sun_path_len || cfg!(windows) {
         tmp
     } else {
         PathBuf::from(format!("/tmp/superfluid-{uid}.sock"))
@@ -775,13 +779,16 @@ mod tests {
     }
 
     /// Every flag the `serve` parser matches is in the table (or an alias or a
-    /// retired flag), so `serve --help`, `--flag=value` and the suggestions know it.
+    /// retired flag), so `serve --help`, `--flag=value` and the suggestions know it:
+    /// its own, and the engine flags it reads with a fleet node's (engine_flags).
     #[test]
     fn every_flag_serve_reads_is_known_here() {
         let src = include_str!("serve.rs");
         let start = src.find("SERVE-FLAGS-BEGIN").expect("marker");
         let end = src.find("SERVE-FLAGS-END").expect("marker");
-        let body = &src[start..end];
+        let engine = include_str!("engine_flags.rs");
+        let engine = &engine[..engine.find("#[cfg(test)]").expect("its tests")];
+        let body = format!("{}{engine}", &src[start..end]);
         let mut seen = 0;
         for piece in body.split('"').skip(1).step_by(2) {
             let long = piece.starts_with("--") && piece.len() > 2 && piece != "--pull-";

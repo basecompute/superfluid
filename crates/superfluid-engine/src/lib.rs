@@ -8,8 +8,8 @@ pub mod tokenizer;
 pub mod tokenizer_abi;
 
 pub use engine::{
-    Engine, EngineConfig, SegmentSink, SeqHandle, SpaceConfig, StageOutput, TranscribeParams,
-    TranscriptSegment, Transcription,
+    Engine, EngineConfig, PrefillRecord, SegmentSink, SeqHandle, SpaceConfig, StageOutput,
+    TickRecord, TranscribeParams, TranscriptSegment, Transcription,
 };
 pub use mock::MockEngine;
 pub use rings::{InMemoryRings, Rings};

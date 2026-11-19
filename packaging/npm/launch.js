@@ -17,6 +17,7 @@ const PACKAGES = {
   "darwin-arm64": "@basecompute/superfluid-darwin-arm64",
   "linux-x64": "@basecompute/superfluid-linux-x64",
   "linux-arm64": "@basecompute/superfluid-linux-arm64",
+  "win32-x64": "@basecompute/superfluid-win32-x64",
 };
 
 function fail(message) {
@@ -47,11 +48,13 @@ function restoreModes(release) {
   }
 }
 
-module.exports = function launch(command) {
-  const platform = `${process.platform}-${process.arch}`;
+// `os` and `arch` are this machine's; a test names another's.
+module.exports = function launch(command, os = process.platform, arch = process.arch) {
+  const WINDOWS = os === "win32";
+  const platform = `${os}-${arch}`;
   const pkg = PACKAGES[platform];
   if (!pkg) {
-    fail(`no release for ${platform}; superfluid ships for macOS on Apple silicon and Linux on x64 and arm64 (https://superfluid.sh)`);
+    fail(`no release for ${platform}; superfluid ships for macOS on Apple silicon, Linux on x64 and arm64, and Windows on x64 (https://superfluid.sh)`);
   }
   let release;
   try {
@@ -59,24 +62,40 @@ module.exports = function launch(command) {
   } catch {
     fail(`${pkg} is not installed; install @basecompute/superfluid again without --omit=optional or --no-optional`);
   }
-  const exe = path.join(release, "bin", command);
-  try {
-    fs.accessSync(exe, fs.constants.X_OK);
-  } catch {
+  const exe = path.join(release, "bin", WINDOWS ? `${command}.exe` : command);
+  // Windows has no executable bit to lose.
+  if (!WINDOWS) {
     try {
-      restoreModes(release);
-    } catch (e) {
-      fail(`${exe} is not executable and could not be made so (${e.message}); install @basecompute/superfluid again`);
+      fs.accessSync(exe, fs.constants.X_OK);
+    } catch {
+      try {
+        restoreModes(release);
+      } catch (e) {
+        fail(`${exe} is not executable and could not be made so (${e.message}); install @basecompute/superfluid again`);
+      }
     }
   }
 
-  const child = spawn(exe, process.argv.slice(2), { stdio: "inherit" });
-  // Every signal sent to this process is passed on, so one sent to it alone
-  // (`kill -INT <pid>`, a supervisor's SIGTERM) reaches superfluid as it would
-  // without this launcher. A terminal's Ctrl-C and Ctrl-\ reach the child
-  // through the foreground group as well; the copy passed on finds it ending
-  // already, or gone, which kill() reports as false.
-  for (const signal of ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
+  // The handlers are in place before the program starts: a signal that came
+  // between the two would end this launcher by its default and leave the
+  // program running. None runs until this function returns, with `child` set.
+  let child;
+  if (WINDOWS) {
+    // Ctrl+C and Ctrl+Break reach every program on the console, superfluid
+    // among them: it answers them (a server drains), and this only waits for
+    // it. Nothing is passed on: Windows has no signal to send one process,
+    // and kill() there ends the program outright whatever signal it is given.
+    // Closing the console (SIGHUP here) ends both.
+    for (const signal of ["SIGINT", "SIGBREAK"]) process.on(signal, () => {});
+  } else {
+    // Every signal sent to this process is passed on, so one sent to it alone
+    // (`kill -INT <pid>`, a supervisor's SIGTERM) reaches superfluid as it would
+    // without this launcher. A terminal's Ctrl-C and Ctrl-\ reach the child
+    // through the foreground group as well; the copy passed on finds it ending
+    // already, or gone, which kill() reports as false.
+    for (const signal of ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
+  }
+  child = spawn(exe, process.argv.slice(2), { stdio: "inherit" });
   child.on("error", (e) => fail(`could not start ${exe}: ${e.message}`));
   child.on("exit", (code, signal) => {
     if (signal) {

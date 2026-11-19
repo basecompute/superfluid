@@ -93,7 +93,10 @@ superfluid-worker-<id> compat
 superfluid-worker-<id> versions
 superfluid-worker-<id> pull <org/model[:tag]> [--offline] [--<option> [value]]...
 superfluid-worker-<id> --frames-fd N --fd-channel-fd M --model <path> [--max-context N] [--max-batch N]
+superfluid-worker-<id> --link <socket> --model <path> [--max-context N] [--max-batch N]
 ```
+
+The daemon hands a worker its two Link W streams as inherited descriptors (`--frames-fd`, `--fd-channel-fd`) on Unix. A Windows child inherits no sockets, so there the daemon listens on a unix socket of its own and the worker connects both streams to it (`--link`). A shared-memory segment then travels as a descriptor on the fd channel (`SCM_RIGHTS`) on Unix, and on Windows as a handle the worker takes out of the daemon's process, which the fd channel names.
 
 | command | exit codes |
 |---|---|

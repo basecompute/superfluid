@@ -18,9 +18,12 @@
 //! again, calls [`prepare_exec`] first, which gives fd 2 back to the real stderr.
 
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -53,6 +56,7 @@ pub const EVENT_MARK: u8 = 0x1e;
 
 static JSON: AtomicBool = AtomicBool::new(false);
 /// The real stderr, which the relay writes to; -1 in text mode.
+#[cfg(unix)]
 static OUT: AtomicI32 = AtomicI32::new(-1);
 static DRAIN_ASKED: AtomicU64 = AtomicU64::new(0);
 static DRAIN_SEEN: AtomicU64 = AtomicU64::new(0);
@@ -165,16 +169,40 @@ pub fn fail(code: i32, message: impl std::fmt::Display) -> ! {
     } else {
         eprintln!("superfluid: {message}");
     }
+    exit(code)
+}
+
+/// Ends this process with `code`, once the relay has written out what was written before.
+/// Unix drains the relay as the process exits (`atexit`). On Windows `std::process::exit` is
+/// `ExitProcess`, which runs no such function and ends the relay's thread with the lines it
+/// still holds, the `error` that says why among them: there the drain is here.
+pub fn exit(code: i32) -> ! {
+    #[cfg(windows)]
+    drain(EXIT_DRAIN);
     std::process::exit(code)
 }
 
 /// Where what stands for stderr is written: the real stderr behind the relay in JSON mode, fd 2
 /// in text mode. `--log-file` points this at its file, so the events go there.
+#[cfg(unix)]
 pub fn output_fd() -> RawFd {
     match OUT.load(Ordering::SeqCst) {
         -1 => libc::STDERR_FILENO,
         fd => fd,
     }
+}
+
+/// Sends what stands for stderr to `to` from here on, as `--log-file` asks: the events in JSON
+/// mode, stderr itself in text mode.
+pub fn redirect_output(to: std::fs::File) {
+    #[cfg(unix)]
+    // SAFETY: `to` is an open descriptor for the duration of the call; dup2 onto the
+    // descriptor that stands for stderr closes what that was and leaves `to` to be dropped.
+    unsafe {
+        libc::dup2(to.as_raw_fd(), output_fd());
+    }
+    #[cfg(windows)]
+    windows::redirect(to, RELAYED.load(Ordering::SeqCst));
 }
 
 /// Waits, up to `within`, until the relay has written out everything this process wrote to
@@ -211,9 +239,15 @@ pub fn prepare_exec() {
     // after: emit and the drain mark both check RELAYED under it.
     let _err = std::io::stderr().lock();
     RELAYED.store(false, Ordering::SeqCst);
+    #[cfg(unix)]
     // SAFETY: dup2 of the real stderr, which the relay holds open for as long as this process
     // lives, onto fd 2; dup2 clears close-on-exec on fd 2, so the next image inherits it.
     if unsafe { libc::dup2(OUT.load(Ordering::SeqCst), libc::STDERR_FILENO) } < 0 {
+        RELAYED.store(true, Ordering::SeqCst);
+    }
+    // The next program is a child there, and inherits the stderr this process has then.
+    #[cfg(windows)]
+    if windows::restore().is_err() {
         RELAYED.store(true, Ordering::SeqCst);
     }
 }
@@ -365,13 +399,13 @@ fn drain_mark(raw: &[u8]) -> Option<(&[u8], Option<u64>)> {
 }
 
 /// Reads the pipe until every writer has closed it, writing what each line stands for to `out`.
-fn relay(mut from: std::fs::File, mut out: std::fs::File) {
+fn relay(mut from: std::fs::File, mut out: impl FnMut(&[u8])) {
     let mut pulling = None;
     let mut write = |raw: &[u8]| {
         let (raw, drained) = drain_mark(raw).unwrap_or((raw, None));
         if let Some(line) = relayed(raw, &mut pulling, now) {
             // A host that stopped reading is no reason to stop: the line is dropped.
-            let _ = out.write_all(line.as_bytes());
+            out(line.as_bytes());
         }
         if let Some(seq) = drained {
             DRAIN_SEEN.fetch_max(seq, Ordering::SeqCst);
@@ -396,7 +430,8 @@ fn relay(mut from: std::fs::File, mut out: std::fs::File) {
 }
 
 /// Points fd 2 at a pipe the relay reads, keeping the real stderr for the relay to write to.
-fn start_relay() -> std::io::Result<()> {
+#[cfg(unix)]
+fn redirect_to_relay() -> std::io::Result<()> {
     // SAFETY: fd syscalls on descriptors this process owns; each one is wrapped in an OwnedFd as
     // soon as it exists, so a failure closes what was opened.
     let (out, read, write) = unsafe {
@@ -413,9 +448,76 @@ fn start_relay() -> std::io::Result<()> {
         libc::fcntl(read.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
         (out, read, write)
     };
-    let out = std::fs::File::from(out);
+    let mut out = std::fs::File::from(out);
     let out_fd = out.as_raw_fd();
-    std::thread::Builder::new().name("superfluid-events".into()).spawn(move || relay(std::fs::File::from(read), out))?;
+    // A host that stopped reading is no reason to stop: the line is dropped.
+    std::thread::Builder::new().name("superfluid-events".into()).spawn(move || {
+        relay(std::fs::File::from(read), |line| {
+            let _ = out.write_all(line);
+        })
+    })?;
+    // SAFETY: dup2 of the pipe's write end, which this process owns, onto fd 2; dup2 clears
+    // close-on-exec, so every worker started from here inherits the pipe as its stderr.
+    if unsafe { libc::dup2(write.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    drop(write);
+    OUT.store(out_fd, Ordering::SeqCst);
+    Ok(())
+}
+
+/// The same on Windows, where stderr is the handle the process names as its standard error:
+/// Rust asks for it at each write, and a worker started from here inherits the one named then.
+#[cfg(windows)]
+mod windows {
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle};
+    use std::sync::Mutex;
+
+    use crate::sys::set_stderr;
+
+    /// What the relay writes to: the stderr this process started with, or `--log-file`'s file.
+    static REAL: Mutex<Option<File>> = Mutex::new(None);
+
+    pub fn start() -> std::io::Result<()> {
+        let real = std::io::stderr().as_handle().try_clone_to_owned()?;
+        let (read, write) = std::io::pipe()?;
+        *REAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(File::from(real));
+        std::thread::Builder::new().name("superfluid-events".into()).spawn(move || {
+            super::relay(File::from(OwnedHandle::from(read)), |line| {
+                // A host that stopped reading is no reason to stop: the line is dropped.
+                if let Some(out) = REAL.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    let _ = out.write_all(line);
+                }
+            })
+        })?;
+        set_stderr(&File::from(OwnedHandle::from(write)))
+    }
+
+    /// Standard error is the real one again.
+    pub fn restore() -> std::io::Result<()> {
+        match REAL.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(real) => set_stderr(real),
+            None => Ok(()),
+        }
+    }
+
+    pub fn redirect(to: File, relayed: bool) {
+        if relayed {
+            *REAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(to);
+        } else if !to.as_raw_handle().is_null() {
+            let _ = set_stderr(&to);
+        }
+    }
+}
+
+#[cfg(windows)]
+use windows::start as redirect_to_relay;
+
+/// Has the relay stand between this process's stderr and the real one.
+fn start_relay() -> std::io::Result<()> {
+    redirect_to_relay()?;
     let (tx, rx) = std::sync::mpsc::channel::<u64>();
     std::thread::Builder::new().name("superfluid-events-drain".into()).spawn(move || {
         for seq in rx {
@@ -430,13 +532,6 @@ fn start_relay() -> std::io::Result<()> {
             }
         }
     })?;
-    // SAFETY: dup2 of the pipe's write end, which this process owns, onto fd 2; dup2 clears
-    // close-on-exec, so every worker started from here inherits the pipe as its stderr.
-    if unsafe { libc::dup2(write.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    drop(write);
-    OUT.store(out_fd, Ordering::SeqCst);
     RELAYED.store(true, Ordering::SeqCst);
     let _ = DRAINER.set(Mutex::new(tx));
     extern "C" fn at_exit() {
@@ -616,6 +711,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_models_size_on_disk_follows_a_snapshots_links() {
         let dir = std::env::temp_dir().join(format!("superfluid-events-bytes-{}", std::process::id()));
