@@ -311,6 +311,89 @@ pub fn replace_process(cmd: &mut Command) -> std::io::Error {
     }
 }
 
+/// A second handle on this process's standard error, one a child does not inherit.
+pub fn stderr_clone() -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd;
+        // SAFETY: a duplicate of descriptor 2, owned by the File from here on.
+        let fd = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is open and nothing else owns it.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+        Ok(File::from(std::io::stderr().as_handle().try_clone_to_owned()?))
+    }
+}
+
+/// A pipe's read end and write end, neither inherited by a child.
+pub fn pipe() -> std::io::Result<(File, File)> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` has room for the two descriptors; each is owned as soon as it exists.
+        unsafe {
+            if libc::pipe(fds.as_mut_ptr()) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let (read, write) = (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]));
+            libc::fcntl(read.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(write.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+            Ok((File::from(read), File::from(write)))
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::OwnedHandle;
+        let (read, write) = std::io::pipe()?;
+        Ok((File::from(OwnedHandle::from(read)), File::from(OwnedHandle::from(write))))
+    }
+}
+
+/// Makes `to` this process's standard error from here on: descriptor 2, and on Windows the
+/// handle Rust asks for at each write and a child started from here inherits. What stood for
+/// it before stays open on Windows: something may be midway through a write to it.
+pub fn set_stderr(to: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `to` is open for the call; dup2 closes what 2 was and leaves `to` its own.
+        if unsafe { libc::dup2(to.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::IntoRawHandle;
+        use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+        let named = to.try_clone()?.into_raw_handle();
+        // SAFETY: `named` is an open handle this process owns and never closes.
+        if unsafe { SetStdHandle(STD_ERROR_HANDLE, named) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if let Ok(for_c) = to.try_clone() {
+            // SAFETY: the descriptor takes over the handle it is opened on; dup2 leaves 2 with
+            // a duplicate, and the first descriptor is closed. A library in this process that
+            // writes through the C runtime follows.
+            unsafe {
+                let fd = libc::open_osfhandle(for_c.into_raw_handle() as isize, 0);
+                if fd >= 0 {
+                    libc::dup2(fd, 2);
+                    libc::close(fd);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `seconds` since the Unix epoch as the UTC date and time of day: (year, month, day, hour,
 /// minute, second), by the proleptic Gregorian calendar.
 pub fn utc(seconds: u64) -> (i64, u32, u32, u32, u32, u32) {

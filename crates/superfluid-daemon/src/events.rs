@@ -462,36 +462,13 @@ fn redirect_to_relay() -> std::io::Result<()> {
 mod windows {
     use std::fs::File;
     use std::io::Write;
-    use std::os::windows::io::{AsHandle, AsRawHandle, IntoRawHandle, OwnedHandle};
+    use std::os::windows::io::{AsHandle, AsRawHandle, OwnedHandle};
     use std::sync::Mutex;
 
-    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+    use crate::sys::set_stderr;
 
     /// What the relay writes to: the stderr this process started with, or `--log-file`'s file.
     static REAL: Mutex<Option<File>> = Mutex::new(None);
-
-    /// Names a duplicate of `to` as this process's standard error, and points the C runtime's
-    /// descriptor 2 at another, for a library in this process that writes through it. The
-    /// handle named before stays open: something may be midway through a write to it.
-    fn set_stderr(to: &File) -> std::io::Result<()> {
-        let named = to.try_clone()?.into_raw_handle();
-        // SAFETY: `named` is an open handle this process owns and never closes.
-        if unsafe { SetStdHandle(STD_ERROR_HANDLE, named) } == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if let Ok(for_c) = to.try_clone() {
-            // SAFETY: the descriptor takes over the handle it is opened on; dup2 leaves 2 with
-            // a duplicate, and the first descriptor is closed.
-            unsafe {
-                let fd = libc::open_osfhandle(for_c.into_raw_handle() as isize, 0);
-                if fd >= 0 {
-                    libc::dup2(fd, 2);
-                    libc::close(fd);
-                }
-            }
-        }
-        Ok(())
-    }
 
     pub fn start() -> std::io::Result<()> {
         let real = std::io::stderr().as_handle().try_clone_to_owned()?;
