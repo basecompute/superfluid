@@ -316,6 +316,61 @@ fn the_ledger_follows_copy_chains_and_the_limits_follow_the_config() {
     assert_eq!(rt.mem_counters().cells_used, 0);
 }
 
+/// A shared pool is sized by what its context takes on the device, which is
+/// more than its KV. Eight lanes of Qwen3-0.6B's trained 40,960 on a 48 GB Mac
+/// were given a pool of 208k cells, 60% of the free memory by their KV; the
+/// context llama.cpp b12503 made for it reserved another 28.6 GB to gather K
+/// and V rows into, 52 GB in all on a device of 40. Metal allocated it, the
+/// device's free figure read zero, and every request failed: Metal refused the
+/// first step's command buffers (`kIOGPUCommandBufferCallbackErrorOutOfMemory`)
+/// and llama.cpp the step after it. Sized by what a context takes, the pool
+/// leaves the device its headroom and its steps compute what a small pool's do.
+#[test]
+fn a_shared_pool_is_sized_by_what_its_context_takes_on_the_device() {
+    let _device = device_alone();
+    let Some(path) = gguf() else {
+        eprintln!("SKIP: no GGUF model");
+        return;
+    };
+    let before = superfluid_adapter_llamacpp::runtime::device_free_bytes();
+    let Some(gpu) = superfluid_adapter_llamacpp::devices().into_iter().find(|d| d.budget > 0).filter(|_| before > 0) else {
+        eprintln!("SKIP: no GPU device reports a budget");
+        return;
+    };
+    let tok = LlamaTokenizer::load(&path).expect("tokenizer");
+    let prompt = tok.encode("The capital of France is Paris, and the capital of Germany is");
+    let next_two = |rt: &mut LlamaRuntime| {
+        let seq = rt.seq_create().unwrap();
+        let row = rt.step(&[Feed { seq, input: Input::Tokens(&prompt), wants_row: true }]).expect("the prompt's step").remove(0);
+        let first = superfluid_executor::sampling::argmax(&row);
+        let row = rt.step(&[Feed { seq, input: Input::Tokens(&[first]), wants_row: true }]).expect("the step after it").remove(0);
+        (first, superfluid_executor::sampling::argmax(&row))
+    };
+    let expected = next_two(&mut runtime(&path));
+
+    let (lanes, window) = (8u32, 40_960u32);
+    let mut rt = LlamaRuntime::open(LlamaConfig {
+        model_path: path.clone(),
+        max_seq_len: window,
+        max_batch: lanes,
+        streams: Some(false),
+        ..Default::default()
+    })
+    .expect("open gguf");
+    let left = superfluid_adapter_llamacpp::runtime::device_free_bytes();
+    let cells = rt.describe().cells_total;
+    let headroom = superfluid_executor::sizing::headroom_bytes(gpu.budget);
+    assert!(left >= headroom, "a pool of {cells} cells left {left} bytes of the device free, under the {headroom} it keeps clear");
+    if cells > window as u64 && cells < lanes as u64 * window as u64 {
+        // The pool's share of what the weights left free, the weights themselves, and the
+        // cells llama.cpp rounds a context up by.
+        let weights = std::fs::metadata(&path).unwrap().len();
+        let share = (superfluid_executor::sizing::POOL_SHARE_OF_FREE * before as f64) as u64 + weights + (256 << 20);
+        assert!(before - left <= share, "the model and a pool of {cells} cells took {} bytes of the {before} free", before - left);
+    }
+    assert_eq!(next_two(&mut rt), expected, "the pool's steps compute what a small pool's do");
+}
+
 #[test]
 fn the_pool_budget_counts_the_weights() {
     let _device = device_alone();

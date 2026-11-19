@@ -219,6 +219,63 @@ unsafe fn registry_text(p: *const c_char) -> String {
 
 const CONTEXT_FLOOR: u32 = 512;
 
+/// The smaller of the two contexts a pool's cost is measured on; the larger is
+/// twice it. llama.cpp cuts `n_batch` to a context smaller than it, and what it
+/// reserves for a batch with it, so below `n_batch` cells a context's size does
+/// not grow by the cell, and a context of a few hundred cells says little
+/// about a cell. `affordable` is the pool its KV alone would be given, which
+/// no pool priced in full exceeds: neither trial is larger than it, so that
+/// the measurement asks nothing of the device that the pool itself would not.
+/// `None` where that leaves no two contexts to measure on.
+fn trial_cells(n_batch: u32, affordable: u64) -> Option<u32> {
+    let small = (affordable / 2 / 256 * 256).min(n_batch.max(2048).next_multiple_of(256) as u64) as u32;
+    (small >= least_trial_cells(n_batch)).then_some(small)
+}
+
+/// The smallest context a pool's cost is measured on.
+fn least_trial_cells(n_batch: u32) -> u32 {
+    n_batch.max(CONTEXT_FLOOR).next_multiple_of(256)
+}
+
+/// What a context takes on the device, read from the device around two small
+/// ones (`small` cells and twice that), each freed again. `trial` makes a
+/// context of so many cells and says how many it has and what it took, or
+/// `None` when llama.cpp made none or the device's free figure did not follow
+/// it (it bottoms out at zero).
+///
+/// A cell of a pool takes more on the device than its KV. llama.cpp reserves a
+/// context's working memory for the largest batch it could be given, and since
+/// b12059 its Metal attention over a shared pool gathers each sequence's K and
+/// V rows first: room for one layer's rows of every cell, for each of the
+/// context's sequence ids. With 32 ids that is 136 kB a cell for Qwen3-0.6B
+/// beside 115 kB of KV, and a pool sized by its KV to 60% of a 48 GB Mac's
+/// 40 GB working set made a context of 52 GB. Metal allocates that, and fails
+/// the steps that run in it. How much it is depends on the build, the backend
+/// and the shape, so it is measured.
+///
+/// A trial is a measurement and never a condition of opening the model: the
+/// device may hold the pool it will be given and not a trial larger than it.
+/// Where a trial cannot be made the two are halved, down to `least` cells, and
+/// with none to measure on the answer is `None` and the pool is priced by its
+/// KV alone. A cell is never priced under its KV, which a device that does not
+/// hold the KV would have it.
+fn context_cost(
+    mut trial: impl FnMut(u32) -> Option<(u64, u64)>,
+    small: u32,
+    least: u32,
+    kv_bytes_per_token: u64,
+) -> Option<superfluid_executor::sizing::ContextCost> {
+    let mut small = small;
+    while small >= least.max(1) {
+        if let Some((first, second)) = small.checked_mul(2).and_then(|large| Some((trial(small)?, trial(large)?))) {
+            return superfluid_executor::sizing::ContextCost::from_trials(first, second)
+                .map(|cost| superfluid_executor::sizing::ContextCost { bytes_per_cell: cost.bytes_per_cell.max(kv_bytes_per_token), ..cost });
+        }
+        small = small / 2 / 256 * 256;
+    }
+    None
+}
+
 const SIZED_BACKENDS: &[&str] = &["Metal", "CUDA"];
 
 fn sizes_here(backend: &str, integrated: bool) -> Result<(), String> {
@@ -751,33 +808,14 @@ impl LlamaRuntime {
             }
         };
         let streams = n_streams > 0;
-        let mut cells = if streams {
-            (n_streams as u64 * per_seq).min(u32::MAX as u64) as u32
-        } else if cfg.cells_total == 0 {
-            let desired = cfg.max_batch as u64 * cfg.max_seq_len as u64;
-            let granted = superfluid_executor::sizing::budgeted_cells(desired, cfg.max_seq_len as u64, kv_bytes_per_token, free);
-            if granted < desired {
-                eprintln!(
-                    "superfluid-workerd: llamacpp KV pool: {} tokens shared by {} lanes, sized to {:.0}% of the {:.1} GB \
-                     the weights left free; one conversation can still use {}",
-                    superfluid_executor::sizing::tokens(granted),
-                    cfg.max_batch,
-                    100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
-                    free as f64 / 1e9,
-                    superfluid_executor::sizing::tokens(cfg.max_seq_len as u64),
-                );
-            }
-            granted.min(u32::MAX as u64) as u32
-        } else {
-            cfg.cells_total
-        };
         let n_seq_max = if streams { n_streams } else { pool_seq_max };
         let threads = if cfg.n_threads > 0 {
             cfg.n_threads
         } else {
             std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4)
         };
-        let make_context = |cells: u32| {
+        // A context of so many cells, or null where llama.cpp makes none.
+        let try_context = |cells: u32| {
             // The context parameters, filled for whichever layout this llama.cpp has
             // (see `sys::ContextLayout`): the same assignments, the right struct.
             macro_rules! fill {
@@ -839,7 +877,7 @@ impl LlamaRuntime {
             }
             // SAFETY: model is live; the params are plain data, read from and handed
             // back to the library in its own layout.
-            let ctx = unsafe {
+            unsafe {
                 match sys::context_layout() {
                     sys::ContextLayout::V1 => {
                         let mut cp = sys::llama_context_default_params();
@@ -857,7 +895,11 @@ impl LlamaRuntime {
                         sys::llama_init_from_model_v3(model, cp)
                     }
                 }
-            };
+            }
+        };
+        // The context the runtime keeps: without it the model is let go.
+        let make_context = |cells: u32| {
+            let ctx = try_context(cells);
             if ctx.is_null() {
                 // SAFETY: model is live and owned here.
                 unsafe { sys::llama_model_free(model) };
@@ -865,13 +907,77 @@ impl LlamaRuntime {
             }
             Ok(ctx)
         };
+        // A shared pool sized here is priced by what a context takes on the device, where
+        // the device's free figure is one to measure by (`sizes_here`), and by its KV alone
+        // where it is not.
+        let desired = cfg.max_batch as u64 * cfg.max_seq_len as u64;
+        let headroom = device
+            .as_ref()
+            .map_or(0, |d| superfluid_executor::sizing::headroom_bytes((superfluid_executor::sizing::PLANNING_SHARE * d.total as f64) as u64));
+        let measures = device.as_ref().is_some_and(|d| d.free > 0 && sizes_here(&d.backend, d.integrated).is_ok());
+        let cost = if measures && !streams && cfg.cells_total == 0 {
+            let affordable = superfluid_executor::sizing::budgeted_cells(desired, cfg.max_seq_len as u64, kv_bytes_per_token, free);
+            let trial = |cells: u32| {
+                let before = device_free_bytes();
+                let ctx = try_context(cells);
+                if ctx.is_null() {
+                    // What llama.cpp said of a trial is not the reason of a later failure.
+                    sys::clear_errors();
+                    return None;
+                }
+                // SAFETY: ctx is live and owned here; it is read, then freed once.
+                let (after, n_ctx) = unsafe {
+                    let read = (device_free_bytes(), sys::llama_n_ctx(ctx));
+                    sys::llama_free(ctx);
+                    read
+                };
+                (after != 0 && after < before).then(|| (n_ctx as u64, before - after))
+            };
+            trial_cells(cfg.n_batch, affordable)
+                .and_then(|small| context_cost(trial, small, least_trial_cells(cfg.n_batch), kv_bytes_per_token))
+        } else {
+            None
+        };
+        let mut cells = if streams {
+            (n_streams as u64 * per_seq).min(u32::MAX as u64) as u32
+        } else if cfg.cells_total == 0 {
+            let granted = match cost {
+                Some(cost) => superfluid_executor::sizing::fitted_cells(desired, cfg.max_seq_len as u64, cost, free, headroom)
+                    .max(CONTEXT_FLOOR as u64),
+                None => superfluid_executor::sizing::budgeted_cells(desired, cfg.max_seq_len as u64, kv_bytes_per_token, free),
+            };
+            if granted < desired {
+                let priced = match cost {
+                    Some(cost) if cost.bytes_per_cell > kv_bytes_per_token => format!(
+                        " at the {:.0} kB a token takes on {} ({:.0} kB of it KV cache)",
+                        cost.bytes_per_cell as f64 / 1e3,
+                        device.as_ref().map_or("the device", |d| d.backend.as_str()),
+                        kv_bytes_per_token as f64 / 1e3,
+                    ),
+                    _ => String::new(),
+                };
+                eprintln!(
+                    "superfluid-workerd: llamacpp KV pool: {} tokens shared by {} lanes, sized to {:.0}% of the {:.1} GB \
+                     the weights left free{priced}; one conversation can still use {}",
+                    superfluid_executor::sizing::tokens(granted),
+                    cfg.max_batch,
+                    100.0 * superfluid_executor::sizing::POOL_SHARE_OF_FREE,
+                    free as f64 / 1e9,
+                    superfluid_executor::sizing::tokens(granted.min(cfg.max_seq_len as u64)),
+                );
+            }
+            granted.min(u32::MAX as u64) as u32
+        } else {
+            cfg.cells_total
+        };
         let mut ctx = make_context(cells)?;
         // A buffer per sequence is sized per lane; only a shared pool shrinks.
         if !streams && cfg.cells_total == 0 {
             if let Some(d) = &device {
                 let budget = (superfluid_executor::sizing::PLANNING_SHARE * d.total as f64) as u64;
                 let left = device_free_bytes();
-                let over = superfluid_executor::sizing::cells_over_budget(budget, left, kv_bytes_per_token);
+                let per_cell = cost.map_or(kv_bytes_per_token, |c| c.bytes_per_cell);
+                let over = superfluid_executor::sizing::cells_over_budget(budget, left, per_cell);
                 let fewer = (cells as u64).saturating_sub(over).max(CONTEXT_FLOOR as u64) as u32;
                 if fewer < cells {
                     eprintln!(
@@ -1681,6 +1787,87 @@ impl LlamaRuntime {
 #[cfg(test)]
 mod offload_device_tests {
     use super::{offload_device, sizes_here, sys};
+
+    #[test]
+    fn a_pools_cost_is_measured_on_contexts_no_smaller_than_a_batch() {
+        use super::trial_cells;
+        assert_eq!(trial_cells(2048, 327_680), Some(2048));
+        assert_eq!(trial_cells(512, 327_680), Some(2048), "a context of a few hundred cells says little about a cell");
+        assert_eq!(trial_cells(3000, 327_680), Some(3072), "in llama.cpp's 256-cell steps");
+    }
+
+    #[test]
+    fn a_pools_cost_is_measured_on_contexts_no_larger_than_the_pool_its_kv_affords() {
+        use super::trial_cells;
+        assert_eq!(trial_cells(2048, 8192), Some(2048));
+        assert_eq!(trial_cells(2048, 4096), Some(2048), "the larger trial is the pool itself");
+        assert_eq!(trial_cells(2048, 4095), None, "below a batch a context does not grow by the cell");
+        // 650 MiB free and a KV of 114,688 bytes a cell: 60% of it holds 3,565 cells.
+        assert_eq!(trial_cells(128, 3565), Some(1536), "1,536 and 3,072 cells, where 2,048 and 4,096 ask for more than the pool");
+        assert_eq!(trial_cells(128, 1024), Some(512));
+        assert_eq!(trial_cells(128, 1023), None, "nothing to measure on");
+        assert_eq!(trial_cells(128, 0), None);
+    }
+
+    /// The sizes of context a device was asked for, in order.
+    type Asked = std::rc::Rc<std::cell::RefCell<Vec<u32>>>;
+
+    /// A device with `free` bytes, on which a context takes `fixed` bytes and
+    /// `cell` a cell and one that takes more than is free is not made: the
+    /// trial `context_cost` is given, and the sizes it was asked for.
+    fn device(free: u64, fixed: u64, cell: u64) -> (impl FnMut(u32) -> Option<(u64, u64)>, Asked) {
+        let asked = Asked::default();
+        let seen = asked.clone();
+        let trial = move |cells: u32| {
+            seen.borrow_mut().push(cells);
+            let takes = fixed + cells as u64 * cell;
+            (takes <= free).then_some((cells as u64, takes))
+        };
+        (trial, asked)
+    }
+
+    // Qwen3-0.6B in a shared pool of 9 sequence ids: 114,688 bytes of KV a cell
+    // and 9 x 4,096 of llama.cpp's reservation beside it.
+    const KV: u64 = 114_688;
+    const CELL: u64 = KV + 9 * 4096;
+    const FIXED: u64 = 62_193_664;
+
+    #[test]
+    fn a_trial_the_device_cannot_hold_is_measured_smaller_and_fails_nothing() {
+        use superfluid_executor::sizing::{fitted_cells, ContextCost};
+        // 650 MiB free: 2,048 cells take 372 MB and 4,096 take 682,950,656 bytes,
+        // 1.4 MB more than there is. The pool the device can be given is smaller
+        // than the trial it could not hold, and is what the model opens with.
+        let free = 650 << 20;
+        assert!(FIXED + 4096 * CELL > free && FIXED + 2048 * CELL < free);
+        let (trial, asked) = device(free, FIXED, CELL);
+        let cost = super::context_cost(trial, 2048, 512, KV);
+        assert_eq!(cost, Some(ContextCost { fixed_bytes: FIXED, bytes_per_cell: CELL }));
+        assert_eq!(*asked.borrow(), [2048, 4096, 1024, 2048], "the pair that did not fit, then half of it");
+        let pool = fitted_cells(8 * 1024, 1024, cost.unwrap(), free, 0);
+        assert_eq!(pool, 2288, "the cells whose context is 60% of what is free");
+        assert!(FIXED + pool * CELL < free);
+    }
+
+    #[test]
+    fn with_no_trial_the_device_can_hold_a_pool_is_priced_by_its_kv() {
+        // Room for the smaller of the last pair and not the larger.
+        let (trial, asked) = device(FIXED + 600 * CELL, FIXED, CELL);
+        assert_eq!(super::context_cost(trial, 2048, 512, KV), None);
+        assert_eq!(*asked.borrow(), [2048, 1024, 512, 1024], "down to the smallest it is measured on, and no further");
+        // Room for none at all.
+        let (trial, asked) = device(0, FIXED, CELL);
+        assert_eq!(super::context_cost(trial, 2048, 512, KV), None);
+        assert_eq!(*asked.borrow(), [2048, 1024, 512]);
+    }
+
+    #[test]
+    fn a_cell_is_never_priced_under_its_kv() {
+        use superfluid_executor::sizing::ContextCost;
+        let (trial, _) = device(u64::MAX, FIXED, KV / 2);
+        let cost = super::context_cost(trial, 2048, 512, KV);
+        assert_eq!(cost, Some(ContextCost { fixed_bytes: FIXED, bytes_per_cell: KV }));
+    }
 
     #[test]
     fn exports_on_the_cpu_keep_to_host_memory_alone() {

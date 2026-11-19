@@ -82,6 +82,47 @@ pub fn budgeted_cells(desired: u64, one_sequence: u64, bytes_per_cell: u64, free
     desired.min(cap).max(one_sequence.min(desired))
 }
 
+/// What a context takes on its device: so much whatever its size, and so much
+/// a cell. A cell costs more there than its KV where the runtime reserves
+/// working memory that grows with the pool, and only the device can say how
+/// much: the figures are measured, on two contexts made at different sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextCost {
+    pub fixed_bytes: u64,
+    pub bytes_per_cell: u64,
+}
+
+impl ContextCost {
+    /// From what two contexts took, each as `(cells, bytes)`. `None` where the
+    /// two say nothing about a cell: one size, or the larger took no more.
+    pub fn from_trials(small: (u64, u64), large: (u64, u64)) -> Option<ContextCost> {
+        let (small, large) = if small.0 <= large.0 { (small, large) } else { (large, small) };
+        if small.0 == large.0 || large.1 <= small.1 {
+            return None;
+        }
+        let bytes_per_cell = (large.1 - small.1).div_ceil(large.0 - small.0);
+        Some(ContextCost { fixed_bytes: small.1.saturating_sub(small.0 * bytes_per_cell), bytes_per_cell })
+    }
+
+    pub fn bytes(&self, cells: u64) -> u64 {
+        self.fixed_bytes.saturating_add(cells.saturating_mul(self.bytes_per_cell))
+    }
+}
+
+/// The cells of a pool by what its whole context takes: the pool's share of
+/// the free memory, a whole sequence where the share holds less (as
+/// `budgeted_cells`), and never so many that the context leaves less than
+/// `headroom_bytes` free, which can cut into the one sequence.
+pub fn fitted_cells(desired: u64, one_sequence: u64, cost: ContextCost, free_bytes: u64, headroom_bytes: u64) -> u64 {
+    if free_bytes == 0 || cost.bytes_per_cell == 0 {
+        return desired;
+    }
+    let cells_within = |bytes: u64| bytes.saturating_sub(cost.fixed_bytes) / cost.bytes_per_cell;
+    let share = cells_within((POOL_SHARE_OF_FREE * free_bytes as f64) as u64);
+    let most = cells_within(free_bytes.saturating_sub(headroom_bytes));
+    desired.min(share).max(one_sequence.min(desired)).min(most)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +228,53 @@ mod tests {
         let m = model(40, 4, 144 << 10, 40_960);
         assert_eq!(Sizing::from_json(&m.to_json()), Some(m));
         assert_eq!(Sizing::from_json(&serde_json::json!({"budget_bytes": 1})), None);
+    }
+
+    /// Qwen3-0.6B on llama.cpp b12503 (Metal) with 32 sequence ids, as an M5
+    /// Pro measured it: a cell's KV is 114,688 bytes, and the context reserves
+    /// another 136,337 for each cell to gather K and V rows into.
+    const KV_06B: u64 = 2 * 28 * 8 * 128 * 2;
+    const CELL_06B: u64 = KV_06B + 136_337;
+    const FIXED_06B: u64 = 160 << 20;
+
+    #[test]
+    fn two_contexts_price_a_cell_and_what_a_context_costs_at_any_size() {
+        let took = |cells: u64| FIXED_06B + cells * CELL_06B;
+        let cost = ContextCost::from_trials((2048, took(2048)), (4096, took(4096))).unwrap();
+        assert_eq!(cost, ContextCost { fixed_bytes: FIXED_06B, bytes_per_cell: CELL_06B });
+        assert_eq!(ContextCost::from_trials((4096, took(4096)), (2048, took(2048))), Some(cost), "in either order");
+        assert_eq!(cost.bytes(208_384), took(208_384));
+        assert_eq!(ContextCost::from_trials((2048, took(2048)), (2048, took(2048))), None, "one size prices nothing");
+        assert_eq!(ContextCost::from_trials((2048, took(4096)), (4096, took(2048))), None, "nor a larger one that took less");
+        let no_fixed = ContextCost::from_trials((2048, 2048 * 100), (4096, 4096 * 100 + 7)).unwrap();
+        assert_eq!((no_fixed.fixed_bytes, no_fixed.bytes_per_cell), (0, 101), "a cell is never priced under what the two took");
+    }
+
+    #[test]
+    fn a_pool_is_sized_by_what_its_context_takes_not_by_its_kv_alone() {
+        // 8 lanes of the trained 40,960 on a 48 GB M4 Pro: 39.8 GB free past the weights.
+        let (free, headroom) = (39_800_000_000u64, 2_135_000_000u64);
+        let (desired, one) = (8 * 40_960u64, 40_960u64);
+        let by_kv = budgeted_cells(desired, one, KV_06B, free);
+        let cost = ContextCost { fixed_bytes: FIXED_06B, bytes_per_cell: CELL_06B };
+        assert!(cost.bytes(by_kv) > free, "priced by its KV the pool's context is {} bytes, past the {free} free", cost.bytes(by_kv));
+        let cells = fitted_cells(desired, one, cost, free, headroom);
+        assert!(cells >= one && cells < by_kv, "{cells}");
+        let share = (POOL_SHARE_OF_FREE * free as f64) as u64;
+        assert!(cost.bytes(cells) <= share && cost.bytes(cells + 1) > share, "the context is the pool's share of what is free");
+    }
+
+    #[test]
+    fn a_fitted_pool_keeps_one_sequence_while_the_headroom_allows() {
+        let cost = ContextCost { fixed_bytes: GIB, bytes_per_cell: 1 << 20 };
+        let share = (POOL_SHARE_OF_FREE * (100 * GIB) as f64) as u64;
+        assert_eq!(fitted_cells(65_536, 16_384, cost, 100 * GIB, 4 * GIB), (share - GIB) >> 20, "the share, less what a context costs at any size");
+        assert_eq!(fitted_cells(8192, 4096, cost, 100 * GIB, 4 * GIB), 8192, "an affordable shape is granted whole");
+        assert_eq!(fitted_cells(65_536, 16_384, cost, 20 * GIB, 2 * GIB), 16_384, "one sequence past the share");
+        assert_eq!(fitted_cells(65_536, 16_384, cost, 12 * GIB, 2 * GIB), 9 * 1024, "and no more than leaves the headroom");
+        assert_eq!(fitted_cells(65_536, 16_384, cost, GIB, 2 * GIB), 0, "nothing where the headroom is all there is");
+        assert_eq!(fitted_cells(65_536, 16_384, cost, 0, 2 * GIB), 65_536, "no reported budget grants the request");
+        assert_eq!(fitted_cells(65_536, 16_384, ContextCost { fixed_bytes: 0, bytes_per_cell: 0 }, 20 * GIB, GIB), 65_536);
     }
 
     #[test]
