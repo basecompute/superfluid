@@ -975,6 +975,11 @@ fn dial(addrs: &[SocketAddr], token: &[u8]) -> Result<(Endpoint, TcpStream), Lin
     for addr in addrs {
         match TcpStream::connect_timeout(addr, CONNECT) {
             Ok(sock) => {
+                // Asked before the clone: on Windows a connect with a timeout leaves the socket's
+                // own record of being connected to be brought up to date, a clone made first
+                // keeps the stale one, and a shutdown through it (`Links::stop`) is then refused
+                // as "not connected", so the lane it was to end never hears.
+                sock.peer_addr()?;
                 let held = sock.try_clone()?;
                 let ep = if token.is_empty() {
                     Endpoint::from_tcp(sock)
