@@ -187,10 +187,21 @@ mlx-lm's own `--max-kv-size`, `--kv-bits` and `--adapter-path` are not options: 
 | option | value | default | meaning |
 |---|---|---|---|
 | `--basert-neural-engine` | on, off | on | Run part of each prefill on the Neural Engine where that is faster (Apple silicon); off runs every prefill on the GPU alone. It needs an engine that has the switch: with one that has none (BaseRT 0.4.6 and earlier, which prefill on the GPU alone), `off` fails the load. |
+| `--basert-npu` | on, off | on | Run part of each prefill on the XDNA NPU where the machine has one and its runtime (AMD Strix on Linux); off runs every prefill on the GPU alone. The same switch as `--basert-neural-engine`: the engine has one for whichever of the two its backend uses, and either option `off` turns it off. |
 
 Its other knobs are flags every runtime may take (`--kv-bits`, `--prefix-blob-budget-mb`) and `--basert-lib`.
 
 An engine that can compile a model's Neural Engine programs ahead has them compiled after a pull, by the worker that will load the model, since macOS keeps the compiled programs for each executable: once per Mac, macOS version and Superfluid build. A load that finds them uncompiled compiles them in the background while the GPU runs the prefill alone. Nothing is compiled with `--basert-neural-engine off`.
+
+On an AMD Strix machine (Strix Halo, Strix Point) an engine whose bundle carries the NPU module (`baseRT_rocm_npu.so` and `npu-designs/` in the install's `lib/`) splits the prefill of a prompt of 1024 tokens or more between the GPU and the XDNA NPU. Nothing is configured in Superfluid for it. The machine needs three things, and without one of them the engine serves on the GPU alone and prints which is missing in one `[npu_ffn]` line at each load:
+
+| what | how |
+|---|---|
+| the NPU's kernel driver and firmware (`/dev/accel/accel0` exists) | the in-tree `amdxdna` driver and `linux-firmware`; Ubuntu 26.04 has both |
+| XRT, the NPU's runtime | Ubuntu 26.04: `sudo apt install libxrt2 libxrt-npu2` |
+| an unlimited locked-memory limit for the server's process (XRT locks a 64 MiB heap) | a shell: `ulimit -l unlimited`; a systemd unit: `LimitMEMLOCK=infinity`. `/etc/security/limits.d` reaches only logins that pass through PAM, not a service |
+
+The NPU's part of a prefill is int8, so its logits are close to the GPU's and not bit-identical; `--basert-npu off` serves on the GPU alone. If an NPU job fails during a request, the engine fails that request with a GPU fault rather than answer from an output the NPU never wrote, and serves the following ones on the GPU alone.
 
 ## How an upstream release becomes a tested one
 
