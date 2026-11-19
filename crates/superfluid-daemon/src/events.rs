@@ -169,6 +169,16 @@ pub fn fail(code: i32, message: impl std::fmt::Display) -> ! {
     } else {
         eprintln!("superfluid: {message}");
     }
+    exit(code)
+}
+
+/// Ends this process with `code`, once the relay has written out what was written before.
+/// Unix drains the relay as the process exits (`atexit`). On Windows `std::process::exit` is
+/// `ExitProcess`, which runs no such function and ends the relay's thread with the lines it
+/// still holds, the `error` that says why among them: there the drain is here.
+pub fn exit(code: i32) -> ! {
+    #[cfg(windows)]
+    drain(EXIT_DRAIN);
     std::process::exit(code)
 }
 

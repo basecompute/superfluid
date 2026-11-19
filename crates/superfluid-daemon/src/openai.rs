@@ -703,7 +703,7 @@ pub fn serve_blocking_config(
                          a non-zero --park-budget-gb AND the directory is over that budget"
                     );
                 }
-                std::process::exit(0);
+                crate::events::exit(0);
             });
         };
         axum::serve(
@@ -727,7 +727,7 @@ pub fn serve_blocking_config(
                 .map(|d| d.saturating_duration_since(std::time::Instant::now()))
                 .unwrap_or_default();
             crate::otlp::shutdown(left.min(std::time::Duration::from_secs(2)));
-            std::process::exit(0);
+            crate::events::exit(0);
         }
         Ok(())
     })
