@@ -979,6 +979,7 @@ fn dial(addrs: &[SocketAddr], token: &[u8]) -> Result<(Endpoint, TcpStream), Lin
                 // own record of being connected to be brought up to date, a clone made first
                 // keeps the stale one, and a shutdown through it (`Links::stop`) is then refused
                 // as "not connected", so the lane it was to end never hears.
+                #[cfg(windows)]
                 sock.peer_addr()?;
                 let held = sock.try_clone()?;
                 let ep = if token.is_empty() {
