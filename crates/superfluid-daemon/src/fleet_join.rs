@@ -1428,9 +1428,12 @@ impl NodeState {
         Ok(NodeState { wal, park: self.park.as_ref().map(|_| dir.join("park")) })
     }
 
-    /// A session store of this process's own, and no parking.
+    /// A session store of this process's own, and no parking. Each one is in a directory of
+    /// its own, so two in one process never open the same log.
     pub fn scratch() -> Result<NodeState, String> {
-        let dir = std::env::temp_dir().join(format!("superfluid-node-{}", std::process::id()));
+        static NTH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("superfluid-node-{}-{nth}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         Ok(NodeState { wal: dir.join("wal.log"), park: None })
     }
@@ -1780,6 +1783,17 @@ mod tests {
         let state = NodeState::scratch().unwrap();
         let opts = NodeOptions { lanes: 2, speculate: Some("eagle3".into()), ..NodeOptions::default() };
         assert!(load_mock_node(&opts, &state).is_err(), "a strategy the engine refuses fails the load");
+    }
+
+    /// Two nodes of one process, each on a scratch store, run side by side: neither finds its
+    /// session log held by the other.
+    #[test]
+    fn scratch_stores_of_one_process_do_not_share_a_log() {
+        let opts = NodeOptions { lanes: 2, ..NodeOptions::default() };
+        let first = load_mock_node(&opts, &NodeState::scratch().unwrap()).unwrap();
+        let second = load_mock_node(&opts, &NodeState::scratch().unwrap());
+        assert!(second.is_ok(), "the second loads while the first runs: {:?}", second.err());
+        drop(first);
     }
 
     fn node_options(args: &[&str]) -> Result<NodeOptions, String> {
