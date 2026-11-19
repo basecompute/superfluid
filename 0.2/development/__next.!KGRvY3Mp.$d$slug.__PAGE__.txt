@@ -1,0 +1,148 @@
+1:"$Sreact.fragment"
+2:"/0.2/_next/static/chunks/2ngzwwqeitkk7.js"
+3:I[39756,["$2"],"default"]
+4:I[37457,["$2"],"default"]
+8:"/0.2/_next/static/chunks/3xdr_-fi_tf79.js"
+9:I[24025,["$2","$8"],"DocsShell"]
+f:"/0.2/_next/static/chunks/2stmo1fl2_ko-.js"
+10:I[73435,["$2","$8","$f"],"Markdown"]
+15:"ViewportBoundary"
+16:I[97367,["$2"],"$15"]
+17:"MetadataBoundary"
+18:I[97367,["$2"],"$17"]
+19:"$Sreact.suspense"
+1a:I[27201,["$2"],"IconMark"]
+:HL["/0.2/_next/static/chunks/2utmj7drmfv5o.css","style"]
+6:X
+d:X
+d:C
+11:T1e7b,# Development
+
+The repository is one Rust workspace. A default build and test run need no model, GPU or runtime: the suite drives the mock engine, and tests that need a real model skip with a printed reason.
+
+```sh
+cargo build
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+Requirements: Rust (stable) and a C compiler. Development happens on macOS (Apple silicon) and Linux (arm64, x86-64). Windows x86-64 builds the daemon without its default features, which link baseRT, with either Rust toolchain ([Installation](/installation#windows)); the tests that stand in for a worker with a shell script, or for a link with a symlink, are Unix-only and compile to nothing there. The flow for pull requests is in [CONTRIBUTING.md](https://github.com/basecompute/superfluid/blob/main/CONTRIBUTING.md).
+
+## Build configurations
+
+| configuration | command |
+|---|---|
+| default (basert adapter and TUI linked) | `cargo build --release` |
+| no engine linked | `cargo build -p superfluid --no-default-features` |
+| llama.cpp linked | `cargo build -p superfluid --features llamacpp` |
+| Windows: llama.cpp, the monitor and the launcher a release puts on `PATH` | `cargo build -p superfluid --no-default-features --features llamacpp,tui,shim` |
+| MLX linked (Apple silicon) | `PYO3_PYTHON=<python> cargo build -p superfluid --features mlx` |
+| the MLX worker | `PYO3_PYTHON=<python> cargo build -p superfluid-adapter-mlx --bin superfluid-worker-mlx` |
+| release adapters | `scripts/build_runtime_adapters.sh <stage-dir>` |
+
+`superfluid-adapter-mlx` is not a default workspace member, so plain `cargo build` and `cargo test` need no Python. `third_party/baseRT/` holds the engine's public C headers, so the workspace builds with no engine present.
+
+## Tests
+
+```sh
+cargo test                                       # default members, mock engine
+cargo test -p superfluid                  # one crate
+cargo test -p superfluid-adapter-llamacpp -- --nocapture 2>&1 | python3 scripts/skip_report.py "llama.cpp adapter"
+PYO3_PYTHON=<venv>/bin/python cargo test -p superfluid-adapter-mlx
+```
+
+- A test that needs a real model or runtime prints `SKIP: <why>` and passes.
+- `scripts/skip_report.py` reads a `--nocapture` run from stdin and counts skips apart from passes. Run it under `set -o pipefail`.
+- `SUPERFLUID_REQUIRE_FIXTURES=1` turns a skip into a failure.
+- New behaviour comes with a test, against the mock engine where possible. Do not loosen an assertion to make a test pass.
+
+### Real-model fixtures
+
+Most real-model tests look for a default under `models/` at the repository root; a variable overrides the path. Each test file's header names the variables it reads.
+
+| variable | points at |
+|---|---|
+| `BASERT_TEST_MODEL` | a `.base` bundle (default `models/Qwen3-0.6B-Q4_K_M.base`) |
+| `BASERT_TEST_MODEL_MOE`, `_HYBRID`, `_GEMMA4`, `_GEMMA4_VL`, `_GPTOSS`, `_XMLWIRE`, `_MUSE_VL` | family-specific bundles |
+| `BASERT_TEST_DRAFTER`, `BASERT_TEST_DSPARK`, `BASERT_TEST_EAGLE3` | drafter sidecars for speculation tests |
+| `SUPERFLUID_TEST_GGUF` | a GGUF (default `models/Qwen3-0.6B-Q4_K_M.gguf`) |
+| `SUPERFLUID_TEST_GGUF_HYBRID`, `SUPERFLUID_TEST_GGUF_SWA`, `SUPERFLUID_TEST_GPT_OSS` | hybrid, sliding-window and gpt-oss GGUFs |
+| `SUPERFLUID_TEST_MLX` | an MLX directory (default `models/Qwen3-0.6B-mlx-4bit`) |
+| `SUPERFLUID_TEST_HF_TOKENIZER` | a Hugging Face snapshot with `tokenizer.json` |
+| `SUPERFLUID_LLAMA_LIB`, `SUPERFLUID_MLX_VENV` | the llama.cpp build and MLX environment to test against |
+| `SUPERFLUID_WRITE_GOLDENS` | rewrite export goldens instead of comparing |
+
+`tests/fixtures/` holds an audio clip, an image and chat templates from several model families. A gated Hugging Face model needs `HF_TOKEN`.
+
+## Style
+
+- `cargo clippy --all-targets -- -D warnings` is the gate. Also run it with `-p superfluid --no-default-features` and `--features llamacpp` when touching those paths. Code under `cfg(windows)` is checked from macOS or Linux with `--target x86_64-pc-windows-gnu` (the rustup target and a MinGW-w64 `gcc`).
+- Every `unsafe` block carries a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks`).
+- The tree is not `rustfmt`-clean: format what you touch, leave the rest.
+- A change to a wire protocol (Link W, Link F), the WAL format or the tick ABI says so and bumps the version it touches.
+- A new runtime is an adapter crate, not a daemon change; see [Writing a runtime adapter](/adapters).
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests.
+
+| job | runners | steps |
+|---|---|---|
+| `core` | `macos-15`, `ubuntu-24.04`, `ubuntu-24.04-arm` | clippy, build, test (mock engine plus skips) |
+| `windows` | `windows-2025` | clippy, build, test of the daemon with `--no-default-features --features llamacpp,tui,shim`, and of the fourteen other crates that build there |
+| `adapters` | `macos-15` | basert adapter tests; clippy on the llama.cpp adapter and feature builds; installs llama.cpp's release build (cached) and runs the adapter's tests against it; `scripts/build_runtime_adapters.sh` |
+
+## Docs
+
+The pages in `docs/` are the site at [superfluid.sh](https://superfluid.sh), built by the Next.js app in `docs-site/`. Its sidebar is `docs-site/src/docs-manifest.mjs`: a new page goes there too, or the build fails.
+
+```sh
+cd docs-site && npm ci && npm run dev   # http://localhost:3000
+```
+
+`npm run build` is what the `Docs` workflow runs on a pull request; it fails on a broken relative link or a page missing from the manifest. `.github/workflows/pages.yml` publishes a push to `main` as `/dev/` and a tag `v*` as its major.minor and `/latest/`.
+
+## API compliance client
+
+`scripts/api_compliance.py` checks a running server's responses against the published shape of every API it serves: required fields, value types, enum values and the order of streamed events.
+
+```sh
+superfluid serve ./Qwen3-0.6B-Q4_K_M.gguf
+python3 scripts/api_compliance.py --url http://127.0.0.1:8453
+python3 scripts/api_compliance.py --url http://127.0.0.1:8453 --mode ollama
+python3 scripts/api_compliance.py --url http://127.0.0.1:8453 --model <embedding model> --mode embed
+```
+
+| `--mode` | checks |
+|---|---|
+| `openai` | chat and text completions, streamed chunks, usage in the stream, logprobs, tool calls, structured outputs, models, files, batches, errors |
+| `anthropic` | Messages, every streamed event, tool use, `thinking`, errors |
+| `ollama` | discovery, chat and generate with their NDJSON streams, tools, JSON schema `format`, errors |
+| `server` | the llama.cpp-server routes clients probe: `/health`, `/props`, `/slots`, `/v1/tokenize`, `/metrics` |
+| `embed` | `/v1/embeddings`, `/api/embed`, `/api/embeddings`; skipped on a model that serves no embeddings |
+| `all` (default) | `openai`, `anthropic`, `ollama` and `server` |
+
+`--model` defaults to the first model `/v1/models` lists; `--key` sends an API key. It prints one line per check, then `PASS n FAIL m SKIP k`, and exits 1 on any failure. A field the published API has and Superfluid documents it does not serve (Ollama's model metadata and phase timings) is noted, not failed.
+
+The Ollama surface has its own tests (`cargo test -p superfluid --test ollama_api`) and opt-in client smoke scripts in `crates/superfluid-daemon/tests/` (`ollama_clients.py`, `ollama_clients.mjs`, `ollama_live.py`).
+
+## The mock engine
+
+`MockEngine` in `superfluid-engine` implements the whole tick contract with deterministic tokens, so the daemon, session API, HTTP surfaces, scheduler, WAL and fleet are tested with no model. It runs in-process in tests, in a daemon thread, or as `superfluid-workerd --engine mock`. `--mock-record <json>` gives it a chosen capability record, which is how refusals and startup-flag checks are tested. The executor's counterpart is `FakePrimitives`.
+e:[["children",{"s":"__PAGE__","h":160,"d":{"r":["$","$1","c",{"children":[["$","$L10",null,{"children":"$11"}],["$L12"],"$L13"]}],"p":"$@14","v":null,"s":"$6"}}]]
+b:[["children",{"s":{"n":"slug","t":"d","k":"development","s":[]},"h":96,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}]}]]}],"p":"$@c","v":"$d","s":"$6"},"c":"$Qe"}]]
+7:[["children",{"s":"(docs)","h":96,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/0.2/_next/static/chunks/3xdr_-fi_tf79.js","async":true}]],["$","$L9",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]]}]}]]}],"p":"$@a","v":null,"s":"$6"},"c":"$Qb"}]]
+0:{"t":{"t":{"s":"","h":80,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/0.2/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next"}],["$","script","script-0",{"src":"/0.2/_next/static/chunks/2ngzwwqeitkk7.js","async":true}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","template":["$","$L4",null,{}],"notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]]}]}]}]]}],"p":"$@5","v":null,"s":"$6"},"c":"$Q7"},"h":{"r":["$","$1","h",{"children":[null,["$","$L16",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]}],["$","$L18",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$19",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"Development · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","link","10",{"rel":"icon","href":"/0.2/favicon.png"}],["$","$L1a","11",{}]]}]}],null]}],null]}],"p":"$@1b","v":null,"s":"$6"}},"a":"$@1c","u":"$@1d","b":"1FondCTYramERJWmnWysB"}
+1e:I[97367,["$2"],"OutletBoundary"]
+12:["$","script","script-0",{"src":"/0.2/_next/static/chunks/2stmo1fl2_ko-.js","async":true}]
+13:["$","$L1e",null,{"children":["$","$19",null,{"name":"Next.MetadataOutlet","children":"$@1f"}]}]
+6:300
+1f:null
+1d:true
+6:C
+1c:0
+c:"$undefined"
+a:"$undefined"
+5:"$undefined"
+1b:"$undefined"
+14:"$undefined"

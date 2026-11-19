@@ -1,0 +1,181 @@
+1:"$Sreact.fragment"
+2:"/0.2/_next/static/chunks/2ngzwwqeitkk7.js"
+3:I[39756,["$2"],"default"]
+4:I[37457,["$2"],"default"]
+6:"/0.2/_next/static/chunks/3xdr_-fi_tf79.js"
+7:I[24025,["$2","$6"],"DocsShell"]
+c:I[97367,["$2"],"OutletBoundary"]
+d:"$Sreact.suspense"
+f:"ViewportBoundary"
+10:I[97367,["$2"],"$f"]
+12:"MetadataBoundary"
+13:I[97367,["$2"],"$12"]
+15:I[68027,["$2"],"default",1]
+:HL["/0.2/_next/static/chunks/2utmj7drmfv5o.css","style"]
+:HC["/",""]
+9:X
+a:[["children",{"s":"__PAGE__","h":512,"d":{"r":["$","$1","c",{"children":["$Lb",[["$","script","script-0",{"src":"/0.2/_next/static/chunks/2stmo1fl2_ko-.js","async":true,"nonce":"$undefined"}]],["$","$Lc",null,{"children":["$","$d",null,{"name":"Next.MetadataOutlet","children":"$@e"}]}]]}],"p":false,"v":null}}]]
+8:[["children",{"s":{"n":"slug","t":"d","k":"observability","s":[]},"h":512,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],"p":false,"v":"$9"},"c":"$Qa"}]]
+5:[["children",{"s":"(docs)","h":512,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/0.2/_next/static/chunks/3xdr_-fi_tf79.js","async":true,"nonce":"$undefined"}]],["$","$L7",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],"p":false,"v":null},"c":"$Q8"}]]
+0:{"P":null,"c":["","observability",""],"q":"","i":false,"t":{"t":{"s":"","h":528,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/0.2/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/0.2/_next/static/chunks/2ngzwwqeitkk7.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],"p":false,"v":null},"c":"$Q5"},"h":{"r":["$","$1","h",{"children":[null,["$","$L10",null,{"children":"$L11"}],["$","$L13",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$d",null,{"name":"Next.Metadata","children":"$L14"}]}],null]}],null]}],"p":false,"v":null}},"m":"$undefined","G":["$15",[["$","link","0",{"rel":"stylesheet","href":"/0.2/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"r":"$undefined","s":"$undefined","a":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"1FondCTYramERJWmnWysB"}
+16:"/0.2/_next/static/chunks/2stmo1fl2_ko-.js"
+17:I[73435,["$2","$6","$16"],"Markdown"]
+9:C
+18:T2046,# Observability
+
+Superfluid exposes an access log, structured logs, Prometheus metrics, OTLP traces and metrics, and two terminal monitors. All of them are content-free: ids, counts, lengths, timings and codes, never prompt or completion text.
+
+## Access log
+
+One line per generation on the chat and completion routes (and the Ollama routes that share them):
+
+```text
+<-- 200 POST /v1/chat/completions model=Qwen3-4B prompt=812 cached=640 completion=256 ttft=312ms prefill=551 tok/s decode=74.9 tok/s total=3792ms finish=stop
+```
+
+| field | meaning |
+|---|---|
+| `prompt` | prompt tokens after the chat template |
+| `cached` | prompt tokens seeded from the prefix cache or a park artifact |
+| `completion` | tokens generated |
+| `ttft` | ms from the start of generation to the first token delivered (includes queueing) |
+| `prefill` | `(prompt - cached) / ttft`; `-` for a fully warm prompt |
+| `decode` | tokens per second between the first and last token delivered |
+| `total` | wall ms of the whole request |
+| `finish` | `stop`, `length` or `tool_calls` |
+
+Both rates are measured at delivery to the client: a slow consumer lowers `decode`. Engine-side rates are on `/slots` and in the monitor. `/v1/messages` writes no access-log line.
+
+## Logs
+
+| flag | default | effect |
+|---|---|---|
+| `--log-filter <directive>` | `info` | `EnvFilter` syntax, e.g. `superfluid_daemon::scheduler=debug,info` |
+| `-v`, `--verbose` | | `--log-filter debug` |
+| `--log-dir <dir>` | stderr | JSON lines in `superfluid.<n>.jsonl`, 64 MiB per file, newest 8 kept, mode 0600 |
+| `--log-file <path>` | none | redirect stderr (daemon and worker output) to a file |
+| `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event ([Start-up events](/events)) |
+
+- With the monitor on and no `--log-dir`, logs go to `<sessions>/logs`.
+- The JSON sink has an 8192-line queue; a full queue drops lines (counted in `superfluid_telemetry_dropped_total`) rather than stall the scheduler.
+- `RUST_LOG` is not read. The filter can be changed at run time with the session API's `SetLogLevel`.
+
+## Prometheus metrics
+
+```sh
+curl -s http://127.0.0.1:8453/metrics | grep -v '^#'
+```
+
+`GET /metrics` and `GET /v1/metrics` serve Prometheus text. They need the API key when one is set, but are exempt from rate limits and key slots. On a multi-model server they describe the default model. All names are prefixed `superfluid_`.
+
+| counter | meaning |
+|---|---|
+| `ticks_total` | scheduler ticks |
+| `prefill_tokens_total`, `decode_tokens_total` | tokens prefilled and decoded |
+| `warm_prefix_tokens_total` | tokens served from the prefix cache or park artifacts |
+| `cold_admissions_total` | admissions that started cold |
+| `unservable_cold_admissions_total`, `unservable_park_refusals_total` | admissions forced cold, and parks refused, because the model's recurrent state cannot be seeded or sealed |
+| `preemptions_total` | lanes preempted and requeued |
+| `admits_deferred_total` | admissions with no room in their tick, requeued |
+| `starvation_grants_total` | ticks where a starving lane was served first |
+| `pressure_evictions_total`, `pressure_bytes_evicted_total` | watermark eviction rounds and bytes |
+| `os_pressure_events_total` | OS memory-pressure signals acted on |
+| `pins_yielded_total`, `pins_expired_total` | pinned prefixes released |
+| `worker_respawns_total` | worker restarts |
+| `spec_proposed_total`, `spec_accepted_total` | speculative draft tokens |
+| `parks_total{encoding}`, `resumes_total` | park artifacts written and restored |
+| `telemetry_dropped_total` | log lines and spans dropped |
+| `otlp_spans_exported_total`, `otlp_spans_dropped_total{reason}` | OTLP span export |
+| `fim_completions_total{result}` | FIM completions: `generated`, `cached`, `expired`, `throttled` |
+| `key_requests_total{key}`, `key_rejected_total{key,reason}` | per-key traffic (with `--key-policy`) |
+
+| gauge | meaning |
+|---|---|
+| `lanes_active` | lanes resident |
+| `pool_blocks_used`, `pool_blocks_total` | KV pool occupancy |
+| `prefill_budget_tokens`, `decode_grant_tokens` | live prefill budget and decode grant |
+| `pins_held`, `pinned_bytes` | pinned prefixes |
+| `queue_depth{class}` | queued jobs per QoS class |
+| `node_info{host}` | always 1; `host` is `SUPERFLUID_NODE_NAME` or the hostname |
+| `key_in_flight{key}` | requests holding a key's slots |
+
+With `--fim-model`, the satellite adds `fim_satellite_info{model}` (always 1), `fim_satellite_decode_tokens_total`, `fim_satellite_lanes_active`, `fim_satellite_pool_blocks_used` and `fim_satellite_pool_blocks_total`.
+
+`superfluid_ttft_seconds` is a histogram of admission to first token, with buckets from 5 ms to 40 s. It excludes the wait before admission; the access log's `ttft` includes it.
+
+## OTLP
+
+Both exporters use OTLP/HTTP JSON over plain `http://`; an `https://` URL is refused. Run a local collector and let it forward with TLS.
+
+```sh
+superfluid serve <model> --otlp-endpoint http://127.0.0.1:4318 --otlp-metrics http://127.0.0.1:4318
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--otlp-endpoint <url>` | off | push spans to `<url>/v1/traces` |
+| `--otlp-header k=v` | | extra header, repeatable |
+| `--otlp-service-name` | `superfluid` | `service.name` |
+| `--otlp-filter` | `info,superfluid_daemon::scheduler=debug` | which spans export |
+| `--otlp-queue`, `--otlp-batch-ms`, `--otlp-timeout-ms` | 8192, 1000, 5000 | queue, batch interval, request timeout |
+| `--otlp-metrics <url>` | off | push metrics to `<url>/v1/metrics` |
+| `--otlp-interval-ms` | 15000 | metrics push interval |
+
+- Spans: `generate`, `tick`, `park`, `restore`. Only numeric and boolean fields plus the model id are exported, so a span cannot carry text.
+- A slow or dead collector costs dropped spans, never a delayed tick. Failed batches are not retried.
+- The metrics push carries a subset of `/metrics` (scheduler counters, lane, pin and queue gauges, the TTFT histogram).
+- `superfluid session export --format otlp-jsonl` writes a session as an agent trace (GenAI semantic conventions) whose trace ids match the live exporter's.
+
+## Terminal monitors
+
+Both need a build with the `tui` feature (the default build has it).
+
+### `superfluid serve` monitor
+
+On by default when stdout is a terminal; `--no-tui` turns it off, `--tui` forces it. It shows the tick in flight, lane occupancy, the KV pool, decode and prefill rates, TTFT, prefix-cache reuse, speculative acceptance, queue depth per class, counters and a log pane.
+
+| key | action |
+|---|---|
+| `q`, `Esc`, `Ctrl-C` | quit (stops the server) |
+| `p` | pause sampling |
+| `Up`/`Down`, `PgUp`/`PgDn`, wheel | scroll the log; while scrolled up, new lines don't move the view |
+| `Home` or `g` / `End` or `G` | oldest line / follow |
+
+### `superfluid top`
+
+```sh
+superfluid top --api-key "$KEY" 10.0.0.11:8453 10.0.0.12:8453
+```
+
+Polls each node's `/metrics` once a second and shows one row per node: state (`up`, `401`, `down`), KV pool, decode tok/s, lanes and queue depth, plus a fleet throughput sparkline. `q` or `Esc` quits.
+
+Given a [fleet head](/distributed-serving), one address shows every node joined to it, from the head's own `/metrics`; with no address at all, `top` finds the head on the local network:
+
+```sh
+superfluid top --api-key "$KEY"            # the fleet head announced on this network
+superfluid top --api-key "$KEY" 10.0.0.10:8453   # a head, by address
+```
+
+## Health and status endpoints
+
+| endpoint | returns |
+|---|---|
+| `GET /health` | `{"status":"ok","models_loaded":N,"models_known":M}`; never authenticated or rate-limited, touches no engine |
+| `GET /props` | served model, effective generation defaults, window, chat template, KV type |
+| `GET /slots` | one aggregate entry: lanes, KV pool, the tick in flight, engine decode and prefill rates, last TTFT |
+
+## Debug environment variables
+
+These print internals to stderr, unfiltered by `--log-filter`.
+
+| variable | prints |
+|---|---|
+| `SUPERFLUID_DEBUG_TICK` | one line per tick: phase times, prefill tokens, rounds, learned costs, budget and grant |
+| `SUPERFLUID_DEBUG_PRESSURE` | pool counters before each eviction decision |
+| `SUPERFLUID_ENGINE_VERBOSE` | the baseRT engine's verbose output |
+| `SUPERFLUID_LLAMA_LOG=1` | llama.cpp's own log |
+b:["$","$L17",null,{"children":"$18"}]
+11:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+19:I[27201,["$2"],"IconMark"]
+e:null
+14:[["$","title","0",{"children":"Observability · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","link","10",{"rel":"icon","href":"/0.2/favicon.png"}],["$","$L19","11",{}]]

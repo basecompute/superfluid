@@ -1,0 +1,175 @@
+1:"$Sreact.fragment"
+2:"/0.2/_next/static/chunks/2ngzwwqeitkk7.js"
+3:I[39756,["$2"],"default"]
+4:I[37457,["$2"],"default"]
+6:"/0.2/_next/static/chunks/3xdr_-fi_tf79.js"
+7:I[24025,["$2","$6"],"DocsShell"]
+c:I[97367,["$2"],"OutletBoundary"]
+d:"$Sreact.suspense"
+f:"ViewportBoundary"
+10:I[97367,["$2"],"$f"]
+12:"MetadataBoundary"
+13:I[97367,["$2"],"$12"]
+15:I[68027,["$2"],"default",1]
+:HL["/0.2/_next/static/chunks/2utmj7drmfv5o.css","style"]
+:HC["/",""]
+9:X
+a:[["children",{"s":"__PAGE__","h":512,"d":{"r":["$","$1","c",{"children":["$Lb",[["$","script","script-0",{"src":"/0.2/_next/static/chunks/2stmo1fl2_ko-.js","async":true,"nonce":"$undefined"}]],["$","$Lc",null,{"children":["$","$d",null,{"name":"Next.MetadataOutlet","children":"$@e"}]}]]}],"p":false,"v":null}}]]
+8:[["children",{"s":{"n":"slug","t":"d","k":"configuration","s":[]},"h":512,"d":{"r":["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],"p":false,"v":"$9"},"c":"$Qa"}]]
+5:[["children",{"s":"(docs)","h":512,"d":{"r":["$","$1","c",{"children":[[["$","script","script-0",{"src":"/0.2/_next/static/chunks/3xdr_-fi_tf79.js","async":true,"nonce":"$undefined"}]],["$","$L7",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:style","children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:1:props:style","children":404}],["$","div",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:style","children":["$","h2",null,{"style":"$0:t:t:d:r:props:children:1:props:children:props:children:props:notFound:0:1:props:children:props:children:2:props:children:props:style","children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]]}],"p":false,"v":null},"c":"$Q8"}]]
+0:{"P":null,"c":["","configuration",""],"q":"","i":false,"t":{"t":{"s":"","h":528,"d":{"r":["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"/0.2/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}],["$","script","script-0",{"src":"/0.2/_next/static/chunks/2ngzwwqeitkk7.js","async":true,"nonce":"$undefined"}]],["$","html",null,{"lang":"en","children":["$","body",null,{"children":["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[[["$","title",null,{"children":"404: This page could not be found."}],["$","div",null,{"style":{"fontFamily":"system-ui,\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif,\"Apple Color Emoji\",\"Segoe UI Emoji\"","height":"100vh","textAlign":"center","display":"flex","flexDirection":"column","alignItems":"center","justifyContent":"center"},"children":["$","div",null,{"children":[["$","style",null,{"dangerouslySetInnerHTML":{"__html":"body{color:#000;background:#fff;margin:0}.next-error-h1{border-right:1px solid rgba(0,0,0,.3)}@media (prefers-color-scheme:dark){body{color:#fff;background:#000}.next-error-h1{border-right:1px solid rgba(255,255,255,.3)}}"}}],["$","h1",null,{"className":"next-error-h1","style":{"display":"inline-block","margin":"0 20px 0 0","padding":"0 23px 0 0","fontSize":24,"fontWeight":500,"verticalAlign":"top","lineHeight":"49px"},"children":404}],["$","div",null,{"style":{"display":"inline-block"},"children":["$","h2",null,{"style":{"fontSize":14,"fontWeight":400,"lineHeight":"49px","margin":0},"children":"This page could not be found."}]}]]}]}]],[]],"forbidden":"$undefined","unauthorized":"$undefined"}]}]}]]}],"p":false,"v":null},"c":"$Q5"},"h":{"r":["$","$1","h",{"children":[null,["$","$L10",null,{"children":"$L11"}],["$","$L13",null,{"children":[["$","div",null,{"hidden":true,"children":["$","$d",null,{"name":"Next.Metadata","children":"$L14"}]}],null]}],null]}],"p":false,"v":null}},"m":"$undefined","G":["$15",[["$","link","0",{"rel":"stylesheet","href":"/0.2/_next/static/chunks/2utmj7drmfv5o.css","precedence":"next","crossOrigin":"$undefined","nonce":"$undefined"}]]],"S":true,"r":"$undefined","s":"$undefined","a":"$undefined","l":"$undefined","p":"$undefined","d":"$undefined","b":"1FondCTYramERJWmnWysB"}
+16:"/0.2/_next/static/chunks/2stmo1fl2_ko-.js"
+17:I[73435,["$2","$6","$16"],"Markdown"]
+9:C
+18:T22ce,# Configuration
+
+Almost everything is set on the `serve` command line ([CLI reference](/cli)). This page covers environment variables, the home directory and the sessions directory. An environment variable set to an empty string counts as unset wherever it names a path.
+
+## Environment variables
+
+### Paths and runtimes
+
+| variable | default | meaning |
+|---|---|---|
+| `SUPERFLUID_LOG_FORMAT` | `text` | `json` makes every stderr line of `serve` and `node join` one JSON event, as `--log-format json` does; the flag wins. See [Start-up events](/events). |
+| `SUPERFLUID_HOME` | `~/.superfluid` (`%USERPROFILE%\.superfluid` on Windows) | Home directory: the installed Superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
+| `SUPERFLUID_NO_UPDATE_CHECK` | unset | Set to anything but `0` to stop `serve` from checking once a day whether a newer Superfluid is out. See [Updating Superfluid](/updating). |
+| `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |
+| `SUPERFLUID_WORKER_<ID>` | unset | Explicit worker executable for runtime `<ID>` (upper-cased, `-` and `.` as `_`, e.g. `SUPERFLUID_WORKER_LLAMACPP`). Also the installer `runtime install` uses. A runtime named this way is never auto-installed. |
+| `BASERT_LIB` | search | libbaseRT file or directory. Set by `--basert-lib`. When set, nothing else is searched. |
+| `BASERT_CLI` | search | The `basert` tool that pulls `.base` models; else the one beside libbaseRT, else `PATH`. |
+| `BASERT_MODELS_DIR` | platform cache | Where `basert` keeps the models it pulls, and where `--speculate auto` looks for drafters (default `~/Library/Caches/baseRT/models` on macOS, `$XDG_CACHE_HOME/baseRT/models` or `~/.cache/baseRT/models` elsewhere). |
+| `SUPERFLUID_LLAMA_LIB` | search | Your own llama.cpp build: the `libllama` file or its directory. When set, nothing else is searched. `--llamacpp-lib` on `serve` is the same. |
+| `SUPERFLUID_MLX_VENV` | the install's `env/` | Python environment with `mlx` and `mlx-lm`, when the worker is not running from an install. `--mlx-venv` on `serve` is the same. |
+
+### Serving
+
+| variable | default | meaning |
+|---|---|---|
+| `HF_TOKEN` | unset | Hugging Face token for gated or private models, read by the pull tools. |
+| `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE` | unset | `1`, `on`, `yes` or `true` keeps a pull off the Hub: it fetches nothing and looks up no size for its progress bar. |
+| `SUPERFLUID_HTTP` | `127.0.0.1:8453` | The server `launch` points the agent at, when `--http` is not given. |
+| `SUPERFLUID_API_KEY` | unset | The key `launch` gives the agent, when `--api-key` is not given. |
+| `SUPERFLUID_MLX_TRUST_MODEL_CODE` | unset | `1` (exactly) loads an MLX directory whose `config.json` names its own Python code. |
+| `SUPERFLUID_MLX_SKIP_FIT_CHECK` | unset | `1` loads MLX weights even when they do not fit free memory. |
+| `SUPERFLUID_NODE_NAME` | hostname | The `host` label on Prometheus metrics. |
+| `SUPERFLUID_LLAMA_LOG` | unset | `1` keeps llama.cpp's own stderr log. |
+| `SUPERFLUID_FULLFSYNC` | unset | Flush the session log with the platform's full-durability sync instead of `fsync`. |
+
+> [!WARNING]
+> `SUPERFLUID_MLX_TRUST_MODEL_CODE=1` runs the model directory's Python as the daemon's user. Leave it unset for models you did not write.
+
+### Speculation fallbacks
+
+Each `--spec-*` flag, when absent, falls back to a variable, then to a constant.
+
+| variable | flag | constant |
+|---|---|---|
+| `SUPERFLUID_MTP_DRAFTS` | `--spec-draft-tokens` (mtp-head) | the head's own depth |
+| `SUPERFLUID_EAGLE_DRAFTS` | `--spec-draft-tokens` (eagle3) | 2 |
+| `SUPERFLUID_DFLASH_DRAFTS` | `--spec-draft-tokens` (dflash, dspark) | the drafter's block width |
+| `SUPERFLUID_SPEC_ADAPTIVE` | `--spec-adaptive` | 1 |
+| `SUPERFLUID_SPEC_MIN_YIELD` | `--spec-min-yield` | 0.75 |
+| `SUPERFLUID_SPEC_LANE_YIELD_ROUNDS` | `--spec-yield-rounds` | 24 |
+| `SUPERFLUID_SPEC_GATE` | `--spec-throughput-gate` | 1 |
+| `SUPERFLUID_SPEC_GATE_PROBE` | `--spec-gate-probe-tokens` | 16 |
+| `SUPERFLUID_SPEC_MIN_SPEEDUP` | `--spec-min-speedup` | 1.08 |
+| `SUPERFLUID_SPEC_GATE_REPROBE` | `--spec-gate-reprobe` | 32 |
+| `SUPERFLUID_SPEC_GATE_REPROBE_MAX` | `--spec-gate-reprobe-max` | 1024 |
+| `SUPERFLUID_DSPARK_CONFIDENCE` | `--dspark-confidence` | engine default |
+| `BASERT_SPEC_BITEXACT` | `--spec-bitexact` | 0 |
+
+### Debugging
+
+| variable | effect |
+|---|---|
+| `SUPERFLUID_DEBUG_TICK` | one `[tick]` line per scheduler tick on stderr |
+| `SUPERFLUID_DEBUG_PRESSURE` | one `[pressure]` line per memory report |
+| `SUPERFLUID_ENGINE_VERBOSE` | the baseRT engine's verbose output at load |
+
+`serve` does not read `RUST_LOG`; use `--log-filter`. `superfluid node join` (default `warn`) and `superfluid-noded` (default `info`) do read it.
+
+## The home directory
+
+`$SUPERFLUID_HOME` (default `~/.superfluid`):
+
+```text
+~/.superfluid/
+  sessions/                 default --sessions
+  superfluid.sock           default --socket
+  versions/<v>/             the installed Superfluid releases (self update, the install script)
+  update-check.json         the daily update check's last result
+  fleet/
+    token                   the fleet token (`superfluid fleet token`)
+    nodes/<identity>/       a `node join` node's session store
+  launch/                   the server `launch` started, and its model
+  logs/serve.log            that server's log
+  runtimes/
+    <id>/                   llamacpp, mlx, basert
+      <install>/            one per version and backend: b11284-metal, 0.3.0-metal
+        bin/                the adapter's worker
+        lib/                the runtime's libraries and tools
+        python/, env/       (mlx) the private CPython and its environment
+        runtime.json        manifest: version, backend, sources with SHA-256
+      current -> <install>  the default install
+      pinned                (optional) the install `runtime use` pinned
+  pulls/
+    <id>.lock               one pull of a model at a time
+    <id>.json               the record of a pull that succeeded: id, runtime, path, size; `superfluid models` reads it
+  cache/
+    hub-catalog.json        the hub catalog, refreshed daily by `serve`
+```
+
+On Windows `runtimes/<id>/current`, and the `current` beside the releases in `versions/`, are files that hold a name, where they are links elsewhere ([what differs on Windows](/installation#windows)).
+
+Models pulled by id are not stored here; each runtime keeps them where its own tool does (llama.cpp and MLX use the Hugging Face cache; `basert` uses `BASERT_MODELS_DIR`).
+
+## The sessions directory
+
+`--sessions` (default `~/.superfluid/sessions`) is created if absent and locked while the server runs; a second server on the same directory is refused.
+
+```text
+<sessions>/
+  wal.log             the session log: every committed token and event
+  wal.log.store-id    the store's identity
+  wal.log.prev        the previous log, under --sessions-cache
+  serve.lock          held by the running server
+  park/               sealed KV artifacts, under --park
+  media/              content-addressed media pool
+  files/              /v1/files uploads
+  batches/            /v1/batches state
+  web-token           the --web bearer token (mode 0600)
+  logs/               JSON logs when the TUI is on and no --log-dir
+  fim/media/          the --fim-model media pool
+  models/<id>/        a second model's own wal.log, park/ and media/
+```
+
+> [!WARNING]
+> `wal.log` holds every prompt and completion in plain text. Keep the directory private to the daemon's user.
+
+A log record that was written completely but fails its checksum stops the start. Move the file aside, or run with `--sessions-cache` when sessions need not survive a restart.
+
+## Logging
+
+| configuration | where lines go |
+|---|---|
+| default | compact lines on stderr, one access-log line per HTTP request |
+| `--log-dir <dir>` | JSON lines in `superfluid.<n>.jsonl`, 64 MiB per file, newest 8 kept, mode 0600 |
+| TUI on, no `--log-dir` | the same JSON files under `<sessions>/logs`, plus the monitor's log pane |
+
+`--log-file <path>` redirects stderr (including the runtime's output) to a file. Logs never carry prompt or completion text. See [Observability](/observability).
+
+## Precedence
+
+| setting | order |
+|---|---|
+| sampling | request, then `--temperature`/`--top-p`/..., then the model's published defaults, then built-in constants |
+| runtime | `/v1/models/load`'s `runtime`, then `--runtime <model>=<id>`, then `--runtime <id>`, then inferred |
+| context window | `--max-context N`, else sized for the device where the runtime can, else 8192 |
+| HTTP address | `--http`, then `--host`/`--port`, then `127.0.0.1:8453` |
+| authentication | `--key-policy`, then `--api-key`, then `--api-key-file`, then `SUPERFLUID_API_KEY`, else off with a warning |
+b:["$","$L17",null,{"children":"$18"}]
+11:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}],["$","meta","2",{"name":"theme-color","content":"#0b0b0d"}]]
+19:I[27201,["$2"],"IconMark"]
+e:null
+14:[["$","title","0",{"children":"Configuration · Superfluid Docs"}],["$","meta","1",{"name":"description","content":"Documentation for Superfluid, an open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","2",{"name":"author","content":"Base Compute"}],["$","meta","3",{"property":"og:title","content":"Superfluid Docs"}],["$","meta","4",{"property":"og:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","meta","5",{"property":"og:type","content":"website"}],["$","meta","6",{"name":"twitter:card","content":"summary"}],["$","meta","7",{"name":"twitter:site","content":"@basecmpt"}],["$","meta","8",{"name":"twitter:title","content":"Superfluid Docs"}],["$","meta","9",{"name":"twitter:description","content":"An open-source server that runs LLMs on your own hardware, from one machine or several that act as one server."}],["$","link","10",{"rel":"icon","href":"/0.2/favicon.png"}],["$","$L19","11",{}]]
