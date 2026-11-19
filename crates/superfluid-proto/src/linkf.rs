@@ -595,6 +595,61 @@ pub struct NodeStatusMsg {
     pub capacity: CapacitySummary,
     pub loadable_models: Vec<String>,
     pub mem: MemCountersMsg,
+    /// The node's scheduler counters; `None` from a node released before them. Last, so a head
+    /// from before it reads the status and leaves it; [`NodeStatusMsg::decode`] reads a status
+    /// from before it.
+    pub stats: Option<NodeStatsMsg>,
+}
+
+/// What a node's scheduler has counted since its counters last started from 0, as its own
+/// `/metrics` counts it, so a head that only routes can report what its nodes measure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeStatsMsg {
+    /// Which start of the node's counters these are: another value means they started again
+    /// from 0. A node with several connections reports on each, so a status read late can be
+    /// older than one read before it; within one run a lower count is such a status, not a
+    /// restart.
+    pub run: u64,
+    pub prefill_tokens: u64,
+    pub warm_prefix_tokens: u64,
+    pub cold_admissions: u64,
+    pub unservable_cold_admissions: u64,
+    pub unservable_park_refusals: u64,
+    pub preemptions: u64,
+    pub admits_deferred: u64,
+    pub starvation_grants: u64,
+    pub os_pressure_events: u64,
+    pub pressure_evictions: u64,
+    pub pressure_bytes_evicted: u64,
+    pub pins_yielded: u64,
+    pub pins_expired: u64,
+    pub worker_respawns: u64,
+    pub spec_proposed: u64,
+    pub spec_accepted: u64,
+    pub parks_lossless: u64,
+    pub parks_lossy: u64,
+    pub resumes: u64,
+}
+
+/// A status from a node released before [`NodeStatusMsg::stats`].
+#[derive(Deserialize)]
+struct NodeStatusBefore {
+    capacity: CapacitySummary,
+    loadable_models: Vec<String>,
+    mem: MemCountersMsg,
+}
+
+impl NodeStatusMsg {
+    /// A status from a node of any release; one from before `stats` has none.
+    pub fn decode(bytes: &[u8]) -> Result<NodeStatusMsg, postcard::Error> {
+        match postcard::from_bytes::<NodeStatusMsg>(bytes) {
+            Ok(status) => Ok(status),
+            Err(e) => match postcard::from_bytes::<NodeStatusBefore>(bytes) {
+                Ok(s) => Ok(NodeStatusMsg { capacity: s.capacity, loadable_models: s.loadable_models, mem: s.mem, stats: None }),
+                Err(_) => Err(e),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,6 +683,48 @@ mod tests {
         let mut new = FrameDecoder::new(is_known_type);
         new.feed(&said);
         assert_eq!(new.decode_next().unwrap().map(|f| f.msg_type), Some(msg_type::REMOVED));
+    }
+
+    fn status(stats: Option<NodeStatsMsg>) -> NodeStatusMsg {
+        NodeStatusMsg {
+            capacity: CapacitySummary { max_lanes: 4, kv_blocks_used: 3, kv_blocks_total: 64, ..Default::default() },
+            loadable_models: vec!["org/model".into()],
+            mem: MemCountersMsg {
+                allocated_bytes: 0,
+                host_retained_bytes: 0,
+                pool_blocks_total: 64,
+                pool_blocks_used: 3,
+                pool_bytes_evictable: 0,
+                tentative_bytes: 0,
+            },
+            stats,
+        }
+    }
+
+    /// A status as a node released before [`NodeStatusMsg::stats`] sends it, and as a head
+    /// released before it reads one.
+    #[derive(Serialize, Deserialize)]
+    struct StatusFrom {
+        capacity: CapacitySummary,
+        loadable_models: Vec<String>,
+        mem: MemCountersMsg,
+    }
+
+    #[test]
+    fn a_head_from_before_node_stats_reads_a_status_that_carries_them() {
+        let stats = NodeStatsMsg { run: 9, spec_proposed: 40, spec_accepted: 31, warm_prefix_tokens: 512, ..Default::default() };
+        let new = postcard::to_stdvec(&status(Some(stats))).unwrap();
+        let old: StatusFrom = postcard::from_bytes(&new).unwrap();
+        assert_eq!((old.capacity.kv_blocks_used, old.loadable_models.as_slice()), (3, &["org/model".to_string()][..]));
+        assert_eq!(NodeStatusMsg::decode(&new).unwrap(), status(Some(stats)));
+    }
+
+    #[test]
+    fn a_status_from_before_node_stats_reads_as_one_with_none() {
+        let s = status(None);
+        let old = postcard::to_stdvec(&StatusFrom { capacity: s.capacity, loadable_models: s.loadable_models.clone(), mem: s.mem }).unwrap();
+        assert_eq!(NodeStatusMsg::decode(&old).unwrap(), s);
+        assert!(NodeStatusMsg::decode(&old[..old.len() - 2]).is_err(), "a cut status is still refused");
     }
 
     #[test]

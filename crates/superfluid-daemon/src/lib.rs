@@ -2005,7 +2005,14 @@ impl Daemon {
     /// As [`Self::metrics_text`]; over a fleet, the head's info names every model in `served`
     /// after this daemon's own, where a server with several models knows them all.
     pub fn metrics_text_serving(&self, served: &[String]) -> String {
-        let mut out = metrics::render_prometheus(&self.stats);
+        let mut out = match &self.fleet {
+            // A head's scheduler routes; its nodes' count what it would, and it adds theirs.
+            Some((fleet, _)) => {
+                let counts = fleet.node_counts();
+                metrics::render_prometheus_adding(&self.stats, &|key| fleet_metrics::head_count(&counts, key))
+            }
+            None => metrics::render_prometheus(&self.stats),
+        };
         if let Some((fleet, model)) = &self.fleet {
             let models: Vec<String> =
                 std::iter::once(model.clone()).chain(served.iter().filter(|m| *m != model).cloned()).collect();

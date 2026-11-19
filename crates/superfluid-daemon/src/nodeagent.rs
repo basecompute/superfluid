@@ -102,6 +102,9 @@ pub struct NodeAgent {
     /// What the node tells the head of itself ([`superfluid_proto::handshake::FOLLOWS_HEAD`]).
     feature_flags: u64,
     start: Instant,
+    /// Which start of the daemon's counters this is, told to the head with them
+    /// ([`linkf::NodeStatsMsg::run`]); every connection of this node shares it.
+    run: u64,
     handshake_timeout: Duration,
     idle_timeout: Duration,
     auth: Vec<u8>,
@@ -126,6 +129,16 @@ const MAX_BLOB: u64 = 1 << 30;
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 const STATUS_INTERVAL_MS: u64 = 2_000;
+
+/// A value no earlier start of a node's counters is likely to have had: a node agent is made
+/// with its daemon, so a new one means counters from 0.
+fn new_run() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    h.write_u32(std::process::id());
+    h.finish()
+}
 
 /// A renewal the head has not answered is asked for again after this long.
 const RENEW_RETRY: Duration = Duration::from_secs(1);
@@ -169,6 +182,7 @@ impl NodeAgent {
             identity: identity.into(),
             feature_flags: 0,
             start: Instant::now(),
+            run: new_run(),
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             auth: Vec::new(),
@@ -188,6 +202,7 @@ impl NodeAgent {
             identity: self.identity.clone(),
             feature_flags: self.feature_flags,
             start: self.start,
+            run: self.run,
             handshake_timeout: self.handshake_timeout,
             idle_timeout: self.idle_timeout,
             auth: self.auth.clone(),
@@ -380,9 +395,41 @@ impl NodeAgent {
             },
             capacity,
             loadable_models: self.served().iter().map(|m| m.name.clone()).collect(),
+            stats: Some(self.stats()),
         };
         let _ = endpoint.send(msg_type::NODE_STATUS, &msg);
         self.last_status_ms = self.start.elapsed().as_millis() as u64;
+    }
+
+    /// The node's scheduler counters, for the head's `/metrics`: every model's summed, as its
+    /// load is, since the head lists a node's series once, under all the models it serves.
+    fn stats(&self) -> linkf::NodeStatsMsg {
+        let models: Vec<Arc<crate::scheduler::SchedStats>> = self.models.iter().map(|m| m.daemon.sched_stats()).collect();
+        let sum = |of: fn(&crate::scheduler::SchedStats) -> &AtomicU64| -> u64 {
+            models.iter().map(|s| of(s).load(Ordering::Relaxed)).fold(0, u64::saturating_add)
+        };
+        linkf::NodeStatsMsg {
+            run: self.run,
+            prefill_tokens: sum(|s| &s.prefill_tokens),
+            warm_prefix_tokens: sum(|s| &s.warm_prefix_tokens),
+            cold_admissions: sum(|s| &s.cold_admissions),
+            unservable_cold_admissions: sum(|s| &s.unservable_cold_admissions),
+            unservable_park_refusals: sum(|s| &s.unservable_park_refusals),
+            preemptions: sum(|s| &s.preemptions),
+            admits_deferred: sum(|s| &s.admits_deferred),
+            starvation_grants: sum(|s| &s.starvation_grants),
+            os_pressure_events: sum(|s| &s.os_pressure_events),
+            pressure_evictions: sum(|s| &s.pressure_evictions),
+            pressure_bytes_evicted: sum(|s| &s.pressure_bytes_evicted),
+            pins_yielded: sum(|s| &s.pins_yielded),
+            pins_expired: sum(|s| &s.pins_expired),
+            worker_respawns: sum(|s| &s.worker_respawns),
+            spec_proposed: sum(|s| &s.spec_proposed),
+            spec_accepted: sum(|s| &s.spec_accepted),
+            parks_lossless: sum(|s| &s.parks_lossless),
+            parks_lossy: sum(|s| &s.parks_lossy),
+            resumes: sum(|s| &s.resumes),
+        }
     }
 
     fn ackf(&mut self) -> HelloAckF {

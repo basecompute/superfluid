@@ -162,6 +162,36 @@ fn a_node_serving_two_models_runs_each_chat_on_the_engine_of_the_model_it_names(
     assert_eq!(decoded(&b), before, "model-b's engine did not");
 }
 
+/// A node is listed once on its head, under all the models it serves, so the scheduler counters
+/// it reports are every model's summed, as its load is: not the first model's alone.
+#[test]
+fn a_node_serving_two_models_reports_the_counters_of_both_as_its_own() {
+    let (nodes, http, fleet) = head_of_fleet("model-a");
+    let (a, b) = (node_daemon("a"), node_daemon("b"));
+    join_as(&nodes, NodeAgent::new(Arc::clone(&a), "box-ab", "model-a").with_model(Arc::clone(&b), "model-b"));
+    wait_for("the head takes on the second model the node brings", || models(&http).contains(&"model-b".to_string()));
+    for model in ["model-a", "model-b"] {
+        let (status, body) = chat(&http, model);
+        assert_eq!(status, 200, "{body}");
+    }
+    let prefilled = |d: &Daemon| d.sched_stats().prefill_tokens.load(Ordering::Relaxed);
+    let (of_a, of_b) = (prefilled(&a), prefilled(&b));
+    assert!(of_a > 0 && of_b > 0, "each model's engine prefilled its chat");
+
+    // The value of the series that starts with `series`, 0 where the head has none.
+    let metric = |series: &str| -> u64 {
+        let mut resp = agent().get(&format!("http://{http}/metrics")).call().unwrap();
+        let text = resp.body_mut().read_to_string().unwrap();
+        text.lines().find(|l| l.starts_with(series)).and_then(|l| l.rsplit(' ').next()?.parse().ok()).unwrap_or(0)
+    };
+    // A status reaches the head when a call or its keepalive reads the connection it came on.
+    wait_for("both models' counters reached the head", || {
+        fleet.tend();
+        metric("superfluid_fleet_node_prefill_tokens_total{node=\"box-ab\"") == of_a + of_b
+    });
+    assert_eq!(metric("superfluid_prefill_tokens_total "), of_a + of_b, "the head's own series sums them too");
+}
+
 #[test]
 fn a_node_serving_two_models_holds_each_to_its_own_tokenizer_and_window() {
     let (nodes, http, fleet) = head_of_fleet("model-a");

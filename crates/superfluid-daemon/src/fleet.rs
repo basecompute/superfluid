@@ -220,6 +220,7 @@ pub struct FleetHead {
     addr: String,
     auth: Vec<u8>,
     on_status: Option<StatusHook>,
+    on_stats: Option<StatsHook>,
     liveness: Liveness,
     /// The blobs this connection has sent, which the node keeps.
     blobs_sent: std::collections::HashSet<String>,
@@ -237,6 +238,10 @@ pub struct FleetHead {
 
 /// Told each capacity a node reports, as the call that reads it, a generation included, reads it.
 pub type StatusHook = std::sync::Arc<dyn Fn(&superfluid_proto::handshake::CapacitySummary) + Send + Sync>;
+
+/// Told the scheduler counters each status carries, as [`StatusHook`] is told its capacity; a
+/// node released before them reports none.
+pub type StatsHook = std::sync::Arc<dyn Fn(&linkf::NodeStatsMsg) + Send + Sync>;
 
 /// Epochs and command ids are numbered across every connection this head makes: a node keeps
 /// a session's across connections, and refuses an epoch or command it has already seen.
@@ -394,6 +399,7 @@ impl FleetHead {
             addr,
             auth,
             on_status: None,
+            on_stats: None,
             liveness: Liveness::DEFAULT,
             blobs_sent: std::collections::HashSet::new(),
             tokenizer: 0,
@@ -525,6 +531,12 @@ impl FleetHead {
         self.on_status = Some(hook);
     }
 
+    /// Tells `hook` the scheduler counters of every status the node sends from now on, as
+    /// [`Self::on_status`] does its capacity.
+    pub fn on_stats(&mut self, hook: StatsHook) {
+        self.on_stats = Some(hook);
+    }
+
     fn reconnect_self(&mut self) -> Result<(), DaemonError> {
         let (addr, auth) = (self.addr.clone(), self.auth.clone());
         self.reconnect(&addr, auth)?;
@@ -589,10 +601,13 @@ impl FleetHead {
     fn absorb(&mut self, frame: superfluid_proto::Frame) -> Result<Option<superfluid_proto::Frame>, DaemonError> {
         match frame.msg_type {
             msg_type::NODE_STATUS => {
-                if let Ok(m) = postcard::from_bytes::<linkf::NodeStatusMsg>(&frame.payload) {
+                if let Ok(m) = linkf::NodeStatusMsg::decode(&frame.payload) {
                     self.node.capacity = m.capacity;
                     if let Some(hook) = &self.on_status {
                         hook(&self.node.capacity);
+                    }
+                    if let (Some(hook), Some(stats)) = (&self.on_stats, &m.stats) {
+                        hook(stats);
                     }
                     if !m.loadable_models.is_empty() {
                         self.node.loadable_models = m.loadable_models;
