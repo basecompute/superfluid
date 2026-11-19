@@ -205,7 +205,7 @@ Each adapter installs on its own only the upstream versions it was built and tes
 - The prefix cache keeps at most one lane's context in a shared pool, where every step attends over the cells up to the highest one in use. The rest of the cache, and any entry that gives up its sequence to a lane, is held in host memory as llama.cpp's own state export and imported when a request reuses it: as many tokens as the pool has cells, within 8 GiB and 60% of the memory the model and its context leave free. On a host without an accelerator, or with the model on the CPU, the 8 GiB alone bounds it.
 - On Metal, a prompt batch on a shared pool is filled to a multiple of 8 tokens: the attention kernel computes a last group short of 8 queries against every cell in use.
 - No lossy park, no media, no batch invariance. Greedy rounds take llama.cpp's argmax; sampled rounds are sampled on the host.
-- llama.cpp's own log is silenced unless `SUPERFLUID_LLAMA_LOG=1`.
+- llama.cpp's own log is silenced unless `SUPERFLUID_LLAMA_LOG=1`. Its error lines are read either way: a step during which llama.cpp logs one fails and returns no token, with what it said on the worker's stderr. On Metal a decode returns before the device has run it, and an error line is the only word of a device that then refuses the work.
 
 ### mlx
 
