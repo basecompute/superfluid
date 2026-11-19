@@ -13,7 +13,7 @@ The wheel is written here, not by a build backend: its contents are fixed
 files, its binaries must keep their mode (a zip entry's external attributes,
 which pip and uv apply), and building it needs nothing from the network. A
 Windows wheel is built the same way, on any machine: pip makes the commands
-there (Scripts\superfluid.exe and its siblings) from the same entry points.
+there (superfluid.exe and its siblings, in Scripts) from the same entry points.
 `superfluid` is taken on PyPI, so the distribution is superfluid-cli.
 """
 

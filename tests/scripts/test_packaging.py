@@ -25,6 +25,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -271,6 +272,12 @@ class ContractTest(unittest.TestCase):
             source = (ROOT / "packaging" / name).read_text(encoding="utf-8")
             self.assertNotIn(".read_text()", source, f"{name} reads text in the machine's own encoding")
             self.assertNotIn(".write_text(", source, f"{name} writes text with the machine's own line ends")
+        # The runner's Python is newer than a developer's may be, and warns of what an older one lets by (a
+        # backslash in a docstring that starts no escape).
+        for path in sorted(PACKAGING.rglob("*.py")):
+            with self.subTest(path=path.name), warnings.catch_warnings():
+                warnings.simplefilter("error")
+                compile(path.read_text(encoding="utf-8"), str(path), "exec")
         with tempfile.TemporaryDirectory() as tmp:
             release.put_text(Path(tmp) / "f", "a \u00b7 b\n")
             self.assertEqual((Path(tmp) / "f").read_bytes(), b"a \xc2\xb7 b\n")
