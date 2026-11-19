@@ -619,22 +619,32 @@ pub fn serve_blocking_config(
         let drain_deadline_sig = Arc::clone(&drain_deadline);
         let watchdog_registry = Arc::clone(&shutdown_registry);
         let shutdown = async move {
-            // Windows has no signal a server can be asked to drain by: it runs until it is ended.
-            #[cfg(not(unix))]
-            std::future::pending::<()>().await;
             #[cfg(unix)]
-            {
+            let asked = {
                 let mut sig = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) {
                     Ok(s) => s,
                     Err(_) => return std::future::pending::<()>().await,
                 };
                 sig.recv().await;
-            }
+                "SIGUSR1"
+            };
+            // Windows has no signal to send a process: Ctrl+Break in the server's console is
+            // the one event a program may take without it also meaning "stop now", as Ctrl+C
+            // does. A server with no console (one `launch` started) runs until it is ended.
+            #[cfg(windows)]
+            let asked = {
+                let mut sig = match tokio::signal::windows::ctrl_break() {
+                    Ok(s) => s,
+                    Err(_) => return std::future::pending::<()>().await,
+                };
+                sig.recv().await;
+                "Ctrl+Break"
+            };
             let _ = drain_deadline_sig
                 .set(std::time::Instant::now() + std::time::Duration::from_secs(drain));
             draining_sig.store(true, std::sync::atomic::Ordering::SeqCst);
             eprintln!(
-                "superfluid: SIGUSR1 — no longer accepting connections, draining for up to {drain}s"
+                "superfluid: {asked} — no longer accepting connections, draining for up to {drain}s"
             );
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(drain)).await;
