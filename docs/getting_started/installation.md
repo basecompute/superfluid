@@ -53,7 +53,11 @@ cargo install superfluid
 cargo install superfluid-adapter-basert
 ```
 
-The first builds `superfluid`, `superfluid-workerd` and `superfluid-noded` from [crates.io](https://crates.io/crates/superfluid) with the baseRT adapter and the terminal monitor; a C compiler is required. The second puts `superfluid-worker-basert` beside them, which `superfluid runtime install basert` installs the baseRT engine with. Without it, `.base` bundles are served only from an engine that `--basert-lib` or `BASERT_LIB` names. The llama.cpp and MLX workers are installed on first use, as with a release.
+The first builds `superfluid`, `superfluid-workerd` and `superfluid-noded` from [crates.io](https://crates.io/crates/superfluid) with the baseRT adapter and the terminal monitor; a C compiler is required. The second puts `superfluid-worker-basert` beside them, which `superfluid runtime install basert` installs the baseRT engine with. Without it, `.base` bundles are served only from an engine that `--basert-lib` or `BASERT_LIB` names.
+
+`cargo install` places programs and nothing else, so it brings neither the llama.cpp nor the MLX runtime within reach. `superfluid runtime install <id>` looks for the adapter's worker beside `superfluid` and in a release's `libexec/superfluid`, and says so when there is none. `cargo install superfluid-adapter-llamacpp` puts llama.cpp's worker there, and the install then stops for the tokenizer library (`libsuperfluid_tokenizer_llamacpp`), which is a library and so nothing `cargo install` builds. For those two runtimes take a release, or [build from source](#build-from-source).
+
+On Windows the first line builds with the MSVC toolchain, and what it builds serves no model: its one runtime is baseRT, which has no engine there. `cargo install superfluid --no-default-features --features llamacpp,tui` builds the daemon a Windows release carries, and meets the same two wants as elsewhere, the second of which (`superfluid_tokenizer_llamacpp.dll`) no `cargo install` answers. Programs installed this way also load the Visual C++ runtime (`vcruntime140.dll`) from the system, where a release links it in: the setting is in the repository's cargo configuration, and cargo reads none from a crate it installs. Take the release ([Windows](#windows)), or build from source there.
 
 ## Build from source
 
@@ -147,6 +151,7 @@ What differs from macOS and Linux:
 | `superfluid stop` | ends the server outright, as `SIGTERM` does elsewhere |
 | `$SUPERFLUID_HOME/runtimes/<id>/current` | a file that holds the default install's name, not a link: an ordinary user may make neither a symbolic link nor a junction every process follows |
 | a server other machines connect to (`--http` off loopback, a fleet head, `superfluid-noded`) | reached only where Windows Defender Firewall allows the program inbound connections, which an administrator grants once; `superfluid node join` dials out and needs nothing ([Distributed serving](../serving/distributed_serving.md#join-a-node)) |
+| `cargo install` | builds, and cannot install llama.cpp ([above](#cargo-install)): take the release or build from source |
 | a copy from npm or PyPI | `superfluid self update` names the package manager's command and runs none: Windows lets nothing replace a program that is running, so run it yourself with no Superfluid running. The command is for the copy it names (npm's carries `--prefix`), and a path with a space is quoted for PowerShell. Homebrew has no Windows |
 
 ## Install a runtime
