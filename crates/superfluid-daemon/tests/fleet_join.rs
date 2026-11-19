@@ -249,7 +249,13 @@ fn a_head_reports_what_its_nodes_schedulers_count_per_node_and_summed() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let head_addr = listener.local_addr().unwrap().to_string();
     let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
-    let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
+    // The head reads its idle connections on its keepalive, as `serve` starts it: a status
+    // reaches the head when a call or the keepalive reads the connection it came on, and
+    // reading `/metrics` reads none.
+    let manager = Arc::new(
+        FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1).with_retry_every(Duration::from_millis(200)),
+    );
+    manager.spawn_keepalive();
     let m = Arc::clone(&manager);
     let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
     std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), models));
