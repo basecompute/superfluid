@@ -1201,6 +1201,7 @@ impl LlamaRuntime {
         }
         let mut b = batch;
         b.n_tokens = (entries.len() + fill) as i32;
+        let logged = sys::errors_logged();
         // SAFETY: ctx is live; the batch is fully initialized.
         let rc = unsafe { sys::llama_decode(self.ctx, b) };
         if rc == 0 && self.sync_steps && !entries.iter().any(|e| e.3) {
@@ -1208,11 +1209,11 @@ impl LlamaRuntime {
             // SAFETY: ctx is live.
             unsafe { sys::llama_synchronize(self.ctx) };
         }
-        let result = if rc == 0 {
+        let mut rows = Vec::new();
+        let mut picks = Vec::new();
+        let mut lost = false;
+        if rc == 0 {
             let n = self.desc.vocab_size as usize;
-            let mut rows = Vec::new();
-            let mut picks = Vec::new();
-            let mut lost = false;
             for (i, e) in entries.iter().enumerate() {
                 if e.3 {
                     // SAFETY: the row for output i is n_vocab floats, valid
@@ -1232,22 +1233,41 @@ impl LlamaRuntime {
                     }
                 }
             }
-            if lost {
-                Err(PrimError::Fatal)
-            } else {
-                Ok((rows, picks))
-            }
-        } else if rc == 1 {
-            Err(PrimError::Capacity)
-        } else {
-            Err(PrimError::Fatal)
-        };
+        }
+        let result = step_outcome(rc, lost, sys::errors_logged() != logged).map(|()| (rows, picks));
+        if matches!(result, Err(PrimError::Fatal)) {
+            let said = match sys::errors_since(logged) {
+                Some(said) if !said.is_empty() => said,
+                // Shown as they were logged, with `SUPERFLUID_LLAMA_LOG=1`.
+                Some(_) => "llama.cpp's error lines are above".to_string(),
+                None => format!("llama_decode returned {rc}"),
+            };
+            eprintln!("superfluid-workerd: llamacpp failed a step of {} tokens: {said}", entries.len());
+        }
         // SAFETY: freed exactly once.
         unsafe { sys::llama_batch_free(batch) };
         if let Some(scratch) = scratch {
             self.clear(scratch);
         }
         result
+    }
+}
+
+/// What a step came to: `rc` is what `llama_decode` returned, `lost` a row
+/// llama.cpp did not hand back, and `logged_an_error` whether llama.cpp
+/// logged an error line between the decode and the end of the wait for it. A
+/// backend that queues its work has only committed it when the decode returns
+/// 0: the device answers in the wait, which is the read of the step's rows,
+/// and llama.cpp reports a refusal there as error lines and nothing else. The
+/// rows of such a step are whatever the buffer held, so the step is fatal
+/// like the decode after it, which is the first that llama.cpp fails.
+fn step_outcome(rc: i32, lost: bool, logged_an_error: bool) -> Result<(), PrimError> {
+    match rc {
+        0 if lost || logged_an_error => Err(PrimError::Fatal),
+        0 => Ok(()),
+        // No slot for the batch, which llama.cpp also says in an error line.
+        1 => Err(PrimError::Capacity),
+        _ => Err(PrimError::Fatal),
     }
 }
 
@@ -1721,6 +1741,24 @@ mod offload_device_tests {
         assert_eq!(offload_device(&[gpu, cpu]), Some(0));
         assert_eq!(offload_device(&[cpu]), None);
         assert_eq!(offload_device(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::{step_outcome, PrimError};
+
+    #[test]
+    fn a_step_llama_cpp_logged_an_error_in_is_fatal_whatever_its_decode_returned() {
+        assert_eq!(step_outcome(0, false, false), Ok(()));
+        assert_eq!(step_outcome(0, false, true), Err(PrimError::Fatal), "Metal refused work the decode had only queued");
+        assert_eq!(step_outcome(0, true, false), Err(PrimError::Fatal));
+        assert_eq!(step_outcome(1, false, true), Err(PrimError::Capacity), "no slot for the batch is said in an error line too");
+        assert_eq!(step_outcome(1, false, false), Err(PrimError::Capacity));
+        for rc in [-1, -2, -3, 2] {
+            assert_eq!(step_outcome(rc, false, true), Err(PrimError::Fatal), "{rc}");
+            assert_eq!(step_outcome(rc, false, false), Err(PrimError::Fatal), "{rc}");
+        }
     }
 }
 

@@ -337,3 +337,65 @@ fn the_pool_budget_counts_the_weights() {
     );
     assert_eq!(rt.describe().cells_total, 8 * 512, "a shape this small is granted whole");
 }
+
+/// On Metal a decode returns before the device has run it, so a device that
+/// refuses the work says so only when the step's rows are read, as error
+/// lines in llama.cpp's log, and what the read hands back then is whatever
+/// the buffer held. The pool here is the one the adapter made when it priced
+/// a shared pool by its KV alone: KV to 60% of what is free and, with 32
+/// sequence ids, llama.cpp's reservation beside it, for a context larger than
+/// the device. Which step the device refuses varies from run to run; whichever
+/// it is fails. It used to return a row, and the step after it failed.
+///
+/// Not run with the rest: it asks the device for more than it has, and what
+/// that does to the tests after it on the same machine is not known.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "takes more Metal memory than the device has: run by hand, needs SUPERFLUID_TEST_GGUF and nothing else on the device"]
+fn a_step_the_device_refuses_fails_and_returns_no_row() {
+    use superfluid_adapter_llamacpp::sys;
+    let _device = device_alone();
+    let Some(path) = gguf() else {
+        eprintln!("SKIP: no GGUF model");
+        return;
+    };
+    let Ok(sizing) = superfluid_adapter_llamacpp::runtime::sizing(&path, None, None) else {
+        eprintln!("SKIP: no device memory to size a pool against");
+        return;
+    };
+    let free = superfluid_adapter_llamacpp::runtime::device_free_bytes();
+    let cells = ((0.6 * free as f64) as u64 / sizing.kv_bytes_per_token.max(1)).min(u32::MAX as u64) as u32;
+    let opened = LlamaRuntime::open(LlamaConfig {
+        model_path: path.clone(),
+        max_seq_len: 4096,
+        max_batch: 8,
+        cells_total: cells,
+        streams: Some(false),
+        ..Default::default()
+    });
+    let Ok(mut rt) = opened else {
+        eprintln!("SKIP: llama.cpp made no context of {cells} cells");
+        return;
+    };
+    let tok = LlamaTokenizer::load(&path).expect("tokenizer");
+    let mut feed = tok.encode("The capital of France is Paris, and the capital of Germany is");
+    let seq = rt.seq_create().unwrap();
+    for step in 0..8 {
+        let logged = sys::errors_logged();
+        let stepped = rt.step(&[Feed { seq, input: Input::Tokens(&feed), wants_row: true }]);
+        let said = sys::errors_since(logged);
+        match stepped {
+            Ok(rows) => {
+                assert_eq!(said, None, "step {step} returned a row, and llama.cpp had logged an error in it");
+                feed = vec![superfluid_executor::sampling::argmax(&rows[0])];
+            }
+            Err(why) => {
+                assert_eq!(why, PrimError::Fatal, "step {step}");
+                assert!(said.is_some(), "step {step} failed and llama.cpp logged no error in it");
+                eprintln!("the device refused step {step} of a pool of {cells} cells: {}", said.unwrap_or_default());
+                return;
+            }
+        }
+    }
+    eprintln!("NOTE: the device took a pool of {cells} cells, so no step was refused");
+}
