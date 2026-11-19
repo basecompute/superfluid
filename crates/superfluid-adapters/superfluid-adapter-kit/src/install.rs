@@ -41,8 +41,14 @@ impl Host {
     pub fn detect() -> Host {
         let mut host = Host::here();
         if host.os == "windows" {
+            let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into())).join("System32");
             // The loader every Vulkan driver installs; which GPU it finds is llama.cpp's to say.
-            host.vulkan = std::env::var_os("SystemRoot").is_some_and(|root| Path::new(&root).join("System32").join("vulkan-1.dll").is_file());
+            host.vulkan = system32.join("vulkan-1.dll").is_file();
+            host.nvidia_driver = windows_nvidia_driver(&system32);
+            let path: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+            host.cuda_runtime = windows_cuda_runtime(&path);
+            // No AMD HIP install is looked for: llama.cpp's ROCm build for Windows carries its own runtime, and
+            // whether the display driver serves it is not something a file here says. `--backend rocm` names it.
         }
         if host.os == "linux" {
             host.nvidia_driver = std::fs::read_to_string("/proc/driver/nvidia/version").ok().and_then(|t| nvidia_driver_version(&t));
@@ -269,6 +275,45 @@ fn nvidia_driver_version(text: &str) -> Option<String> {
         parts.len() >= 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
     })
     .map(str::to_string)
+}
+
+/// The NVIDIA driver's version on Windows (`566.36`), from the tool the driver installs beside itself. None without
+/// the driver, or when the tool does not answer.
+fn windows_nvidia_driver(system32: &Path) -> Option<String> {
+    let tool = system32.join("nvidia-smi.exe");
+    if !tool.is_file() {
+        return None;
+    }
+    let mut child = Command::new(tool)
+        .args(["--query-gpu=driver_version", "--format=csv,noheader"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // It answers in well under a second; one that hangs (a driver mid-update) is not waited on.
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < Duration::from_secs(10) => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let out = child.wait_with_output().ok()?;
+    out.status.success().then(|| nvidia_driver_version(&String::from_utf8_lossy(&out.stdout))).flatten()
+}
+
+/// The newest CUDA runtime in `dirs` (the directories Windows searches for a library: PATH), by major version: a
+/// directory with both `cudart64_<major>.dll` and `cublas64_<major>.dll`, as the toolkit installs them.
+fn windows_cuda_runtime(dirs: &[PathBuf]) -> Option<u32> {
+    (11..=20).rev().find(|major| {
+        dirs.iter().any(|d| d.join(format!("cudart64_{major}.dll")).is_file() && d.join(format!("cublas64_{major}.dll")).is_file())
+    })
 }
 
 fn linux_libraries() -> Vec<String> {
@@ -1021,6 +1066,31 @@ mod tests {
         assert!(glob_matches("*", "anything/at/all"));
         assert!(glob_matches("a*b*c", "a-b-c"));
         assert!(!glob_matches("a*b*c", "a-c-b"));
+    }
+
+    #[test]
+    fn a_windows_cuda_runtime_is_both_its_libraries_in_one_directory_on_path() {
+        let dir = std::env::temp_dir().join(format!("sf-kit-win-gpu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (system32, cuda12, cuda13, partial) = (dir.join("System32"), dir.join("cuda12"), dir.join("cuda13"), dir.join("partial"));
+        for d in [&system32, &cuda12, &cuda13, &partial] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let touch = |d: &Path, name: &str| std::fs::write(d.join(name), b"").unwrap();
+        assert_eq!(windows_nvidia_driver(&system32), None, "no driver, so its tool is not there to ask");
+        assert_eq!(windows_cuda_runtime(std::slice::from_ref(&system32)), None);
+        for name in ["cudart64_12.dll", "cublas64_12.dll"] {
+            touch(&cuda12, name);
+        }
+        for name in ["cudart64_13.dll", "cublas64_13.dll"] {
+            touch(&cuda13, name);
+        }
+        // A runtime is both libraries in one directory: cuBLAS is what an engine's CUDA build asks for beside it.
+        touch(&partial, "cudart64_14.dll");
+        assert_eq!(windows_cuda_runtime(&[system32.clone(), cuda12.clone()]), Some(12));
+        assert_eq!(windows_cuda_runtime(&[partial.clone(), cuda12, cuda13]), Some(13), "the newest whole one");
+        assert_eq!(windows_cuda_runtime(std::slice::from_ref(&partial)), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

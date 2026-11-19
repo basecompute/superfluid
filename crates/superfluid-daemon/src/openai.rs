@@ -1210,7 +1210,7 @@ fn stage_audio(dir: &std::path::Path, ext: &str, audio: &[u8]) -> std::io::Resul
     for _ in 0..8 {
         let nonce = std::collections::hash_map::RandomState::new().build_hasher().finish();
         let path = dir.join(format!("superfluid-audio-{nonce:016x}.{ext}"));
-        match crate::sys::owner_only(std::fs::OpenOptions::new().write(true).create_new(true)).open(&path) {
+        match crate::sys::open_private(std::fs::OpenOptions::new().write(true).create_new(true), &path) {
             Ok(mut f) => {
                 if let Err(e) = f.write_all(audio) {
                     let _ = std::fs::remove_file(&path);

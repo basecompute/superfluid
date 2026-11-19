@@ -10,7 +10,7 @@ Superfluid is one daemon binary plus a worker per runtime. The runtimes themselv
 | macOS, Intel | CPU | no | no |
 | Linux x86-64 | CUDA, ROCm, Vulkan or CPU | no | ROCm (AMD Strix Halo or Strix Point GPU, ROCm 10) |
 | Linux arm64 | CUDA, Vulkan or CPU | no | CUDA (NVIDIA GPU) |
-| Windows x86-64 | Vulkan or CPU; CUDA or ROCm by name | no | no |
+| Windows x86-64 | CUDA, Vulkan or CPU; ROCm by name | no | no |
 
 Windows is new: it serves GGUF models through llama.cpp, from a release of its own or a source build ([Windows](#windows) below).
 
@@ -133,7 +133,7 @@ superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 
 Either Rust toolchain builds it, with a C compiler beside it: `stable-x86_64-pc-windows-msvc` with the Visual Studio Build Tools (what a release is built with), or `stable-x86_64-pc-windows-gnu` with a MinGW-w64 `gcc` on `PATH`. Neither the second nor anything Superfluid does afterwards needs administrator rights: rustup installs under your profile, a MinGW-w64 build such as [WinLibs](https://winlibs.com) unpacks anywhere, and Superfluid keeps to `%USERPROFILE%\.superfluid`, the Hugging Face cache and your temporary directory.
 
-`superfluid runtime install llamacpp` takes llama.cpp's Vulkan build where a Vulkan driver is installed, with the CPU build to fall back on. An NVIDIA or AMD HIP install is not looked for yet; `--backend cuda` or `--backend rocm` names one.
+`superfluid runtime install llamacpp` takes llama.cpp's CUDA build where an NVIDIA driver is installed (the newest CUDA that driver runs, with the CUDA runtime from llama.cpp's release unless the toolkit's is on `PATH`), then its Vulkan build where a Vulkan driver is, with the CPU build to fall back on. The ROCm build is not chosen on its own: it carries its own HIP runtime, and nothing on the machine says whether the display driver serves it. `--backend rocm` names it, and the install is kept only if it finds the GPU.
 
 What differs from macOS and Linux:
 

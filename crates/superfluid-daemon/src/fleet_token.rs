@@ -30,13 +30,13 @@ fn save(home: &Path, token: &[u8], fresh: bool) -> Result<bool, String> {
     let dir = p.parent().expect("the token has a directory");
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut opts = std::fs::OpenOptions::new();
-    crate::sys::owner_only(opts.write(true));
+    opts.write(true);
     if fresh {
         opts.create_new(true);
     } else {
         opts.create(true).truncate(true);
     }
-    let mut f = match opts.open(&p) {
+    let mut f = match crate::sys::open_private(&mut opts, &p) {
         Ok(f) => f,
         Err(e) if fresh && e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
         Err(e) => return Err(format!("{}: {e}", p.display())),

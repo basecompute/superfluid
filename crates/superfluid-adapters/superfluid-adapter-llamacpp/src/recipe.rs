@@ -162,7 +162,7 @@ fn choose(host: &Host, have: &[&Archive]) -> Vec<(String, String)> {
             out.push((b.to_string(), format!("{}: ROCm", host.describe())));
         }
     }
-    // No NVIDIA or ROCm install is looked for on Windows yet: `--backend cuda` or `rocm` names one.
+    // No ROCm install is looked for on Windows (the kit's `Host::detect` says why): `--backend rocm` names one.
     if host.vulkan && has("vulkan") {
         out.push(("vulkan".to_string(), format!("{}: a Vulkan driver", host.describe())));
     }
@@ -390,6 +390,29 @@ mod tests {
         assert!(cuda[0].backend.starts_with("cuda-13."), "{}", cuda[0].backend);
         let names: Vec<&str> = cuda[0].assets.iter().map(|a| a.name.as_str()).collect();
         assert!(names.len() == 2 && names[1].starts_with("cudart-llama-bin-win-cuda-13."), "{names:?}");
+    }
+
+    #[test]
+    fn windows_with_an_nvidia_driver_takes_the_cuda_build_it_runs_before_vulkan() {
+        let mut win = host("windows", "x64");
+        win.vulkan = true;
+        // A driver of the 580 branch runs CUDA 13; the machine has no CUDA runtime, so the release's comes too.
+        win.nvidia_driver = Some("581.15".into());
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert_eq!(plans.iter().map(|p| p.backend.split('-').next().unwrap()).collect::<Vec<_>>(), ["cuda", "vulkan", "cpu"]);
+        assert!(plans[0].backend.starts_with("cuda-13."), "{}", plans[0].backend);
+        assert!(plans[0].assets.len() == 2 && plans[0].assets[1].name.starts_with("cudart-llama-bin-win-cuda-13."), "{:?}", plans[0].assets);
+        // With the toolkit's runtime on PATH, the build alone.
+        win.cuda_runtime = Some(13);
+        assert_eq!(plan(&Request::default(), &win).unwrap()[0].assets.len(), 1);
+        // An older driver runs CUDA 12 and not 13.
+        win.nvidia_driver = Some("566.36".into());
+        let plans = plan(&Request::default(), &win).unwrap();
+        assert!(plans[0].backend.starts_with("cuda-12."), "{}", plans[0].backend);
+        assert_eq!(plans[0].assets.len(), 2, "the runtime here is 13, so 12's comes with the build");
+        // One too old for either leaves Vulkan first.
+        win.nvidia_driver = Some("472.12".into());
+        assert_eq!(backends(&plan(&Request::default(), &win).unwrap()), ["vulkan", "cpu"]);
     }
 
     #[test]

@@ -49,16 +49,105 @@ pub fn random(buf: &mut [u8]) -> std::io::Result<()> {
     }
 }
 
-/// Makes a file these options create readable and writable by its owner alone. On Windows a
-/// file takes the rights of the directory it is made in, and the ones this crate writes are
-/// under the user's own profile, which only that user reaches.
-pub fn owner_only(opts: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+/// Opens `path` with `opts`, and has a file this creates readable and writable by its owner
+/// alone: mode 0600 on Unix. A Windows file takes the rights of the directory it is made in,
+/// which under the user's profile are already the user's, but a home elsewhere may give every
+/// user of the machine a reading; so there the file is given a list of its own, with this user,
+/// the system and its administrators (who reach any file, as root does) and nobody else. Where
+/// the volume keeps no such list the file is as its directory has it, as a mode is on a
+/// filesystem without modes.
+pub fn open_private(opts: &mut std::fs::OpenOptions, path: &Path) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    opts
+    let file = opts.open(path)?;
+    #[cfg(windows)]
+    let _ = private::restrict(path);
+    Ok(file)
+}
+
+#[cfg(windows)]
+mod private {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// This process's user, as the text form of its security identifier (`S-1-5-21-...`).
+    fn user_sid() -> std::io::Result<String> {
+        // SAFETY: the token is closed here; the buffer is 8-aligned and as long as it is said
+        // to be, and TOKEN_USER is read from it only after the call filled it; the string the
+        // system allocates is copied and freed.
+        unsafe {
+            let mut token: HANDLE = std::ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut buf = [0u64; 32];
+            let mut len = 0u32;
+            let got = GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), std::mem::size_of_val(&buf) as u32, &mut len);
+            let err = std::io::Error::last_os_error();
+            CloseHandle(token);
+            if got == 0 {
+                return Err(err);
+            }
+            let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+            let mut text: *mut u16 = std::ptr::null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let n = (0..).take_while(|&i| *text.add(i) != 0).count();
+            let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+            LocalFree(text.cast());
+            Ok(sid)
+        }
+    }
+
+    /// Gives `path` an access list of its own that inherits nothing: full access for this user,
+    /// the system (SY) and the administrators (BA).
+    pub fn restrict(path: &Path) -> std::io::Result<()> {
+        let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+        let sddl = wide(format!("D:P(A;;FA;;;{})(A;;FA;;;SY)(A;;FA;;;BA)", user_sid()?).as_ref());
+        let name = wide(path.as_os_str());
+        // SAFETY: both strings are NUL-terminated and outlive the calls; the descriptor the
+        // system allocates holds the list it points into, and is freed after the list is set.
+        unsafe {
+            let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut descriptor, std::ptr::null_mut()) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let (mut present, mut defaulted) = (0i32, 0i32);
+            let mut list: *mut ACL = std::ptr::null_mut();
+            let status = if GetSecurityDescriptorDacl(descriptor, &mut present, &mut list, &mut defaulted) == 0 || present == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                match SetNamedSecurityInfoW(
+                    name.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    list,
+                    std::ptr::null(),
+                ) {
+                    0 => Ok(()),
+                    code => Err(std::io::Error::from_raw_os_error(code as i32)),
+                }
+            };
+            LocalFree(descriptor);
+            status
+        }
+    }
 }
 
 /// The file's permission bits; none on Windows, which has no such bits.
@@ -548,6 +637,27 @@ mod tests {
         assert!(hears.recv_timeout(std::time::Duration::from_millis(100)).is_err(), "not asked yet");
         ask_to_drain(nobody as i32).unwrap();
         hears.recv_timeout(std::time::Duration::from_secs(10)).expect("the request was heard");
+    }
+
+    #[test]
+    fn a_private_file_is_its_owners_and_takes_no_rights_from_its_directory() {
+        let dir = std::env::temp_dir().join(format!("superfluid-sys-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret");
+        let file = open_private(std::fs::OpenOptions::new().write(true).create_new(true), &path).unwrap();
+        #[cfg(unix)]
+        assert_eq!(mode(&file.metadata().unwrap()), 0o600);
+        #[cfg(windows)]
+        {
+            let listed = Command::new("icacls").arg(&path).output().unwrap();
+            let listed = String::from_utf8_lossy(&listed.stdout);
+            assert!(!listed.contains("(I)"), "nothing is inherited: {listed}");
+            assert_eq!(listed.matches("(F)").count(), 3, "this user, the system and the administrators: {listed}");
+        }
+        drop(file);
+        assert!(std::fs::read(&path).is_ok(), "its owner still reads it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

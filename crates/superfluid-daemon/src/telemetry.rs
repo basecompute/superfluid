@@ -77,12 +77,7 @@ impl Rotating {
         let path = self.dir.join(format!("superfluid.{}.jsonl", self.seq));
         let mut opts = std::fs::OpenOptions::new();
         opts.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        self.file = Some(opts.open(path)?);
+        self.file = Some(crate::sys::open_private(&mut opts, &path)?);
         self.written = 0;
         self.seq += 1;
         let mut names: Vec<(u64, PathBuf)> = std::fs::read_dir(&self.dir)?

@@ -418,13 +418,8 @@ pub fn mint_token(path: &std::path::Path) -> std::io::Result<String> {
     let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
     let mut o = std::fs::OpenOptions::new();
     o.create(true).write(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o600);
-    }
     use std::io::Write;
-    let mut f = o.open(path)?;
+    let mut f = crate::sys::open_private(&mut o, path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
