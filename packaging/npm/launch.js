@@ -76,7 +76,10 @@ module.exports = function launch(command, os = process.platform, arch = process.
     }
   }
 
-  const child = spawn(exe, process.argv.slice(2), { stdio: "inherit" });
+  // The handlers are in place before the program starts: a signal that came
+  // between the two would end this launcher by its default and leave the
+  // program running. None runs until this function returns, with `child` set.
+  let child;
   if (WINDOWS) {
     // Ctrl+C and Ctrl+Break reach every program on the console, superfluid
     // among them: it answers them (a server drains), and this only waits for
@@ -92,6 +95,7 @@ module.exports = function launch(command, os = process.platform, arch = process.
     // already, or gone, which kill() reports as false.
     for (const signal of ["SIGINT", "SIGQUIT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
   }
+  child = spawn(exe, process.argv.slice(2), { stdio: "inherit" });
   child.on("error", (e) => fail(`could not start ${exe}: ${e.message}`));
   child.on("exit", (code, signal) => {
     if (signal) {
