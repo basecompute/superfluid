@@ -50,6 +50,17 @@ pub fn sizes_context(id: RuntimeId) -> bool {
     false
 }
 
+/// The device budget `suggest_max_context` sizes `id`'s window against, in bytes: on baseRT the share of
+/// the working set it plans within (85% of Metal's recommended working set). None where `id` sizes nothing.
+pub fn device_budget(id: RuntimeId) -> Option<u64> {
+    #[cfg(feature = "basert")]
+    if id.base().name() == superfluid_adapter_basert::Basert.info().id {
+        return superfluid_adapter_basert::devices().first().map(|d| d.budget).filter(|b| *b > 0);
+    }
+    let _ = id;
+    None
+}
+
 pub fn suggest_max_context(
     id: RuntimeId,
     models: &[PathBuf],

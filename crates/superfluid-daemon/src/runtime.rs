@@ -285,6 +285,16 @@ impl EngineHost {
             .map(|d| d.page_size_tokens as u64)
     }
 
+    /// The worker's paged KV cost, in bytes per token of one sequence, as its hello describes it.
+    pub fn kv_bytes_per_token(&self) -> Option<u64> {
+        self.client_ref()?
+            .hello
+            .state_space_descriptors
+            .iter()
+            .find(|d| d.kind == superfluid_abi::space_kind::PAGED_TOKEN_KV && d.bytes_per_token > 0)
+            .map(|d| d.bytes_per_token)
+    }
+
     pub fn has_unservable_space(&self) -> bool {
         self.client_ref()
             .map(|c| {
