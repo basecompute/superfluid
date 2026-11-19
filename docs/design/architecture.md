@@ -20,7 +20,7 @@ Superfluid is split into processes: the daemon, which owns sessions, policy and 
 | Link W | daemon and worker, same host | two unix sockets (frames on fd 3, `SCM_RIGHTS` descriptors on fd 4) plus shared-memory rings | 8 |
 | Link F | fleet head and node | TCP, same frame envelope; Noise-encrypted with a fleet token | 3 (speaks 2 too) |
 
-Both share one frame envelope: `u32 len | u16 proto_version | u16 msg_type | u64 seq | u64 correlation_id | u8 class | payload`, little-endian, postcard payloads, 16 MiB cap. On Link W, a peer at another version fails the handshake; on Link F, the ends agree on the newest version both speak, 2 or 3 (2 has no heartbeat).
+Both share one frame envelope: `u32 len | u16 proto_version | u16 msg_type | u64 seq | u64 correlation_id | u8 class | payload`, little-endian, postcard payloads, 16 MiB cap. On Link W, a peer at another version fails the handshake; on Link F, the ends agree on the newest version both speak, 2, 3 or 4 (2 has no heartbeat; on 4 the head names the model of each session and request, so a node may serve several).
 
 Token spans and logits rows never ride the frames. Each worker has three shared-memory rings allocated by the daemon: an inbound token ring for prompts (64 slots of one context window), an outbound token ring (256 slots of 1024 tokens) and a logits ring (8 vocabulary-wide rows) for host-sampled lanes. Slots carry a generation counter so a recycled slot is detected rather than read torn.
 

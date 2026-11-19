@@ -432,6 +432,7 @@ mod tests {
             kv_blocks_used: 25,
             kv_blocks_total: 100,
             decode_tokens,
+            counters: None,
         }
     }
 

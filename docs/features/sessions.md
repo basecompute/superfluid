@@ -20,7 +20,7 @@ The log lives at `<sessions>/wal.log` (default `~/.superfluid/sessions`). One se
 
 A request whose prompt starts with tokens a finished request already processed is seeded from the cache instead of prefilled. The match is on token ids only, so changing tools or sampling settings does not flush it.
 
-- Hits are reported as `usage.prompt_tokens_details.cached_tokens`, the `x-superfluid-warm` header, `cached=` in the access log, and `superfluid_warm_prefix_tokens_total`.
+- Hits are reported as `usage.prompt_tokens_details.cached_tokens`, the `x-superfluid-warm` header, `cached=` in the access log, and `superfluid_warm_prefix_tokens_total` (on a fleet head, its nodes' summed, and each node's as `superfluid_fleet_node_warm_prefix_tokens_total`).
 - A prefix reaches the cache when its request finishes. Requests that arrive together sharing at least 1024 prompt tokens with a nearly finished request wait for it and are seeded from it, instead of each prefilling the same prefix.
 - Requests with images never use the cache.
 - Under KV pressure, cached prefixes are evicted first (see [Scheduling](scheduling.md#memory-pressure)).

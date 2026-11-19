@@ -82,6 +82,58 @@ fn noded_process_serves_a_fleet_generation() {
     drop(child);
 }
 
+/// `superfluid-noded` with `args`, and the address it reports it listens on.
+fn noded_listening(args: &[&str], home: &std::path::Path) -> (Child, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_superfluid-noded"))
+        .args(args)
+        .env("HOME", home)
+        .env("SUPERFLUID_HOME", home.join(".superfluid"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn superfluid-noded");
+    let mut reader = BufReader::new(child.stderr.take().unwrap());
+    let child = Child(child);
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap() > 0 {
+        if let Some(idx) = line.find(" on 127.0.0.1:") {
+            let addr = line[idx + 4..].split_whitespace().next().unwrap().to_string();
+            // The rest of what it says goes nowhere, so it never blocks on a full pipe.
+            std::thread::spawn(move || std::io::copy(&mut reader, &mut std::io::sink()));
+            return (child, addr);
+        }
+        line.clear();
+    }
+    panic!("node did not report its listen address");
+}
+
+#[test]
+fn noded_serves_several_models_each_on_its_own_engine() {
+    let home = empty_home("several");
+    let args = ["--listen", "127.0.0.1:0", "--engine", "mock", "--identity", "two", "--max-batch", "2", "--model", "mock-a", "--model", "mock-b"];
+    let (child, addr) = noded_listening(&args, &home);
+    let mut head = FleetHead::connect(&addr, Vec::new()).expect("connect noded");
+    assert_eq!(head.node().loadable_models, ["mock-a", "mock-b"]);
+    assert_eq!(head.node().capacity.max_lanes, 4, "each model's lanes");
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let prompt: Vec<u32> = (500..540).collect();
+    let (local_tokens, _) = local_mock().generate_tokens(prompt.clone(), GenParams::default(), 8, 0).unwrap();
+    for (session, model) in [(1, "mock-b"), (2, "mock-a")] {
+        head.assign_for(session, GenParams::default(), 0, "chatml", model, lease).unwrap();
+        head.append(session, &prompt).unwrap();
+        let gen = head.generate(session, 8, 60_000).unwrap();
+        assert_eq!(gen.tokens, local_tokens, "{model}");
+    }
+    drop(head);
+    drop(child);
+
+    let out = noded(&["--listen", "127.0.0.1:0", "--engine", "mock", "--model", "a", "--model", "b", "--model-name", "x"], &home);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("once for each --model"), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = noded(&["--listen", "127.0.0.1:0", "--engine", "mock", "--model", "a", "--model", "a"], &home);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("given twice"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
 fn noded(args: &[&str], home: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_superfluid-noded"))
         .args(args)

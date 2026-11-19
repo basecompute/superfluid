@@ -70,7 +70,7 @@ Default draft depth: `mtp-head` lets the engine choose (3; 1 on GLM-DSA), `eagle
 ## What is reported
 
 - `superfluid.spec` (`proposed`, `accepted`, `acceptance_rate`) on chat replies and the final stream chunk.
-- `superfluid_spec_proposed_total` and `superfluid_spec_accepted_total` on `/metrics`.
+- `superfluid_spec_proposed_total` and `superfluid_spec_accepted_total` on `/metrics`. A fleet head sums its nodes' into its own, and lists each node's as `superfluid_fleet_node_spec_proposed_total` and `_spec_accepted_total`.
 - `spec accept` in the terminal monitor.
 
 ## Expected speedups
