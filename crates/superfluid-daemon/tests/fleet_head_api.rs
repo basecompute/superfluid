@@ -1046,35 +1046,41 @@ fn a_fleet_head_runs_a_batch_invariant_lane_on_a_node_that_can_and_names_one_tha
 
 #[test]
 fn a_fleet_head_sends_each_request_in_the_class_it_resolves() {
-    // Each class may hold one of the node's two lanes: of two requests at once in a class, one
-    // waits in that class's queue on the node, which says what class the head sent.
+    // Each class may hold one of the node's two lanes: a request sent while another of its class
+    // runs waits in that class's queue on the node, which says what class the head sent. The
+    // second takes a few of the node's ticks to reach it, so the first is long, to be running
+    // still, and the second is sent once the first holds its lane.
     use superfluid_daemon::qos;
     let (addr, stats) = qos_node("classes", 2, [1, 1, 1, 1], std::time::Duration::from_millis(20), false);
     let fleet = fleet_of(addr);
-    let queued_in = |head: &str, headers: &[(&'static str, &'static str)]| -> usize {
-        let runs: Vec<_> = (0..2)
-            .map(|i| {
-                let (head, headers) = (head.to_string(), headers.to_vec());
-                std::thread::spawn(move || {
-                    let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": format!("hello {i}")}], "max_tokens": 300, "ignore_eos": true});
-                    let mut req = agent().post(&format!("http://{head}/v1/chat/completions")).header("content-type", "application/json");
-                    for (k, v) in headers {
-                        req = req.header(k, v);
-                    }
-                    let mut resp = req.send(body.to_string().as_bytes()).unwrap();
-                    (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap())
-                })
-            })
-            .collect();
+    let until = |what: &str, met: &dyn Fn() -> bool| {
         let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let class = loop {
-            if let Some(c) = (0..4).find(|&c| stats.queue_depth[c].load(Ordering::Relaxed) > 0) {
-                break c;
-            }
-            assert!(std::time::Instant::now() < by, "neither request waited in a class queue on the node");
+        while !met() {
+            assert!(std::time::Instant::now() < by, "{what}");
             std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    let queued_in = |head: &str, headers: &[(&'static str, &'static str)]| -> usize {
+        let ask = |i: usize, max_tokens: u32| {
+            let (head, headers) = (head.to_string(), headers.to_vec());
+            std::thread::spawn(move || {
+                let body = serde_json::json!({"model": "mock-model", "messages": [{"role": "user", "content": format!("hello {i}")}], "max_tokens": max_tokens, "ignore_eos": true});
+                let mut req = agent().post(&format!("http://{head}/v1/chat/completions")).header("content-type", "application/json");
+                for (k, v) in headers {
+                    req = req.header(k, v);
+                }
+                let mut resp = req.send(body.to_string().as_bytes()).unwrap();
+                (resp.status().as_u16(), resp.body_mut().read_to_string().unwrap())
+            })
         };
-        for run in runs {
+        let queued = || (0..4).find(|&c| stats.queue_depth[c].load(Ordering::Relaxed) > 0);
+        until("the node is idle", &|| stats.lanes_active.load(Ordering::Relaxed) == 0);
+        let first = ask(0, 6000);
+        until("the first request took a lane on the node", &|| stats.lanes_active.load(Ordering::Relaxed) == 1);
+        let second = ask(1, 8);
+        until("the second request waited in a class queue on the node", &|| queued().is_some());
+        let class = queued().expect("the first request is running still");
+        for run in [first, second] {
             let (status, said) = run.join().unwrap();
             assert_eq!(status, 200, "{said}");
         }
