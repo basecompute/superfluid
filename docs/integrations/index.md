@@ -15,6 +15,8 @@ superfluid launch claude --model basecompute/Qwen3.8-27B
 | `superfluid launch` | list the agents and whether each is installed; `--json` prints the list for a program to read (see [the CLI reference](../serving/cli.md#superfluid-launch)) |
 | `superfluid stop` | stop the server `launch` started |
 
+On Windows `launch` looks for an agent's `.exe`, `.cmd` or `.bat` on `PATH` (npm installs a `.cmd`). It has not been run with an agent there yet.
+
 Arguments after `--` go to the agent:
 
 ```sh
