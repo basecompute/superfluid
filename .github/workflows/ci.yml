@@ -75,20 +75,10 @@ jobs:
         run: |
           cargo build -p superfluid --no-default-features --features llamacpp,tui,shim
           cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
-      # What a synced append costs on each disk: the tests' session logs sync
-      # after every record, and a slow disk under them is what their timings miss.
-      - name: time a synced append on each disk
-        shell: pwsh
-        run: |
-          foreach ($dir in @("$env:LOCALAPPDATA\Temp", $env:RUNNER_TEMP)) {
-            $f = [IO.File]::Open("$dir\sync-probe.bin", 'Create'); $b = New-Object byte[] 256
-            $sw = [Diagnostics.Stopwatch]::StartNew()
-            1..200 | ForEach-Object { $f.Write($b, 0, 256); $f.Flush($true) }
-            "{0}: {1:n2} ms a synced append" -f $dir, ($sw.Elapsed.TotalMilliseconds / 200)
-            $f.Close(); Remove-Item "$dir\sync-probe.bin"
-          }
-      # The tests keep their session logs under the temp directory. The runner's
-      # own is on the system disk; its work disk is the one the build is on.
+      # The tests keep their session logs under the temp directory, and a log
+      # syncs after every record. The runner's own temp directory is on its
+      # system disk, where a synced append took 3.34 ms against 0.13 ms on the
+      # work disk: slow enough that a different timing test failed on most runs.
       - name: cargo test
         shell: bash
         env:
