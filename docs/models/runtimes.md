@@ -201,7 +201,7 @@ On an AMD Strix machine (Strix Halo, Strix Point) an engine whose bundle carries
 | XRT, the NPU's runtime | Ubuntu 26.04: `sudo apt install libxrt2 libxrt-npu2` |
 | an unlimited locked-memory limit for the server's process (XRT locks a 64 MiB heap) | a shell: `ulimit -l unlimited`; a systemd unit: `LimitMEMLOCK=infinity`. `/etc/security/limits.d` reaches only logins that pass through PAM, not a service |
 
-The NPU's part of a prefill is int8, so its logits are close to the GPU's and not bit-identical; `--basert-npu off` serves on the GPU alone. If an NPU job fails during a request, the engine fails that request with a GPU fault rather than answer from an output the NPU never wrote. The worker treats an engine fault as fatal, so the requests after it fail too until the server is restarted; `--basert-npu off` keeps a machine whose NPU fails serving on the GPU alone.
+The NPU's part of a prefill is int8, so its logits are close to the GPU's and not bit-identical; `--basert-npu off` serves on the GPU alone. If an NPU job fails during a request, the engine fails that request with a GPU fault rather than answer from an output the NPU never wrote. The server then replaces its engine worker, as after any tick the engine calls fatal, and serves the next request; the fresh worker uses the NPU again, so on a machine whose NPU keeps failing `--basert-npu off` serves on the GPU alone.
 
 ## How an upstream release becomes a tested one
 
