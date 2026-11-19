@@ -161,7 +161,7 @@ superfluid runtime install basert
 
 | runtime | what the install fetches |
 |---|---|
-| `llamacpp` | llama.cpp's own release build for this machine (Metal; CUDA, ROCm, Vulkan or CPU on Linux), checked against pinned SHA-256s |
+| `llamacpp` | llama.cpp's own release build for this machine (Metal; CUDA, ROCm, Vulkan or CPU on Linux; CUDA, Vulkan or CPU on Windows), checked against pinned SHA-256s |
 | `mlx` | a private CPython 3.12 with `mlx`, `mlx-lm` and their dependencies, every wheel pinned by hash. Your own Python is never used or changed |
 | `basert` | the baseRT engine bundle (Apple silicon, Linux arm64 with an NVIDIA GPU, or Linux x86-64 with an AMD Strix Halo or Strix Point GPU) from baseRT's releases |
 

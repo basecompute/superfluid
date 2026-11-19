@@ -8,7 +8,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Requirements: Rust (stable) and a C compiler. Development happens on macOS (Apple silicon) and Linux (arm64, x86-64). The flow for pull requests is in [CONTRIBUTING.md](https://github.com/basecompute/superfluid/blob/main/CONTRIBUTING.md).
+Requirements: Rust (stable) and a C compiler. Development happens on macOS (Apple silicon) and Linux (arm64, x86-64). Windows x86-64 builds the daemon without its default features, which link baseRT, with either Rust toolchain ([Installation](../getting_started/installation.md#windows)); the tests that stand in for a worker with a shell script, or for a link with a symlink, are Unix-only and compile to nothing there. The flow for pull requests is in [CONTRIBUTING.md](https://github.com/basecompute/superfluid/blob/main/CONTRIBUTING.md).
 
 ## Build configurations
 
@@ -17,6 +17,7 @@ Requirements: Rust (stable) and a C compiler. Development happens on macOS (Appl
 | default (basert adapter and TUI linked) | `cargo build --release` |
 | no engine linked | `cargo build -p superfluid --no-default-features` |
 | llama.cpp linked | `cargo build -p superfluid --features llamacpp` |
+| Windows: llama.cpp, the monitor and the launcher a release puts on `PATH` | `cargo build -p superfluid --no-default-features --features llamacpp,tui,shim` |
 | MLX linked (Apple silicon) | `PYO3_PYTHON=<python> cargo build -p superfluid --features mlx` |
 | the MLX worker | `PYO3_PYTHON=<python> cargo build -p superfluid-adapter-mlx --bin superfluid-worker-mlx` |
 | release adapters | `scripts/build_runtime_adapters.sh <stage-dir>` |
@@ -57,7 +58,7 @@ Most real-model tests look for a default under `models/` at the repository root;
 
 ## Style
 
-- `cargo clippy --all-targets -- -D warnings` is the gate. Also run it with `-p superfluid --no-default-features` and `--features llamacpp` when touching those paths.
+- `cargo clippy --all-targets -- -D warnings` is the gate. Also run it with `-p superfluid --no-default-features` and `--features llamacpp` when touching those paths. Code under `cfg(windows)` is checked from macOS or Linux with `--target x86_64-pc-windows-gnu` (the rustup target and a MinGW-w64 `gcc`).
 - Every `unsafe` block carries a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks`).
 - The tree is not `rustfmt`-clean: format what you touch, leave the rest.
 - A change to a wire protocol (Link W, Link F), the WAL format or the tick ABI says so and bumps the version it touches.
@@ -70,6 +71,7 @@ Most real-model tests look for a default under `models/` at the repository root;
 | job | runners | steps |
 |---|---|---|
 | `core` | `macos-15`, `ubuntu-24.04`, `ubuntu-24.04-arm` | clippy, build, test (mock engine plus skips) |
+| `windows` | `windows-2025` | clippy, build, test of the daemon with `--no-default-features --features llamacpp,tui,shim`, and of the fourteen other crates that build there |
 | `adapters` | `macos-15` | basert adapter tests; clippy on the llama.cpp adapter and feature builds; installs llama.cpp's release build (cached) and runs the adapter's tests against it; `scripts/build_runtime_adapters.sh` |
 
 ## Docs

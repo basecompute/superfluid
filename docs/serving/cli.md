@@ -83,7 +83,7 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--http <addr:port>` | `127.0.0.1:8453` | Address of the OpenAI, Anthropic and Ollama HTTP API. |
 | `--no-http` | | Serve the session API on the socket only. |
 | `--host <addr>` / `--port <N>` | `127.0.0.1` / `8453` | The HTTP address as two flags; `--http` wins. |
-| `--socket <path>` | `$SUPERFLUID_HOME/superfluid.sock` | Native session API socket. Falls back to `$TMPDIR/superfluid-<uid>.sock` when the default path is too long for a unix socket. |
+| `--socket <path>` | `$SUPERFLUID_HOME/superfluid.sock` | Native session API socket. Falls back to `$TMPDIR/superfluid-<uid>.sock` (`%TEMP%\superfluid-0.sock` on Windows) when the default path is too long for a unix socket. |
 | `--sessions <dir>` | `$SUPERFLUID_HOME/sessions` | Session store: log, parks, media, files, batches. One server per directory. |
 | `--api-key <key>` | none | Require `Authorization: Bearer <key>` or `X-Api-Key` on every route but `/health`. `ps` shows it to every user; prefer `--api-key-file` or `SUPERFLUID_API_KEY`. |
 | `--api-key-file <path>` | | The key, read from this file with the whitespace around it trimmed; a missing or empty file is refused, one group or others can read is warned about. Refused beside `--api-key`. With neither flag, `SUPERFLUID_API_KEY` gives the key. |

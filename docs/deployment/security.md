@@ -31,7 +31,7 @@ curl -H 'x-api-key: <key>' http://127.0.0.1:8453/v1/models
 ```
 
 - The key comes from `--api-key <key>`, else `--api-key-file <path>`, else the `SUPERFLUID_API_KEY` environment variable. `ps` shows a key on the command line to every user of the machine; the file and the variable it does not. The two flags together are refused.
-- `--api-key-file` reads the file with the whitespace around the key trimmed, and refuses a missing or empty one. Like ssh with a private key, it warns when group or others may read the file: `chmod 600` it.
+- `--api-key-file` reads the file with the whitespace around the key trimmed, and refuses a missing or empty one. Like ssh with a private key, it warns when group or others may read the file: `chmod 600` it. Windows has no such mode to read, so nothing warns there: keep the file where only you can read it, as a file under your profile is.
 - `superfluid launch` hands the server it starts the key in `SUPERFLUID_API_KEY`, not on its command line. `superfluid top` takes `--api-key-file` and the variable too.
 - Every route except `GET /health` needs the key, including `/metrics` and the Ollama routes. An unknown path without a key is a 401.
 - Keys are compared in constant time against a SHA-256 digest.
@@ -98,7 +98,7 @@ Fill-in-the-middle completions have their own per-client bucket (`--completion-r
 
 ## Unix socket
 
-The session API socket has no credential: whoever can connect controls every session and the daemon's log level. The daemon binds it with the process umask. Keep it in a directory private to the daemon's user.
+The session API socket has no credential: whoever can connect controls every session and the daemon's log level. The daemon binds it with the process umask. Keep it in a directory private to the daemon's user. On Windows the socket takes the access list of its directory, which under your profile, where the default one is, admits you, the system and the administrators.
 
 ## Browser transport
 
@@ -118,6 +118,8 @@ The session API socket has no credential: whoever can connect controls every ses
 | `media/` | images and audio requests carried | 0600 |
 | `park/` | sealed KV, with `--park` | umask |
 | `logs/`, `web-token` | JSON logs under the TUI, the `--web` token | 0600 |
+
+A Windows file has no mode. Where this page says 0600, the file there gets an access list of its own: this user, the system and the administrators, with nothing inherited from its directory, so it stays private in a home outside the profile. Where it says umask, the file takes its directory's access list.
 
 Logs, metrics and OTLP traces carry ids, counts, timings and codes, never content. Key secrets are never logged; keys appear by `name`. Session exports include content only with `--include-content`, and send it off the host only with `--allow-content-egress`.
 

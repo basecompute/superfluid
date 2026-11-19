@@ -70,8 +70,11 @@ The default install is the pinned one, else the best-ranked: a GPU backend (`met
 | Linux x86-64 with ROCm | `rocm` | Vulkan, CPU |
 | Linux with a Vulkan loader | `vulkan` | CPU |
 | any Linux | `cpu` | |
+| Windows x86-64 with an NVIDIA driver | newest CUDA the driver runs, by the same rule | Vulkan, CPU |
+| Windows x86-64 with a Vulkan driver | `vulkan` | CPU |
+| any Windows x86-64 | `cpu` | |
 
-SYCL and OpenVINO builds are installed only with `--backend`. Of the tested builds, only b11284 has an OpenVINO build, so `--backend openvino` needs `--version b11284`.
+SYCL and OpenVINO builds are installed only with `--backend`. So is the ROCm build on Windows: it carries its own HIP runtime, and nothing on the machine says whether the display driver serves it, so `--backend rocm` names it and the install is kept only if it finds the GPU. Of the tested builds, only b11284 has an OpenVINO build, so `--backend openvino` needs `--version b11284`.
 
 **MLX.** Apple silicon only. Fetches CPython 3.12.14 (python-build-standalone) and, from PyPI, `mlx`, `mlx-metal`, `mlx-lm` and their dependencies, every wheel pinned by hash (tested: mlx 0.32.4 with mlx-lm 0.32.2, and mlx 0.32.2 with mlx-lm 0.31.3; `superfluid compat` lists them). Installs with `pip --require-hashes --no-deps --only-binary=:all:`; your own Python and `PYTHON*`/`PIP_*` settings are not used (pip's network settings excepted).
 
