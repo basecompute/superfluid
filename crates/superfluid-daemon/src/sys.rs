@@ -469,7 +469,10 @@ pub fn detached(cmd: &mut Command) -> &mut Command {
 
 /// Runs `cmd` in this process's place, and returns only when it could not be started. Unix
 /// execs it. Windows has no exec: the program runs as a child with this process's streams, and
-/// this process waits and exits with its status.
+/// this process waits and exits with its status. While it waits it stands for the program:
+/// Ctrl+C and Ctrl+Break, which reach every process on the console, are the program's to
+/// answer, and ending this process ends the program. What the program itself starts is left
+/// out of that, as it would be after an exec.
 pub fn replace_process(cmd: &mut Command) -> std::io::Error {
     #[cfg(unix)]
     {
@@ -478,7 +481,38 @@ pub fn replace_process(cmd: &mut Command) -> std::io::Error {
     }
     #[cfg(windows)]
     {
-        match cmd.status() {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{BOOL, HANDLE};
+        use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+
+        unsafe extern "system" fn left_to_the_program(kind: u32) -> BOOL {
+            BOOL::from(kind == CTRL_C_EVENT || kind == CTRL_BREAK_EVENT)
+        }
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => return e,
+        };
+        // SAFETY: the handler is a function that lives as long as the process and touches
+        // nothing. The job is this process's own and stays open until it exits, which is what
+        // ends the program; `limits` is plain data, zeroed and then set, and its size is what
+        // is passed; the child's handle is open while `child` lives.
+        unsafe {
+            SetConsoleCtrlHandler(Some(left_to_the_program), 1);
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if !job.is_null() {
+                let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+                let size = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+                if SetInformationJobObject(job, JobObjectExtendedLimitInformation, std::ptr::addr_of!(limits).cast(), size) != 0 {
+                    AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE);
+                }
+            }
+        }
+        match child.wait() {
             Ok(status) => std::process::exit(status.code().unwrap_or(1)),
             Err(e) => e,
         }

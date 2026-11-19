@@ -338,7 +338,11 @@ fn join(args: &[String]) {
         let _ = lane.join();
     }
     drop(node);
-    for daemon in &daemons {
+    // The node that starts next opens the session logs this one holds, and loads its model into
+    // the memory this one's worker has. An exec lets go of both. Windows has none: this process
+    // waits there for the next as its child, so it lets go of them itself, and each daemon ends
+    // here with its store's lock and its engine's worker.
+    for daemon in daemons {
         daemon.signal_shutdown();
         daemon.shutdown();
     }
