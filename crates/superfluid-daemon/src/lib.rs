@@ -1357,11 +1357,11 @@ impl Daemon {
         extras: scheduler::GenExtras,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
     ) -> Result<(Vec<u32>, u32, bool), DaemonError> {
-        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, qos::INLINE_COMPLETION, extras, Vec::new(), on_tokens, |_| {})
+        self.generate_tokens_streaming_lp(stream, params, max_tokens, deadline_ms, qos::INLINE_COMPLETION, false, extras, Vec::new(), on_tokens, |_| {})
     }
 
-    /// As [`Self::generate_tokens_streaming`] in QoS class `class`, telling `on_logprobs` the
-    /// log-probabilities the extras ask for.
+    /// As [`Self::generate_tokens_streaming`] in QoS class `class`, in a lane of its own when
+    /// `batch_invariant`, telling `on_logprobs` the log-probabilities the extras ask for.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_tokens_streaming_lp(
         &self,
@@ -1370,6 +1370,7 @@ impl Daemon {
         max_tokens: u32,
         deadline_ms: u64,
         class: u8,
+        batch_invariant: bool,
         extras: scheduler::GenExtras,
         media: Vec<(u64, std::path::PathBuf, u32)>,
         on_tokens: impl FnMut(&[u32]) -> std::ops::ControlFlow<()>,
@@ -1387,6 +1388,7 @@ impl Daemon {
             max_tokens,
             deadline,
             class,
+            batch_invariant,
             extras,
             media,
             on_tokens,
@@ -2095,8 +2097,12 @@ impl Daemon {
         class: u8,
         batch_invariant: bool,
     ) -> Result<CommittedEvent, DaemonError> {
-        if batch_invariant && self.fleet.is_some() {
-            return Err(fleet_daemon::batch_invariant_refused());
+        // Over a fleet, refused before a stream starts when no node serving the model can run
+        // the session alone; one that can is where its generations are placed.
+        if let Some((fleet, model)) = &self.fleet {
+            if let Some(e) = fleet.needs_refusal(model, fleet_daemon::needs(batch_invariant)) {
+                return Err(e);
+            }
         }
         self.store
             .lock()

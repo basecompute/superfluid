@@ -368,8 +368,9 @@ pub enum GrammarSpecMsg {
 }
 
 /// What a generation asks beyond its sampling parameters. Floats are f32 bits; the defaults
-/// (no penalty, EOS ends it, no logprobs, no grammar or bias) are what a generation with no
-/// options gets.
+/// (no penalty, EOS ends it, no logprobs, no grammar or bias, batched with the others) are what a
+/// generation with no options gets. Its QoS class is not here: the session's assignment
+/// ([`SessionAssignMsg::qos_class`]) carries it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerateOptsMsg {
     pub session_id: u64,
@@ -384,6 +385,50 @@ pub struct GenerateOptsMsg {
     /// The images and audio in the context: where each starts, the blob it is (sent before, by
     /// its SHA-256 in hex), and the tokens it takes.
     pub media: Vec<(u64, String, u32)>,
+    /// Run alone, in a batch-invariant lane: asked only of a node that states
+    /// [`crate::handshake::BATCH_INVARIANT`]. Last, so a node from before it reads the options and
+    /// leaves it; [`GenerateOptsMsg::decode`] reads options from before it.
+    pub batch_invariant: bool,
+}
+
+/// Options from a head released before [`GenerateOptsMsg::batch_invariant`].
+#[derive(Deserialize)]
+struct GenerateOptsBefore {
+    session_id: u64,
+    generation_id: u64,
+    presence_penalty_bits: u32,
+    frequency_penalty_bits: u32,
+    repeat_penalty_bits: u32,
+    ignore_eos: bool,
+    top_logprobs: Option<u8>,
+    grammar: Option<GrammarSpecMsg>,
+    logit_bias: Option<(Vec<i32>, Vec<u32>)>,
+    media: Vec<(u64, String, u32)>,
+}
+
+impl GenerateOptsMsg {
+    /// Options from a head of any release; those from before `batch_invariant` do not ask it.
+    pub fn decode(bytes: &[u8]) -> Result<GenerateOptsMsg, postcard::Error> {
+        match postcard::from_bytes::<GenerateOptsMsg>(bytes) {
+            Ok(opts) => Ok(opts),
+            Err(e) => match postcard::from_bytes::<GenerateOptsBefore>(bytes) {
+                Ok(o) => Ok(GenerateOptsMsg {
+                    session_id: o.session_id,
+                    generation_id: o.generation_id,
+                    presence_penalty_bits: o.presence_penalty_bits,
+                    frequency_penalty_bits: o.frequency_penalty_bits,
+                    repeat_penalty_bits: o.repeat_penalty_bits,
+                    ignore_eos: o.ignore_eos,
+                    top_logprobs: o.top_logprobs,
+                    grammar: o.grammar,
+                    logit_bias: o.logit_bias,
+                    media: o.media,
+                    batch_invariant: false,
+                }),
+                Err(_) => Err(e),
+            },
+        }
+    }
 }
 
 /// What a node's model tokenizes with, by digest (0: not known), so a head refuses a node whose
@@ -683,6 +728,72 @@ mod tests {
         let mut new = FrameDecoder::new(is_known_type);
         new.feed(&said);
         assert_eq!(new.decode_next().unwrap().map(|f| f.msg_type), Some(msg_type::REMOVED));
+    }
+
+    fn opts(batch_invariant: bool) -> GenerateOptsMsg {
+        GenerateOptsMsg {
+            session_id: 7,
+            generation_id: 9,
+            presence_penalty_bits: 0.5f32.to_bits(),
+            frequency_penalty_bits: 0,
+            repeat_penalty_bits: 1.0f32.to_bits(),
+            ignore_eos: true,
+            top_logprobs: Some(3),
+            grammar: Some(GrammarSpecMsg::JsonSchema("{}".into())),
+            logit_bias: Some((vec![5], vec![1.0f32.to_bits()])),
+            media: vec![(4, "ab".repeat(32), 16)],
+            batch_invariant,
+        }
+    }
+
+    /// The options as a head from before `batch_invariant` writes them, and a node from before
+    /// it reads them.
+    #[derive(Serialize, Deserialize)]
+    struct OptsBefore {
+        session_id: u64,
+        generation_id: u64,
+        presence_penalty_bits: u32,
+        frequency_penalty_bits: u32,
+        repeat_penalty_bits: u32,
+        ignore_eos: bool,
+        top_logprobs: Option<u8>,
+        grammar: Option<GrammarSpecMsg>,
+        logit_bias: Option<(Vec<i32>, Vec<u32>)>,
+        media: Vec<(u64, String, u32)>,
+    }
+
+    impl From<GenerateOptsMsg> for OptsBefore {
+        fn from(o: GenerateOptsMsg) -> OptsBefore {
+            OptsBefore {
+                session_id: o.session_id,
+                generation_id: o.generation_id,
+                presence_penalty_bits: o.presence_penalty_bits,
+                frequency_penalty_bits: o.frequency_penalty_bits,
+                repeat_penalty_bits: o.repeat_penalty_bits,
+                ignore_eos: o.ignore_eos,
+                top_logprobs: o.top_logprobs,
+                grammar: o.grammar,
+                logit_bias: o.logit_bias,
+                media: o.media,
+            }
+        }
+    }
+
+    #[test]
+    fn a_node_from_before_batch_invariant_reads_options_that_ask_it() {
+        let new = postcard::to_stdvec(&opts(true)).unwrap();
+        let read: OptsBefore = postcard::from_bytes(&new).unwrap();
+        let want = OptsBefore::from(opts(true));
+        assert_eq!((read.session_id, read.generation_id, read.ignore_eos, read.top_logprobs), (7, 9, true, Some(3)));
+        assert_eq!((read.grammar, read.logit_bias, read.media), (want.grammar, want.logit_bias, want.media), "everything before the ask is read");
+        assert_eq!(GenerateOptsMsg::decode(&new).unwrap(), opts(true));
+    }
+
+    #[test]
+    fn options_from_a_head_before_batch_invariant_do_not_ask_it() {
+        let old = postcard::to_stdvec(&OptsBefore::from(opts(false))).unwrap();
+        assert_eq!(GenerateOptsMsg::decode(&old).unwrap(), opts(false));
+        assert!(GenerateOptsMsg::decode(&old[..old.len() - 2]).is_err(), "cut options are still refused");
     }
 
     fn status(stats: Option<NodeStatsMsg>) -> NodeStatusMsg {

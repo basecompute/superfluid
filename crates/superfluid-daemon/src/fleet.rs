@@ -195,6 +195,26 @@ impl superfluid_engine::Tokenizer for RemoteTokenizer {
     }
 }
 
+/// What a node released before it cannot be asked, as `unsupported_on_fleet`: `nodes` names it,
+/// or each of them.
+pub(crate) fn older_node(nodes: &str, what: &str) -> DaemonError {
+    DaemonError::Unsupported(crate::Refusal::new(
+        "unsupported_on_fleet",
+        None,
+        format!("node {nodes} runs an older superfluid that cannot take {what}; update it"),
+    ))
+}
+
+/// What a node that does not state `needs` ([`HelloAckF::feature_flags`]) cannot take, for
+/// [`older_node`].
+pub(crate) fn needs_what(needs: u64) -> &'static str {
+    if needs & superfluid_proto::handshake::BATCH_INVARIANT != 0 {
+        "a batch-invariant lane"
+    } else {
+        "what this generation asks"
+    }
+}
+
 /// A file a request names, sent to the node by its SHA-256 (in hex) before the request.
 #[derive(Debug, Clone)]
 pub struct Blob {
@@ -918,11 +938,16 @@ impl FleetHead {
         if self.endpoint.version() >= 3 {
             return Ok(());
         }
-        Err(DaemonError::Unsupported(crate::Refusal::new(
-            "unsupported_on_fleet",
-            None,
-            format!("node {} runs an older superfluid that cannot take {what}; update it", self.node.node_identity),
-        )))
+        Err(older_node(&self.node.node_identity, what))
+    }
+
+    /// Refuses what a node that does not state each of `needs` ([`HelloAckF::feature_flags`])
+    /// cannot be asked.
+    fn needs_flags(&self, needs: u64) -> Result<(), DaemonError> {
+        if self.node.feature_flags & needs == needs {
+            return Ok(());
+        }
+        Err(older_node(&self.node.node_identity, needs_what(needs)))
     }
 
     /// The tokenizer the node serves `model` with, whole but for encoding, for a head with no
@@ -1024,8 +1049,11 @@ impl FleetHead {
         on_logprobs: &mut dyn FnMut(&[linkf::TokenLogprobMsg]),
         mut on_tokens: impl FnMut(&[u32]),
     ) -> Result<FleetGeneration, DaemonError> {
-        if opts.is_some() {
+        if let Some(ask) = opts {
             self.needs_v3("these generation options")?;
+            if ask.opts.batch_invariant {
+                self.needs_flags(superfluid_proto::handshake::BATCH_INVARIANT)?;
+            }
         }
         let generation_id = self.next_generation;
         self.next_generation += 1;
