@@ -36,6 +36,7 @@ for d in (PACKAGING, PACKAGING / "python", PACKAGING / "npm", PACKAGING / "homeb
 import build_packages  # noqa: E402
 import build_wheel  # noqa: E402
 import formula  # noqa: E402
+import own_workers  # noqa: E402
 import release  # noqa: E402
 
 TARGET_FORMAT = {
@@ -611,6 +612,79 @@ class NpmTest(Scratch):
         make_release(self.tmp / "assets", "aarch64-apple-darwin")
         with self.assertRaisesRegex(release.ReleaseError, "no superfluid-x86_64-unknown-linux-gnu.tar.gz"):
             build_packages.build(self.tmp / "assets", self.tmp / "out", "1.2.3")
+
+
+class OwnWorkersTest(Scratch):
+    """try-install.sh's check of `superfluid runtimes --json`, on both kinds of release."""
+
+    def release(self, *files: str) -> Path:
+        root = self.tmp / "pkg" / "release"
+        for name in files:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(b"")
+        return root
+
+    @staticmethod
+    def row(rid: str, source: str, path) -> dict:
+        return {"id": rid, "state": "not installed", "worker": {"path": str(path), "source": source}}
+
+    def test_a_release_that_ships_its_adapters_runs_them_from_libexec(self):
+        root = self.release("bin/superfluid-workerd", "libexec/superfluid/superfluid-worker-llamacpp", "libexec/superfluid/superfluid-worker-mlx")
+        rows = [
+            self.row("llamacpp", "shipped with superfluid", root / "libexec/superfluid/superfluid-worker-llamacpp"),
+            self.row("mlx", "shipped with superfluid", root / "libexec/superfluid/superfluid-worker-mlx"),
+            # A runtime installed on the machine is not the package's, wherever it is.
+            self.row("toyrt", "installed", self.tmp / "home/runtimes/toyrt/1/bin/superfluid-worker-toyrt"),
+            {"id": "basert", "state": "not installed"},
+        ]
+        self.assertEqual(own_workers.own_workers(rows, root), {"llamacpp": "shipped with superfluid", "mlx": "shipped with superfluid"})
+
+    def test_the_windows_release_runs_llama_cpp_built_into_its_own_workerd(self):
+        # Built with `--no-default-features --features llamacpp,tui,shim`: llama.cpp is linked into the daemon, and
+        # `runtimes` names the package's superfluid-workerd.exe, with the adapter files in libexec all the same.
+        root = self.release("bin/superfluid.exe", "bin/superfluid-workerd.exe", "libexec/superfluid/superfluid-worker-llamacpp.exe", "libexec/superfluid/superfluid-shim.exe")
+        rows = [self.row("llamacpp", "built in", root / "bin" / "superfluid-workerd.exe")]
+        self.assertEqual(own_workers.own_workers(rows, root), {"llamacpp": "built in"})
+        # As try-install.sh runs it, on what the installed superfluid printed.
+        p = subprocess.run([sys.executable, str(PACKAGING / "own_workers.py"), str(root)], input=json.dumps(rows), capture_output=True, text=True)
+        self.assertEqual((p.returncode, p.stdout, p.stderr), (0, "workers: llamacpp (built in)\n", ""))
+
+    def test_a_worker_from_outside_the_package_or_none_for_llama_cpp_is_refused(self):
+        root = self.release("bin/superfluid-workerd", "libexec/superfluid/superfluid-worker-llamacpp")
+        other = self.tmp / "other" / "release"
+        for name in ("bin/superfluid-workerd", "libexec/superfluid/superfluid-worker-llamacpp"):
+            (other / name).parent.mkdir(parents=True, exist_ok=True)
+            (other / name).write_bytes(b"")
+        shipped = self.row("llamacpp", "shipped with superfluid", root / "libexec/superfluid/superfluid-worker-llamacpp")
+        for rows, why in (
+            ([self.row("llamacpp", "shipped with superfluid", other / "libexec/superfluid/superfluid-worker-llamacpp")], "not in"),
+            ([self.row("llamacpp", "built in", other / "bin/superfluid-workerd")], "not in"),
+            # A built-in worker is the daemon's own program, not something in libexec, and the other way about.
+            ([self.row("llamacpp", "built in", root / "libexec/superfluid/superfluid-worker-llamacpp")], "not in"),
+            ([self.row("llamacpp", "shipped with superfluid", root / "libexec/superfluid/gone")], "is not there"),
+            ([self.row("llamacpp", "installed", self.tmp / "home/runtimes/llamacpp/b1/bin/superfluid-worker-llamacpp")], "no llama.cpp worker"),
+            ([shipped, self.row("mlx", "shipped with superfluid", other / "libexec/superfluid/superfluid-worker-mlx")], "the mlx worker"),
+            ([], "no llama.cpp worker"),
+        ):
+            with self.subTest(rows=rows), self.assertRaisesRegex(own_workers.NotOwn, why):
+                own_workers.own_workers(rows, root)
+        # The Windows release finds llama.cpp in the daemon, and still has to carry what it ships in libexec.
+        bare = self.tmp / "bare" / "release"
+        (bare / "bin").mkdir(parents=True)
+        (bare / "bin" / "superfluid-workerd.exe").write_bytes(b"")
+        (bare / "libexec" / "superfluid").mkdir(parents=True)
+        with self.assertRaisesRegex(own_workers.NotOwn, "holds nothing"):
+            own_workers.own_workers([self.row("llamacpp", "built in", bare / "bin" / "superfluid-workerd.exe")], bare)
+        p = subprocess.run([sys.executable, str(PACKAGING / "own_workers.py"), str(root)], input="[]", capture_output=True, text=True)
+        self.assertEqual((p.returncode, p.stdout), (1, ""))
+        self.assertIn("no llama.cpp worker of the package's own", p.stderr)
+
+    def test_the_sources_are_the_daemons_names_and_try_install_runs_this_check(self):
+        src = (ROOT / "crates/superfluid-daemon/src/runtimes.rs").read_text(encoding="utf-8")
+        for source in own_workers.OWN:
+            self.assertIn(f'=> "{source}",', src)
+        script = (PACKAGING / "try-install.sh").read_text(encoding="utf-8")
+        self.assertIn('runtimes --json | "$python" "$here/own_workers.py" "$where"', script)
 
 
 class FormulaTest(Scratch):

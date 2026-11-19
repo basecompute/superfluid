@@ -24,6 +24,7 @@ Every package carries the release tree unchanged, so superfluid finds its runtim
 | `homebrew/formula.py` | `superfluid.rb`, from a template; only the version, checksums and minimum macOS change between releases |
 | `build.py` | all of the above for one release; `--targets` packages the platforms it names alone |
 | `try-install.sh` | installs one kind (pip into a venv, npm into a throwaway global prefix, brew from a throwaway local tap, trusted for the run where Homebrew asks) and checks the commands run the release inside it; on Windows it runs in Git Bash |
+| `own_workers.py` | `try-install.sh`'s check that the installed package runs its own runtime workers: an adapter the release ships, or for a runtime linked into the daemon (the Windows release's llama.cpp) the package's `superfluid-workerd` |
 
 To build and try a release on this machine (nothing is uploaded; `brew` installs into your Homebrew and uninstalls again, and downloads the tarball from GitHub):
 

@@ -17,6 +17,7 @@ set -eu
 
 [ $# -eq 3 ] || { echo "usage: $0 pip|npm|brew <out-dir> <version>" >&2; exit 2; }
 kind=$1
+here=$(cd "$(dirname "$0")" && pwd)
 out=$(cd "$2" && pwd)
 version=$3
 
@@ -33,6 +34,7 @@ case "$(uname -s)" in
     # program does not read: the same folders as Windows names them.
     tmp=$(cygpath -m "$tmp")
     out=$(cygpath -m "$out")
+    here=$(cygpath -m "$here")
     ;;
 esac
 # What a Windows program printed, less the carriage returns Python and
@@ -54,17 +56,10 @@ check() {
   for cmd in superfluid-workerd superfluid-noded; do
     "$bin/$cmd" --help 2>&1 | grep -q "usage: $cmd" || fail "$cmd did not start"
   done
-  # Its shipped runtime workers are found beside the real binary, in the package.
-  "$bin/superfluid" runtimes --json | "$python" -c '
-import json, os, sys
-real = lambda p: os.path.normcase(os.path.realpath(p))
-where = real(sys.argv[1])
-shipped = {r["id"]: r["worker"]["path"] for r in json.load(sys.stdin) if (r.get("worker") or {}).get("source") == "shipped with superfluid"}
-assert "llamacpp" in shipped, f"no shipped llama.cpp worker: {shipped}"
-for rid, path in shipped.items():
-    assert real(path).startswith(where + os.sep), f"{rid} worker {path} is not in {where}"
-print("workers:", ", ".join(sorted(shipped)))
-' "$where" || fail "the shipped workers were not found in $where"
+  # Its runtime workers are the package's own: an adapter the release ships,
+  # or, for a runtime linked into the daemon (the Windows release's llama.cpp),
+  # the package's superfluid-workerd.
+  "$bin/superfluid" runtimes --json | "$python" "$here/own_workers.py" "$where" || fail "the package's own workers were not found in $where"
   # 0.1.4 is the last release that does not read installed-by. 0.1.5 named
   # every manager's command and left the update to the user ("was installed
   # by <manager>; `<command>` updates it", exit 1). From 0.1.6 on, `self
