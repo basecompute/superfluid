@@ -136,7 +136,7 @@ The fleet token (`superfluid fleet token`: 32 random bytes as hex at `$SUPERFLUI
 - The head reads the token from `--fleet-auth <path>`, else `$SUPERFLUID_HOME/fleet/token`. `superfluid-noded` reads it from `--auth-file <path>`, else the same path. `superfluid node join --token <value>` keeps the value at that path.
 - With no token, the links are plain TCP and nothing is checked. A head with `--fleet-listen` and no token takes only nodes on its own machine; `node join` with no token dials only a head on loopback.
 - `superfluid-noded` bound off loopback refuses to start without a token, unless `--insecure-no-auth`, which accepts any peer that reaches it. Use that only behind a transport that already authenticates (WireGuard, Tailscale).
-- `--api-key`, `--key-policy` and `--rate-limit` protect the head's own HTTP listener (a policy's class ceilings do not apply: the head has no scheduler).
+- `--api-key`, `--key-policy` and `--rate-limit` protect the head's own HTTP listener and a policy's class ceilings apply there as on a single server.
 
 ## Fleet discovery
 

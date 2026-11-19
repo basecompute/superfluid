@@ -63,6 +63,10 @@ Options:
   --runtime <id>          The runtime, when the model's format does not decide it
   --max-context <N>       This node's context window [default: sized for this device]
   --max-batch <N>         This node's lanes, each model's [default: 8]
+  --class-lanes <class>=N[,...]
+                          Caps this node's lanes per QoS class, each model's, as
+                          `serve --class-lanes` does: the head sends each generation
+                          in its request's class [default: uncapped]
   --identity <name>       The name the head shows for this node [default: the host name]
   --model-name <id>       The name the head matches on, once per --model [default: an
                           id's own name; a path's own name, or the head's one model when
@@ -232,6 +236,9 @@ fn join(args: &[String]) {
     }
     opts.lanes = opts.lanes.max(1);
     let max_batch = opts.lanes;
+    if let Err(e) = opts.class_lanes() {
+        fail(e);
+    }
     let state = NodeState::open(&home, &identity, opts.parks(park)).unwrap_or_else(|e| fail(e));
     let sources = match &follows {
         Some(serving) => vec![serving.id.clone()],
@@ -957,6 +964,8 @@ pub struct NodeOptions {
     pub max_context: Option<i32>,
     /// `--max-batch`.
     pub lanes: u32,
+    /// `--class-lanes`, as given; [`NodeOptions::class_lanes`] reads it against the lanes.
+    pub class_lanes: Option<String>,
     pub offline: bool,
     /// `--speculate`, kept as named, `off` included.
     pub speculate: Option<String>,
@@ -976,6 +985,7 @@ impl Default for NodeOptions {
             runtime: None,
             max_context: None,
             lanes: 8,
+            class_lanes: None,
             offline: false,
             speculate: None,
             park_lossy: false,
@@ -992,6 +1002,7 @@ impl NodeOptions {
     pub fn take(&mut self, arg: &str, rest: &mut std::slice::Iter<'_, String>) -> Result<bool, String> {
         match arg {
             "--speculate" => self.speculate = Some(rest.next().cloned().ok_or_else(|| format!("{arg} takes a value"))?),
+            "--class-lanes" => self.class_lanes = Some(rest.next().cloned().ok_or_else(|| format!("{arg} takes a value"))?),
             "--park-lossy" => self.park_lossy = true,
             _ => {
                 let mut missing = false;
@@ -1016,6 +1027,21 @@ impl NodeOptions {
     /// Whether the node keeps its prompts' prefixes on disk: `--park`, or `--park-lossy`.
     pub fn parks(&self, park: bool) -> bool {
         park || self.park_lossy
+    }
+
+    /// The lanes each QoS class may hold of the node's, each model's with several
+    /// ([`class_lanes_of`]); an error for a `--class-lanes` that does not read against them.
+    pub fn class_lanes(&self) -> Result<[usize; 4], String> {
+        class_lanes_of(self.class_lanes.as_deref(), self.lanes)
+    }
+}
+
+/// `--class-lanes` on a node: the lanes each QoS class may hold of `lanes`, as
+/// [`crate::qos::parse_class_lanes`] reads them for `serve`; uncapped when not given.
+pub fn class_lanes_of(spec: Option<&str>, lanes: u32) -> Result<[usize; 4], String> {
+    match spec {
+        None => Ok([0; 4]),
+        Some(spec) => crate::qos::parse_class_lanes(spec, lanes.max(1) as usize).map_err(|e| format!("--class-lanes: {e}")),
     }
 }
 
@@ -1045,6 +1071,7 @@ struct Planned {
 /// ([`NodeState::of_model`]).
 pub fn load_nodes(models: &[String], opts: &NodeOptions, state: &NodeState) -> Result<Vec<LoadedNode>, String> {
     let lanes = opts.lanes.max(1);
+    opts.class_lanes()?;
     if models.is_empty() && opts.runtime.as_deref() != Some("mock") {
         return Err("no model to serve: give --model".into());
     }
@@ -1159,6 +1186,7 @@ fn load_mock_as(opts: &NodeOptions, state: &NodeState, name: &str) -> Result<Loa
     }
     let kv_bits = opts.engine.kv_bits_for(opts.park_lossy)?;
     let lanes = opts.lanes.max(1);
+    opts.class_lanes()?;
     let engine = crate::linked::engine("mock").ok_or("this build does not link the mock engine")?;
     let args = superfluid_adapter_kit::WorkerArgs {
         max_context: opts.max_context.unwrap_or(4096).max(512),
@@ -1202,6 +1230,8 @@ fn daemon_options(opts: &NodeOptions, state: &NodeState, spec: NodeSpeculation, 
     let engine = &opts.engine;
     crate::DaemonOptions {
         max_lanes: opts.lanes.max(1) as usize,
+        // Read before any model is loaded (load_nodes), so it reads here.
+        class_lanes: opts.class_lanes().unwrap_or_default(),
         park_dir: state.park.clone(),
         park_lossy: opts.park_lossy,
         park_budget_bytes: engine.park_budget_gb.saturating_mul(1 << 30),
@@ -1796,6 +1826,25 @@ mod tests {
         assert_eq!(node_options(&["--spec-draft-tokens", "16"]).unwrap_err(), "--spec-draft-tokens must be in 1..=15");
         assert_eq!(node_options(&["--prefill-budget"]).unwrap_err(), "--prefill-budget takes a value");
         assert!(!NodeOptions::default().take("-x", &mut [].iter()).unwrap(), "not one of them");
+    }
+
+    #[test]
+    fn a_node_caps_its_lanes_per_class_as_serve_does() {
+        assert_eq!(class_lanes_of(None, 8), Ok([0; 4]), "uncapped");
+        assert_eq!(class_lanes_of(Some("background=2,agent=6"), 8), Ok([0, 0, 6, 2]));
+        let e = class_lanes_of(Some("agent=9"), 8).unwrap_err();
+        assert!(e.starts_with("--class-lanes: ") && e.contains("exceeds"), "{e}");
+        let state = NodeState::scratch().unwrap();
+        let capped = |spec: &str| NodeOptions { lanes: 2, class_lanes: Some(spec.into()), ..NodeOptions::default() };
+        assert_eq!(capped("agent=1").class_lanes(), Ok([0, 0, 1, 0]));
+        load_mock_node(&capped("agent=1"), &state).expect("a capped node loads");
+        let e = load_mock_node(&capped("agent=3"), &state).map(|_| ()).unwrap_err();
+        assert!(e.starts_with("--class-lanes: "), "refused before the engine opens: {e}");
+        let mut opts = NodeOptions::default();
+        let args = ["--class-lanes".to_string(), "background=2".to_string()];
+        let mut it = args[1..].iter();
+        assert!(opts.take(&args[0], &mut it).unwrap(), "read with the flags a node takes from serve");
+        assert_eq!(opts.class_lanes.as_deref(), Some("background=2"));
     }
 
     #[test]

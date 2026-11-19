@@ -17,7 +17,7 @@ const DEFAULT_LANES: u32 = 8;
 fn usage() -> ! {
     eprintln!(
         "usage: superfluid-noded --model <path|org/model[:tag]> [--model ...] [--listen <ip:port>] [--auth-file <path>] \
-         [--runtime <id>] [--model-name <id> ...] [--max-context N] [--max-batch N] [--identity <name>] \
+         [--runtime <id>] [--model-name <id> ...] [--max-context N] [--max-batch N] [--class-lanes <class>=N[,...]] [--identity <name>] \
          [--offline] [--speculate <strategy|off>] [--park] [--park-lossy] [--park-budget-gb N] \
          [--kv-bits <0|4|8|16|84>] [--<runtime>-<name> <value>] [--prefill-budget N] \
          [--tick-decode-budget N] [--tick-target-ms N] [--spec-* ...] [--otlp-endpoint <url> [--otlp-* ...]] \
@@ -39,6 +39,8 @@ fn usage() -> ! {
           `superfluid fleet token`); with it the link is encrypted and both ends checked.\n\
           --park keeps each prompt's prefix on disk under $SUPERFLUID_HOME/fleet/nodes/<identity>/park,\n\
           so a restarted node starts the head's sessions warm.\n\
+          --class-lanes caps this node's lanes per QoS class, each model's, as `superfluid serve\n\
+          --class-lanes` does; the head sends each generation in its request's class.\n\
           There is no sampling flag here: a fleet generation must match the local path\n\
           token for token, so the node applies only what the request carries. The head\n\
           resolves it, its own --temperature, --repeat-penalty, --presence-penalty and\n\
@@ -107,6 +109,9 @@ fn main() {
     let identity = identity.unwrap_or_else(superfluid_daemon::metrics::hostname);
     let lanes = max_batch.unwrap_or(DEFAULT_LANES).max(1);
     opts.lanes = lanes;
+    if let Err(e) = opts.class_lanes() {
+        fail(2, e);
+    }
     let mock = opts.runtime.as_deref() == Some("mock");
     if models.is_empty() && !mock {
         usage();

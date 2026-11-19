@@ -232,7 +232,6 @@ pub fn run(args: &[String], embedding: &Embedding) {
     let mut http_qos_header = true;
     let mut http_allow_batch_invariant = false;
     let mut key_policy_path: Option<PathBuf> = None;
-    let mut qos_flags: Vec<&'static str> = Vec::new();
     let mut log_dir: Option<PathBuf> = None;
     let mut log_filter = String::from("info");
     let mut speculate: Option<String> = None;
@@ -386,10 +385,8 @@ pub fn run(args: &[String], embedding: &Embedding) {
             "--starvation-ticks" => starvation_ticks = num(a, val()),
             "--class-lanes" => {
                 class_lanes_spec = Some(val());
-                qos_flags.push("--class-lanes");
             }
             "--http-default-qos" => {
-                qos_flags.push("--http-default-qos");
                 let v = val();
                 http_default_qos.class = superfluid_daemon::qos::parse(&v).unwrap_or_else(|| {
                     superfluid_daemon::events::fail(2, format!(
@@ -400,11 +397,9 @@ pub fn run(args: &[String], embedding: &Embedding) {
             }
             "--no-http-qos-header" => {
                 http_qos_header = false;
-                qos_flags.push("--no-http-qos-header");
             }
             "--http-allow-batch-invariant" => {
                 http_allow_batch_invariant = true;
-                qos_flags.push("--http-allow-batch-invariant");
             }
             "--key-policy" => key_policy_path = Some(PathBuf::from(val())),
             "--completion-deadline-ms" => {
@@ -776,13 +771,15 @@ pub fn run(args: &[String], embedding: &Embedding) {
                 Err(e) => eprintln!("superfluid: not announced on the local network ({e}); give nodes this head's address"),
             }
         }
-        if !qos_flags.is_empty() {
-            superfluid_daemon::events::fail(2, format!(
-                "{} not supported in fleet-head mode: the fleet head has no local \
-                 scheduler, and Link F carries no QoS class, so a node runs every \
-                 generation in one class and a network has no place to set them",
-                qos_flags.join(", ")
-            ));
+        // The head resolves each request's class as a single server does and sends it to the
+        // node with the session; the node's scheduler admits it there, under its own caps.
+        if class_lanes_spec.is_some() {
+            superfluid_daemon::events::fail(
+                2,
+                "--class-lanes is not supported in fleet-head mode (lane caps are a scheduler's, \
+                 and each node runs its own); set it on each node instead: \
+                 `superfluid node join --class-lanes` or `superfluid-noded --class-lanes`",
+            );
         }
         if fim_model.is_some() {
             superfluid_daemon::events::fail(
@@ -796,12 +793,6 @@ pub fn run(args: &[String], embedding: &Embedding) {
         eprintln!(
             "superfluid: fleet-head openai api on http://{addr} over {n_nodes} node(s), {reached} reachable"
         );
-        if key_policy.is_some() {
-            eprintln!(
-                "superfluid: --key-policy at the fleet head: keys, rate and concurrency limits \
-                 apply; class and max_class do not (the head has no local scheduler)"
-            );
-        }
         // A model given by id is served once a node serving it has shared its tokenizer.
         let served: Vec<(String, Box<dyn superfluid_daemon::TextCodec + Send + Sync>)> = served
             .into_iter()
@@ -873,13 +864,17 @@ pub fn run(args: &[String], embedding: &Embedding) {
                     spec_max_temperature: op_spec_max_temperature,
                     fallback: embedding.sampling_fallback,
                 },
+                qos: superfluid_daemon::openai::HttpQosPolicy {
+                    default: http_default_qos,
+                    honor_headers: http_qos_header,
+                    allow_batch_invariant: http_allow_batch_invariant,
+                },
                 keys: key_policy.clone(),
                 nonstream_keepalive_secs: nonstream_keepalive,
                 surface: embedding.http,
                 model_naming: embedding.model_naming,
                 identity: embedding.identity.clone(),
                 idempotency_dir: Some(sessions.join("idempotency")),
-                ..Default::default()
             },
         )
         .expect("fleet serve");

@@ -303,7 +303,8 @@ fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<(GenerateOptsMsg, V
         && !x.want_logprobs
         && grammar.is_none()
         && logit_bias.is_none()
-        && job.media.is_empty();
+        && job.media.is_empty()
+        && !job.batch_invariant;
     if plain {
         return Ok(None);
     }
@@ -325,20 +326,18 @@ fn options(d: &Dispatch, job: &GenerateJob) -> Result<Option<(GenerateOptsMsg, V
         grammar,
         logit_bias,
         media,
+        batch_invariant: job.batch_invariant,
     };
     Ok(Some((opts, blobs)))
 }
 
-/// A batch-invariant lane asked of a fleet-backed daemon: a node batches each generation with
-/// the others it runs, and Link F cannot ask it not to, so the head refuses rather than answer
-/// from a shared batch.
-pub(crate) fn batch_invariant_refused() -> DaemonError {
-    DaemonError::Unsupported(crate::Refusal::new(
-        "unsupported_on_fleet",
-        None,
-        "a fleet head cannot give a batch-invariant lane: its nodes batch each generation with the others they run; \
-         ask a node's own server for one",
-    ))
+/// What a job asks of the node it is placed on ([`crate::fleet_manager::RequestShape::needs`]).
+pub(crate) fn needs(batch_invariant: bool) -> u64 {
+    if batch_invariant {
+        superfluid_proto::handshake::BATCH_INVARIANT
+    } else {
+        0
+    }
 }
 
 /// What a fleet-backed daemon says it can do: generation, and a reason for each thing that does
@@ -370,15 +369,12 @@ fn run(d: &Dispatch, bus: &Arc<SessionBus>, job: GenerateJob) {
 /// Places the job on a node, streams its tokens through a lane output, and ends the lane as
 /// the scheduler would.
 fn generate(d: &Dispatch, bus: &SessionBus, job: &GenerateJob) -> Result<LaneEvent, DaemonError> {
-    // A session made batch-invariant before its store was served over the fleet still asks.
-    if job.batch_invariant {
-        return Err(batch_invariant_refused());
-    }
     let opts = options(d, job)?;
     let fs = NEXT_FLEET_SESSION.fetch_add(1, Ordering::Relaxed);
     // A deadline that passes while every connection to a node is held expires the job unstarted,
-    // as a local scheduler expires one it could not admit in time.
-    if d.fleet.place_by(fs, job.params, job.class, "raw", &d.model, &job.stream, job.max_tokens as u64, job.deadline)?.is_none() {
+    // as a local scheduler expires one it could not admit in time. The class goes to the node
+    // with the session; a batch-invariant job goes only to a node that can run it alone.
+    if d.fleet.place_by(fs, job.params, job.class, needs(job.batch_invariant), "raw", &d.model, &job.stream, job.max_tokens as u64, job.deadline)?.is_none() {
         return Ok(LaneEvent::Expired);
     }
     // Removes the session from the fleet however this ends.
