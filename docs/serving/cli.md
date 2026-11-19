@@ -89,7 +89,7 @@ With no `--runtime`, a model id goes to `llamacpp` when its repo name contains `
 | `--api-key-file <path>` | | The key, read from this file with the whitespace around it trimmed; a missing or empty file is refused, one group or others can read is warned about. Refused beside `--api-key`. With neither flag, `SUPERFLUID_API_KEY` gives the key. |
 | `--key-policy <file.json>` | none | Per-key class, rate, concurrency and admin rights; turns authentication on. See [Security](../deployment/security.md#key-policy). |
 | `--rate-limit <rpm>` | 0 (off) | Requests per minute per client IP. |
-| `--drain-timeout <sec>` | 60 | On `SIGUSR1`, how long in-flight requests get before exit. |
+| `--drain-timeout <sec>` | 60 | On `SIGUSR1` (`Ctrl+Break` on Windows), how long in-flight requests get before exit. |
 | `--nonstream-keepalive <sec>` | 0 (off) | Write a space every `<sec>` into a pending non-streaming response. |
 | `--web <127.0.0.1:port>` | off | Loopback browser transport for the [session API](session_api.md), with a minted token. |
 | `--web-origin <url>` | none | An allowed `Origin` for `--web`; repeatable. |
@@ -309,7 +309,7 @@ superfluid self use <v>
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. See [Updating Superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. On Windows a release is replaced where it is by its install script, which `update` names; `use` and `install` are not offered there. See [Updating Superfluid](updating.md).
 
 ## `superfluid session`
 

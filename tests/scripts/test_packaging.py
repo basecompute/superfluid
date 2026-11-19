@@ -190,9 +190,9 @@ class ContractTest(unittest.TestCase):
         for line in (build_wheel.INSTALLED_BY, build_packages.INSTALLED_BY, formula.INSTALLED_BY):
             self.assertRegex(line, r"^[^:\n]+: \S.*$", "parsed by package_manager() in selfupdate.rs")
 
-    def test_every_target_release_yml_builds_is_packaged(self):
+    def test_every_target_release_yml_builds_is_packaged_or_a_tarball_only(self):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
-        self.assertEqual(set(re.findall(r"^\s+target: (\S+)$", workflow, re.M)), set(release.TARGETS))
+        self.assertEqual(set(re.findall(r"^\s+target: (\S+)$", workflow, re.M)), set(release.TARGETS) | set(release.TARBALL_ONLY))
         self.assertEqual(set(build_packages.TARGETS), set(release.TARGETS))
 
     def test_the_npm_launcher_names_the_packages_the_builder_makes(self):

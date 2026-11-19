@@ -40,6 +40,9 @@ TARGETS = {
     "x86_64-unknown-linux-gnu": {"format": "elf", "arch": "x86_64"},
     "aarch64-unknown-linux-gnu": {"format": "elf", "arch": "aarch64"},
 }
+# Released as a tarball only, which scripts/install.ps1 installs: no wheel, npm
+# package or bottle carries it yet.
+TARBALL_ONLY = ("x86_64-pc-windows-msvc",)
 # The commands a release puts on PATH: LINKED in crates/superfluid-daemon/src/selfupdate.rs.
 COMMANDS = ("superfluid", "superfluid-workerd", "superfluid-noded")
 # INSTALLED_BY in crates/superfluid-daemon/src/selfupdate.rs.

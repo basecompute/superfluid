@@ -10,7 +10,7 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths: ["docs/**", "docs-site/**", "scripts/install.sh", ".github/workflows/pages.yml"]
+    paths: ["docs/**", "docs-site/**", "scripts/install.sh", "scripts/install.ps1", ".github/workflows/pages.yml"]
   workflow_dispatch:
     inputs:
       latest:
@@ -64,6 +64,7 @@ jobs:
           set -euo pipefail
           cd ../pages
           cp "$GITHUB_WORKSPACE/scripts/install.sh" install.sh
+          cp "$GITHUB_WORKSPACE/scripts/install.ps1" install.ps1
           echo superfluid.sh > CNAME
           touch .nojekyll
           home=dev

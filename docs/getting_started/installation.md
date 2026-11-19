@@ -12,7 +12,7 @@ Superfluid is one daemon binary plus a worker per runtime. The runtimes themselv
 | Linux arm64 | CUDA, Vulkan or CPU | no | CUDA (NVIDIA GPU) |
 | Windows x86-64 | Vulkan or CPU; CUDA or ROCm by name | no | no |
 
-Windows is new: it builds from source ([Windows](#windows) below), and no release is published for it yet.
+Windows is new: it serves GGUF models through llama.cpp, from a release of its own or a source build ([Windows](#windows) below).
 
 ## Install a release
 
@@ -20,7 +20,7 @@ Windows is new: it builds from source ([Windows](#windows) below), and no releas
 curl -fsSL https://basecompute.co/sf/install.sh | sh
 ```
 
-Prebuilt tarballs exist for macOS arm64 and Linux x86-64 and arm64 (glibc 2.28 or newer: Ubuntu 20.04, Debian 11, RHEL 8 and later); other platforms build from source. The script checks the tarball's SHA-256 and keeps the release under `~/.superfluid/versions/<v>`. It links `superfluid`, `superfluid-workerd` and `superfluid-noded` from `~/.local/bin` into it. On Apple silicon, Linux arm64 and Linux x86-64 with an AMD GPU it also runs `superfluid runtime install basert`, which installs the baseRT engine under `~/.superfluid/runtimes`.
+Prebuilt tarballs exist for macOS arm64, Linux x86-64 and arm64 (glibc 2.28 or newer: Ubuntu 20.04, Debian 11, RHEL 8 and later) and Windows x86-64, which has an install script of its own ([Windows](#windows)); other platforms build from source. The script checks the tarball's SHA-256 and keeps the release under `~/.superfluid/versions/<v>`. It links `superfluid`, `superfluid-workerd` and `superfluid-noded` from `~/.local/bin` into it. On Apple silicon, Linux arm64 and Linux x86-64 with an AMD GPU it also runs `superfluid runtime install basert`, which installs the baseRT engine under `~/.superfluid/runtimes`.
 
 | variable | default | meaning |
 |---|---|---|
@@ -101,17 +101,35 @@ SUPERFLUID_WORKER_MLX=target/adapters/superfluid-worker-mlx superfluid runtime i
 
 ### Windows
 
-Windows 10 1803 or later, x86-64. The daemon builds with llama.cpp and without baseRT, MLX or the terminal monitor, none of which has a Windows build:
+Windows 10 1803 or later, x86-64. Superfluid serves GGUF models through llama.cpp there; baseRT and MLX have no Windows engine.
+
+A release, in PowerShell:
+
+```powershell
+irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex
+superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
+```
+
+The script checks the tarball's SHA-256, puts the release (`bin\` and `libexec\superfluid\`) in `%LOCALAPPDATA%\Programs\superfluid` in place of the one there, and adds its `bin\` to your own `PATH`. Nothing needs an administrator. Run it again to update: it refuses while a server from that folder is running.
+
+| variable | default | meaning |
+|---|---|---|
+| `SUPERFLUID_VERSION` | latest release | a release tag, e.g. `v0.2.0` |
+| `SUPERFLUID_PREFIX` | `%LOCALAPPDATA%\Programs\superfluid` | where the release goes |
+| `SUPERFLUID_NO_PATH` | unset | set to anything to leave `PATH` as it is |
+| `SUPERFLUID_RELEASE_URL` | GitHub | where the release's files are: a mirror, or a folder (`file:///C:/...`) |
+
+From source, the daemon builds with llama.cpp and the terminal monitor, and without its default features, which link baseRT:
 
 ```powershell
 git clone https://github.com/basecompute/superfluid; cd superfluid
-cargo build --release -p superfluid --no-default-features --features llamacpp
+cargo build --release -p superfluid --no-default-features --features llamacpp,tui
 cargo build --release -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
 $env:PATH = "$PWD\target\release;$env:PATH"
 superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 ```
 
-Either Rust toolchain builds it, with a C compiler beside it: `stable-x86_64-pc-windows-msvc` with the Visual Studio Build Tools, or `stable-x86_64-pc-windows-gnu` with a MinGW-w64 `gcc` on `PATH`. Neither the second nor anything Superfluid does afterwards needs administrator rights: rustup installs under your profile, a MinGW-w64 build such as [WinLibs](https://winlibs.com) unpacks anywhere, and Superfluid keeps to `%USERPROFILE%\.superfluid`, the Hugging Face cache and your temporary directory.
+Either Rust toolchain builds it, with a C compiler beside it: `stable-x86_64-pc-windows-msvc` with the Visual Studio Build Tools (what a release is built with), or `stable-x86_64-pc-windows-gnu` with a MinGW-w64 `gcc` on `PATH`. Neither the second nor anything Superfluid does afterwards needs administrator rights: rustup installs under your profile, a MinGW-w64 build such as [WinLibs](https://winlibs.com) unpacks anywhere, and Superfluid keeps to `%USERPROFILE%\.superfluid`, the Hugging Face cache and your temporary directory.
 
 `superfluid runtime install llamacpp` takes llama.cpp's Vulkan build where a Vulkan driver is installed, with the CPU build to fall back on. An NVIDIA or AMD HIP install is not looked for yet; `--backend cuda` or `--backend rocm` names one.
 
@@ -119,11 +137,11 @@ What differs from macOS and Linux:
 
 | | on Windows |
 |---|---|
-| `superfluid self` | not offered; build the next version from source |
-| `superfluid top`, the `serve` TUI | not built (`tui` feature) |
-| `superfluid stop` | ends the server outright; there is no signal to ask it to finish first, and none to drain it (`SIGUSR1`) |
+| `superfluid self update` | names the install script, which replaces the release where it is; `self use` and `self install` are not offered, since versions side by side sit behind symbolic links |
+| draining a server | `Ctrl+Break` in its console, where `kill -USR1` is elsewhere; a server with no console (one `superfluid launch` started) cannot be asked |
+| `superfluid stop` | ends the server outright, as `SIGTERM` does elsewhere |
 | `$SUPERFLUID_HOME/runtimes/<id>/current` | a file that holds the default install's name, not a link: an ordinary user may make neither a symbolic link nor a junction every process follows |
-| the native session API | the same unix socket, `%USERPROFILE%\.superfluid\superfluid.sock` |
+| npm, PyPI, Homebrew | no Windows package yet: the install script or a source build |
 
 ## Install a runtime
 

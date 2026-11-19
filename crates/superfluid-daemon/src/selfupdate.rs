@@ -27,6 +27,9 @@ pub const INSTALLED_BY: &str = "installed-by";
 /// The stamp basert writes at the root of the superfluid it installs for `basert serve`, before it also wrote an
 /// `installed-by` file naming itself: such a copy is basert's, not the install script's.
 const BASERT_STAMP: &str = ".release";
+/// What `scripts/install.ps1` writes as its name in `installed-by`, and the command that runs it again.
+const INSTALL_PS1: &str = "install.ps1";
+const INSTALL_PS1_COMMAND: &str = "irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex";
 /// How long a new copy's `--version` or `runtimes --json` may take: it runs under the lock, which a copy that hangs
 /// would hold for every later update. Longer than the runtime checks `runtimes --json` makes, a minute each at most.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -55,6 +58,10 @@ a terminal), and for pip in an environment or a project's npm dependency it name
 The superfluid basert installs for `basert serve` is basert's: this command runs
 `basert superfluid install`, which picks the release that serves basert's engine.
 
+On Windows a release is kept in one place and replaced there by the install script, which
+`self update` names; `self use` and `self install` are not offered. Versions side by side sit
+behind symbolic links, which Windows keeps for administrators.
+
 `superfluid serve` checks for a newer release once a day, after the server is up, and prints
 one line; SUPERFLUID_NO_UPDATE_CHECK=1 or --offline turns that off. A release is announced a
 few days after it is published.
@@ -66,6 +73,7 @@ pub fn target() -> Option<&'static str> {
         ("macos", "aarch64") => Some("aarch64-apple-darwin"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
         ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+        ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
         _ => None,
     }
 }
@@ -300,7 +308,11 @@ pub enum Installed {
 }
 
 pub fn installed_as(exe: &Path) -> Installed {
-    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let exe = crate::sys::canonical(exe).unwrap_or_else(|_| exe.to_path_buf());
+    // Neither layout of versions exists on Windows: a release there is the install script's.
+    if cfg!(windows) {
+        return Installed::Other(exe);
+    }
     let parts: Vec<&std::ffi::OsStr> = exe.iter().collect();
     let n = parts.len();
     if n >= 4 && parts[n - 2] == "bin" && parts[n - 4] == "versions" {
@@ -329,7 +341,7 @@ fn package_manager(exe: &Path) -> Option<(String, String)> {
 
 /// The command that updates the running superfluid, for the line `serve` prints when a newer release is out.
 fn update_command(exe: &Path) -> String {
-    let exe = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let exe = crate::sys::canonical(exe).unwrap_or_else(|_| exe.to_path_buf());
     match installed_as(&exe) {
         Installed::Other(p) => delegate(&p).map(|d| d.command().to_string()),
         _ => None,
@@ -342,7 +354,7 @@ fn not_ours(exe: &Path) -> String {
     if let Some(d) = delegate(exe) {
         return format!("{p} was installed by {}; `{}` updates it", d.manager(), d.command());
     }
-    let how = if p.contains("/target/") { "it is a source build: build it again" } else { "update it the way it was installed" };
+    let how = if p.contains("/target/") || p.contains("\\target\\") { "it is a source build: build it again" } else { "update it the way it was installed" };
     format!("{p} was not installed by the install script or by `superfluid self update`; {how}")
 }
 
@@ -392,6 +404,7 @@ fn delegate(exe: &Path) -> Option<Delegate> {
         Some("npm") => npm(&p),
         Some("pip") => pip(&p),
         Some("cargo") => cargo(bin),
+        Some(INSTALL_PS1) => install_ps1(),
         Some(_) => {
             let (manager, command) = named?;
             Delegate::Name { manager, command, why: "superfluid runs only Homebrew, npm, pipx, uv, cargo and basert itself".into() }
@@ -401,6 +414,8 @@ fn delegate(exe: &Path) -> Option<Delegate> {
         None if p.contains("/node_modules/") => npm(&p),
         None if p.contains("/site-packages/") => pip(&p),
         None if p.contains("/.cargo/bin/") => cargo(bin),
+        // A release unpacked by hand on Windows: the script puts the next one in its place.
+        None if cfg!(windows) && root.join("libexec").join("superfluid").is_dir() => install_ps1(),
         None => return None,
     })
 }
@@ -514,6 +529,16 @@ fn pip(p: &str) -> Delegate {
     };
     let why = "its environment may be a project's, pinned by a lock file, or the system's: run it in that environment yourself";
     Delegate::Name { manager: "pip".into(), command, why: why.into() }
+}
+
+/// The Windows install script, which replaces a release where it is. Only named: the copy it replaces is the one that
+/// would be running it, and a server started from that copy keeps its files open.
+fn install_ps1() -> Delegate {
+    Delegate::Name {
+        manager: "the install script".into(),
+        command: INSTALL_PS1_COMMAND.into(),
+        why: "in PowerShell, with no server of this copy running: it replaces the files this command runs from".into(),
+    }
 }
 
 /// `cargo install superfluid` by the cargo beside the copy.
@@ -1365,8 +1390,7 @@ fn announce(home: &Path, mut check: Check, command: &str) -> Option<String> {
 
 /// What `serve` runs once the server is up: one listing read a day at most, one line per new release.
 pub fn check_in_background(home: PathBuf, offline: bool) {
-    // Windows has no release to announce, nor a `superfluid self update` to install one with.
-    if offline || cfg!(windows) || std::env::var_os(NO_CHECK_ENV).is_some_and(|v| !v.is_empty() && v != "0") {
+    if offline || std::env::var_os(NO_CHECK_ENV).is_some_and(|v| !v.is_empty() && v != "0") {
         return;
     }
     std::thread::Builder::new()
@@ -1398,10 +1422,13 @@ fn usage() -> ! {
 
 /// `superfluid self <action> ...`; the exit code.
 pub fn run(args: &[String]) -> i32 {
-    // No release is published for Windows, and a version here is kept behind symbolic links,
-    // which an ordinary user cannot make there.
-    if cfg!(windows) {
-        eprintln!("superfluid: `superfluid self` is not offered on Windows yet; build the next version from source");
+    // A version is kept behind symbolic links, which an ordinary Windows user cannot make.
+    if cfg!(windows) && matches!(args.first().map(String::as_str), Some("use" | "install")) {
+        eprintln!(
+            "superfluid: `self {}` keeps versions side by side behind symbolic links, which Windows keeps for administrators; \
+             the install script replaces the release where it is: {INSTALL_PS1_COMMAND}",
+            args[0]
+        );
         return 1;
     }
     let home = crate::runtimes::default_home();
@@ -1474,6 +1501,34 @@ pub fn run(args: &[String]) -> i32 {
             print(install_from(&home, &catalog, &from, prefix.as_deref()))
         }
         _ => usage(),
+    }
+}
+
+#[cfg(test)]
+mod install_script_tests {
+    use super::*;
+
+    #[test]
+    fn a_release_the_windows_install_script_placed_is_updated_by_running_it_again() {
+        let root = std::env::temp_dir().join(format!("sf-self-ps1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::create_dir_all(root.join("libexec").join("superfluid")).unwrap();
+        let exe = root.join("bin").join(crate::sys::exe_name("superfluid"));
+        std::fs::write(&exe, b"").unwrap();
+        std::fs::write(root.join(INSTALLED_BY), format!("{INSTALL_PS1}: {INSTALL_PS1_COMMAND}\n")).unwrap();
+        assert!(matches!(installed_as(&exe), Installed::Other(_)), "it is the script's, not a version here");
+        let exe = crate::sys::canonical(&exe).unwrap();
+        match delegate(&exe) {
+            Some(Delegate::Name { manager, command, .. }) => {
+                assert_eq!((manager.as_str(), command.as_str()), ("the install script", INSTALL_PS1_COMMAND));
+            }
+            other => panic!("the script is named, never run: {other:?}"),
+        }
+        assert_eq!(update_command(&exe), INSTALL_PS1_COMMAND, "what `serve` says installs a newer release");
+        let refused = update(&root, &Catalog::from_env(), &exe, &Options::default()).unwrap_err();
+        assert!(refused.contains(INSTALL_PS1_COMMAND), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
