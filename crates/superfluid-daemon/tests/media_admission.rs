@@ -123,18 +123,30 @@ fn stall_beside(n: usize, encode: Duration) -> (Duration, Duration) {
 #[test]
 fn a_decoding_lane_keeps_ticking_while_another_request_encodes_its_images() {
     let encode = Duration::from_millis(150);
-    let runs: Vec<(usize, Duration)> = [1usize, 4, 8]
+    let runs: Vec<(u32, Duration, Duration)> = [1u32, 4, 8]
         .into_iter()
         .map(|n| {
-            let (gap, took) = stall_beside(n, encode);
+            let (gap, took) = stall_beside(n as usize, encode);
             eprintln!("[media-admission] images={n} encode={encode:?} longest_gap={gap:?} request={took:?}");
-            (n, gap)
+            (n, gap, took)
         })
         .collect();
-    for (n, gap) in runs {
-        // One image's encode (and a tick) between two of its ticks, at most;
-        // never every image of the request at once.
-        assert!(gap < encode * 2, "{n} images: the decoding lane stalled {gap:?} (one encode is {encode:?})");
+    // One image's encode (and a tick) between two of its ticks, at most; never
+    // every image of the request at once. Judged against the request's own time,
+    // not against the encode's sleep alone: the mock's ticks cost CPU time too,
+    // which a small runner stretches (a 3-core macOS runner took 320-345 ms for a
+    // gap that is 160 ms on a laptop, the same for 1, 4 and 8 images). Encoding
+    // an image at a time keeps the longest wait near one image's share of the
+    // request; encoding them all at admission made it nearly the whole request.
+    for (n, gap, took) in runs {
+        if n == 1 {
+            assert!(gap < encode * 4, "1 image: the decoding lane stalled {gap:?} (one encode is {encode:?})");
+        } else {
+            assert!(
+                gap * n < took * 2,
+                "{n} images: the decoding lane stalled {gap:?} of a request that took {took:?} (over two images' share)"
+            );
+        }
     }
 }
 
