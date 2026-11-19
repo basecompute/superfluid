@@ -56,6 +56,10 @@ Options:
   --model-name <id>       The name the head matches on [default: an id's own name; a
                           path's own name, or the head's one model when it serves one]
   --offline               Pull nothing; the model must be in the runtime's cache
+  --speculate <auto|prompt-lookup|mtp-head|<drafter>|off>
+                          Draft tokens and verify them, as `serve` does; also dflash:,
+                          dspark:, eagle3:, draft-model: <path or id>
+                          [default: auto on basert, else off]
   --park                  Keep each prompt's prefix on disk, under
                           $SUPERFLUID_HOME/fleet/nodes/<identity>/park, so a restarted node
                           starts the head's sessions warm
@@ -125,6 +129,7 @@ fn join(args: &[String]) {
     }
     let (mut head, mut model, mut token, mut runtime, mut identity, mut model_name) = (None, None, None, None, None, None);
     let (mut max_context, mut max_batch, mut offline, mut park) = (None, 8u32, false, false);
+    let mut speculate: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| fail(format!("{a} takes a value")));
@@ -137,6 +142,7 @@ fn join(args: &[String]) {
             "--max-context" => max_context = Some(val().parse().unwrap_or_else(|_| fail("--max-context takes a number"))),
             "--max-batch" => max_batch = val().parse().unwrap_or_else(|_| fail("--max-batch takes a number")),
             "--offline" => offline = true,
+            "--speculate" => speculate = Some(val()),
             "--park" => park = true,
             // Read before the rest by events::init.
             "--log-format" => drop(val()),
@@ -188,7 +194,8 @@ fn join(args: &[String]) {
         (None, Some(m)) => m.clone(),
         (None, None) => unreachable!("a node with no --model follows its head"),
     };
-    let loaded = load_node(&source, runtime.as_deref(), max_context, max_batch, offline, &state).unwrap_or_else(|e| fail(e));
+    let loaded = load_node(&source, runtime.as_deref(), max_context, max_batch, offline, speculate.as_deref(), &state)
+        .unwrap_or_else(|e| fail(e));
     eprintln!("superfluid: {}", loaded.summary);
     let model_name = match (&follows, model_name) {
         (Some(serving), _) => serving.name.clone(),
@@ -874,28 +881,31 @@ pub struct LoadedNode {
 
 /// A fleet node's model by path or id, as `superfluid serve` loads one: pulled when given by
 /// id, on its runtime (installed first if it never was), in a window sized for this device
-/// unless `max_context` pins it.
+/// unless `max_context` pins it, and speculating as `serve` does: with the strategy `speculate`
+/// names (`off` is none), else `auto` on the baseRT runtime, its drafter counted in the window.
 pub fn load_node(
     model: &str,
     runtime: Option<&str>,
     max_context: Option<i32>,
     lanes: u32,
     offline: bool,
+    speculate: Option<&str>,
     state: &NodeState,
 ) -> Result<LoadedNode, String> {
     let lanes = lanes.max(1);
     // The test engine, which needs no model, as `superfluid-noded --engine mock` serves it.
     if runtime == Some("mock") {
-        return load_mock_node(max_context, lanes, state);
+        return load_mock_node(max_context, lanes, speculate, state);
     }
     let catalog = Catalog::from_env();
     let runtime = runtime.map(|r| if r == "native" { "basert" } else { r });
     let (path, model_name, id) = resolve_model(&catalog, model, runtime, offline)?;
     let runtime = catalog.require(id).or_else(|_| crate::pulls::ensure_installed(&catalog, id, offline).map_err(String::from))?;
     let pulled = crate::pulls::looks_like_id(model).then(|| model.to_string());
+    let spec = node_speculation(speculate, &catalog, &runtime, &path, offline)?;
     let (ctx, sized) = match max_context {
         Some(n) => (n, format!("--max-context {n}")),
-        None => match device_window(&runtime, &path, lanes) {
+        None => match device_window(&runtime, &path, lanes, &spec.ranked) {
             Ok(n) => (n, "sized for this device".to_string()),
             Err(why) => (8192, format!("{why}; --max-context N pins it")),
         },
@@ -918,18 +928,20 @@ pub fn load_node(
     .inspect_err(|e| crate::events::emit("model.load.failed", serde_json::json!({"model": model_name, "error": e})))?;
     crate::events::emit("model.load.done", serde_json::json!({"model": model_name, "runtime": runtime.id.name(), "context": ctx, "lanes": lanes}));
     let summary = format!(
-        "runtime {} serves {}: context window {ctx} tokens ({sized}), {lanes} lanes",
+        "runtime {} serves {}: context window {ctx} tokens ({sized}), {lanes} lanes{}",
         runtime.id.name(),
-        path.display()
+        path.display(),
+        if spec.ranked.is_empty() { "" } else { ", 1 speculator" }
     );
-    let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, state)?;
+    let mut node = loaded(host, Box::new(NoCodec), lanes, model_name, summary, state, spec)?;
     node.tokenizer = crate::serve::open_tokenizer(&runtime, &path).ok();
     node.id = pulled;
     Ok(node)
 }
 
-/// A node on the test engine, which needs no model.
-pub fn load_mock_node(max_context: Option<i32>, lanes: u32, state: &NodeState) -> Result<LoadedNode, String> {
+/// A node on the test engine, which needs no model. It speculates only when `speculate` names
+/// a strategy, as a runtime other than baseRT does; its `auto` is prompt-lookup.
+pub fn load_mock_node(max_context: Option<i32>, lanes: u32, speculate: Option<&str>, state: &NodeState) -> Result<LoadedNode, String> {
     let lanes = lanes.max(1);
     let engine = crate::linked::engine("mock").ok_or("this build does not link the mock engine")?;
     let args = superfluid_adapter_kit::WorkerArgs {
@@ -938,7 +950,11 @@ pub fn load_mock_node(max_context: Option<i32>, lanes: u32, state: &NodeState) -
         ..Default::default()
     };
     let host = EngineHost::try_spawn_loaded(move || engine.open(&args)).map_err(|e| format!("model load failed: {e}"))?;
-    loaded(host, Box::new(crate::MockCodec), lanes, "mock".into(), "the mock engine".into(), state)
+    let spec = match crate::serve::speculate_directive(speculate, "mock") {
+        None => NodeSpeculation::default(),
+        Some(d) => NodeSpeculation { ranked: vec![if d.trim() == "auto" { "prompt-lookup".into() } else { d.to_string() }], auto: false },
+    };
+    loaded(host, Box::new(crate::MockCodec), lanes, "mock".into(), "the mock engine".into(), state, spec)
 }
 
 fn loaded(
@@ -948,18 +964,96 @@ fn loaded(
     model_name: String,
     summary: String,
     state: &NodeState,
+    spec: NodeSpeculation,
 ) -> Result<LoadedNode, String> {
     let store = SessionStore::open(&state.wal).map_err(|e| format!("node store: {e}"))?;
-    let daemon = Daemon::with_park(store, host, codec, lanes as usize, state.park.clone());
+    let mut ranked = spec.ranked.into_iter();
+    let opts = crate::DaemonOptions {
+        max_lanes: lanes as usize,
+        park_dir: state.park.clone(),
+        speculate: ranked.next(),
+        speculate_auto: spec.auto,
+        speculate_fallbacks: ranked.collect(),
+        ..crate::DaemonOptions::default()
+    };
+    let daemon = Daemon::with_options(store, host, codec, opts).map_err(|e| format!("model load failed: {e}"))?;
     Ok(LoadedNode { daemon, model_name, id: None, summary, tokenizer: None })
 }
 
-/// The window this device holds for `lanes` lanes of the model, as `superfluid serve` sizes it.
-fn device_window(runtime: &crate::runtimes::Runtime, model: &std::path::Path, lanes: u32) -> Result<i32, String> {
+/// The drafters a node speculates with, ranked: the first is registered, and under `auto` the
+/// rest are tried in turn when the engine refuses it.
+#[derive(Default)]
+struct NodeSpeculation {
+    ranked: Vec<String>,
+    auto: bool,
+}
+
+/// What `superfluid serve` would speculate with for this model, chosen the same way: the strategy
+/// `named` (a drafter given by id pulled first), else `auto` on the baseRT runtime, settled
+/// against the engine's capabilities and the drafters installed (or paired in the hub catalog,
+/// pulled unless `offline`).
+fn node_speculation(
+    named: Option<&str>,
+    catalog: &Catalog,
+    runtime: &crate::runtimes::Runtime,
+    path: &Path,
+    offline: bool,
+) -> Result<NodeSpeculation, String> {
+    crate::speculate_resolve::allow_catalog_fetch(!offline);
+    let mut named = named.map(str::to_string);
+    if let Some((kind, id)) = named.as_deref().and_then(crate::speculate_resolve::drafter_id) {
+        let flags = crate::pulls::PullFlags { offline, ..Default::default() };
+        let drafter = crate::pulls::pull(catalog, runtime.id, id, &flags).map_err(|e| format!("--speculate {kind}:{id}: {e}"))?;
+        named = Some(format!("{kind}:{}", drafter.display()));
+    }
+    let Some(directive) = crate::serve::speculation_for(named.as_deref(), &runtime.static_capabilities(), path, runtime.id.name()) else {
+        return Ok(NodeSpeculation::default());
+    };
+    let pull = crate::serve::auto_drafter_pull(catalog, runtime.id, path);
+    let pull = (!offline).then_some(&pull as &dyn Fn(&str));
+    let ranked = crate::speculate_resolve::resolve_all(directive, path, pull)?;
+    match ranked.first() {
+        Some(r) => eprintln!("superfluid: speculation: {r}"),
+        None => {
+            let dirs: Vec<_> = crate::speculate_resolve::auto_search_dirs(path).iter().map(|(d, _)| d.display().to_string()).collect();
+            eprintln!(
+                "superfluid: speculation: auto found no head in {} and no fitting drafter in {} — decoding plainly",
+                path.display(),
+                dirs.join(", ")
+            );
+        }
+    }
+    Ok(NodeSpeculation { ranked, auto: directive.trim() == "auto" })
+}
+
+/// The window this device holds for `lanes` lanes of the model, as `superfluid serve` sizes it:
+/// with the drafter it speculates with charged too, the smallest window of any it may fall back to.
+fn device_window(runtime: &crate::runtimes::Runtime, model: &std::path::Path, lanes: u32, drafters: &[String]) -> Result<i32, String> {
     let id = runtime.id;
     if crate::linked::sizes_context(id) {
-        return crate::linked::suggest_max_context(id, &[model.to_path_buf()], &[], lanes as i32, 0)?
-            .ok_or_else(|| format!("the {} runtime could not size a window for this device", id.base().name()));
+        use crate::speculate_resolve::{sizing_path, SpecLoad};
+        const MAX_CANDIDATES: usize = 16;
+        let choices: Vec<Vec<(PathBuf, bool, Option<usize>)>> = if drafters.is_empty() {
+            vec![Vec::new()]
+        } else {
+            drafters
+                .iter()
+                .take(MAX_CANDIDATES)
+                .map(|r| {
+                    sizing_path(r, model)
+                        .map(|(path, load)| (path, load == SpecLoad::EmbeddedHead, (load == SpecLoad::Sidecar).then_some(0)))
+                        .into_iter()
+                        .collect()
+                })
+                .collect()
+        };
+        let mut window: Option<i32> = None;
+        for speculators in &choices {
+            if let Some(n) = crate::linked::suggest_max_context(id, &[model.to_path_buf()], speculators, lanes as i32, 0)? {
+                window = Some(window.map_or(n, |w| w.min(n)));
+            }
+        }
+        return window.ok_or_else(|| format!("the {} runtime could not size a window for this device", id.base().name()));
     }
     let sizing = crate::runtimes::sizing_of(runtime, model)?;
     let trained = sizing.trained_context;
@@ -1325,7 +1419,7 @@ mod tests {
         std::thread::spawn(move || accept_nodes(listener, m, t, models));
 
         let state = NodeState::scratch().unwrap();
-        let node = load_mock_node(None, 2, &state).unwrap();
+        let node = load_mock_node(None, 2, None, &state).unwrap();
         let agent = NodeAgent::new(Arc::new(node.daemon), "box-a", "mock").with_max_lanes(2).with_auth(token.clone());
         let target = Arc::new(Target::new(Some(addr), Vec::new(), Search::for_token(&token), None));
         let links = Arc::new(Links::default());
@@ -1347,6 +1441,23 @@ mod tests {
             assert!(std::time::Instant::now() < by, "every lane ended once its link closed");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// A node speculates as `serve` does: with the strategy named, `off` being none, and on a
+    /// runtime other than baseRT (the mock engine here) not unless one is named.
+    #[test]
+    fn a_node_speculates_with_the_strategy_named_and_not_otherwise_off_basert() {
+        let strategy = |speculate: Option<&str>| {
+            let state = NodeState::scratch().unwrap();
+            let node = load_mock_node(None, 2, speculate, &state).unwrap();
+            node.daemon.speculation().map(|g| g.strategy_id.to_string())
+        };
+        assert_eq!(strategy(None), None, "the mock engine is not baseRT: no default");
+        assert_eq!(strategy(Some("off")), None);
+        assert_eq!(strategy(Some("prompt-lookup")).as_deref(), Some("prompt-lookup"));
+        assert_eq!(strategy(Some("auto")).as_deref(), Some("prompt-lookup"), "auto off baseRT is prompt-lookup");
+        let state = NodeState::scratch().unwrap();
+        assert!(load_mock_node(None, 2, Some("eagle3"), &state).is_err(), "a strategy the engine refuses fails the load");
     }
 
     #[test]

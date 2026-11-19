@@ -18,10 +18,12 @@ fn usage() -> ! {
     eprintln!(
         "usage: superfluid-noded --model <path|org/model[:tag]> [--listen <ip:port>] [--auth-file <path>] \
          [--runtime <id>] [--model-name <id>] [--max-context N] [--max-batch N] [--identity <name>] \
-         [--offline] [--park] [--insecure-no-auth] [--idle-timeout-ms N] [--handshake-timeout-ms N]\n\
+         [--offline] [--speculate <strategy|off>] [--park] [--insecure-no-auth] [--idle-timeout-ms N] \
+         [--handshake-timeout-ms N]\n\
          \n\
          A model given by id is pulled, and its runtime installed, as `superfluid serve` does; the\n\
-         context window is sized for this device unless --max-context pins it.\n\
+         context window is sized for this device unless --max-context pins it. It speculates as\n\
+         `superfluid serve` does: --speculate names the strategy, else auto on basert, off elsewhere.\n\
          (--listen defaults to 0.0.0.0:8454, the fleet-worker port next to BASE 8453;\n\
           --auth-file holds the fleet token (default $SUPERFLUID_HOME/fleet/token, from\n\
           `superfluid fleet token`); with it the link is encrypted and both ends checked.\n\
@@ -61,6 +63,7 @@ fn main() {
     let mut insecure_no_auth = false;
     let mut offline = false;
     let mut park = false;
+    let mut speculate: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().unwrap_or_else(|| usage());
@@ -75,6 +78,7 @@ fn main() {
             "--auth-file" => auth_file = Some(PathBuf::from(val())),
             "--insecure-no-auth" => insecure_no_auth = true,
             "--offline" => offline = true,
+            "--speculate" => speculate = Some(val()),
             "--park" => park = true,
             "--handshake-timeout-ms" => {
                 handshake_timeout = Duration::from_millis(val().parse().unwrap_or_else(|_| usage()))
@@ -134,10 +138,10 @@ fn main() {
     }
     .unwrap_or_else(|e| fail(3, e));
     let loaded = if mock {
-        superfluid_daemon::fleet_join::load_mock_node(max_context, lanes, &state)
+        superfluid_daemon::fleet_join::load_mock_node(max_context, lanes, speculate.as_deref(), &state)
     } else {
         let model = model.expect("checked above");
-        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, lanes, offline, &state)
+        superfluid_daemon::fleet_join::load_node(&model, runtime.as_deref(), max_context, lanes, offline, speculate.as_deref(), &state)
     }
     .unwrap_or_else(|e| fail(3, e));
     let model_name = model_name_override.unwrap_or(loaded.model_name);

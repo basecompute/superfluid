@@ -2273,7 +2273,7 @@ fn codec_for_dialect(
 /// for `target` when no copy is installed, by `runtime`, the one that serves the target, as a drafter
 /// given by id is pulled. A pull that fails is said, and `auto` settles among what is installed. The
 /// default `auto` (no `--speculate`, speculate_directive) pulls as a named one does.
-fn auto_drafter_pull<'a>(
+pub(crate) fn auto_drafter_pull<'a>(
     catalog: &'a superfluid_daemon::runtimes::Catalog,
     runtime: RuntimeId,
     target: &'a std::path::Path,
@@ -2290,7 +2290,7 @@ fn auto_drafter_pull<'a>(
 /// none), else `auto` on the baseRT runtime, where speculative decoding is on by default, and none on
 /// the other runtimes, whose `auto` is prompt-lookup. A pinned installation (`basert@<install>`) is
 /// its base runtime here (is_basert).
-fn speculate_directive<'a>(named: Option<&'a str>, runtime: &str) -> Option<&'a str> {
+pub(crate) fn speculate_directive<'a>(named: Option<&'a str>, runtime: &str) -> Option<&'a str> {
     match named {
         Some(d) if d.trim() == "off" => None,
         Some(d) => Some(d),
@@ -2305,7 +2305,7 @@ fn is_basert(runtime: &str) -> bool {
 
 /// The strategy a model serves with, from the `--speculate` the command line names (None: not named;
 /// see speculate_directive): `auto` settled for the runtime and the engine's capabilities.
-fn speculation_for<'a>(
+pub(crate) fn speculation_for<'a>(
     named: Option<&'a str>,
     caps: &superfluid_daemon::capabilities::Capabilities,
     model: &std::path::Path,

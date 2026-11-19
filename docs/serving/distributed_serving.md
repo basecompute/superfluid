@@ -37,6 +37,7 @@ Several fleets can share one local network. A head with a token announces a netw
 | `--identity <name>` | the host name | the name in the head's logs |
 | `--model-name <id>` | what the head announces, else the model's id | the name the head matches on |
 | `--offline` | off | pull nothing |
+| `--speculate <strategy\|off>` | `auto` on `basert`, else off | speculative decoding on the node, as `serve` takes it ([Speculative decoding](../features/speculative_decoding.md)) |
 | `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
 | `--log-format <text\|json>` | `text` | `json`: every stderr line is one JSON event, for a program that runs the node ([Start-up events](events.md)) |
 
@@ -65,6 +66,7 @@ superfluid-noded: node 'box-a' serving 'basecompute/Qwen3.8-27B' on 100.64.0.2:8
 | `--max-batch <N>` | 8 | the node's lanes |
 | `--identity <name>` | the host name | the name in the head's logs |
 | `--offline` | off | pull and install nothing |
+| `--speculate <strategy\|off>` | `auto` on `basert`, else off | speculative decoding on the node, as `serve` takes it |
 | `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
 | `--auth-file <path>` | `$SUPERFLUID_HOME/fleet/token` | the fleet token; with it the link is encrypted and both ends are checked |
 | `--insecure-no-auth` | off | accept any peer on a non-loopback address |
