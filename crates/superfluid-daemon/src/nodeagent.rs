@@ -627,6 +627,7 @@ impl NodeAgent {
                     .spawn(move || {
                         let request_id = m.request_id;
                         let streamed = matches!(m.req, superfluid_proto::linkw::StateSyncReqMsg::Transcribe { stream: true, .. });
+                        let capabilities = matches!(m.req, superfluid_proto::linkw::StateSyncReqMsg::Capabilities);
                         let result = if streamed {
                             let (seg_tx, seg_rx) = mpsc::channel();
                             let told = tx.clone();
@@ -640,6 +641,12 @@ impl NodeAgent {
                             result
                         } else {
                             daemon.state_sync(m.req)
+                        };
+                        let result = match result {
+                            Ok(superfluid_proto::linkw::StateSyncOkMsg::Capabilities { json }) if capabilities => {
+                                Ok(superfluid_proto::linkw::StateSyncOkMsg::Capabilities { json: as_served(&daemon, json) })
+                            }
+                            other => other,
                         };
                         let result = result.map_err(crate::fleet_daemon::message);
                         let _ = tx.send(Synced::Done(linkf::StateSyncRespF { request_id, result }));
@@ -956,6 +963,21 @@ impl Drop for Running {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
+}
+
+/// The engine's capability record, as the head learns what this node does: with whether the node
+/// speculates, which the head needs to resolve a request's default temperature
+/// (`--spec-max-temperature`) and which the engine's record does not say. A record that is not an
+/// object (an engine that describes nothing) is left as it is.
+fn as_served(daemon: &Daemon, json: String) -> String {
+    let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&json) else { return json };
+    let Some(obj) = record.as_object_mut().filter(|_| daemon.speculation().is_some()) else { return json };
+    let (section, key) = crate::NODE_SPECULATES;
+    match obj.entry(section).or_insert_with(|| serde_json::json!({})).as_object_mut() {
+        Some(s) => s.insert(key.into(), true.into()),
+        None => return json,
+    };
+    record.to_string()
 }
 
 enum Out {

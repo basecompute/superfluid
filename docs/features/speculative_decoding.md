@@ -12,7 +12,7 @@ The startup log names the strategy it registered (`superfluid: speculation: mtp-
 
 On the `basert` runtime speculative decoding is on by default: a model served with no `--speculate` serves under `auto`, and `--speculate off` decodes plainly. The default is the same `auto` as one named by hand, its pull of the drafter the hub catalog marks for the target included (step 1 below); `--offline` pulls nothing. The other runtimes decode plainly unless asked. Speculative greedy text is not bit-identical to plain decoding unless `--spec-bitexact` is on, and the auto-sized context window counts the drafter's weights and KV, so measure plain decoding with `--speculate off`.
 
-In a fleet the nodes decode, so a node speculates, not the head: `superfluid node join` and `superfluid-noded` take `--speculate` and default to it as `serve` does, `auto` on `basert`, the drafter counted in the node's window. The node's log names the strategy (`superfluid: speculation: dflash:…`).
+In a fleet the nodes decode, so a node speculates, not the head: `superfluid node join` and `superfluid-noded` take `--speculate` and default to it as `serve` does, `auto` on `basert`, the drafter counted in the node's window. The node's log names the strategy (`superfluid: speculation: dflash:…`). A node takes the `--spec-*` knobs too; `--spec-max-temperature` goes on the head, which resolves each request's temperature and caps a model-default one where its nodes say they speculate.
 
 ## Strategies
 

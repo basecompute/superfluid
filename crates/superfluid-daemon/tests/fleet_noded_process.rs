@@ -124,6 +124,57 @@ fn noded_needs_a_model_and_names_a_missing_file() {
     assert!(err.contains("/no/such/model.base"), "{err}");
 }
 
+/// The engine flags `serve` takes, which a node takes too, refused as `serve` refuses them and
+/// before the node listens; given right, the node serves as it does without them.
+#[test]
+fn noded_takes_the_engine_flags_serve_takes() {
+    let home = empty_home("engine-flags");
+    for (args, says) in [
+        (&["--spec-draft-tokens", "16"][..], "--spec-draft-tokens must be in 1..=15"),
+        (&["--kv-bits", "5"][..], "--kv-bits 5: expected 0 (auto)"),
+        (&["--park-lossy", "--kv-bits", "8"][..], "--park-lossy requires F16 KV pools; --kv-bits 8 conflicts"),
+        (&["--prefill-budget", "lots"][..], "--prefill-budget expects a number"),
+        (&["--mlx-venv", "/env"][..], "the mock engine takes no runtime option"),
+        (&["--otlp-endpoint", "not a url"][..], "--otlp-endpoint"),
+    ] {
+        let out = noded(&[&["--listen", "127.0.0.1:0", "--engine", "mock"][..], args].concat(), &home);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(0), "{args:?}: {err}");
+        assert!(err.contains(says), "{args:?}: {err}");
+        assert!(!err.contains("serving 'mock'"), "{args:?} refused before the node serves: {err}");
+    }
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_superfluid-noded"))
+        .args(["--listen", "127.0.0.1:0", "--engine", "mock", "--identity", "flags-node", "--speculate", "prompt-lookup"])
+        .args(["--spec-draft-tokens", "4", "--no-spec-adaptive", "--prefill-budget", "256", "--tick-target-ms", "200"])
+        .args(["--kv-bits", "16", "--park-budget-gb", "1"])
+        .env("HOME", &home)
+        .env("SUPERFLUID_HOME", home.join(".superfluid"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn superfluid-noded");
+    let stderr = child.stderr.take().unwrap();
+    let _child = Child(child);
+    let mut addr = String::new();
+    let mut said = String::new();
+    for line in BufReader::new(stderr).lines() {
+        let line = line.unwrap();
+        said.push_str(&line);
+        said.push('\n');
+        if let Some(idx) = line.find(" on 127.0.0.1:") {
+            addr = line[idx + 4..].split_whitespace().next().unwrap().to_string();
+            break;
+        }
+    }
+    assert!(!addr.is_empty(), "the node serves with the flags: {said}");
+    let mut head = FleetHead::connect(&addr, Vec::new()).expect("connect noded");
+    let (prompt, params) = ((500..540).collect::<Vec<u32>>(), GenParams::default());
+    head.assign(1, params, 0, "chatml", Lease { duration_ms: 60_000, renew_by_ms: 40_000 }).unwrap();
+    head.append(1, &prompt).unwrap();
+    let gen = head.generate(1, 12, 60_000).unwrap();
+    assert_eq!(gen.tokens.len(), 12, "{said}");
+}
+
 #[cfg(feature = "basert")]
 #[test]
 fn noded_sizes_its_window_for_the_device() {
