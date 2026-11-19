@@ -151,9 +151,10 @@ fn learn_capabilities(d: std::sync::Weak<Dispatch>) {
 }
 
 /// Takes the capability record of a node serving the model as the daemon's; `false` when none
-/// answered with one.
+/// answered with one. Asked on the node's connection for short calls, not a lane's: the record
+/// is read when a node's connections change, which is when a session is taking one.
 fn read_capabilities(dispatch: &Dispatch) -> bool {
-    let Ok(StateSyncOkMsg::Capabilities { json }) = dispatch.fleet.state_sync(&dispatch.model, StateSyncReqMsg::Capabilities, &[]) else {
+    let Ok(StateSyncOkMsg::Capabilities { json }) = dispatch.fleet.state_sync_aside(&dispatch.model, StateSyncReqMsg::Capabilities) else {
         return false;
     };
     let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&json) else { return false };
