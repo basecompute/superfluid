@@ -2,8 +2,8 @@
 
     python3 packaging/homebrew/formula.py <assets-dir> <out-dir> --version <v>
 
-<assets-dir> holds the release's three tarballs and their .sha256 files. The
-formula downloads the same tarballs from the GitHub release, so it takes their
+<assets-dir> holds the release's tarballs and their .sha256 files. The
+formula downloads the macOS and Linux ones from the GitHub release, so it takes their
 checksums from the .sha256 files, after checking each against its tarball, and
 the oldest macOS it allows from the macOS binaries themselves. It is written
 whole from the template below, so from one release to the next only the
@@ -24,6 +24,8 @@ import release  # noqa: E402
 
 REPO = "basecompute/superfluid"
 INSTALLED_BY = "Homebrew: brew upgrade superfluid"
+# The platforms Homebrew runs on, each with a url in the template below.
+TARGETS = ("aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 # Homebrew's names for the macOS versions a release could require.
 MACOS = {13: "ventura", 14: "sonoma", 15: "sequoia", 26: "tahoe"}
 
@@ -101,7 +103,7 @@ def render(version: str, shas: dict[str, str], macos: tuple[int, int]) -> str:
 
 
 def build(assets: Path, out: Path, version: str) -> Path:
-    shas = {target: checksum(assets, target) for target in release.TARGETS}
+    shas = {target: checksum(assets, target) for target in TARGETS}
     with tempfile.TemporaryDirectory() as tmp:
         r = release.stage(assets / "superfluid-aarch64-apple-darwin.tar.gz", Path(tmp) / "release", version=version)
         macos = release.macos_requirement(r.root)

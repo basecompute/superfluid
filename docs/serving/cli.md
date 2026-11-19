@@ -317,7 +317,7 @@ superfluid self use <v>
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program. See [Updating Superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program; a package manager's copy has its update command named there, not run. See [Updating Superfluid](updating.md).
 
 ## `superfluid session`
 

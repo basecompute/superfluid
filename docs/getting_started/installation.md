@@ -41,10 +41,10 @@ npm install --global @basecompute/superfluid
 pipx install superfluid-cli    # or: uv tool install superfluid-cli, pip install superfluid-cli
 ```
 
-Homebrew 6 and later install a formula from a tap outside Homebrew's own only once the tap is trusted, hence `brew trust basecompute/tap` first (`brew trust --formula basecompute/tap/superfluid` trusts the one formula); an older Homebrew has no `trust` command and needs none. Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on npm and on PyPI, hence `@basecompute/superfluid` and `superfluid-cli`; the PyPI package has no Python API and needs nothing from your Python beyond running the command. Update with the package manager (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`, `pipx upgrade superfluid-cli`, `uv tool upgrade superfluid-cli`, `pip install --upgrade superfluid-cli`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way Superfluid came.
+Homebrew 6 and later install a formula from a tap outside Homebrew's own only once the tap is trusted, hence `brew trust basecompute/tap` first (`brew trust --formula basecompute/tap/superfluid` trusts the one formula); an older Homebrew has no `trust` command and needs none. Each installs the release for this machine (macOS 15 or later on Apple silicon; Linux x86-64 or arm64 with glibc 2.28 or later; with npm and PyPI, Windows x86-64 too) and puts `superfluid` on your `PATH`. `superfluid` is another project's name on npm and on PyPI, hence `@basecompute/superfluid` and `superfluid-cli`; the PyPI package has no Python API and needs nothing from your Python beyond running the command. Update with the package manager (`brew upgrade superfluid`, `npm install --global @basecompute/superfluid@latest`, `pipx upgrade superfluid-cli`, `uv tool upgrade superfluid-cli`, `pip install --upgrade superfluid-cli`): `superfluid self update` leaves such a copy to it and says which command to run. Runtimes install under `~/.superfluid` whichever way Superfluid came.
 
 > [!NOTE]
-> The Homebrew and npm packages are published from 0.1.5 on, the PyPI package from 0.1.10 on.
+> The Homebrew and npm packages are published from 0.1.5 on, the PyPI package from 0.1.10 on, and both carry Windows from 0.2.0 on.
 
 ## cargo install
 
@@ -112,6 +112,8 @@ superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 
 The script checks the tarball's SHA-256 and keeps the release under `%USERPROFILE%\.superfluid\versions\<v>`, as on macOS and Linux. An ordinary Windows user may make no symbolic link, so the commands it puts in `%LOCALAPPDATA%\Programs\superfluid\bin` (`superfluid`, `superfluid-workerd`, `superfluid-noded`) are small launchers, each of which runs the current version's program of its own name. It adds that folder to your own `PATH`. Nothing needs an administrator. `superfluid self update` installs the next release beside this one and `superfluid self use <v>` goes back; a server that is running keeps the version it started with.
 
+The same release comes through npm and PyPI ([above](#homebrew-npm-or-pypi)): `npm install --global @basecompute/superfluid`, or `pipx install superfluid-cli` (`uv tool install`, `pip install`). Such a copy is one release in the package manager's own folder, with no versions beside it, and the package manager updates it.
+
 Nothing else has to be installed first. Superfluid's own programs need no Visual C++ runtime. llama.cpp's Windows builds do, and carry none: the release brings the three libraries (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`), and `superfluid runtime install llamacpp` puts beside llama.cpp whichever of them the machine lacks. A GPU is used through its Vulkan driver, which comes with the graphics driver; without one llama.cpp runs on the CPU. A source build ships no runtime libraries: where llama.cpp will not load for want of them, the error names them and the [redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
 | variable | default | meaning |
@@ -145,7 +147,7 @@ What differs from macOS and Linux:
 | `superfluid stop` | ends the server outright, as `SIGTERM` does elsewhere |
 | `$SUPERFLUID_HOME/runtimes/<id>/current` | a file that holds the default install's name, not a link: an ordinary user may make neither a symbolic link nor a junction every process follows |
 | a server other machines connect to (`--http` off loopback, a fleet head, `superfluid-noded`) | reached only where Windows Defender Firewall allows the program inbound connections, which an administrator grants once; `superfluid node join` dials out and needs nothing ([Distributed serving](../serving/distributed_serving.md#join-a-node)) |
-| npm, PyPI, Homebrew | no Windows package yet: the install script or a source build |
+| a copy from npm or PyPI | `superfluid self update` names the package manager's command and runs none: Windows lets nothing replace a program that is running, so run it yourself with no Superfluid running. The command is for the copy it names (npm's carries `--prefix`), and a path with a space is quoted for PowerShell. Homebrew has no Windows |
 
 ## Install a runtime
 
