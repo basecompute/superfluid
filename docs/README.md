@@ -35,7 +35,7 @@ superfluid launch claude --model basecompute/Qwen3.8-27B
 superfluid node join --model basecompute/Qwen3.8-27B --token <token>
 ```
 
-On Windows the install line is PowerShell's, `irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex`, and the model is a GGUF one, such as `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` ([Windows](getting_started/installation.md#windows)).
+On Windows the install line is PowerShell's, `irm https://basecompute.co/sf/install.ps1 | iex`, and the model is a GGUF one, such as `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M` ([Windows](getting_started/installation.md#windows)).
 
 ## How it fits
 
