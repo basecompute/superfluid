@@ -208,6 +208,20 @@ fn join(args: &[String]) {
     let (events, heard) = std::sync::mpsc::sync_channel::<Event>(8);
     let asks = events.clone();
     hear_drain(move |asked| {
+        let restarting = {
+            let mut restart = RESTART.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            restart.asked = Some(asked);
+            restart.begun
+        };
+        if restarting {
+            // Unix: the exec has not replaced this process yet, and the node has nothing left
+            // running. Windows: the program run in this one's place is asked instead
+            // (`sys::replace_process`); ending this process would end it unasked.
+            #[cfg(unix)]
+            drained_rather_than_restart(asked);
+            #[cfg(windows)]
+            return;
+        }
         if DIALING.load(std::sync::atomic::Ordering::SeqCst) {
             let _ = asks.send(Event::Drain(asked));
             return;
@@ -366,16 +380,29 @@ fn join(args: &[String]) {
         daemon.signal_shutdown();
         daemon.shutdown();
     }
-    // Asked to drain while it let what it ran finish: it ends rather than start again.
-    if let Some(asked) = heard.try_iter().find_map(|e| match e {
-        Event::Drain(asked) => Some(asked),
-        _ => None,
-    }) {
-        eprintln!("superfluid: drained ({asked}) rather than start again for the head's model — exiting");
-        crate::events::emit("node.drain.done", serde_json::json!({"reason": asked, "links_cut": 0}));
-        crate::events::exit(0);
-    }
     restart();
+}
+
+/// What a node starting again and its drain listener settle under one lock, so a drain asked at
+/// any moment of the start again is heard by one of them: whether the start again has passed
+/// its last look at the ask, and the ask, once heard.
+struct Restart {
+    begun: bool,
+    asked: Option<&'static str>,
+}
+
+static RESTART: Mutex<Restart> = Mutex::new(Restart { begun: false, asked: None });
+
+/// Ends a node asked to drain while it started again for its head's new model, its links
+/// closed and its engines ended: there is nothing left to let finish.
+fn drained_rather_than_restart(asked: &str) -> ! {
+    // Prose is written out as it is once the events are readied for the exec; the event alone
+    // says it in JSON.
+    if !crate::events::json() {
+        eprintln!("superfluid: drained ({asked}) rather than start again for the head's model — exiting");
+    }
+    crate::events::emit("node.drain.done", serde_json::json!({"reason": asked, "links_cut": 0}));
+    crate::events::exit(0)
 }
 
 /// Waits until `busy` is false or `by` passes, as a node about to start again lets what it runs
@@ -462,8 +489,9 @@ fn drain_and_exit(
 ) -> ! {
     eprintln!("superfluid: {asked} — no longer taking work from the head, draining for up to {}s", within.as_secs());
     crate::events::emit("node.drain.start", serde_json::json!({"reason": asked, "timeout_secs": within.as_secs()}));
-    links.leave();
+    // The lanes first, so none starts work once the drain has begun; then no lane dials again.
     node.leave();
+    links.leave();
     let by = std::time::Instant::now() + within;
     while !lanes.iter().all(|l| l.is_finished()) && std::time::Instant::now() < by {
         std::thread::sleep(Duration::from_millis(100));
@@ -961,6 +989,16 @@ fn restart() -> ! {
     eprintln!("superfluid: starting again to serve the head's model");
     // The next image writes its events to the stream this one wrote to, from its `start` on.
     crate::events::prepare_exec();
+    // The last look at a drain: one asked before it ends the node here, one asked after is the
+    // listener's to end (Unix, before the exec) or to pass on (Windows).
+    let asked = {
+        let mut restart = RESTART.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        restart.begun = true;
+        restart.asked
+    };
+    if let Some(asked) = asked {
+        drained_rather_than_restart(asked);
+    }
     let e = crate::sys::replace_process(std::process::Command::new(exe).args(std::env::args_os().skip(1)));
     fail(format!("cannot start again: {e}"))
 }

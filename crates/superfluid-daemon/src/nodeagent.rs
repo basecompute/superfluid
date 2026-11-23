@@ -122,8 +122,10 @@ pub struct NodeAgent {
     on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Told, at each handshake, what the head stated it serves over the link.
     on_head: Option<HeadHook>,
-    /// Set by [`NodeAgent::leave`], for every connection of the node at once.
-    leaving: Arc<AtomicBool>,
+    /// Set by [`NodeAgent::leave`], for every connection of the node at once. A connection
+    /// holds it read while it handles what it read, so the leave waits for a dispatch under way
+    /// and none starts after it.
+    leaving: Arc<std::sync::RwLock<bool>>,
 }
 
 /// The largest blob a node takes from its head.
@@ -169,7 +171,7 @@ impl NodeAgent {
             incoming: HashMap::new(),
             on_control_ask: None,
             on_head: None,
-            leaving: Arc::new(AtomicBool::new(false)),
+            leaving: Arc::new(std::sync::RwLock::new(false)),
             models: vec![Model { daemon, name: model_name.into(), id: None, tokenizer: 0, tokenizer_impl: None }],
             names_models: false,
             shared: Arc::new(Mutex::new(AgentShared {
@@ -227,7 +229,7 @@ impl NodeAgent {
     /// the node closed for a node that left: it sends it nothing more, and a session it would
     /// run there goes to another node.
     pub fn leave(&self) {
-        self.leaving.store(true, Ordering::Release);
+        *self.leaving.write().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     }
 
     /// `idle` is how long the head may be silent before a connection is dropped; zero keeps
@@ -579,13 +581,16 @@ impl NodeAgent {
             // Leaving with nothing running, after the read and before what it read: a generation
             // the head sent meanwhile (to an idle lane, or once this one's last tokens were out)
             // finds the link closed unanswered, and the head places it elsewhere as for a node
-            // that left.
-            if !work.busy() && self.leaving.load(Ordering::Acquire) {
+            // that left. Held through the dispatch, so a leave comes wholly before it or after.
+            let leaving = Arc::clone(&self.leaving);
+            let leaving = leaving.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !work.busy() && *leaving {
                 return Ok(());
             }
             for frame in frames {
                 self.handle(endpoint, frame, work)?;
             }
+            drop(leaving);
             // A head on version 2 sends no heartbeat while it waits on a generation, so only
             // a connection with nothing running is idle.
             if endpoint.version() < 3
