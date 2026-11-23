@@ -516,12 +516,19 @@ impl Down {
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Asks the server at `base` what it serves, within [`PROBE_TIMEOUT`] all told: the
+/// connection made first and the request after share it.
 fn probe(base: &str, api_key: Option<&str>) -> Probe {
-    if let Some(down) = cannot_connect(base.trim_start_matches("http://")) {
+    let by = Instant::now() + PROBE_TIMEOUT;
+    if let Some(down) = cannot_connect(base.trim_start_matches("http://"), by) {
         return Probe::Down(down);
     }
+    let left = by.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Probe::Down(Down::because(format!("no answer within {} s", PROBE_TIMEOUT.as_secs())));
+    }
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(PROBE_TIMEOUT))
+        .timeout_global(Some(left))
         .http_status_as_error(false)
         .build()
         .new_agent();
@@ -553,22 +560,34 @@ fn probe(base: &str, api_key: Option<&str>) -> Probe {
 
 /// Why no connection can be made to `addr`, as the system says it: the HTTP client words it
 /// less exactly (a connection that timed out can come back from it as refused).
-fn cannot_connect(addr: &str) -> Option<Down> {
+fn cannot_connect(addr: &str, by: Instant) -> Option<Down> {
     use std::net::ToSocketAddrs;
-    let addrs = match addr.to_socket_addrs() {
-        Ok(addrs) => addrs,
+    let addrs: Vec<std::net::SocketAddr> = match addr.to_socket_addrs() {
+        Ok(addrs) => addrs.collect(),
         Err(e) => return Some(Down::because(format!("cannot resolve {addr}: {e}"))),
     };
-    let mut last = None;
-    for at in addrs {
-        match std::net::TcpStream::connect_timeout(&at, PROBE_TIMEOUT) {
-            Ok(_) => return None,
-            Err(e) => last = Some(e),
-        }
-    }
-    let e = last?;
+    let e = connect_within(&addrs, by).err()?;
     let no_route = matches!(e.kind(), std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable);
     Some(Down { why: format!("connect: {e}"), no_route })
+}
+
+/// Connects to the first of `addrs` that answers by `by`. The time left is shared among the
+/// addresses left, so one that never answers leaves the others theirs, and a name with several
+/// addresses takes no longer than one.
+fn connect_within(addrs: &[std::net::SocketAddr], by: Instant) -> std::io::Result<()> {
+    let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "the name resolves to no address");
+    for (i, at) in addrs.iter().enumerate() {
+        let left = by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out"));
+        }
+        let share = (left / (addrs.len() - i) as u32).max(Duration::from_millis(1));
+        match std::net::TcpStream::connect_timeout(at, share) {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
 
 /// The host of `addr`, `host:port` or `[v6]:port`.
@@ -1344,6 +1363,20 @@ mod tests {
         assert!(!cant_reach("203.0.113.9:8453", &no_route, true, None).contains("Local Network"));
         let timeout = Down::because("connect: Operation timed out (os error 60)");
         assert_eq!(cant_reach("10.255.255.1:8453", &timeout, true, None), "can't reach the server at 10.255.255.1:8453: connect: Operation timed out (os error 60)");
+    }
+
+    #[test]
+    fn the_addresses_of_a_name_share_one_deadline() {
+        // Addresses that may never answer (or say at once they cannot be reached): together
+        // they take no longer than the time given.
+        let addrs: Vec<std::net::SocketAddr> = ["10.255.255.1:9", "10.255.255.2:9", "10.255.255.3:9"].iter().map(|a| a.parse().unwrap()).collect();
+        let started = Instant::now();
+        assert!(connect_within(&addrs, started + Duration::from_millis(600)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+        assert_eq!(connect_within(&[], Instant::now() + Duration::from_secs(1)).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap();
+        assert!(connect_within(&[addrs[0], open], Instant::now() + Duration::from_secs(2)).is_ok(), "the second answers in its share");
     }
 
     #[test]
