@@ -564,11 +564,6 @@ impl NodeAgent {
             if was_busy && !work.busy() {
                 endpoint.poll_every(POLL_IDLE)?;
             }
-            // Before reading: a generation the head sends once this one's last tokens are out
-            // finds the link closed, and the head places it elsewhere as for a node that left.
-            if !work.busy() && self.leaving.load(Ordering::Acquire) {
-                return Ok(());
-            }
             let frames = match endpoint.pump() {
                 Ok(f) => f,
                 Err(LinkFError::Closed) => return Ok(()),
@@ -581,6 +576,13 @@ impl NodeAgent {
                 }
                 Err(e) => return Err(e.into()),
             };
+            // Leaving with nothing running, after the read and before what it read: a generation
+            // the head sent meanwhile (to an idle lane, or once this one's last tokens were out)
+            // finds the link closed unanswered, and the head places it elsewhere as for a node
+            // that left.
+            if !work.busy() && self.leaving.load(Ordering::Acquire) {
+                return Ok(());
+            }
             for frame in frames {
                 self.handle(endpoint, frame, work)?;
             }

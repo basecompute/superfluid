@@ -211,6 +211,65 @@ fn a_session_goes_to_a_joined_nodes_idle_lane_rather_than_wait_behind_a_generati
     assert!(shorts_done < long.join().unwrap(), "a short session waited for the long generation to end");
 }
 
+/// A node told to leave answers nothing more on a lane with nothing running: a generation the
+/// head sends it then, one already on its way included, finds the link closed unanswered, and
+/// the head runs it on another node.
+#[test]
+fn a_generation_sent_to_a_leaving_node_runs_on_another() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let head_addr = listener.local_addr().unwrap().to_string();
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    let manager = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, lease, 90, 1));
+    let m = Arc::clone(&manager);
+    let models = HeadModels::fixed(Arc::clone(&m), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, m, TOKEN.to_vec(), models));
+
+    // One lane, served once: a node that leaves dials no more.
+    let leaving = NodeAgent::new(Arc::new(mock_daemon()), "box-f", "mock").with_max_lanes(1).with_auth(TOKEN.to_vec());
+    let mut conn = leaving.connection();
+    let at = head_addr.clone();
+    let served = std::thread::spawn(move || {
+        let ep = Endpoint::from_tcp_secure(TcpStream::connect(at).unwrap(), TOKEN, Role::Responder, Duration::from_secs(5)).unwrap();
+        conn.serve(ep).is_ok()
+    });
+    wait_for("the first node joined", || manager.status().first().is_some_and(|n| n.up));
+    let prompt: Vec<u32> = (400..432).collect();
+    let params = GenParams::default();
+    assert_eq!(manager.place(1, params, 0, "chatml", "mock", &prompt, 8).expect("placed"), 0);
+    join(head_addr, "box-g", 1);
+    wait_for("the second node joined", || manager.status().len() == 2 && manager.status().iter().all(|n| n.up));
+
+    leaving.leave();
+    let gen = manager.generate(1, 8, 60_000).expect("generated on the other node");
+    let (local, _) = mock_daemon().generate_tokens(prompt, params, 8, 0).unwrap();
+    assert_eq!(gen.tokens, local);
+    assert_eq!(manager.load(), vec![0, 1], "the session moved to the node that stayed");
+    assert!(served.join().unwrap(), "the leaving node's lane ended");
+}
+
+/// The read a lane is blocked in when its node is told to leave brings a generation the head
+/// sent just then: the lane closes without starting it.
+#[test]
+fn a_leaving_node_does_not_start_a_generation_it_read_after_it_was_told() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let at = listener.local_addr().unwrap().to_string();
+    let leaving = NodeAgent::new(Arc::new(mock_daemon()), "box-h", "mock").with_max_lanes(1).with_auth(TOKEN.to_vec());
+    let mut conn = leaving.connection();
+    let served = std::thread::spawn(move || {
+        let ep = Endpoint::from_tcp_secure(TcpStream::connect(at).unwrap(), TOKEN, Role::Responder, Duration::from_secs(5)).unwrap();
+        conn.serve(ep).is_ok()
+    });
+    let mut head = superfluid_daemon::fleet::FleetHead::accept(listener.accept().unwrap().0, TOKEN.to_vec()).unwrap();
+    let lease = Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+    head.assign(1, GenParams::default(), 0, "chatml", lease).unwrap();
+    head.append(1, &(400..432).collect::<Vec<u32>>()).unwrap();
+    // Long enough for the lane to take both and wait in a read again.
+    std::thread::sleep(Duration::from_millis(200));
+    leaving.leave();
+    assert!(head.generate(1, 8, 10_000).is_err(), "the leaving lane closed rather than run it");
+    assert!(served.join().unwrap(), "the lane ended");
+}
+
 #[test]
 fn a_node_with_another_token_does_not_join() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
