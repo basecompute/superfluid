@@ -347,10 +347,11 @@ fn join(args: &[String]) {
     };
     crate::events::emit("node.head.changed", serde_json::json!({"model": next, "id": id, "from": model_name}));
     // What the node runs ends, then its links, then its engine; it starts again as it was
-    // started, and pulls and loads the head's model as it did at first.
+    // started, and pulls and loads the head's model as it did at first. Asked to drain while it
+    // waits, it drains instead, within its own --drain-timeout, and does not start again.
     let by = std::time::Instant::now() + DRAIN;
-    while daemons.iter().any(|d| busy(d)) && std::time::Instant::now() < by {
-        std::thread::sleep(Duration::from_millis(200));
+    if let Some(asked) = finish_or_drain(&heard, by, || daemons.iter().any(|d| busy(d))) {
+        drain_and_exit(asked, Duration::from_secs(drain), &node, &links, lanes, daemons);
     }
     links.stop();
     for lane in lanes {
@@ -375,6 +376,21 @@ fn join(args: &[String]) {
         crate::events::exit(0);
     }
     restart();
+}
+
+/// Waits until `busy` is false or `by` passes, as a node about to start again lets what it runs
+/// finish; the ask to drain instead, when one comes first.
+fn finish_or_drain(heard: &std::sync::mpsc::Receiver<Event>, by: std::time::Instant, busy: impl Fn() -> bool) -> Option<&'static str> {
+    while busy() {
+        let left = by.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        if let Ok(Event::Drain(asked)) = heard.recv_timeout(left.min(Duration::from_millis(200))) {
+            return Some(asked);
+        }
+    }
+    None
 }
 
 /// Whether the node has begun dialing its head: a drain asked before then has nothing to let
@@ -1936,6 +1952,23 @@ mod tests {
             assert!(std::time::Instant::now() < by, "every lane ended once its link closed");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn a_node_about_to_follow_the_head_drains_instead_when_asked_while_it_waits() {
+        let (tell, heard) = std::sync::mpsc::sync_channel::<Event>(8);
+        let by = std::time::Instant::now() + Duration::from_secs(30);
+        assert_eq!(finish_or_drain(&heard, by, || false), None, "nothing runs: nothing to wait for");
+        tell.send(Event::ControlAsk).unwrap();
+        let soon = std::time::Instant::now() + Duration::from_millis(300);
+        assert_eq!(finish_or_drain(&heard, soon, || true), None, "what still runs at the deadline is left to the links' close");
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            tell.send(Event::Drain("SIGUSR1")).unwrap();
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(finish_or_drain(&heard, by, || true), Some("SIGUSR1"));
+        assert!(started.elapsed() < Duration::from_secs(5), "heard at once, not after the wait");
     }
 
     /// A node asked to drain: its idle lane leaves the head at once, the generation running on
