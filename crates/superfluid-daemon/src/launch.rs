@@ -51,6 +51,8 @@ pub struct Agent {
     pub aliases: &'static [&'static str],
     pub title: &'static str,
     pub binary: &'static str,
+    /// The command that installs the agent, in the shell of the platform this is built for
+    /// (PowerShell on Windows), or the page to get it from when no command does.
     pub install: &'static str,
     plan: fn(&Target, &[String]) -> Plan,
 }
@@ -61,7 +63,7 @@ pub const AGENTS: &[Agent] = &[
         aliases: &["claude-code"],
         title: "Claude Code",
         binary: "claude",
-        install: "curl -fsSL https://claude.ai/install.sh | bash",
+        install: if cfg!(windows) { "irm https://claude.ai/install.ps1 | iex" } else { "curl -fsSL https://claude.ai/install.sh | bash" },
         plan: claude,
     },
     Agent {
@@ -85,7 +87,7 @@ pub const AGENTS: &[Agent] = &[
         aliases: &[],
         title: "OpenCode",
         binary: "opencode",
-        install: "curl -fsSL https://opencode.ai/install | bash",
+        install: if cfg!(windows) { "npm install -g opencode-ai" } else { "curl -fsSL https://opencode.ai/install | bash" },
         plan: opencode,
     },
     Agent {
@@ -93,7 +95,11 @@ pub const AGENTS: &[Agent] = &[
         aliases: &["hermes-agent"],
         title: "Hermes Agent",
         binary: "hermes",
-        install: "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+        install: if cfg!(windows) {
+            "irm https://hermes-agent.nousresearch.com/install.ps1 | iex"
+        } else {
+            "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+        },
         plan: hermes,
     },
     Agent {
@@ -566,6 +572,15 @@ fn on_path(binary: &str) -> Option<PathBuf> {
     std::env::split_paths(&path).flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>()).find(|p| crate::sys::is_executable(p))
 }
 
+/// What to hand `Command` to run `program`. On Windows it is the path `find` gives: `Command`
+/// looks on PATH only for `<program>.exe`, so the `.cmd` an agent npm installs is not found by
+/// its bare name, while given the full path std runs it through `cmd.exe`, quoting the
+/// arguments for it. Elsewhere `Command`'s own PATH search finds the program as `find` does.
+fn program_path(program: &str, find: impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
+    let found = if cfg!(windows) { find(program) } else { None };
+    found.unwrap_or_else(|| PathBuf::from(program))
+}
+
 fn fail(msg: impl std::fmt::Display) -> ! {
     eprintln!("superfluid launch: {msg}");
     std::process::exit(1);
@@ -667,7 +682,7 @@ pub fn run(args: &[String]) {
         }
     }
     for args in &plan.before {
-        let out = std::process::Command::new(&plan.program)
+        let out = std::process::Command::new(program_path(&plan.program, on_path))
             .args(args)
             .stdin(std::process::Stdio::null())
             .output()
@@ -835,7 +850,7 @@ fn tail(log: &Path, from: u64, n: usize) -> String {
 }
 
 fn exec(plan: &Plan) -> ! {
-    let mut cmd = std::process::Command::new(&plan.program);
+    let mut cmd = std::process::Command::new(program_path(&plan.program, on_path));
     cmd.args(&plan.args);
     for k in &plan.env_remove {
         cmd.env_remove(k);
@@ -1190,6 +1205,46 @@ mod tests {
         for bad in [&["--pid"][..], &["--drain", "--pid", "0"], &["--drain", "--pid", "x"], &["now"]] {
             assert!(parse_stop(&strings(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn on_windows_an_agent_is_run_by_the_path_it_was_found_at() {
+        let npm = PathBuf::from(r"C:\Users\me\AppData\Roaming\npm\pi.cmd");
+        let found = |binary: &str| (binary == "pi").then(|| npm.clone());
+        let want = if cfg!(windows) { npm.clone() } else { PathBuf::from("pi") };
+        assert_eq!(program_path("pi", found), want, "elsewhere Command searches PATH itself");
+        assert_eq!(program_path("codex", found), PathBuf::from("codex"), "not found, it is left to Command to report");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_cmd_found_on_path_runs_with_its_arguments_intact() {
+        let dir = std::env::temp_dir().join(format!("superfluid-launch-cmd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shim = dir.join("agent.cmd");
+        std::fs::write(&shim, "@echo [%~1] [%~2]\r\n").unwrap();
+        let out = std::process::Command::new(program_path("agent", |_| Some(shim.clone()))).args(["two words", "-p"]).output();
+        let _ = std::fs::remove_dir_all(&dir);
+        let out = out.expect("a .cmd runs by its full path");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "[two words] [-p]");
+    }
+
+    #[test]
+    fn install_commands_run_in_the_platforms_own_shell() {
+        let install = |name: &str| find(name).unwrap().install;
+        for a in AGENTS {
+            // PowerShell has no bash, and its `curl` is Invoke-WebRequest, without curl's flags.
+            assert!(!(cfg!(windows) && (a.install.contains("bash") || a.install.contains("curl"))), "{}: {}", a.name, a.install);
+        }
+        if cfg!(windows) {
+            assert_eq!(install("claude"), "irm https://claude.ai/install.ps1 | iex");
+            assert_eq!(install("hermes"), "irm https://hermes-agent.nousresearch.com/install.ps1 | iex");
+            assert_eq!(install("opencode"), "npm install -g opencode-ai");
+        } else {
+            assert_eq!(install("claude"), "curl -fsSL https://claude.ai/install.sh | bash");
+        }
+        assert_eq!(install("codex"), "npm install -g @openai/codex", "npm runs the same in both");
+        assert_eq!(install("ollama"), "https://ollama.com/download");
     }
 
     #[test]
