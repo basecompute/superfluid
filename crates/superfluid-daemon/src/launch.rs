@@ -608,6 +608,12 @@ fn connect_within(addrs: &[std::net::SocketAddr], by: Instant) -> std::io::Resul
     Err(last)
 }
 
+/// The IP address `host` is, without the zone a link-local IPv6 address may carry
+/// (`fe80::1%7`, `fe80::1%en0`): the address is the same on whichever interface it is named.
+fn ip_of(host: &str) -> Option<std::net::IpAddr> {
+    host.split_once('%').map_or(host, |(ip, _zone)| ip).parse().ok()
+}
+
 /// The host of `addr`, `host:port` or `[v6]:port`.
 fn host_of(addr: &str) -> &str {
     match addr.strip_prefix('[') {
@@ -632,20 +638,20 @@ fn is_local_among(addr: &str, assigned: impl FnOnce() -> Vec<std::net::IpAddr>) 
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.is_loopback() || ip.is_unspecified() || assigned().contains(&ip),
-        Err(_) => false,
+    match ip_of(&host) {
+        Some(ip) => ip.is_loopback() || ip.is_unspecified() || assigned().contains(&ip),
+        None => false,
     }
 }
 
 /// Whether `host` is on a local network, which macOS's Local Network setting governs: a
 /// private or link-local address, or a `.local` name.
 fn on_local_network(host: &str) -> bool {
-    match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
+    match ip_of(host) {
+        Some(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
         // Unique local fc00::/7 and link-local fe80::/10.
-        Ok(std::net::IpAddr::V6(ip)) => (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
-        Err(_) => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
+        Some(std::net::IpAddr::V6(ip)) => (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
+        None => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
     }
 }
 
@@ -1350,11 +1356,11 @@ mod tests {
 
     #[test]
     fn a_server_is_started_only_at_an_address_of_this_machine() {
-        let assigned = || vec!["10.17.0.42".parse().unwrap(), "fd00::7".parse().unwrap()];
-        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9", "10.17.0.42:8453", "[fd00::7]:8453"] {
+        let assigned = || vec!["10.17.0.42".parse().unwrap(), "fd00::7".parse().unwrap(), "fe80::1234".parse().unwrap()];
+        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9", "10.17.0.42:8453", "[fd00::7]:8453", "[fe80::1234%7]:8453", "[fe80::1234%en0]:8453"] {
             assert!(is_local_among(here, assigned), "{here}");
         }
-        for there in ["10.17.0.171:8453", "10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "[fd00::8]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
+        for there in ["10.17.0.171:8453", "10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "[fd00::8]:8453", "[fe80::99%7]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
             assert!(!is_local_among(there, assigned), "{there}");
         }
         // What this machine's interfaces hold is read from them.
@@ -1377,6 +1383,7 @@ mod tests {
         assert!(cant_reach("192.168.1.4:8453", &no_route, true, Some("iTerm.app")).contains("turn iTerm on"));
         assert!(cant_reach("mac-mini.local:8453", &no_route, true, Some("WezTerm")).contains("from your terminal app off"));
         assert!(cant_reach("[fe80::1]:8453", &no_route, true, None).contains("Local Network"));
+        assert!(cant_reach("[fe80::1%en0]:8453", &no_route, true, None).contains("Local Network"));
         // No hint off macOS, for an address beyond the local network, or for another reason.
         let plain = "can't reach the server at 10.17.0.171:8453: connect: No route to host (os error 65)";
         assert_eq!(cant_reach("10.17.0.171:8453", &no_route, false, Some("Apple_Terminal")), plain);
