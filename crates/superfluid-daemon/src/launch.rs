@@ -561,14 +561,32 @@ fn probe(base: &str, api_key: Option<&str>) -> Probe {
 /// Why no connection can be made to `addr`, as the system says it: the HTTP client words it
 /// less exactly (a connection that timed out can come back from it as refused).
 fn cannot_connect(addr: &str, by: Instant) -> Option<Down> {
-    use std::net::ToSocketAddrs;
-    let addrs: Vec<std::net::SocketAddr> = match addr.to_socket_addrs() {
-        Ok(addrs) => addrs.collect(),
-        Err(e) => return Some(Down::because(format!("cannot resolve {addr}: {e}"))),
+    let addrs = match resolve_within(addr, by) {
+        Ok(addrs) => addrs,
+        Err(why) => return Some(Down::because(why)),
     };
     let e = connect_within(&addrs, by).err()?;
     let no_route = matches!(e.kind(), std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable);
     Some(Down { why: format!("connect: {e}"), no_route })
+}
+
+/// The addresses `addr` names, looked up by `by`: the system's lookup takes no timeout, so it
+/// runs on a thread of its own, left to finish when the time is up.
+fn resolve_within(addr: &str, by: Instant) -> Result<Vec<std::net::SocketAddr>, String> {
+    use std::net::ToSocketAddrs;
+    let (found, finds) = std::sync::mpsc::channel();
+    let name = addr.to_string();
+    std::thread::Builder::new()
+        .name("launch-resolve".into())
+        .spawn(move || {
+            let _ = found.send(name.to_socket_addrs().map(Iterator::collect));
+        })
+        .map_err(|e| format!("resolving {}: {e}", host_of(addr)))?;
+    match finds.recv_timeout(by.saturating_duration_since(Instant::now())) {
+        Ok(Ok(addrs)) => Ok(addrs),
+        Ok(Err(e)) => Err(format!("cannot resolve {addr}: {e}")),
+        Err(_) => Err(format!("resolving {}: no answer within {} s", host_of(addr), PROBE_TIMEOUT.as_secs())),
+    }
 }
 
 /// Connects to the first of `addrs` that answers by `by`. The time left is shared among the
@@ -599,16 +617,23 @@ fn host_of(addr: &str) -> &str {
 }
 
 /// Whether a server at `addr` would run on this machine, which launch may start one at: a
-/// loopback or unspecified address, `localhost`, or an address of one of this machine's
-/// interfaces (one a socket can be bound to). Any other host, a name among them, is another
-/// machine's, where a server launch started could never listen.
+/// loopback or unspecified address, `localhost`, or an address assigned to one of this
+/// machine's interfaces. Any other host, a name among them, is another machine's, where a
+/// server launch started could never listen.
 fn is_local(addr: &str) -> bool {
+    is_local_among(addr, || if_addrs::get_if_addrs().map(|all| all.iter().map(|i| i.ip()).collect()).unwrap_or_default())
+}
+
+/// [`is_local`], with `assigned` the addresses this machine's interfaces hold: those, not
+/// whether a socket can be bound to an address, which a system may allow for any address
+/// (Linux with `net.ipv4.ip_nonlocal_bind`).
+fn is_local_among(addr: &str, assigned: impl FnOnce() -> Vec<std::net::IpAddr>) -> bool {
     let host = host_of(addr).trim_end_matches('.').to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
     match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.is_loopback() || ip.is_unspecified() || std::net::UdpSocket::bind((ip, 0)).is_ok(),
+        Ok(ip) => ip.is_loopback() || ip.is_unspecified() || assigned().contains(&ip),
         Err(_) => false,
     }
 }
@@ -1325,20 +1350,15 @@ mod tests {
 
     #[test]
     fn a_server_is_started_only_at_an_address_of_this_machine() {
-        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9"] {
-            assert!(is_local(here), "{here}");
+        let assigned = || vec!["10.17.0.42".parse().unwrap(), "fd00::7".parse().unwrap()];
+        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9", "10.17.0.42:8453", "[fd00::7]:8453"] {
+            assert!(is_local_among(here, assigned), "{here}");
         }
-        for there in ["10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
-            assert!(!is_local(there), "{there}");
+        for there in ["10.17.0.171:8453", "10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "[fd00::8]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
+            assert!(!is_local_among(there, assigned), "{there}");
         }
-        // An address of one of this machine's interfaces is this machine's.
-        let own = std::net::UdpSocket::bind("0.0.0.0:0")
-            .and_then(|s| s.connect("192.0.2.1:9").map(|()| s))
-            .and_then(|s| s.local_addr())
-            .map(|a| a.ip());
-        if let Some(ip) = own.ok().filter(|ip| !ip.is_unspecified()) {
-            assert!(is_local(&std::net::SocketAddr::new(ip, 8453).to_string()), "{ip}");
-        }
+        // What this machine's interfaces hold is read from them.
+        assert!(is_local("127.0.0.1:8453") && !is_local("192.0.2.7:8453"));
         assert_eq!(host_of("[fe80::1]:8453"), "fe80::1");
         assert_eq!(host_of("10.0.0.1:8453"), "10.0.0.1");
         assert_eq!(host_of("box"), "box");
@@ -1377,6 +1397,13 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let open = listener.local_addr().unwrap();
         assert!(connect_within(&[addrs[0], open], Instant::now() + Duration::from_secs(2)).is_ok(), "the second answers in its share");
+    }
+
+    #[test]
+    fn a_name_not_looked_up_in_time_is_said_so() {
+        let why = resolve_within("head.example.com:8453", Instant::now()).unwrap_err();
+        assert!(why == "resolving head.example.com: no answer within 3 s" || why.starts_with("cannot resolve"), "{why}");
+        assert_eq!(resolve_within("127.0.0.1:8453", Instant::now() + Duration::from_secs(3)).unwrap(), vec!["127.0.0.1:8453".parse().unwrap()]);
     }
 
     #[test]
