@@ -401,7 +401,8 @@ Usage: superfluid launch <agent> [options] [-- <agent arguments>...]
   Points the agent at the server on --http. When none answers there, starts
   `superfluid serve <model>` in the background first (its log goes to
   $SUPERFLUID_HOME/logs/serve.log) and leaves it running; `superfluid stop` stops it.
-  The model is --model, or the one launch last started a server with.
+  The model is --model, or the one launch last started a server with. An --http of
+  another machine is never started on: launch says why it got no answer there.
 
 Options:
   --model <path|org/model[:tag]>   The model to serve, and the one the agent uses on a server
@@ -495,12 +496,32 @@ struct Served {
 enum Probe {
     Up(Vec<Served>),
     Unauthorized,
-    Down,
+    Down(Down),
 }
 
+/// Why no server answered as one.
+#[derive(Debug, Clone, PartialEq)]
+struct Down {
+    why: String,
+    /// The system said there is no route to the host or its network, which on macOS is also
+    /// what a program the Local Network setting keeps off the network gets.
+    no_route: bool,
+}
+
+impl Down {
+    fn because(why: impl Into<String>) -> Down {
+        Down { why: why.into(), no_route: false }
+    }
+}
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 fn probe(base: &str, api_key: Option<&str>) -> Probe {
+    if let Some(down) = cannot_connect(base.trim_start_matches("http://")) {
+        return Probe::Down(down);
+    }
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(3)))
+        .timeout_global(Some(PROBE_TIMEOUT))
         .http_status_as_error(false)
         .build()
         .new_agent();
@@ -508,17 +529,100 @@ fn probe(base: &str, api_key: Option<&str>) -> Probe {
     if let Some(key) = api_key {
         req = req.header("authorization", &format!("Bearer {key}"));
     }
-    let Ok(mut resp) = req.call() else { return Probe::Down };
+    let mut resp = match req.call() {
+        Ok(resp) => resp,
+        Err(e) => {
+            let no_route = matches!(&e, ureq::Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable));
+            return Probe::Down(Down { why: e.to_string(), no_route });
+        }
+    };
     match resp.status().as_u16() {
         200 => {}
         401 | 403 => return Probe::Unauthorized,
-        _ => return Probe::Down,
+        status => return Probe::Down(Down::because(format!("GET /v1/models answered HTTP {status}"))),
     }
-    let Ok(body) = resp.body_mut().read_to_string() else { return Probe::Down };
+    let body = match resp.body_mut().read_to_string() {
+        Ok(body) => body,
+        Err(e) => return Probe::Down(Down::because(format!("GET /v1/models: {e}"))),
+    };
     match parse_models(&body) {
         Some(models) => Probe::Up(models),
-        None => Probe::Down,
+        None => Probe::Down(Down::because("GET /v1/models answered something that is not a model list")),
     }
+}
+
+/// Why no connection can be made to `addr`, as the system says it: the HTTP client words it
+/// less exactly (a connection that timed out can come back from it as refused).
+fn cannot_connect(addr: &str) -> Option<Down> {
+    use std::net::ToSocketAddrs;
+    let addrs = match addr.to_socket_addrs() {
+        Ok(addrs) => addrs,
+        Err(e) => return Some(Down::because(format!("cannot resolve {addr}: {e}"))),
+    };
+    let mut last = None;
+    for at in addrs {
+        match std::net::TcpStream::connect_timeout(&at, PROBE_TIMEOUT) {
+            Ok(_) => return None,
+            Err(e) => last = Some(e),
+        }
+    }
+    let e = last?;
+    let no_route = matches!(e.kind(), std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable);
+    Some(Down { why: format!("connect: {e}"), no_route })
+}
+
+/// The host of `addr`, `host:port` or `[v6]:port`.
+fn host_of(addr: &str) -> &str {
+    match addr.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => addr.rsplit_once(':').map_or(addr, |(host, _)| host),
+    }
+}
+
+/// Whether a server at `addr` would run on this machine, which launch may start one at: a
+/// loopback or unspecified address, `localhost`, or an address of one of this machine's
+/// interfaces (one a socket can be bound to). Any other host, a name among them, is another
+/// machine's, where a server launch started could never listen.
+fn is_local(addr: &str) -> bool {
+    let host = host_of(addr).trim_end_matches('.').to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback() || ip.is_unspecified() || std::net::UdpSocket::bind((ip, 0)).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Whether `host` is on a local network, which macOS's Local Network setting governs: a
+/// private or link-local address, or a `.local` name.
+fn on_local_network(host: &str) -> bool {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
+        // Unique local fc00::/7 and link-local fe80::/10.
+        Ok(std::net::IpAddr::V6(ip)) => (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
+        Err(_) => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
+    }
+}
+
+/// What launch says when the server at another machine's `addr` does not answer. On macOS a
+/// program started from a terminal that is not allowed on the local network gets "no route to
+/// host" for every address there, while the system's own tools reach it, so it says where
+/// that is allowed: `term` is `$TERM_PROGRAM`, the terminal app.
+fn cant_reach(addr: &str, down: &Down, macos: bool, term: Option<&str>) -> String {
+    let mut msg = format!("can't reach the server at {addr}: {}", down.why);
+    if macos && down.no_route && on_local_network(host_of(addr)) {
+        let app = match term {
+            Some("Apple_Terminal") => "Terminal",
+            Some("iTerm.app") => "iTerm",
+            _ => "your terminal app",
+        };
+        msg.push_str(&format!(
+            "\n  macOS keeps programs started from {app} off the local network until it is allowed: \
+             turn {app} on under System Settings › Privacy & Security › Local Network, then run this again"
+        ));
+    }
+    msg
 }
 
 fn parse_models(body: &str) -> Option<Vec<Served>> {
@@ -644,11 +748,15 @@ pub fn run(args: &[String]) {
     let served = match probe(&base, api_key.as_deref()) {
         Probe::Up(served) => served,
         Probe::Unauthorized => fail(format!("the server at {addr} wants a key: pass --api-key or set SUPERFLUID_API_KEY")),
-        Probe::Down if a.print => {
+        Probe::Down(_) if a.print => {
             let id = a.model.clone().or_else(remembered).map_or_else(|| "<model>".into(), |m| served_id(&m));
             vec![Served { id, n_ctx: None }]
         }
-        Probe::Down => {
+        Probe::Down(down) if !is_local(&addr) => {
+            let term = std::env::var("TERM_PROGRAM").ok();
+            fail(cant_reach(&addr, &down, cfg!(target_os = "macos"), term.as_deref()))
+        }
+        Probe::Down(_) => {
             let model = a.model.clone().or_else(remembered).unwrap_or_else(|| {
                 fail(format!(
                     "no server at {addr}, and no model to start one with. Pass one:\n  \
@@ -1194,6 +1302,57 @@ mod tests {
         assert!(v["agents"].as_array().unwrap().iter().all(|r| r["installed"] == false));
         let ollama = v["agents"].as_array().unwrap().iter().find(|r| r["name"] == "ollama").unwrap();
         assert_eq!(ollama["aliases"], serde_json::json!([]), "an agent with no alias has an empty list");
+    }
+
+    #[test]
+    fn a_server_is_started_only_at_an_address_of_this_machine() {
+        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9"] {
+            assert!(is_local(here), "{here}");
+        }
+        for there in ["10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
+            assert!(!is_local(there), "{there}");
+        }
+        // An address of one of this machine's interfaces is this machine's.
+        let own = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| s.connect("192.0.2.1:9").map(|()| s))
+            .and_then(|s| s.local_addr())
+            .map(|a| a.ip());
+        if let Some(ip) = own.ok().filter(|ip| !ip.is_unspecified()) {
+            assert!(is_local(&std::net::SocketAddr::new(ip, 8453).to_string()), "{ip}");
+        }
+        assert_eq!(host_of("[fe80::1]:8453"), "fe80::1");
+        assert_eq!(host_of("10.0.0.1:8453"), "10.0.0.1");
+        assert_eq!(host_of("box"), "box");
+    }
+
+    #[test]
+    fn a_remote_server_not_reached_says_why_and_on_macos_where_the_local_network_is_allowed() {
+        let no_route = Down { why: "connect: No route to host (os error 65)".into(), no_route: true };
+        let said = cant_reach("10.17.0.171:8453", &no_route, true, Some("Apple_Terminal"));
+        assert_eq!(
+            said,
+            "can't reach the server at 10.17.0.171:8453: connect: No route to host (os error 65)\n  macOS keeps programs \
+             started from Terminal off the local network until it is allowed: turn Terminal on under System Settings \
+             › Privacy & Security › Local Network, then run this again"
+        );
+        assert!(cant_reach("192.168.1.4:8453", &no_route, true, Some("iTerm.app")).contains("turn iTerm on"));
+        assert!(cant_reach("mac-mini.local:8453", &no_route, true, Some("WezTerm")).contains("from your terminal app off"));
+        assert!(cant_reach("[fe80::1]:8453", &no_route, true, None).contains("Local Network"));
+        // No hint off macOS, for an address beyond the local network, or for another reason.
+        let plain = "can't reach the server at 10.17.0.171:8453: connect: No route to host (os error 65)";
+        assert_eq!(cant_reach("10.17.0.171:8453", &no_route, false, Some("Apple_Terminal")), plain);
+        assert!(!cant_reach("203.0.113.9:8453", &no_route, true, None).contains("Local Network"));
+        let timeout = Down::because("connect: Operation timed out (os error 60)");
+        assert_eq!(cant_reach("10.255.255.1:8453", &timeout, true, None), "can't reach the server at 10.255.255.1:8453: connect: Operation timed out (os error 60)");
+    }
+
+    #[test]
+    fn a_probe_says_why_no_server_answered() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let Probe::Down(down) = probe(&format!("http://{addr}"), None) else { panic!("nothing listens there") };
+        assert!(down.why.starts_with("connect: ") && !down.no_route, "{down:?}");
     }
 
     #[test]
