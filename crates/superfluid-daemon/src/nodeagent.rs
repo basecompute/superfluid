@@ -122,6 +122,8 @@ pub struct NodeAgent {
     on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Told, at each handshake, what the head stated it serves over the link.
     on_head: Option<HeadHook>,
+    /// Set by [`NodeAgent::leave`], for every connection of the node at once.
+    leaving: Arc<AtomicBool>,
 }
 
 /// The largest blob a node takes from its head.
@@ -167,6 +169,7 @@ impl NodeAgent {
             incoming: HashMap::new(),
             on_control_ask: None,
             on_head: None,
+            leaving: Arc::new(AtomicBool::new(false)),
             models: vec![Model { daemon, name: model_name.into(), id: None, tokenizer: 0, tokenizer_impl: None }],
             names_models: false,
             shared: Arc::new(Mutex::new(AgentShared {
@@ -215,7 +218,16 @@ impl NodeAgent {
             incoming: HashMap::new(),
             on_control_ask: self.on_control_ask.clone(),
             on_head: self.on_head.clone(),
+            leaving: Arc::clone(&self.leaving),
         }
+    }
+
+    /// Has every connection of this node close its link as soon as it has nothing running: a
+    /// node asked to drain takes no new work and lets what it runs finish. A head takes a link
+    /// the node closed for a node that left: it sends it nothing more, and a session it would
+    /// run there goes to another node.
+    pub fn leave(&self) {
+        self.leaving.store(true, Ordering::Release);
     }
 
     /// `idle` is how long the head may be silent before a connection is dropped; zero keeps
@@ -551,6 +563,11 @@ impl NodeAgent {
             }
             if was_busy && !work.busy() {
                 endpoint.poll_every(POLL_IDLE)?;
+            }
+            // Before reading: a generation the head sends once this one's last tokens are out
+            // finds the link closed, and the head places it elsewhere as for a node that left.
+            if !work.busy() && self.leaving.load(Ordering::Acquire) {
+                return Ok(());
             }
             let frames = match endpoint.pump() {
                 Ok(f) => f,

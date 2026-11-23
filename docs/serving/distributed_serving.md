@@ -41,6 +41,7 @@ On Windows, other machines reach a head (its `--fleet-listen` and `--http` ports
 | `--model-name <id>` | what the head announces, else the model's id | the name the head matches on; with several models, once per `--model` in the same order |
 | `--offline` | off | pull nothing |
 | `--speculate <strategy\|off>` | `auto` on `basert`, else off | speculative decoding on the node, as `serve` takes it ([Speculative decoding](../features/speculative_decoding.md)) |
+| `--drain-timeout <sec>` | 60 | asked to drain, how long the requests the node runs get before they are cut ([Failure handling](#failure-handling)) |
 | `--park` | off | keep each prompt's prefix on disk, so a restarted node starts it warm ([Durable sessions](#durable-sessions)) |
 | `--park-lossy` | off | park in the lossy Q8 tier, on F16 KV pools; implies `--park` |
 | `--park-budget-gb <N>` | 20 | disk budget for the parked prefixes, oldest evicted first; 0 is unbounded |
@@ -213,6 +214,7 @@ superfluid fleet remove <name> [<head>]    # remove one
 | node restarts | comes back with an empty cache, or with the prefixes it kept under `--park`; the head reconnects, and a conversation's next turn goes back to it |
 | connection idle or busy | each end sends a heartbeat when it has sent nothing for 5 s, during a generation too; a connection a node closed anyway is replaced before it is used |
 | node goes silent | after 30 s with nothing from it, the head gives the connection up and re-places what ran there, as for a node that failed |
+| `node join` node asked to drain | as a server is: `kill -USR1 <pid>`, `superfluid stop --drain --pid <pid>` on any system, or `Ctrl+Break` in its console on Windows. The node takes no new work: it closes each connection to the head once what runs there has finished (an idle one at once), so the head places new requests and sessions elsewhere as for a node that left. It dials no more and exits 0, cutting what still runs after `--drain-timeout` |
 | node removed | its connections close and what ran there is re-placed, as for a node that failed; the head refuses it until the head restarts ([List and remove nodes](#list-and-remove-nodes)) |
 | head restarts | in-flight requests fail; a client that retries with its `Idempotency-Key` gets a finished answer replayed, and one the restart cut short runs again ([Retrying with Idempotency-Key](openai_compatible_server.md#retrying-with-idempotency-key)). The head still knows which node ran each conversation, so the next turn goes where it is warm |
 | head misses a lease renewal | the node fences the session and emits nothing more; the head stops waiting 30 s past the generation's wall-clock budget |

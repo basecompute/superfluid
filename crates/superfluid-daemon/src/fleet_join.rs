@@ -55,6 +55,9 @@ Usage: superfluid node join [<head-host:port>] [--model <path|org/model[:tag]>].
   or --model-name given once per --model, in order. A head released before heads named the
   model of each request is offered the first model only. A node that follows the head
   serves one model.
+  Asked to drain as a server is (SIGUSR1, `superfluid stop --drain --pid <pid>`, Ctrl+Break
+  on Windows), the node takes no new work, closes each link to the head once what it runs
+  there has finished (the head places new work elsewhere), dials no more, and exits 0.
 Options:
   --model <m>             The model, fixed; an id is pulled first, as `serve` pulls it;
                           again for each more model to serve
@@ -76,6 +79,8 @@ Options:
                           Draft tokens and verify them, as `serve` does; also dflash:,
                           dspark:, eagle3:, draft-model: <path or id>
                           [default: auto on basert, else off]
+  --drain-timeout <sec>   Asked to drain, how long the requests it runs get before they are
+                          cut [default: 60]
   --park                  Keep each prompt's prefix on disk, under
                           $SUPERFLUID_HOME/fleet/nodes/<identity>/park, so a restarted node
                           starts the head's sessions warm
@@ -160,6 +165,7 @@ fn join(args: &[String]) {
     let (mut head, mut token, mut identity) = (None, None, None);
     let (mut models, mut names): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     let mut park = false;
+    let mut drain = 60;
     let mut opts = NodeOptions::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -174,6 +180,7 @@ fn join(args: &[String]) {
             "--max-batch" => opts.lanes = val().parse().unwrap_or_else(|_| fail("--max-batch takes a number")),
             "--offline" => opts.offline = true,
             "--park" => park = true,
+            "--drain-timeout" => drain = val().parse().unwrap_or_else(|_| fail("--drain-timeout takes a number of seconds")),
             // Read before the rest by events::init.
             "--log-format" => drop(val()),
             s if s.starts_with("--log-format=") => {}
@@ -198,6 +205,17 @@ fn join(args: &[String]) {
     if names.len() > models.len() || (models.len() > 1 && !names.is_empty() && names.len() != models.len()) {
         fail("give --model-name once for each --model, in the same order, or not at all");
     }
+    let (events, heard) = std::sync::mpsc::sync_channel::<Event>(8);
+    let asks = events.clone();
+    hear_drain(move |asked| {
+        if DIALING.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = asks.send(Event::Drain(asked));
+            return;
+        }
+        eprintln!("superfluid: {asked} before the node joined its head — exiting");
+        crate::events::emit("node.drain.done", serde_json::json!({"reason": asked, "links_cut": 0}));
+        crate::events::exit(0);
+    });
     let model = models.first().cloned();
     // The node-agent's warnings (a fenced session, a silent head) go to stderr, as noded's do;
     // its scheduler's spans to a collector with --otlp-endpoint, as `serve`'s do.
@@ -212,7 +230,6 @@ fn join(args: &[String]) {
     }
     let token = crate::fleet_token::read(&home).unwrap_or_default();
     let identity = identity.unwrap_or_else(crate::metrics::hostname);
-    let (events, heard) = std::sync::mpsc::sync_channel::<Event>(8);
     let mut search = Search::for_token(&token);
     let (target, announced, follows) = match (head, &model) {
         (given, None) => {
@@ -305,6 +322,7 @@ fn join(args: &[String]) {
         let (target, token, node, links) = (Arc::clone(&target), token.clone(), node.connection(), Arc::clone(&links));
         std::thread::spawn(move || keep_dialing(&target, &token, node, lane, &links))
     };
+    DIALING.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut lanes: Vec<_> = (0..max_batch).map(dial).collect();
     let mut asked = false;
     let followed = loop {
@@ -315,6 +333,7 @@ fn join(args: &[String]) {
             }
             Ok(Event::ControlAsk) => {}
             Ok(Event::Follow(wanted)) => break Some(wanted),
+            Ok(Event::Drain(asked)) => drain_and_exit(asked, Duration::from_secs(drain), &node, &links, lanes, daemons),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if lanes.iter().all(|l| l.is_finished()) => break None,
             Err(_) => {}
         }
@@ -346,8 +365,120 @@ fn join(args: &[String]) {
         daemon.signal_shutdown();
         daemon.shutdown();
     }
+    // Asked to drain while it let what it ran finish: it ends rather than start again.
+    if let Some(asked) = heard.try_iter().find_map(|e| match e {
+        Event::Drain(asked) => Some(asked),
+        _ => None,
+    }) {
+        eprintln!("superfluid: drained ({asked}) rather than start again for the head's model — exiting");
+        crate::events::emit("node.drain.done", serde_json::json!({"reason": asked, "links_cut": 0}));
+        crate::events::exit(0);
+    }
     restart();
 }
+
+/// Whether the node has begun dialing its head: a drain asked before then has nothing to let
+/// finish.
+static DIALING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Listens for the asks a server drains on, from the node's start: SIGUSR1 on Unix; on
+/// Windows the event named for this process that `superfluid stop --drain --pid` sets, and
+/// Ctrl+Break for a node with a console. `tell` is told the first. Listening from the start
+/// also keeps a SIGUSR1 sent while the model loads from ending the node as an unheard one would.
+fn hear_drain(tell: impl FnOnce(&'static str) + Send + 'static) {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
+    // Made on this thread, so the ask is heard from here on.
+    let _in = rt.enter();
+    #[cfg(unix)]
+    let asked = {
+        let Ok(mut sig) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1()) else { return };
+        async move {
+            sig.recv().await;
+            "SIGUSR1"
+        }
+    };
+    #[cfg(windows)]
+    let asked = {
+        let mut key = tokio::signal::windows::ctrl_break().ok();
+        let request = crate::sys::DrainRequest::listen().ok();
+        async move {
+            // Either may be missing (no console; no event): the other still asks.
+            let by_key = async {
+                let pressed = match key.as_mut() {
+                    Some(k) => k.recv().await.is_some(),
+                    None => false,
+                };
+                if !pressed {
+                    std::future::pending::<()>().await;
+                }
+            };
+            let by_request = async {
+                let heard = match request {
+                    Some(r) => tokio::task::spawn_blocking(move || r.wait()).await.is_ok(),
+                    None => false,
+                };
+                if !heard {
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::select! {
+                () = by_key => "Ctrl+Break",
+                () = by_request => "a drain request",
+            }
+        }
+    };
+    drop(_in);
+    let _ = std::thread::Builder::new().name("drain-request".into()).spawn(move || tell(rt.block_on(asked)));
+}
+
+/// Drains the node as a server drains, then exits 0. Its lanes dial no more, and each closes
+/// its link to the head once it has nothing running: an idle one at once, one running a
+/// generation once its last tokens are out. A closed link is how the head learns a node left,
+/// so it sends the node nothing new and places what would have run here elsewhere. What still
+/// runs after `within` is cut.
+fn drain_and_exit(
+    asked: &str,
+    within: Duration,
+    node: &NodeAgent,
+    links: &Links,
+    lanes: Vec<std::thread::JoinHandle<()>>,
+    daemons: Vec<Arc<Daemon>>,
+) -> ! {
+    eprintln!("superfluid: {asked} — no longer taking work from the head, draining for up to {}s", within.as_secs());
+    crate::events::emit("node.drain.start", serde_json::json!({"reason": asked, "timeout_secs": within.as_secs()}));
+    links.leave();
+    node.leave();
+    let by = std::time::Instant::now() + within;
+    while !lanes.iter().all(|l| l.is_finished()) && std::time::Instant::now() < by {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let cut = lanes.iter().filter(|l| !l.is_finished()).count();
+    if cut > 0 {
+        eprintln!("superfluid: drain window elapsed with {cut} link(s) still running — closing them");
+        links.stop();
+    }
+    // Each engine ends with its worker, and a node that parks writes what it parks; bounded, as
+    // a server's teardown after a drain is.
+    let (done, ended) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new().name("superfluid-shutdown".into()).spawn(move || {
+        for daemon in &daemons {
+            daemon.signal_shutdown();
+        }
+        for daemon in &daemons {
+            daemon.shutdown();
+        }
+        let _ = done.send(());
+    });
+    if ended.recv_timeout(DRAIN_TEARDOWN).is_err() {
+        eprintln!("superfluid: the engine's teardown did not finish in {} s — exiting anyway", DRAIN_TEARDOWN.as_secs());
+    }
+    eprintln!("superfluid: drained — exiting");
+    crate::events::emit("node.drain.done", serde_json::json!({"reason": asked, "links_cut": cut}));
+    crate::events::exit(0)
+}
+
+/// How long a drained node waits for its engines to end before it exits anyway.
+const DRAIN_TEARDOWN: Duration = Duration::from_secs(10);
 
 /// What the node's main thread is told while its lanes run.
 enum Event {
@@ -355,6 +486,8 @@ enum Event {
     ControlAsk,
     /// The head this node follows serves another model now.
     Follow(Follow),
+    /// The node was asked to drain, by this.
+    Drain(&'static str),
 }
 
 /// What a node that follows its head serves: the head's first model, by the id it states.
@@ -829,7 +962,8 @@ fn name_among(served: &[String], own: String, by_id: bool) -> String {
     }
 }
 
-/// The links a node's lanes hold to its head, which a node that follows another model closes.
+/// The links a node's lanes hold to its head, which a node that follows another model closes,
+/// and one asked to drain lets close.
 #[derive(Default)]
 struct Links {
     stopping: std::sync::atomic::AtomicBool,
@@ -854,7 +988,17 @@ impl Links {
     }
 
     fn close(&self, lane: u32) {
-        self.open.lock().expect("links").remove(&lane);
+        let sock = self.open.lock().expect("links").remove(&lane);
+        if let Some(sock) = sock.filter(|_| self.stopping()) {
+            linger(sock);
+        }
+    }
+
+    /// Keeps the lanes from dialing again, and lets each link close when its lane is done with
+    /// it.
+    fn leave(&self) {
+        let _open = self.open.lock().expect("links");
+        self.stopping.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Closes every link, and keeps the lanes from dialing again.
@@ -878,6 +1022,30 @@ impl Links {
         !self.stopping()
     }
 }
+
+/// Closes a link a leaving node is done with after what it sent: its own side first, so the
+/// head reads a generation's last tokens and then the end, and what the head still sends is
+/// read off for a moment, since closing a socket with bytes unread resets the link, which can
+/// lose the head bytes it has not read yet.
+fn linger(sock: TcpStream) {
+    use std::io::Read;
+    let _ = sock.shutdown(std::net::Shutdown::Write);
+    let by = std::time::Instant::now() + LINGER;
+    let mut buf = [0u8; 4096];
+    loop {
+        let left = by.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || sock.set_read_timeout(Some(left)).is_err() {
+            return;
+        }
+        match (&sock).read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// How long [`linger`] waits for the head to close its side of a link.
+const LINGER: Duration = Duration::from_secs(2);
 
 /// Dials the head and serves until the link ends, then dials again, until the links stop; the
 /// first lane speaks for the node in the log.
@@ -1768,6 +1936,68 @@ mod tests {
             assert!(std::time::Instant::now() < by, "every lane ended once its link closed");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// A node asked to drain: its idle lane leaves the head at once, the generation running on
+    /// the other finishes whole and that lane leaves after it, and neither dials again.
+    #[test]
+    fn a_draining_node_finishes_what_it_runs_and_leaves_without_dialing_again() {
+        let token = b"a fleet token".to_vec();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let lease = superfluid_proto::linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+        let manager = Arc::new(FleetManager::with_options(Vec::new(), crate::fleet_manager::PlacementPolicy::LoadAware, lease, 90, 1));
+        let models = HeadModels::fixed(Arc::clone(&manager), vec!["mock".into()]);
+        let (m, t) = (Arc::clone(&manager), token.clone());
+        std::thread::spawn(move || accept_nodes(listener, m, t, models));
+
+        // An engine slow enough that the generation outlasts the idle lane's leaving, which
+        // waits up to LINGER for the head to close its side.
+        let ticking = |tick| {
+            let state = NodeState::scratch().unwrap();
+            let store = SessionStore::open(&state.wal).unwrap();
+            let config = superfluid_engine::EngineConfig { tick_delay: tick, ..Default::default() };
+            let host = EngineHost::spawn(move || (superfluid_engine::MockEngine::new(config), None)).unwrap();
+            Daemon::new(store, host, Box::new(crate::MockCodec), 8)
+        };
+        let agent = NodeAgent::new(Arc::new(ticking(Duration::from_millis(400))), "box-a", "mock").with_max_lanes(2).with_auth(token.clone());
+        let target = Arc::new(Target::new(Some(addr), Vec::new(), Search::for_token(&token), None));
+        let links = Arc::new(Links::default());
+        let lanes: Vec<_> = (0..2)
+            .map(|lane| {
+                let (target, token, conn, links) = (Arc::clone(&target), token.clone(), agent.connection(), Arc::clone(&links));
+                std::thread::spawn(move || {
+                    keep_dialing(&target, &token, conn, lane, &links);
+                    std::time::Instant::now()
+                })
+            })
+            .collect();
+        let wait = |what: &str, ok: &dyn Fn() -> bool| {
+            let by = std::time::Instant::now() + Duration::from_secs(20);
+            while !ok() {
+                assert!(std::time::Instant::now() < by, "{what}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        wait("the node joined on both lanes", &|| manager.status().first().is_some_and(|n| n.up && n.lanes == 2) && manager.connections(0) == 2);
+
+        let prompt: Vec<u32> = (400..424).collect();
+        let params = crate::wal::GenParams::default();
+        let (whole, _) = ticking(Duration::ZERO).generate_tokens(prompt.clone(), params, 2000, 0).unwrap();
+        manager.place(1, params, 0, "chatml", "mock", &prompt, 2000).expect("placed");
+        let running = {
+            let m = Arc::clone(&manager);
+            std::thread::spawn(move || (m.generate(1, 2000, 60_000), std::time::Instant::now()))
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        links.leave();
+        agent.leave();
+        wait("the idle lane left", &|| lanes.iter().any(|l| l.is_finished()));
+        assert!(!running.is_finished(), "the idle lane left while the generation still ran");
+        let (generated, done) = running.join().unwrap();
+        assert_eq!(generated.expect("the generation finished").tokens, whole, "nothing of it was cut");
+        let ends: Vec<_> = lanes.into_iter().map(|l| l.join().unwrap()).collect();
+        assert!(ends.iter().any(|&end| end < done) && ends.iter().any(|&end| end + Duration::from_millis(200) >= done), "one lane left at once, the other once its generation ended");
     }
 
     /// A node speculates as `serve` does: with the strategy named, `off` being none, and on a

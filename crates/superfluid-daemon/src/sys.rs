@@ -359,10 +359,10 @@ pub fn kill_hard(pid: i32) {
     }
 }
 
-/// Asks the server with this process id to drain: stop accepting, finish what it runs, exit.
-/// SIGUSR1 on Unix. Windows has no signal to send, so a server there waits on an event named
-/// for its process id ([`DrainRequest`]), which this sets; a process that made no such event
-/// is not a server that drains, and is left alone.
+/// Asks the server or fleet node with this process id to drain: stop taking work, finish what
+/// it runs, exit. SIGUSR1 on Unix. Windows has no signal to send, so a server or node there
+/// waits on an event named for its process id ([`DrainRequest`]), which this sets; a process
+/// that made no such event is not one that drains, and is left alone.
 pub fn ask_to_drain(pid: i32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -390,7 +390,7 @@ pub fn ask_to_drain(pid: i32) -> std::io::Result<()> {
                 return if set { Ok(()) } else { Err(err) };
             }
         }
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no superfluid server that drains has that process id"))
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no superfluid server or node that drains has that process id"))
     }
 }
 
@@ -403,7 +403,7 @@ fn drain_event_names(pid: u32) -> [Vec<u16>; 2] {
     [wide("Global"), wide("Local")]
 }
 
-/// A Windows server's standing request to be asked to drain: an event named for this process,
+/// A Windows server's or node's standing request to be asked to drain: an event named for this process,
 /// which [`ask_to_drain`] sets from another.
 #[cfg(windows)]
 pub struct DrainRequest(windows_sys::Win32::Foundation::HANDLE);
