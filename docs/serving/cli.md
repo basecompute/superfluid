@@ -245,7 +245,7 @@ superfluid stop --drain --pid <pid>   # ask a server you started yourself
 
 Sends the server `launch` started SIGTERM, which ends it without draining: in-flight requests are cut. It then waits up to 90 s for the process to exit. A server started with `superfluid serve` is not touched.
 
-With `--drain` the server is asked to drain instead (see [Quickstart](../getting_started/quickstart.md#stop)), and the command waits until it has exited. `--pid` names a server you started yourself: what `kill -USR1 <pid>` does, and the way to ask on Windows, which has no signal to send.
+With `--drain` the server is asked to drain instead (see [Quickstart](../getting_started/quickstart.md#stop)), and the command waits until it has exited. `--pid` names a server you started yourself, or a `superfluid node join` node, which drains the same way ([Failure handling](distributed_serving.md#failure-handling)): what `kill -USR1 <pid>` does, and the way to ask on Windows, which has no signal to send.
 
 ## `superfluid runtimes`
 

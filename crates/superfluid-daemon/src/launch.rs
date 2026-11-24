@@ -428,9 +428,11 @@ Usage: superfluid stop [--drain [--pid <pid>]]
 
   --drain        Ask it to drain instead: it stops accepting connections, gives in-flight
                  requests its --drain-timeout, and exits. This waits for that.
-  --pid <pid>    With --drain: the server to ask, one you started yourself. What
-                 `kill -USR1 <pid>` does, and the way to ask on Windows, where a server with
-                 a console also drains on Ctrl+Break.
+  --pid <pid>    With --drain: the server or `superfluid node join` node to ask, one you
+                 started yourself. What `kill -USR1 <pid>` does, and the way to ask on
+                 Windows, where one with a console also drains on Ctrl+Break. A node takes
+                 no new work from its head, lets what it runs finish within its
+                 --drain-timeout, and exits.
 ";
 
 #[derive(Debug, Default, PartialEq)]
@@ -930,7 +932,7 @@ pub fn stop(args: &[String]) {
             std::process::exit(1);
         }
         None => match read_server() {
-            Some((pid, addr)) => (pid, format!("on {addr} (pid {pid})")),
+            Some((pid, addr)) => (pid, format!("the server on {addr} (pid {pid})")),
             None => {
                 let _ = std::fs::remove_file(server_file());
                 eprintln!("superfluid stop: no server started by `superfluid launch` is running");
@@ -942,10 +944,10 @@ pub fn stop(args: &[String]) {
     let wait = if drain { Duration::from_secs(60 * 60) } else { Duration::from_secs(90) };
     if drain {
         if let Err(e) = crate::sys::ask_to_drain(pid) {
-            eprintln!("superfluid stop: the server {server} could not be asked to drain: {e}");
+            eprintln!("superfluid stop: {server} could not be asked to drain: {e}");
             std::process::exit(1);
         }
-        eprintln!("superfluid stop: asked the server {server} to drain; waiting for it to exit");
+        eprintln!("superfluid stop: asked {server} to drain; waiting for it to exit");
     } else {
         crate::sys::terminate(pid);
     }
@@ -955,13 +957,13 @@ pub fn stop(args: &[String]) {
     }
     if alive(pid) {
         let got = if drain { "was asked to drain" } else { "got SIGTERM" };
-        eprintln!("superfluid stop: the server {server} is still finishing; it {got}");
+        eprintln!("superfluid stop: {server} is still finishing; it {got}");
         std::process::exit(1);
     }
     if named.is_none() {
         let _ = std::fs::remove_file(server_file());
     }
-    eprintln!("superfluid stop: {} the server {server}", if drain { "drained and stopped" } else { "stopped" });
+    eprintln!("superfluid stop: {} {server}", if drain { "drained and stopped" } else { "stopped" });
 }
 
 #[cfg(test)]

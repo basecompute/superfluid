@@ -437,6 +437,55 @@ fn a_node_join_process_the_head_removes_exits_saying_so() {
     );
 }
 
+/// `superfluid stop --drain --pid` asks a node as it asks a server: SIGUSR1 on Unix, the
+/// event named for the node's process on Windows. The node leaves its head and exits 0.
+#[test]
+fn a_node_join_process_asked_to_drain_leaves_its_head_and_exits_0() {
+    use std::io::Read;
+    let fleet = Arc::new(FleetManager::with_options(Vec::new(), PlacementPolicy::LoadAware, LEASE, 90, 0));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let join_addr = listener.local_addr().unwrap().to_string();
+    let f = Arc::clone(&fleet);
+    let models = HeadModels::fixed(Arc::clone(&f), vec!["mock".into()]);
+    std::thread::spawn(move || accept_nodes(listener, f, Vec::new(), models));
+    let home = dir("join-drain-home");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_superfluid"))
+        .args(["node", "join", &join_addr, "--model", "mock", "--runtime", "mock", "--identity", "proc-drain", "--max-batch", "2"])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("SUPERFLUID_HOME", home.join(".superfluid"))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn superfluid node join");
+    let mut stderr = child.stderr.take().unwrap();
+    let mut child = Child(child);
+    wait_for("the node joined on both lanes", || fleet.status().first().is_some_and(|n| n.up && n.lanes == 2));
+
+    let mut stop = std::process::Command::new(env!("CARGO_BIN_EXE_superfluid"))
+        .args(["stop", "--drain", "--pid", &child.0.id().to_string()])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("SUPERFLUID_HOME", home.join(".superfluid"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn superfluid stop");
+    // Reaped here, so `stop` sees the node gone.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "the node is still running after it was asked to drain");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut said = String::new();
+    stderr.read_to_string(&mut said).unwrap();
+    assert_eq!(status.code(), Some(0), "{said}");
+    assert!(said.contains("draining for up to 60s") && said.contains("drained — exiting"), "{said}");
+    assert!(!said.contains("dialing again"), "a draining node dials no more: {said}");
+    assert!(stop.wait().unwrap().success(), "stop saw the node drain");
+}
+
 #[test]
 fn the_fleet_command_lists_a_heads_nodes_and_removes_one() {
     let (node_addr, _, _) = dialed("dialed-h");
