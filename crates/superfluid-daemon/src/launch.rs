@@ -517,22 +517,27 @@ impl Down {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Asks the server at `base` what it serves, within [`PROBE_TIMEOUT`] all told: the
-/// connection made first and the request after share it.
+/// connection made first and the request after share it. A request the HTTP client sends
+/// through a proxy (`HTTP_PROXY` and the like, less `NO_PROXY`) makes no connection of its own
+/// first, as the proxy may reach, or resolve, what this machine cannot.
 fn probe(base: &str, api_key: Option<&str>) -> Probe {
+    probe_with(ureq::Agent::config_builder().http_status_as_error(false).build().new_agent(), base, api_key)
+}
+
+/// [`probe`], with `agent` the HTTP client, which carries the proxy it uses.
+fn probe_with(agent: ureq::Agent, base: &str, api_key: Option<&str>) -> Probe {
     let by = Instant::now() + PROBE_TIMEOUT;
-    if let Some(down) = cannot_connect(base.trim_start_matches("http://"), by) {
-        return Probe::Down(down);
+    let url = format!("{base}/v1/models");
+    if !through_proxy(agent.config().proxy(), &url) {
+        if let Some(down) = cannot_connect(base.trim_start_matches("http://"), by) {
+            return Probe::Down(down);
+        }
     }
     let left = by.saturating_duration_since(Instant::now());
     if left.is_zero() {
         return Probe::Down(Down::because(format!("no answer within {} s", PROBE_TIMEOUT.as_secs())));
     }
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(left))
-        .http_status_as_error(false)
-        .build()
-        .new_agent();
-    let mut req = agent.get(format!("{base}/v1/models"));
+    let mut req = agent.get(&url).config().timeout_global(Some(left)).build();
     if let Some(key) = api_key {
         req = req.header("authorization", &format!("Bearer {key}"));
     }
@@ -556,6 +561,13 @@ fn probe(base: &str, api_key: Option<&str>) -> Probe {
         Some(models) => Probe::Up(models),
         None => Probe::Down(Down::because("GET /v1/models answered something that is not a model list")),
     }
+}
+
+/// Whether the HTTP client sends a request for `url` through `proxy`, as it decides: any proxy
+/// it has, unless `NO_PROXY` names the host.
+fn through_proxy(proxy: Option<&ureq::Proxy>, url: &str) -> bool {
+    let Some(proxy) = proxy else { return false };
+    url.parse::<ureq::http::Uri>().map_or(true, |uri| !proxy.is_no_proxy(&uri))
 }
 
 /// Why no connection can be made to `addr`, as the system says it: the HTTP client words it
@@ -609,11 +621,16 @@ fn connect_within(addrs: &[std::net::SocketAddr], by: Instant) -> std::io::Resul
 }
 
 /// The IP address `host` is, without the zone a link-local IPv6 address may carry
-/// (`fe80::1%7`, `fe80::1%en0`): the address is the same on whichever interface it is named.
+/// (`fe80::1%7`, `fe80::1%en0`; [`zone_of`] gives it).
 /// An IPv4 address written as IPv6 (`::ffff:127.0.0.1`) is that IPv4 address, as interfaces
 /// list it.
 fn ip_of(host: &str) -> Option<std::net::IpAddr> {
     host.split_once('%').map_or(host, |(ip, _zone)| ip).parse::<std::net::IpAddr>().ok().map(|ip| ip.to_canonical())
+}
+
+/// The zone a link-local IPv6 address names its interface by, `7` or `en0` in `fe80::1%7`.
+fn zone_of(host: &str) -> Option<&str> {
+    host.split_once('%').map(|(_, zone)| zone)
 }
 
 /// The host of `addr`, `host:port` or `[v6]:port`.
@@ -629,19 +646,48 @@ fn host_of(addr: &str) -> &str {
 /// machine's interfaces. Any other host, a name among them, is another machine's, where a
 /// server launch started could never listen.
 fn is_local(addr: &str) -> bool {
-    is_local_among(addr, || if_addrs::get_if_addrs().map(|all| all.iter().map(|i| i.ip()).collect()).unwrap_or_default())
+    is_local_among(addr, || {
+        if_addrs::get_if_addrs()
+            .map(|all| all.into_iter().map(|i| Assigned { ip: i.ip(), name: i.name, index: i.index }).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// An address one of this machine's interfaces holds, and that interface.
+struct Assigned {
+    ip: std::net::IpAddr,
+    name: String,
+    index: Option<u32>,
+}
+
+impl Assigned {
+    /// Whether `zone`, a number or a name, is this address's interface.
+    fn on(&self, zone: &str) -> bool {
+        match zone.parse::<u32>() {
+            Ok(index) => self.index == Some(index),
+            Err(_) => self.name == zone,
+        }
+    }
 }
 
 /// [`is_local`], with `assigned` the addresses this machine's interfaces hold: those, not
 /// whether a socket can be bound to an address, which a system may allow for any address
-/// (Linux with `net.ipv4.ip_nonlocal_bind`).
-fn is_local_among(addr: &str, assigned: impl FnOnce() -> Vec<std::net::IpAddr>) -> bool {
-    let host = host_of(addr).trim_end_matches('.').to_ascii_lowercase();
-    if host == "localhost" || host.ends_with(".localhost") {
+/// (Linux with `net.ipv4.ip_nonlocal_bind`). An address named with a zone is this machine's
+/// only on the interface the zone names: the same link-local address on another link may be
+/// another machine's, and a server can't be started at it here.
+fn is_local_among(addr: &str, assigned: impl FnOnce() -> Vec<Assigned>) -> bool {
+    let host = host_of(addr).trim_end_matches('.');
+    let name = host.to_ascii_lowercase();
+    if name == "localhost" || name.ends_with(".localhost") {
         return true;
     }
-    match ip_of(&host) {
-        Some(ip) => ip.is_loopback() || ip.is_unspecified() || assigned().iter().any(|a| a.to_canonical() == ip),
+    let zone = zone_of(host);
+    match ip_of(host) {
+        Some(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || assigned().iter().any(|a| a.ip.to_canonical() == ip && zone.is_none_or(|z| a.on(z)))
+        }
         None => false,
     }
 }
@@ -1358,11 +1404,13 @@ mod tests {
 
     #[test]
     fn a_server_is_started_only_at_an_address_of_this_machine() {
-        let assigned = || vec!["10.17.0.42".parse().unwrap(), "fd00::7".parse().unwrap(), "fe80::1234".parse().unwrap()];
-        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9", "10.17.0.42:8453", "[fd00::7]:8453", "[fe80::1234%7]:8453", "[fe80::1234%en0]:8453", "[::ffff:127.0.0.1]:8453", "[::ffff:0.0.0.0]:8453", "[::ffff:10.17.0.42]:8453"] {
+        let on = |ip: &str, name: &str, index: u32| Assigned { ip: ip.parse().unwrap(), name: name.into(), index: Some(index) };
+        let assigned = || vec![on("10.17.0.42", "en0", 7), on("fd00::7", "en0", 7), on("fe80::1234", "en0", 7)];
+        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9", "10.17.0.42:8453", "[fd00::7]:8453", "[fe80::1234]:8453", "[fe80::1234%7]:8453", "[fe80::1234%en0]:8453", "[::ffff:127.0.0.1]:8453", "[::ffff:0.0.0.0]:8453", "[::ffff:10.17.0.42]:8453"] {
             assert!(is_local_among(here, assigned), "{here}");
         }
-        for there in ["10.17.0.171:8453", "10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "[fd00::8]:8453", "[fe80::99%7]:8453", "[::ffff:10.17.0.171]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
+        // fe80::1234 on another link than en0, by its index or its name, is not this machine's.
+        for there in ["10.17.0.171:8453", "10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "[fd00::8]:8453", "[fe80::99%7]:8453", "[fe80::1234%9]:8453", "[fe80::1234%en1]:8453", "[fe80::1234%EN0]:8453", "[::ffff:10.17.0.171]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
             assert!(!is_local_among(there, assigned), "{there}");
         }
         // What this machine's interfaces hold is read from them.
@@ -1408,6 +1456,56 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let open = listener.local_addr().unwrap();
         assert!(connect_within(&[addrs[0], open], Instant::now() + Duration::from_secs(2)).is_ok(), "the second answers in its share");
+    }
+
+    #[test]
+    fn a_server_reached_through_a_proxy_is_asked_through_it() {
+        use std::io::{BufRead, Write};
+        // A proxy that answers for any host, as one that reaches what this machine cannot.
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_at = format!("http://{}", proxy.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for sock in proxy.incoming().flatten() {
+                let mut read = std::io::BufReader::new(sock.try_clone().unwrap());
+                let mut out = sock;
+                let head = |read: &mut std::io::BufReader<std::net::TcpStream>| {
+                    let mut first = String::new();
+                    let _ = read.read_line(&mut first);
+                    let mut line = String::new();
+                    while read.read_line(&mut line).is_ok_and(|n| n > 2) {
+                        line.clear();
+                    }
+                    first
+                };
+                if head(&mut read).starts_with("CONNECT") {
+                    let _ = out.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+                    head(&mut read);
+                }
+                let body = r#"{"data":[{"id":"m"}]}"#;
+                let _ = write!(out, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let through = |proxy: ureq::Proxy| ureq::Agent::config_builder().http_status_as_error(false).proxy(Some(proxy)).build().new_agent();
+        let base = "http://proxy-only.invalid:8453";
+        match probe_with(through(ureq::Proxy::new(&proxy_at).unwrap()), base, None) {
+            Probe::Up(models) => assert_eq!(models, vec![Served { id: "m".into(), n_ctx: None }]),
+            Probe::Down(down) => panic!("not asked through the proxy: {}", down.why),
+            Probe::Unauthorized => panic!("unauthorized"),
+        }
+        // A host NO_PROXY names is connected to directly, and is said why when it can't be.
+        let bypassed = ureq::Proxy::builder(ureq::ProxyProtocol::Http)
+            .host("127.0.0.1")
+            .port(1)
+            .no_proxy("proxy-only.invalid")
+            .build()
+            .unwrap();
+        assert!(!through_proxy(Some(&bypassed), &format!("{base}/v1/models")));
+        assert!(through_proxy(Some(&bypassed), "http://10.17.0.171:8453/v1/models"));
+        assert!(!through_proxy(None, "http://10.17.0.171:8453/v1/models"));
+        match probe_with(through(bypassed), base, None) {
+            Probe::Down(down) => assert!(down.why.contains("proxy-only.invalid"), "{}", down.why),
+            _ => panic!("a bypassed host that does not resolve answered"),
+        }
     }
 
     #[test]
