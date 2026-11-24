@@ -4,6 +4,122 @@
   "api": "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{version}",
   "tested": [
     {
+      "version": "b12676",
+      "published": "2026-11-24",
+      "assets": [
+        {
+          "name": "cudart-llama-b12676-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 594371406,
+          "sha256": "7950380b5b88ce0f7ef082f3a86c23a93a11f39dad9c3a7a0d838ad017d1e4b3"
+        },
+        {
+          "name": "cudart-llama-b12676-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "size": 559872932,
+          "sha256": "f2686443bff3f03abd5b3d785b784100c13a1f1a7da630023343e4088ef3eadd"
+        },
+        {
+          "name": "cudart-llama-b12676-bin-ubuntu-cuda-13.5-x64.tar.gz",
+          "size": 444078892,
+          "sha256": "76177793e1d12df47aaebbc3b97a03d33d295d88ea3c7b264ac834822412f3a3"
+        },
+        {
+          "name": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+          "size": 391443627,
+          "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
+        },
+        {
+          "name": "cudart-llama-bin-win-cuda-13.5-x64.zip",
+          "size": 426314199,
+          "sha256": "c2bf4cc202bfbaaa7a0b75f5082457c3811326947bb216059b72839d844e9cba"
+        },
+        {
+          "name": "llama-b12676-bin-macos-arm64.tar.gz",
+          "size": 16820228,
+          "sha256": "a222d1ba06a3f0215fa7d22f372af6ba74c5b4cfca5f6b2aa6974c7b63017b59"
+        },
+        {
+          "name": "llama-b12676-bin-macos-x64.tar.gz",
+          "size": 12540396,
+          "sha256": "10f36c786606e874f7440a87b48716dbd19f4bc6670e7dcd005e43c61977e6ef"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-arm64.tar.gz",
+          "size": 18929478,
+          "sha256": "05707ec03e09e83a4e5bde447adf7e59280035eeeced28dbe167e716bd432f04"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 220397713,
+          "sha256": "f92c568b56fa39afb92ead65a899a618d2ef29cff4ca2b739d51eb777c55b12e"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "size": 219663308,
+          "sha256": "49706f0b4106987421d3fb5bfc903fd5f4cba16ef0e5253bb6ae04c7330d4ca4"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-cuda-13.5-x64.tar.gz",
+          "size": 224691011,
+          "sha256": "bcb9629f51e99c4ad771822e9799e3c4119178faf784ed324111ce0ffeb88e88"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-rocm-10.0-x64.tar.gz",
+          "size": 276014940,
+          "sha256": "ab5678cd5f77638994ce883ff98f5c33558133588b8bf68da78dd01f8150f208"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-sycl-fp16-x64.tar.gz",
+          "size": 69650172,
+          "sha256": "e2b304de3d5cb5ce28d0020c157085863e2619594e020898752fee01ccc77c82"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-sycl-fp32-x64.tar.gz",
+          "size": 69549606,
+          "sha256": "730b7969bfb64073a9214b08e7c9d414ca5b620c3c94c9fafb0a4cc530b33b95"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-vulkan-arm64.tar.gz",
+          "size": 30053891,
+          "sha256": "8deadf4b99e84fc302d4cf16b20a9080d7b779deb4e543b7bc0e1d7f933b97d1"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-vulkan-x64.tar.gz",
+          "size": 37066771,
+          "sha256": "cd355471644b3e905f7fc678a230ec60f93cb0c39b3947dc696c9a449bbc007e"
+        },
+        {
+          "name": "llama-b12676-bin-ubuntu-x64.tar.gz",
+          "size": 23378348,
+          "sha256": "c65369a8574d096d90c593fef0e77a1ba2abfdfa7e7e9426bbf8939781ef8a07"
+        },
+        {
+          "name": "llama-b12676-bin-win-cpu-x64.zip",
+          "size": 25216675,
+          "sha256": "fdf78a3924fe92ccfb24af58544a6dccbc1feeb0587e77fca9ec3bef6737086c"
+        },
+        {
+          "name": "llama-b12676-bin-win-cuda-12.4-x64.zip",
+          "size": 358327112,
+          "sha256": "1d5692d90213a39aa01ef7da8d2c662ee815e0c6e4ad63b6f56473cc5b8ddb84"
+        },
+        {
+          "name": "llama-b12676-bin-win-cuda-13.5-x64.zip",
+          "size": 225953323,
+          "sha256": "39f2cdae1833fc58b4ab6c7ae29b0100f6ee656008ee7ae62285bc6d812d0258"
+        },
+        {
+          "name": "llama-b12676-bin-win-rocm-10.0-x64.zip",
+          "size": 284895280,
+          "sha256": "0e9ae56154dce138fa0c86143c5770b74fa440325d7de0af3c5eb710bb4a7227"
+        },
+        {
+          "name": "llama-b12676-bin-win-vulkan-x64.zip",
+          "size": 39065358,
+          "sha256": "4a0732dd3b68ea1d7346fde885253a315c0c5eb7279da897d936892e0f709108"
+        }
+      ]
+    },
+    {
       "version": "b12535",
       "published": "2026-11-19",
       "assets": [
