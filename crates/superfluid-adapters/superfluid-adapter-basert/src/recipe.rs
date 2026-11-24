@@ -604,7 +604,7 @@ mod tests {
         for gpus in [vec!["gfx1100".to_string()], vec![]] {
             let other = Host { amd_gpus: gpus, ..strix("gfx1151") };
             let e = plan_with(&Request::default(), &other, &pinned, &releases).unwrap_err();
-            assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
+            assert!(e.contains("for Linux and Windows x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
         }
         // The engine opens HIP device 0, the first of Host.amd_gpus: a Strix GPU behind another AMD GPU is named, not admitted.
         let behind = Host { amd_gpus: vec!["gfx1100".into(), "gfx1151".into()], ..strix("gfx1151") };
@@ -633,7 +633,7 @@ mod tests {
         // Linux x86-64 without a Strix GPU has no baseRT engine, asked for by backend or not.
         let other = Host { amd_gpus: vec!["gfx1100".into()], ..strix("gfx1151") };
         let e = plan_with(&asked, &other, &pinned, &Value::Null).unwrap_err();
-        assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
+        assert!(e.contains("for Linux and Windows x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
     }
 
     /// A Strix machine as detection sees it: the driver's GPUs in node order, then ROCR_VISIBLE_DEVICES and
@@ -677,7 +677,7 @@ mod tests {
         for arch in ["x64", "arm64"] {
             let linux = Host { os: "linux".into(), arch: arch.into(), ..Host::default() };
             let e = plan_with(&Request::default(), &linux, &[], &json!([])).unwrap_err();
-            assert!(e.starts_with("baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux x86-64 with an AMD"), "{e}");
+            assert!(e.starts_with("baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux and Windows x86-64 with an AMD"), "{e}");
             assert!(e.ends_with(&format!("; this is Linux {arch}")), "{e}");
         }
         let from = Request { from: Some("/x/basert-engine-macos-arm64-0.0.1.tar.gz".into()), untested: true, ..Request::default() };
