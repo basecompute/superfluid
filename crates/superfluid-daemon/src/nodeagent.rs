@@ -122,6 +122,11 @@ pub struct NodeAgent {
     on_control_ask: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Told, at each handshake, what the head stated it serves over the link.
     on_head: Option<HeadHook>,
+    /// Set by [`NodeAgent::leave`], for every connection of the node at once. A connection
+    /// holds it read only while it starts a piece of work ([`admit`]), never across a send, so
+    /// a leave waits for at most the start under way and none starts after it. A start takes
+    /// [`Self::shared`] too, so that is never held across a send either.
+    leaving: Arc<std::sync::RwLock<bool>>,
 }
 
 /// The largest blob a node takes from its head.
@@ -167,6 +172,7 @@ impl NodeAgent {
             incoming: HashMap::new(),
             on_control_ask: None,
             on_head: None,
+            leaving: Arc::new(std::sync::RwLock::new(false)),
             models: vec![Model { daemon, name: model_name.into(), id: None, tokenizer: 0, tokenizer_impl: None }],
             names_models: false,
             shared: Arc::new(Mutex::new(AgentShared {
@@ -215,7 +221,16 @@ impl NodeAgent {
             incoming: HashMap::new(),
             on_control_ask: self.on_control_ask.clone(),
             on_head: self.on_head.clone(),
+            leaving: Arc::clone(&self.leaving),
         }
+    }
+
+    /// Has every connection of this node close its link as soon as it has nothing running: a
+    /// node asked to drain takes no new work and lets what it runs finish. A head takes a link
+    /// the node closed for a node that left: it sends it nothing more, and a session it would
+    /// run there goes to another node.
+    pub fn leave(&self) {
+        *self.leaving.write().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     }
 
     /// `idle` is how long the head may be silent before a connection is dropped; zero keeps
@@ -564,8 +579,19 @@ impl NodeAgent {
                 }
                 Err(e) => return Err(e.into()),
             };
+            // Leaving with nothing running, after the read and before what it read: a generation
+            // the head sent meanwhile (to an idle lane, or once this one's last tokens were out)
+            // finds the link closed unanswered, and the head places it elsewhere as for a node
+            // that left. A leave that lands while the frames are handled is caught where each
+            // piece of work starts ([`admit`]).
+            if !work.busy() && *self.leaving.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
+                return Ok(());
+            }
             for frame in frames {
                 self.handle(endpoint, frame, work)?;
+                if work.left {
+                    return Ok(());
+                }
             }
             // A head on version 2 sends no heartbeat while it waits on a generation, so only
             // a connection with nothing running is idle.
@@ -672,6 +698,10 @@ impl NodeAgent {
             }
             msg_type::GENERATE_REQ => {
                 let m: linkf::GenerateReqMsg = postcard::from_bytes(&frame.payload)?;
+                let gate = Arc::clone(&self.leaving);
+                let Some(admitted) = admit(&gate, work) else {
+                    return Ok(());
+                };
                 let model = {
                     let sh = self.shared.lock().expect("agent shared");
                     // A session placed before this node told its models is the first's.
@@ -681,6 +711,7 @@ impl NodeAgent {
                     || model.is_none()
                     || !self.shared.lock().expect("agent shared").agent.on_generate(&m);
                 if declined {
+                    drop(admitted);
                     tracing::warn!(
                         session = m.session_id,
                         generation = m.generation_id,
@@ -703,6 +734,7 @@ impl NodeAgent {
                     endpoint.send(msg_type::TOKEN_EVENTS, &msg)?;
                 } else {
                     work.generation = Some(self.start_generation(&m, model.expect("checked above")));
+                    drop(admitted);
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
@@ -775,6 +807,10 @@ impl NodeAgent {
                 };
                 let daemon = Arc::clone(&self.models[model].daemon);
                 Self::localize(&daemon, &mut m.req);
+                let gate = Arc::clone(&self.leaving);
+                let Some(admitted) = admit(&gate, work) else {
+                    return Ok(());
+                };
                 let (tx, rx) = mpsc::channel();
                 std::thread::Builder::new()
                     .name("node-state-sync".into())
@@ -807,6 +843,7 @@ impl NodeAgent {
                     })
                     .expect("spawn a node state operation");
                 work.syncs.push(rx);
+                drop(admitted);
                 endpoint.poll_every(POLL_RUNNING)?;
             }
             msg_type::GENERATE_CANCEL => {
@@ -828,7 +865,12 @@ impl NodeAgent {
                     let resp = linkf::StageForwardRespMsg { request_id: m.request_id, hidden: None, token: None };
                     endpoint.send(msg_type::STAGE_FORWARD_RESP, &resp)?;
                 } else {
+                    let gate = Arc::clone(&self.leaving);
+                    let Some(admitted) = admit(&gate, work) else {
+                        return Ok(());
+                    };
                     work.stage = Some(self.start_stage(m));
+                    drop(admitted);
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
@@ -1056,7 +1098,12 @@ impl NodeAgent {
             }
             Err(e) => return Err(e),
         };
-        if let Some(batch) = sh.agent.emit(run.session_id, run.generation_id, TokenEventPayload::Finish { reason }) {
+        let batch = sh.agent.emit(run.session_id, run.generation_id, TokenEventPayload::Finish { reason });
+        // Let go of the shared state before the finish goes out, as every send here does: a
+        // head that stops reading this link must not hold up the node's other connections, nor,
+        // through a connection waiting on this lock to start work, a leave.
+        drop(sh);
+        if let Some(batch) = batch {
             endpoint.send(msg_type::TOKEN_EVENTS, &batch)?;
         }
         Ok(true)
@@ -1090,6 +1137,23 @@ struct Work {
     stage: Option<mpsc::Receiver<linkf::StageForwardRespMsg>>,
     /// State operations' answers, once each has one.
     syncs: Vec<mpsc::Receiver<Synced>>,
+    /// The node is leaving and this connection had nothing running when the head sent it work:
+    /// the connection closes without answering it.
+    left: bool,
+}
+
+/// Lets a piece of work start on a connection, holding a [`NodeAgent::leave`] off until the
+/// returned guard is dropped; hold it only while the work starts, never across a send, so a
+/// leave is never held up by a head that has stopped reading. `None` when the node is leaving
+/// and the connection has nothing running, which it then closes ([`Work::left`]); a connection
+/// still running something takes it, and leaves once all of it is done.
+fn admit<'g>(gate: &'g std::sync::RwLock<bool>, work: &mut Work) -> Option<std::sync::RwLockReadGuard<'g, bool>> {
+    let leaving = gate.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *leaving && !work.busy() {
+        work.left = true;
+        return None;
+    }
+    Some(leaving)
 }
 
 /// What a state operation has to tell the head: a streamed transcription's segments, then its
@@ -1202,4 +1266,102 @@ fn is_client_refusal(e: &DaemonError) -> bool {
         e,
         DaemonError::StreamTooLong { .. } | DaemonError::Constraint(_)
     )
+}
+
+// A link stuck on a full buffer is made of a Unix socket pair.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    fn mock_daemon() -> Daemon {
+        static DIRS: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("superfluid-nodeagent-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = crate::EngineHost::spawn(|| (superfluid_engine::MockEngine::new(superfluid_engine::EngineConfig::default()), None)).unwrap();
+        Daemon::new(store, host, Box::new(crate::MockCodec), 8)
+    }
+
+    /// A connection's link whose head never reads, with its buffers already full: the next send
+    /// on it blocks until the link is shut down. A Unix socket's buffers stay the size they
+    /// are, where TCP's may grow and let a small send through.
+    fn stuck_link() -> (Endpoint, UnixStream) {
+        let (node, head) = UnixStream::pair().unwrap();
+        // Kept open, and never read.
+        std::mem::forget(head);
+        let raw = node.try_clone().unwrap();
+        raw.set_nonblocking(true).unwrap();
+        loop {
+            match (&raw).write(&[0u8; 64 * 1024]) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("filling the link: {e}"),
+            }
+        }
+        raw.set_nonblocking(false).unwrap();
+        (Endpoint::new(node).unwrap(), raw)
+    }
+
+    /// A connection stuck sending a generation's finish to a head that has stopped reading
+    /// holds nothing another connection needs to start work. Were it to hold the shared state,
+    /// a connection starting a generation would wait on it while holding a leave off, and a
+    /// drain would never reach its deadline.
+    #[test]
+    fn a_connection_stuck_sending_a_finish_holds_nothing_a_start_needs() {
+        let node = NodeAgent::new(Arc::new(mock_daemon()), "box-s", "mock");
+        {
+            let mut sh = node.shared.lock().unwrap();
+            let lease = linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+            let assign = linkf::SessionAssignMsg {
+                command_id: 1,
+                session_id: 1,
+                epoch: 1,
+                lease,
+                codec: "chatml".into(),
+                params: Vec::new(),
+                qos_class: 0,
+                policy_ref: 0,
+                model: String::new(),
+            };
+            assert!(sh.agent.on_assign(&assign, Duration::ZERO));
+            let budgets = linkf::GenerationBudgetsMsg { max_new_tokens: 8, max_wall_ms: 0 };
+            let generate = linkf::GenerateReqMsg { command_id: 2, session_id: 1, epoch: 1, generation_id: 1, budgets, policy_ref: 0 };
+            assert!(sh.agent.on_generate(&generate));
+        }
+        let (ep, raw) = stuck_link();
+        let (tx, out) = mpsc::channel();
+        tx.send(Out::Done(Ok((Vec::new(), 0, false)))).unwrap();
+        let run = Running {
+            session_id: 1,
+            generation_id: 1,
+            max_new: 8,
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancelled: false,
+            out,
+            pending: Vec::new(),
+            last_flush: Duration::ZERO,
+            sent: true,
+        };
+        let mut lane = node.connection();
+        let forwarding = std::thread::spawn(move || {
+            let (mut ep, mut run) = (ep, run);
+            let _ = lane.forward(&mut ep, &mut run, Duration::ZERO);
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let stuck = !forwarding.is_finished();
+
+        let shared = Arc::clone(&node.shared);
+        let (locked_tx, locked) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(shared.lock());
+            let _ = locked_tx.send(());
+        });
+        let free = locked.recv_timeout(Duration::from_secs(2)).is_ok();
+        let _ = raw.shutdown(std::net::Shutdown::Both);
+        forwarding.join().unwrap();
+        assert!(stuck, "the finish went out: the link was not full, so this tests nothing");
+        assert!(free, "a connection stuck sending a finish held the shared state");
+    }
 }

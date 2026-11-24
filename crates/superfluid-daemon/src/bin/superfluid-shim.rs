@@ -22,7 +22,7 @@ const VERSIONS_FILE: &str = "superfluid-versions";
 /// (a timestamp, a build id) and not in what they do, so a launcher is replaced by revision, not by content.
 #[used]
 static REVISION: [u8; 29] = *b"superfluid-shim-revision:0001";
-const INSTALL: &str = "irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex";
+const INSTALL: &str = "irm https://basecompute.co/sf/install.ps1 | iex";
 
 /// The program `launcher` stands for: `<versions>\<current>\bin\<the launcher's own name>`.
 fn target(launcher: &Path) -> Result<PathBuf, String> {

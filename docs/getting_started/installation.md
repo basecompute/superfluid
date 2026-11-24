@@ -110,7 +110,7 @@ Windows 10 1803 or later, x86-64. Superfluid serves GGUF models through llama.cp
 A release, in PowerShell:
 
 ```powershell
-irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex
+irm https://basecompute.co/sf/install.ps1 | iex
 superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M
 ```
 

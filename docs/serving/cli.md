@@ -231,7 +231,7 @@ superfluid launch [--json]                          # list the agents and whethe
 superfluid launch <agent> [--model <m>] [--http <addr:port>] [--api-key <key>] [--print] [-- <agent args>...]
 ```
 
-Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there. That server's log goes to `$SUPERFLUID_HOME/logs/serve.log`. `--http` defaults to `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`; `--api-key` to `$SUPERFLUID_API_KEY`. `--model` defaults to the model `launch` last started a server with. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](../integrations/index.md).
+Runs `claude`, `codex`, `pi`, `opencode`, `hermes`, `cline`, `openclaw` or the `ollama` CLI pointed at the server on `--http`, starting `superfluid serve <model>` in the background when nothing answers there and the address is this machine's. At another machine's address it starts nothing and says why it got no answer (on macOS, with a hint when the terminal app is not allowed on the local network). That server's log goes to `$SUPERFLUID_HOME/logs/serve.log`. `--http` defaults to `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`; `--api-key` to `$SUPERFLUID_API_KEY`. `--model` defaults to the model `launch` last started a server with. `--print` shows what would run; arguments after `--` go to the agent. See [Superfluid launch](../integrations/index.md).
 
 `superfluid launch --json` prints the list as one JSON object: `schema` (1; a key is only added under the same number), `agents` (each with `name`, `aliases`, `title`, `binary`, `installed`, `path`, where on `PATH` it was found or null, and `install`), `server` (`pid` and `address` of the server `launch` started, or null) and `last_model` (the model `launch` starts a server with when none answers, or null). With an agent, `--json` is refused.
 
@@ -245,7 +245,7 @@ superfluid stop --drain --pid <pid>   # ask a server you started yourself
 
 Sends the server `launch` started SIGTERM, which ends it without draining: in-flight requests are cut. It then waits up to 90 s for the process to exit. A server started with `superfluid serve` is not touched.
 
-With `--drain` the server is asked to drain instead (see [Quickstart](../getting_started/quickstart.md#stop)), and the command waits until it has exited. `--pid` names a server you started yourself: what `kill -USR1 <pid>` does, and the way to ask on Windows, which has no signal to send.
+With `--drain` the server is asked to drain instead (see [Quickstart](../getting_started/quickstart.md#stop)), and the command waits until it has exited. `--pid` names a server you started yourself, or a `superfluid node join` node, which drains the same way ([Failure handling](distributed_serving.md#failure-handling)): what `kill -USR1 <pid>` does, and the way to ask on Windows, which has no signal to send.
 
 ## `superfluid runtimes`
 

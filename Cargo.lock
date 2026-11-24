@@ -1947,12 +1947,13 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "superfluid"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
  "futures-util",
  "http-body",
+ "if-addrs",
  "libc",
  "mdns-sd",
  "minijinja",
@@ -1993,7 +1994,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-abi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "baseRT-sys",
  "cc",
@@ -2002,7 +2003,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-adapter-basert"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde_json",
  "superfluid-adapter-kit",
@@ -2011,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-adapter-kit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde_json",
  "sha2",
@@ -2024,7 +2025,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-adapter-llamacpp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libloading",
  "serde_json",
@@ -2040,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-adapter-mlx"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "pyo3",
  "pyo3-build-config",
@@ -2057,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-adapter-mock"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "superfluid-adapter-kit",
  "superfluid-engine",
@@ -2065,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "postcard",
  "serde",
@@ -2080,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "superfluid-abi",
  "thiserror",
@@ -2089,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-engine-ffi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "baseRT-sys",
  "libloading",
@@ -2107,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-executor"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "llguidance",
  "serde_json",
@@ -2119,11 +2120,11 @@ dependencies = [
 
 [[package]]
 name = "superfluid-fingerprint"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "superfluid-linkf"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "postcard",
  "serde",
@@ -2136,7 +2137,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "postcard",
  "serde",
@@ -2145,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-shm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "superfluid-abi",
@@ -2157,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-tokenizer-hf"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde_json",
  "superfluid-engine",
@@ -2167,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-tokenizer-llamacpp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "superfluid-adapter-kit",
@@ -2177,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "superfluid-worker"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "postcard",
  "serde",

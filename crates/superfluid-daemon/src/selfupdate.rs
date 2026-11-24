@@ -39,7 +39,7 @@ const BASERT_STAMP: &str = ".release";
 /// The name `installed-by` gives a release that was put in one place on Windows, with no versions beside it, and the
 /// command that installs one with them.
 const INSTALL_PS1: &str = "install.ps1";
-const INSTALL_PS1_COMMAND: &str = "irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex";
+const INSTALL_PS1_COMMAND: &str = "irm https://basecompute.co/sf/install.ps1 | iex";
 /// How long a new copy's `--version` or `runtimes --json` may take: it runs under the lock, which a copy that hangs
 /// would hold for every later update. Longer than the runtime checks `runtimes --json` makes, a minute each at most.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
