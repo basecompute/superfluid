@@ -123,8 +123,8 @@ pub struct NodeAgent {
     /// Told, at each handshake, what the head stated it serves over the link.
     on_head: Option<HeadHook>,
     /// Set by [`NodeAgent::leave`], for every connection of the node at once. A connection
-    /// holds it read while it handles what it read, so the leave waits for a dispatch under way
-    /// and none starts after it.
+    /// holds it read only while it starts a piece of work ([`admit`]), never across a send, so
+    /// a leave waits for at most the start under way and none starts after it.
     leaving: Arc<std::sync::RwLock<bool>>,
 }
 
@@ -581,16 +581,17 @@ impl NodeAgent {
             // Leaving with nothing running, after the read and before what it read: a generation
             // the head sent meanwhile (to an idle lane, or once this one's last tokens were out)
             // finds the link closed unanswered, and the head places it elsewhere as for a node
-            // that left. Held through the dispatch, so a leave comes wholly before it or after.
-            let leaving = Arc::clone(&self.leaving);
-            let leaving = leaving.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !work.busy() && *leaving {
+            // that left. A leave that lands while the frames are handled is caught where each
+            // piece of work starts ([`admit`]).
+            if !work.busy() && *self.leaving.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
                 return Ok(());
             }
             for frame in frames {
                 self.handle(endpoint, frame, work)?;
+                if work.left {
+                    return Ok(());
+                }
             }
-            drop(leaving);
             // A head on version 2 sends no heartbeat while it waits on a generation, so only
             // a connection with nothing running is idle.
             if endpoint.version() < 3
@@ -696,6 +697,10 @@ impl NodeAgent {
             }
             msg_type::GENERATE_REQ => {
                 let m: linkf::GenerateReqMsg = postcard::from_bytes(&frame.payload)?;
+                let gate = Arc::clone(&self.leaving);
+                let Some(admitted) = admit(&gate, work) else {
+                    return Ok(());
+                };
                 let model = {
                     let sh = self.shared.lock().expect("agent shared");
                     // A session placed before this node told its models is the first's.
@@ -705,6 +710,7 @@ impl NodeAgent {
                     || model.is_none()
                     || !self.shared.lock().expect("agent shared").agent.on_generate(&m);
                 if declined {
+                    drop(admitted);
                     tracing::warn!(
                         session = m.session_id,
                         generation = m.generation_id,
@@ -727,6 +733,7 @@ impl NodeAgent {
                     endpoint.send(msg_type::TOKEN_EVENTS, &msg)?;
                 } else {
                     work.generation = Some(self.start_generation(&m, model.expect("checked above")));
+                    drop(admitted);
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
@@ -799,6 +806,10 @@ impl NodeAgent {
                 };
                 let daemon = Arc::clone(&self.models[model].daemon);
                 Self::localize(&daemon, &mut m.req);
+                let gate = Arc::clone(&self.leaving);
+                let Some(admitted) = admit(&gate, work) else {
+                    return Ok(());
+                };
                 let (tx, rx) = mpsc::channel();
                 std::thread::Builder::new()
                     .name("node-state-sync".into())
@@ -831,6 +842,7 @@ impl NodeAgent {
                     })
                     .expect("spawn a node state operation");
                 work.syncs.push(rx);
+                drop(admitted);
                 endpoint.poll_every(POLL_RUNNING)?;
             }
             msg_type::GENERATE_CANCEL => {
@@ -852,7 +864,12 @@ impl NodeAgent {
                     let resp = linkf::StageForwardRespMsg { request_id: m.request_id, hidden: None, token: None };
                     endpoint.send(msg_type::STAGE_FORWARD_RESP, &resp)?;
                 } else {
+                    let gate = Arc::clone(&self.leaving);
+                    let Some(admitted) = admit(&gate, work) else {
+                        return Ok(());
+                    };
                     work.stage = Some(self.start_stage(m));
+                    drop(admitted);
                     endpoint.poll_every(POLL_RUNNING)?;
                 }
             }
@@ -1114,6 +1131,23 @@ struct Work {
     stage: Option<mpsc::Receiver<linkf::StageForwardRespMsg>>,
     /// State operations' answers, once each has one.
     syncs: Vec<mpsc::Receiver<Synced>>,
+    /// The node is leaving and this connection had nothing running when the head sent it work:
+    /// the connection closes without answering it.
+    left: bool,
+}
+
+/// Lets a piece of work start on a connection, holding a [`NodeAgent::leave`] off until the
+/// returned guard is dropped; hold it only while the work starts, never across a send, so a
+/// leave is never held up by a head that has stopped reading. `None` when the node is leaving
+/// and the connection has nothing running, which it then closes ([`Work::left`]); a connection
+/// still running something takes it, and leaves once all of it is done.
+fn admit<'g>(gate: &'g std::sync::RwLock<bool>, work: &mut Work) -> Option<std::sync::RwLockReadGuard<'g, bool>> {
+    let leaving = gate.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *leaving && !work.busy() {
+        work.left = true;
+        return None;
+    }
+    Some(leaving)
 }
 
 /// What a state operation has to tell the head: a streamed transcription's segments, then its
