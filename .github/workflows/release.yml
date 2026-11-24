@@ -80,18 +80,22 @@ jobs:
         if: runner.os == 'macOS'
         run: scripts/build_runtime_adapters.sh target/adapters
 
-      # Windows has no baseRT or MLX engine: the daemon is built with llama.cpp
-      # and the terminal monitor, and ships the llama.cpp adapter alone.
-      - name: Build the daemon and the llama.cpp adapter
+      # Windows has no MLX engine: the daemon is built with baseRT's engine (the
+      # default feature; baseRT publishes a Windows x86-64 ROCm engine from
+      # 0.6.0), llama.cpp and the terminal monitor, and ships the llama.cpp and
+      # baseRT adapters.
+      - name: Build the daemon and the llama.cpp and baseRT adapters
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           # `shim` builds the launcher: the commands on PATH are copies of it (`superfluid self`).
-          cargo build --release --locked -p superfluid --no-default-features --features llamacpp,tui,shim
+          cargo build --release --locked -p superfluid --features llamacpp,tui,shim
           cargo build --release --locked -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+          cargo build --release --locked -p superfluid-adapter-basert --bin superfluid-worker-basert
           mkdir -p target/adapters/vcruntime
-          cp target/release/superfluid-worker-llamacpp.exe target/release/superfluid_tokenizer_llamacpp.dll target/release/superfluid-shim.exe target/adapters/
+          cp target/release/superfluid-worker-llamacpp.exe target/release/superfluid_tokenizer_llamacpp.dll target/release/superfluid-shim.exe \
+            target/release/superfluid-worker-basert.exe target/adapters/
           # llama.cpp's Windows builds are linked against the Visual C++ runtime
           # and carry none. The release carries the three libraries, from the
           # redistributable folder of the Visual Studio that built it, and an
