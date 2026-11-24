@@ -547,11 +547,12 @@ mod tests {
         }
         assert_eq!(none.matches(", ").count(), file_names().len() - 1, "only the named directory: {none}");
 
-        let versioned = dir.join(file_names()[1]);
+        // The last name (the versioned one on Unix; Windows has the one name, baseRT.dll).
+        let versioned = dir.join(file_names().last().unwrap());
         std::fs::write(&versioned, b"").unwrap();
         let (paths, is_file) = named(dir.clone());
         let chosen = pick(&paths, is_file).cloned();
-        let missing = dir.join(file_names()[0]);
+        let missing = dir.join("elsewhere").join(file_names()[0]);
         let (file, is_file) = named(missing.clone());
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(chosen.unwrap(), versioned, "the versioned name, where it is the one there");
