@@ -124,7 +124,8 @@ pub struct NodeAgent {
     on_head: Option<HeadHook>,
     /// Set by [`NodeAgent::leave`], for every connection of the node at once. A connection
     /// holds it read only while it starts a piece of work ([`admit`]), never across a send, so
-    /// a leave waits for at most the start under way and none starts after it.
+    /// a leave waits for at most the start under way and none starts after it. A start takes
+    /// [`Self::shared`] too, so that is never held across a send either.
     leaving: Arc<std::sync::RwLock<bool>>,
 }
 
@@ -1097,7 +1098,12 @@ impl NodeAgent {
             }
             Err(e) => return Err(e),
         };
-        if let Some(batch) = sh.agent.emit(run.session_id, run.generation_id, TokenEventPayload::Finish { reason }) {
+        let batch = sh.agent.emit(run.session_id, run.generation_id, TokenEventPayload::Finish { reason });
+        // Let go of the shared state before the finish goes out, as every send here does: a
+        // head that stops reading this link must not hold up the node's other connections, nor,
+        // through a connection waiting on this lock to start work, a leave.
+        drop(sh);
+        if let Some(batch) = batch {
             endpoint.send(msg_type::TOKEN_EVENTS, &batch)?;
         }
         Ok(true)
@@ -1260,4 +1266,102 @@ fn is_client_refusal(e: &DaemonError) -> bool {
         e,
         DaemonError::StreamTooLong { .. } | DaemonError::Constraint(_)
     )
+}
+
+// A link stuck on a full buffer is made of a Unix socket pair.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    fn mock_daemon() -> Daemon {
+        static DIRS: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("superfluid-nodeagent-{}-{}", std::process::id(), DIRS.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = crate::SessionStore::open(&dir.join("wal.log")).unwrap();
+        let host = crate::EngineHost::spawn(|| (superfluid_engine::MockEngine::new(superfluid_engine::EngineConfig::default()), None)).unwrap();
+        Daemon::new(store, host, Box::new(crate::MockCodec), 8)
+    }
+
+    /// A connection's link whose head never reads, with its buffers already full: the next send
+    /// on it blocks until the link is shut down. A Unix socket's buffers stay the size they
+    /// are, where TCP's may grow and let a small send through.
+    fn stuck_link() -> (Endpoint, UnixStream) {
+        let (node, head) = UnixStream::pair().unwrap();
+        // Kept open, and never read.
+        std::mem::forget(head);
+        let raw = node.try_clone().unwrap();
+        raw.set_nonblocking(true).unwrap();
+        loop {
+            match (&raw).write(&[0u8; 64 * 1024]) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("filling the link: {e}"),
+            }
+        }
+        raw.set_nonblocking(false).unwrap();
+        (Endpoint::new(node).unwrap(), raw)
+    }
+
+    /// A connection stuck sending a generation's finish to a head that has stopped reading
+    /// holds nothing another connection needs to start work. Were it to hold the shared state,
+    /// a connection starting a generation would wait on it while holding a leave off, and a
+    /// drain would never reach its deadline.
+    #[test]
+    fn a_connection_stuck_sending_a_finish_holds_nothing_a_start_needs() {
+        let node = NodeAgent::new(Arc::new(mock_daemon()), "box-s", "mock");
+        {
+            let mut sh = node.shared.lock().unwrap();
+            let lease = linkf::Lease { duration_ms: 60_000, renew_by_ms: 40_000 };
+            let assign = linkf::SessionAssignMsg {
+                command_id: 1,
+                session_id: 1,
+                epoch: 1,
+                lease,
+                codec: "chatml".into(),
+                params: Vec::new(),
+                qos_class: 0,
+                policy_ref: 0,
+                model: String::new(),
+            };
+            assert!(sh.agent.on_assign(&assign, Duration::ZERO));
+            let budgets = linkf::GenerationBudgetsMsg { max_new_tokens: 8, max_wall_ms: 0 };
+            let generate = linkf::GenerateReqMsg { command_id: 2, session_id: 1, epoch: 1, generation_id: 1, budgets, policy_ref: 0 };
+            assert!(sh.agent.on_generate(&generate));
+        }
+        let (ep, raw) = stuck_link();
+        let (tx, out) = mpsc::channel();
+        tx.send(Out::Done(Ok((Vec::new(), 0, false)))).unwrap();
+        let run = Running {
+            session_id: 1,
+            generation_id: 1,
+            max_new: 8,
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancelled: false,
+            out,
+            pending: Vec::new(),
+            last_flush: Duration::ZERO,
+            sent: true,
+        };
+        let mut lane = node.connection();
+        let forwarding = std::thread::spawn(move || {
+            let (mut ep, mut run) = (ep, run);
+            let _ = lane.forward(&mut ep, &mut run, Duration::ZERO);
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let stuck = !forwarding.is_finished();
+
+        let shared = Arc::clone(&node.shared);
+        let (locked_tx, locked) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(shared.lock());
+            let _ = locked_tx.send(());
+        });
+        let free = locked.recv_timeout(Duration::from_secs(2)).is_ok();
+        let _ = raw.shutdown(std::net::Shutdown::Both);
+        forwarding.join().unwrap();
+        assert!(stuck, "the finish went out: the link was not full, so this tests nothing");
+        assert!(free, "a connection stuck sending a finish held the shared state");
+    }
 }

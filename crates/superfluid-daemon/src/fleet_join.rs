@@ -489,10 +489,21 @@ fn drain_and_exit(
 ) -> ! {
     eprintln!("superfluid: {asked} — no longer taking work from the head, draining for up to {}s", within.as_secs());
     crate::events::emit("node.drain.start", serde_json::json!({"reason": asked, "timeout_secs": within.as_secs()}));
-    // The lanes first, so none starts work once the drain has begun; then no lane dials again.
-    node.leave();
-    links.leave();
+    // The deadline from the ask, whatever holds the rest up.
     let by = std::time::Instant::now() + within;
+    // The lanes first, so none starts work once the drain has begun; then no lane dials again.
+    // A leave waits only for work being started, but it is waited on no longer than the
+    // deadline, so a lane stuck some other way can still be cut when it passes.
+    let leaver = node.connection();
+    let (left_tx, left) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new().name("superfluid-leave".into()).spawn(move || {
+        leaver.leave();
+        let _ = left_tx.send(());
+    });
+    if left.recv_timeout(by.saturating_duration_since(std::time::Instant::now())).is_err() && !within.is_zero() {
+        tracing::warn!("the node's lanes did not take the leave before the drain window ran out");
+    }
+    links.leave();
     while !lanes.iter().all(|l| l.is_finished()) && std::time::Instant::now() < by {
         std::thread::sleep(Duration::from_millis(100));
     }
