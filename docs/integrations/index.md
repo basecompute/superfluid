@@ -1,6 +1,6 @@
 # `superfluid launch`
 
-`superfluid launch <agent>` runs a coding agent already pointed at a local server, starting one when none answers:
+`superfluid launch <agent>` runs a coding agent already pointed at a local server, starting one when none answers on this machine:
 
 ```sh
 superfluid launch claude --model basecompute/Qwen3.8-27B
@@ -8,7 +8,7 @@ superfluid launch claude --model basecompute/Qwen3.8-27B
 
 | flag | meaning |
 |---|---|
-| `--http <addr:port>` | the server (default `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`); when none answers there, `superfluid serve <model>` is started in the background, waited on until it lists its models, and left running (log: `$SUPERFLUID_HOME/logs/serve.log`) |
+| `--http <addr:port>` | the server (default `$SUPERFLUID_HTTP`, else `127.0.0.1:8453`); when none answers at an address of this machine, `superfluid serve <model>` is started in the background, waited on until it lists its models, and left running (log: `$SUPERFLUID_HOME/logs/serve.log`). At another machine's address nothing is started: launch says why it got no answer there, and on macOS, when the terminal app is not allowed on the local network, where to allow it |
 | `--model` | the model to serve or, on a running server, the served model to use; default the model `launch` last started a server with, else the server's first |
 | `--api-key` | the server's key (or `SUPERFLUID_API_KEY`), given to the agent |
 | `--print` | show the environment, arguments and files instead of running |

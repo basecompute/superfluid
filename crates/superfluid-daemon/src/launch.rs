@@ -401,7 +401,8 @@ Usage: superfluid launch <agent> [options] [-- <agent arguments>...]
   Points the agent at the server on --http. When none answers there, starts
   `superfluid serve <model>` in the background first (its log goes to
   $SUPERFLUID_HOME/logs/serve.log) and leaves it running; `superfluid stop` stops it.
-  The model is --model, or the one launch last started a server with.
+  The model is --model, or the one launch last started a server with. An --http of
+  another machine is never started on: launch says why it got no answer there.
 
 Options:
   --model <path|org/model[:tag]>   The model to serve, and the one the agent uses on a server
@@ -497,30 +498,231 @@ struct Served {
 enum Probe {
     Up(Vec<Served>),
     Unauthorized,
-    Down,
+    Down(Down),
 }
 
+/// Why no server answered as one.
+#[derive(Debug, Clone, PartialEq)]
+struct Down {
+    why: String,
+    /// The system said there is no route to the host or its network, which on macOS is also
+    /// what a program the Local Network setting keeps off the network gets.
+    no_route: bool,
+}
+
+impl Down {
+    fn because(why: impl Into<String>) -> Down {
+        Down { why: why.into(), no_route: false }
+    }
+}
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Asks the server at `base` what it serves, within [`PROBE_TIMEOUT`] all told: the
+/// connection made first and the request after share it. A request the HTTP client sends
+/// through a proxy (`HTTP_PROXY` and the like, less `NO_PROXY`) makes no connection of its own
+/// first, as the proxy may reach, or resolve, what this machine cannot.
 fn probe(base: &str, api_key: Option<&str>) -> Probe {
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(3)))
-        .http_status_as_error(false)
-        .build()
-        .new_agent();
-    let mut req = agent.get(format!("{base}/v1/models"));
+    probe_with(ureq::Agent::config_builder().http_status_as_error(false).build().new_agent(), base, api_key)
+}
+
+/// [`probe`], with `agent` the HTTP client, which carries the proxy it uses.
+fn probe_with(agent: ureq::Agent, base: &str, api_key: Option<&str>) -> Probe {
+    let by = Instant::now() + PROBE_TIMEOUT;
+    let url = format!("{base}/v1/models");
+    if !through_proxy(agent.config().proxy(), &url) {
+        if let Some(down) = cannot_connect(base.trim_start_matches("http://"), by) {
+            return Probe::Down(down);
+        }
+    }
+    let left = by.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Probe::Down(Down::because(format!("no answer within {} s", PROBE_TIMEOUT.as_secs())));
+    }
+    let mut req = agent.get(&url).config().timeout_global(Some(left)).build();
     if let Some(key) = api_key {
         req = req.header("authorization", &format!("Bearer {key}"));
     }
-    let Ok(mut resp) = req.call() else { return Probe::Down };
+    let mut resp = match req.call() {
+        Ok(resp) => resp,
+        Err(e) => {
+            let no_route = matches!(&e, ureq::Error::Io(io) if matches!(io.kind(), std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable));
+            return Probe::Down(Down { why: e.to_string(), no_route });
+        }
+    };
     match resp.status().as_u16() {
         200 => {}
         401 | 403 => return Probe::Unauthorized,
-        _ => return Probe::Down,
+        status => return Probe::Down(Down::because(format!("GET /v1/models answered HTTP {status}"))),
     }
-    let Ok(body) = resp.body_mut().read_to_string() else { return Probe::Down };
+    let body = match resp.body_mut().read_to_string() {
+        Ok(body) => body,
+        Err(e) => return Probe::Down(Down::because(format!("GET /v1/models: {e}"))),
+    };
     match parse_models(&body) {
         Some(models) => Probe::Up(models),
-        None => Probe::Down,
+        None => Probe::Down(Down::because("GET /v1/models answered something that is not a model list")),
     }
+}
+
+/// Whether the HTTP client sends a request for `url` through `proxy`, as it decides: any proxy
+/// it has, unless `NO_PROXY` names the host.
+fn through_proxy(proxy: Option<&ureq::Proxy>, url: &str) -> bool {
+    let Some(proxy) = proxy else { return false };
+    url.parse::<ureq::http::Uri>().map_or(true, |uri| !proxy.is_no_proxy(&uri))
+}
+
+/// Why no connection can be made to `addr`, as the system says it: the HTTP client words it
+/// less exactly (a connection that timed out can come back from it as refused).
+fn cannot_connect(addr: &str, by: Instant) -> Option<Down> {
+    let addrs = match resolve_within(addr, by) {
+        Ok(addrs) => addrs,
+        Err(why) => return Some(Down::because(why)),
+    };
+    let e = connect_within(&addrs, by).err()?;
+    let no_route = matches!(e.kind(), std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable);
+    Some(Down { why: format!("connect: {e}"), no_route })
+}
+
+/// The addresses `addr` names, looked up by `by`: the system's lookup takes no timeout, so it
+/// runs on a thread of its own, left to finish when the time is up.
+fn resolve_within(addr: &str, by: Instant) -> Result<Vec<std::net::SocketAddr>, String> {
+    use std::net::ToSocketAddrs;
+    let (found, finds) = std::sync::mpsc::channel();
+    let name = addr.to_string();
+    std::thread::Builder::new()
+        .name("launch-resolve".into())
+        .spawn(move || {
+            let _ = found.send(name.to_socket_addrs().map(Iterator::collect));
+        })
+        .map_err(|e| format!("resolving {}: {e}", host_of(addr)))?;
+    match finds.recv_timeout(by.saturating_duration_since(Instant::now())) {
+        Ok(Ok(addrs)) => Ok(addrs),
+        Ok(Err(e)) => Err(format!("cannot resolve {addr}: {e}")),
+        Err(_) => Err(format!("resolving {}: no answer within {} s", host_of(addr), PROBE_TIMEOUT.as_secs())),
+    }
+}
+
+/// Connects to the first of `addrs` that answers by `by`. The time left is shared among the
+/// addresses left, so one that never answers leaves the others theirs, and a name with several
+/// addresses takes no longer than one.
+fn connect_within(addrs: &[std::net::SocketAddr], by: Instant) -> std::io::Result<()> {
+    let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "the name resolves to no address");
+    for (i, at) in addrs.iter().enumerate() {
+        let left = by.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out"));
+        }
+        let share = (left / (addrs.len() - i) as u32).max(Duration::from_millis(1));
+        match std::net::TcpStream::connect_timeout(at, share) {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// The IP address `host` is, without the zone a link-local IPv6 address may carry
+/// (`fe80::1%7`, `fe80::1%en0`; [`zone_of`] gives it).
+/// An IPv4 address written as IPv6 (`::ffff:127.0.0.1`) is that IPv4 address, as interfaces
+/// list it.
+fn ip_of(host: &str) -> Option<std::net::IpAddr> {
+    host.split_once('%').map_or(host, |(ip, _zone)| ip).parse::<std::net::IpAddr>().ok().map(|ip| ip.to_canonical())
+}
+
+/// The zone a link-local IPv6 address names its interface by, `7` or `en0` in `fe80::1%7`.
+fn zone_of(host: &str) -> Option<&str> {
+    host.split_once('%').map(|(_, zone)| zone)
+}
+
+/// The host of `addr`, `host:port` or `[v6]:port`.
+fn host_of(addr: &str) -> &str {
+    match addr.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => addr.rsplit_once(':').map_or(addr, |(host, _)| host),
+    }
+}
+
+/// Whether a server at `addr` would run on this machine, which launch may start one at: a
+/// loopback or unspecified address, `localhost`, or an address assigned to one of this
+/// machine's interfaces. Any other host, a name among them, is another machine's, where a
+/// server launch started could never listen.
+fn is_local(addr: &str) -> bool {
+    is_local_among(addr, || {
+        if_addrs::get_if_addrs()
+            .map(|all| all.into_iter().map(|i| Assigned { ip: i.ip(), name: i.name, index: i.index }).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// An address one of this machine's interfaces holds, and that interface.
+struct Assigned {
+    ip: std::net::IpAddr,
+    name: String,
+    index: Option<u32>,
+}
+
+impl Assigned {
+    /// Whether `zone`, a number or a name, is this address's interface.
+    fn on(&self, zone: &str) -> bool {
+        match zone.parse::<u32>() {
+            Ok(index) => self.index == Some(index),
+            Err(_) => self.name == zone,
+        }
+    }
+}
+
+/// [`is_local`], with `assigned` the addresses this machine's interfaces hold: those, not
+/// whether a socket can be bound to an address, which a system may allow for any address
+/// (Linux with `net.ipv4.ip_nonlocal_bind`). An address named with a zone is this machine's
+/// only on the interface the zone names: the same link-local address on another link may be
+/// another machine's, and a server can't be started at it here.
+fn is_local_among(addr: &str, assigned: impl FnOnce() -> Vec<Assigned>) -> bool {
+    let host = host_of(addr).trim_end_matches('.');
+    let name = host.to_ascii_lowercase();
+    if name == "localhost" || name.ends_with(".localhost") {
+        return true;
+    }
+    let zone = zone_of(host);
+    match ip_of(host) {
+        Some(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || assigned().iter().any(|a| a.ip.to_canonical() == ip && zone.is_none_or(|z| a.on(z)))
+        }
+        None => false,
+    }
+}
+
+/// Whether `host` is on a local network, which macOS's Local Network setting governs: a
+/// private or link-local address, or a `.local` name.
+fn on_local_network(host: &str) -> bool {
+    match ip_of(host) {
+        Some(std::net::IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local(),
+        // Unique local fc00::/7 and link-local fe80::/10.
+        Some(std::net::IpAddr::V6(ip)) => (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
+        None => host.trim_end_matches('.').to_ascii_lowercase().ends_with(".local"),
+    }
+}
+
+/// What launch says when the server at another machine's `addr` does not answer. On macOS a
+/// program started from a terminal that is not allowed on the local network gets "no route to
+/// host" for every address there, while the system's own tools reach it, so it says where
+/// that is allowed: `term` is `$TERM_PROGRAM`, the terminal app.
+fn cant_reach(addr: &str, down: &Down, macos: bool, term: Option<&str>) -> String {
+    let mut msg = format!("can't reach the server at {addr}: {}", down.why);
+    if macos && down.no_route && on_local_network(host_of(addr)) {
+        let app = match term {
+            Some("Apple_Terminal") => "Terminal",
+            Some("iTerm.app") => "iTerm",
+            _ => "your terminal app",
+        };
+        msg.push_str(&format!(
+            "\n  macOS keeps programs started from {app} off the local network until it is allowed: \
+             turn {app} on under System Settings › Privacy & Security › Local Network, then run this again"
+        ));
+    }
+    msg
 }
 
 fn parse_models(body: &str) -> Option<Vec<Served>> {
@@ -646,11 +848,15 @@ pub fn run(args: &[String]) {
     let served = match probe(&base, api_key.as_deref()) {
         Probe::Up(served) => served,
         Probe::Unauthorized => fail(format!("the server at {addr} wants a key: pass --api-key or set SUPERFLUID_API_KEY")),
-        Probe::Down if a.print => {
+        Probe::Down(_) if a.print => {
             let id = a.model.clone().or_else(remembered).map_or_else(|| "<model>".into(), |m| served_id(&m));
             vec![Served { id, n_ctx: None }]
         }
-        Probe::Down => {
+        Probe::Down(down) if !is_local(&addr) => {
+            let term = std::env::var("TERM_PROGRAM").ok();
+            fail(cant_reach(&addr, &down, cfg!(target_os = "macos"), term.as_deref()))
+        }
+        Probe::Down(_) => {
             let model = a.model.clone().or_else(remembered).unwrap_or_else(|| {
                 fail(format!(
                     "no server at {addr}, and no model to start one with. Pass one:\n  \
@@ -1196,6 +1402,128 @@ mod tests {
         assert!(v["agents"].as_array().unwrap().iter().all(|r| r["installed"] == false));
         let ollama = v["agents"].as_array().unwrap().iter().find(|r| r["name"] == "ollama").unwrap();
         assert_eq!(ollama["aliases"], serde_json::json!([]), "an agent with no alias has an empty list");
+    }
+
+    #[test]
+    fn a_server_is_started_only_at_an_address_of_this_machine() {
+        let on = |ip: &str, name: &str, index: u32| Assigned { ip: ip.parse().unwrap(), name: name.into(), index: Some(index) };
+        let assigned = || vec![on("10.17.0.42", "en0", 7), on("fd00::7", "en0", 7), on("fe80::1234", "en0", 7)];
+        for here in ["127.0.0.1:8453", "localhost:8453", "LocalHost.:8453", "api.localhost:1", "0.0.0.0:8453", "[::1]:8453", "[::]:8453", "127.0.0.2:9", "10.17.0.42:8453", "[fd00::7]:8453", "[fe80::1234]:8453", "[fe80::1234%7]:8453", "[fe80::1234%en0]:8453", "[::ffff:127.0.0.1]:8453", "[::ffff:0.0.0.0]:8453", "[::ffff:10.17.0.42]:8453"] {
+            assert!(is_local_among(here, assigned), "{here}");
+        }
+        // fe80::1234 on another link than en0, by its index or its name, is not this machine's.
+        for there in ["10.17.0.171:8453", "10.255.255.1:8453", "192.0.2.7:8453", "[2001:db8::1]:8453", "[fd00::8]:8453", "[fe80::99%7]:8453", "[fe80::1234%9]:8453", "[fe80::1234%en1]:8453", "[fe80::1234%EN0]:8453", "[::ffff:10.17.0.171]:8453", "head.example.com:8453", "mac-mini.local:8453"] {
+            assert!(!is_local_among(there, assigned), "{there}");
+        }
+        // What this machine's interfaces hold is read from them.
+        assert!(is_local("127.0.0.1:8453") && !is_local("192.0.2.7:8453"));
+        assert_eq!(host_of("[fe80::1]:8453"), "fe80::1");
+        assert_eq!(host_of("10.0.0.1:8453"), "10.0.0.1");
+        assert_eq!(host_of("box"), "box");
+    }
+
+    #[test]
+    fn a_remote_server_not_reached_says_why_and_on_macos_where_the_local_network_is_allowed() {
+        let no_route = Down { why: "connect: No route to host (os error 65)".into(), no_route: true };
+        let said = cant_reach("10.17.0.171:8453", &no_route, true, Some("Apple_Terminal"));
+        assert_eq!(
+            said,
+            "can't reach the server at 10.17.0.171:8453: connect: No route to host (os error 65)\n  macOS keeps programs \
+             started from Terminal off the local network until it is allowed: turn Terminal on under System Settings \
+             › Privacy & Security › Local Network, then run this again"
+        );
+        assert!(cant_reach("192.168.1.4:8453", &no_route, true, Some("iTerm.app")).contains("turn iTerm on"));
+        assert!(cant_reach("mac-mini.local:8453", &no_route, true, Some("WezTerm")).contains("from your terminal app off"));
+        assert!(cant_reach("[fe80::1]:8453", &no_route, true, None).contains("Local Network"));
+        assert!(cant_reach("[fe80::1%en0]:8453", &no_route, true, None).contains("Local Network"));
+        assert!(cant_reach("[::ffff:10.17.0.171]:8453", &no_route, true, None).contains("Local Network"));
+        assert!(!cant_reach("[::ffff:203.0.113.9]:8453", &no_route, true, None).contains("Local Network"));
+        // No hint off macOS, for an address beyond the local network, or for another reason.
+        let plain = "can't reach the server at 10.17.0.171:8453: connect: No route to host (os error 65)";
+        assert_eq!(cant_reach("10.17.0.171:8453", &no_route, false, Some("Apple_Terminal")), plain);
+        assert!(!cant_reach("203.0.113.9:8453", &no_route, true, None).contains("Local Network"));
+        let timeout = Down::because("connect: Operation timed out (os error 60)");
+        assert_eq!(cant_reach("10.255.255.1:8453", &timeout, true, None), "can't reach the server at 10.255.255.1:8453: connect: Operation timed out (os error 60)");
+    }
+
+    #[test]
+    fn the_addresses_of_a_name_share_one_deadline() {
+        // Addresses that may never answer (or say at once they cannot be reached): together
+        // they take no longer than the time given.
+        let addrs: Vec<std::net::SocketAddr> = ["10.255.255.1:9", "10.255.255.2:9", "10.255.255.3:9"].iter().map(|a| a.parse().unwrap()).collect();
+        let started = Instant::now();
+        assert!(connect_within(&addrs, started + Duration::from_millis(600)).is_err());
+        assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+        assert_eq!(connect_within(&[], Instant::now() + Duration::from_secs(1)).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap();
+        assert!(connect_within(&[addrs[0], open], Instant::now() + Duration::from_secs(2)).is_ok(), "the second answers in its share");
+    }
+
+    #[test]
+    fn a_server_reached_through_a_proxy_is_asked_through_it() {
+        use std::io::{BufRead, Write};
+        // A proxy that answers for any host, as one that reaches what this machine cannot.
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_at = format!("http://{}", proxy.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for sock in proxy.incoming().flatten() {
+                let mut read = std::io::BufReader::new(sock.try_clone().unwrap());
+                let mut out = sock;
+                let head = |read: &mut std::io::BufReader<std::net::TcpStream>| {
+                    let mut first = String::new();
+                    let _ = read.read_line(&mut first);
+                    let mut line = String::new();
+                    while read.read_line(&mut line).is_ok_and(|n| n > 2) {
+                        line.clear();
+                    }
+                    first
+                };
+                if head(&mut read).starts_with("CONNECT") {
+                    let _ = out.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+                    head(&mut read);
+                }
+                let body = r#"{"data":[{"id":"m"}]}"#;
+                let _ = write!(out, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        let through = |proxy: ureq::Proxy| ureq::Agent::config_builder().http_status_as_error(false).proxy(Some(proxy)).build().new_agent();
+        let base = "http://proxy-only.invalid:8453";
+        match probe_with(through(ureq::Proxy::new(&proxy_at).unwrap()), base, None) {
+            Probe::Up(models) => assert_eq!(models, vec![Served { id: "m".into(), n_ctx: None }]),
+            Probe::Down(down) => panic!("not asked through the proxy: {}", down.why),
+            Probe::Unauthorized => panic!("unauthorized"),
+        }
+        // A host NO_PROXY names is connected to directly, and is said why when it can't be.
+        let bypassed = ureq::Proxy::builder(ureq::ProxyProtocol::Http)
+            .host("127.0.0.1")
+            .port(1)
+            .no_proxy("proxy-only.invalid")
+            .build()
+            .unwrap();
+        assert!(!through_proxy(Some(&bypassed), &format!("{base}/v1/models")));
+        assert!(through_proxy(Some(&bypassed), "http://10.17.0.171:8453/v1/models"));
+        assert!(!through_proxy(None, "http://10.17.0.171:8453/v1/models"));
+        match probe_with(through(bypassed), base, None) {
+            Probe::Down(down) => assert!(down.why.contains("proxy-only.invalid"), "{}", down.why),
+            _ => panic!("a bypassed host that does not resolve answered"),
+        }
+    }
+
+    #[test]
+    fn a_name_not_looked_up_in_time_is_said_so() {
+        let why = resolve_within("head.example.com:8453", Instant::now()).unwrap_err();
+        assert!(why == "resolving head.example.com: no answer within 3 s" || why.starts_with("cannot resolve"), "{why}");
+        assert_eq!(resolve_within("127.0.0.1:8453", Instant::now() + Duration::from_secs(3)).unwrap(), vec!["127.0.0.1:8453".parse().unwrap()]);
+    }
+
+    #[test]
+    fn a_probe_says_why_no_server_answered() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let Probe::Down(down) = probe(&format!("http://{addr}"), None) else { panic!("nothing listens there") };
+        assert!(down.why.starts_with("connect: ") && !down.no_route, "{down:?}");
     }
 
     #[test]
