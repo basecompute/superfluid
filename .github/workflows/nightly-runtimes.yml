@@ -282,7 +282,7 @@ jobs:
       BASE: ${{ needs.pick.outputs.base }}
       FROM: ${{ inputs.walking_back_from }}
     steps:
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         id: app
         with:
           app-id: ${{ vars.NIGHTLY_APP_ID }}
@@ -554,7 +554,7 @@ jobs:
       RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       BASE: ${{ needs.pick.outputs.base }}
     steps:
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         id: app
         with:
           app-id: ${{ vars.NIGHTLY_APP_ID }}
