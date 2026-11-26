@@ -9,13 +9,14 @@ superfluid self update --dry-run # say what it would do
 superfluid self list             # the versions here, which is current, which was replaced
 superfluid self use 0.1.3        # go back to a version that is still here
 superfluid self auto-update off  # no automatic updates (on turns them back on; neither says which)
+superfluid self auto-update wait 3  # automatic updates wait 3 days after a release (0: as soon as it is out)
 ```
 
 ## Automatic updates
 
 `serve`, `launch`, `node`, `top` and `runtime install|update|repair|remove|use`, run in a terminal, look at what the last read of the release listing found. The read is made at most once a day, by a `superfluid self check --record` started in the background in a session of its own, so the command never waits on the network; the first command after the day is up starts it and goes on.
 
-When that read found a release newer than the one running, past the hold-off (a few days after it is published, so early reports land first) and fitting the engine here (the same ABI rule as `self update`), the command updates first:
+When that read found a release newer than the one running, out as long as the wait asks (no wait by default: see [The wait](#the-wait)) and fitting the engine here (the same ABI rule as `self update`), the command updates first:
 
 ```text
 Updating superfluid 0.2.1 → 0.2.2 · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2
@@ -35,6 +36,25 @@ couldn't update superfluid to 0.2.2: fetching https://github.com/... failed: cur
 ```
 
 Going back: `superfluid self use 0.2.1` makes the version it replaced current again (`superfluid self list` shows which versions are here), and `superfluid runtime use <id> <install>` pins a runtime to the install it had, which `runtime update` installs beside, never over; `superfluid runtimes` lists them. An install the update repaired (`runtime repair`, for a worker the new version could not run) was installed again in place with the new version's worker: after going back, `superfluid runtime repair <id>` installs it again with the old version's worker. Going back with `self use` is kept: no automatic update goes to the version it left, or to an older one, again (the line saying it is out is printed once). A later release is updated to as usual, and `superfluid self update`, or `self use` of that version, ends it. The version left is `declined` in `$SUPERFLUID_HOME/update-check.json`.
+
+### The wait
+
+By default an automatic update installs a release as soon as the daily read sees it. To let a release be out a while first, so early reports land before it reaches this machine:
+
+```sh
+superfluid self auto-update wait 3   # automatic updates wait 3 days after a release
+superfluid self auto-update wait 0   # automatic updates install a release as soon as it is out
+superfluid self auto-update          # automatic updates: on · a release installs once it has been out 3 days
+```
+
+The wait is `updateWaitDays` in `$SUPERFLUID_HOME/settings.json`, a whole number of days from 0 to 365, counted from the release's publication date on the listing; a missing key means 0, and so does a value that is not such a number, which `self auto-update` names. `SUPERFLUID_UPDATE_WAIT_DAYS=<days>` sets the wait for the shell or service it is set in, over the setting (`self auto-update` says so: `· a release installs once it has been out 7 days (SUPERFLUID_UPDATE_WAIT_DAYS is set)`); a value that is not such a number is ignored, and the setting is used. Superfluid Desktop sets the wait with `superfluid self auto-update wait <days>` to follow its own setting.
+
+The wait governs everything automatic: the update a launch makes, a package manager's update in the background (pinned to the release the wait let through), `self update --auto` and the `auto` of `self check --json`, and the line that says a newer release is out, which names the release an automatic update would take. The daily read records the wait it was made under (`wait_days` in `update-check.json`); a record made under another (the setting changed since, or a shell with the variable) is read again by the next launch, which neither updates nor prints the line from it. `superfluid self update` installs the newest release at once, whatever the wait. `superfluid self check` names it and, when an automatic update would take another (or none yet), which one, or why none:
+
+```text
+superfluid: newest release: 0.2.4 (published 2026-11-26): `superfluid self update` installs it
+superfluid: an automatic update takes 0.2.3 (published 2026-11-20): automatic updates wait 3 days after a release
+```
 
 ### When nothing is updated
 
@@ -73,15 +93,15 @@ superfluid self update --auto   # what an automatic update would install, instal
 superfluid self check --json    # what is out, and what --auto would install
 ```
 
-`self update --auto` reads the release listing now and applies the same rules as an update at a launch: the newest release past the hold-off that fits the engine here, not one `self use` went back from, and nothing at all with automatic updates off (the setting, `SUPERFLUID_NO_UPDATE`, `SUPERFLUID_NO_UPDATE_CHECK`, `CI`). It installs that release the same way, then updates and repairs the runtimes as above, and prints the lines above on stderr; the download is a line per tenth (`downloading superfluid-aarch64-apple-darwin.tar.gz: 45%`) when stderr is not a terminal. When there is nothing to do it prints why on stdout (`automatic updates are off (superfluid self auto-update off)`, `superfluid 0.2.2 is up to date for automatic updates`, `you went back from 0.2.3 with self use; it stays until a newer release is out`) and exits 0. It exits 1 when the update fails (the version in use stays), and 3 for a copy a package manager or basert updates, naming that copy's command. `--yes` is accepted; nothing is asked.
+`self update --auto` reads the release listing now and applies the same rules as an update at a launch: the newest release out as long as the wait asks that fits the engine here, not one `self use` went back from, and nothing at all with automatic updates off (the setting, `SUPERFLUID_NO_UPDATE`, `SUPERFLUID_NO_UPDATE_CHECK`, `CI`). It installs that release the same way, then updates and repairs the runtimes as above, and prints the lines above on stderr; the download is a line per tenth (`downloading superfluid-aarch64-apple-darwin.tar.gz: 45%`) when stderr is not a terminal. When there is nothing to do it prints why on stdout (`automatic updates are off (superfluid self auto-update off)`, `superfluid 0.2.2 is up to date for automatic updates`, ``superfluid 0.2.3 (published 2026-11-26) is held off: automatic updates wait 3 days after a release; `superfluid self update` installs it now``, `you went back from 0.2.3 with self use; it stays until a newer release is out`) and exits 0. It exits 1 when the update fails (the version in use stays), and 3 for a copy a package manager or basert updates, naming that copy's command. `--yes` is accepted; nothing is asked.
 
 `self check --json` prints one object, from a read of the listing made now:
 
 ```json
-{"current":"0.2.2","newest":"0.2.4","auto":"0.2.3","autoReason":null,"notes":"https://github.com/basecompute/superfluid/releases/tag/v0.2.4","autoUpdate":true}
+{"current":"0.2.2","newest":"0.2.4","auto":"0.2.3","autoReason":null,"notes":"https://github.com/basecompute/superfluid/releases/tag/v0.2.4","autoUpdate":true,"waitDays":3}
 ```
 
-`newest` is the newest release that fits here and is newer than `current` (what `self update` installs), with `notes` its release notes; `auto` is what `self update --auto` would install, and when it is `null`, `autoReason` is the line `--auto` would print; `autoUpdate` is whether automatic updates are on here.
+`newest` is the newest release that fits here and is newer than `current` (what `self update` installs), with `notes` its release notes; `auto` is what `self update --auto` would install, and when it is `null`, `autoReason` is the line `--auto` would print; `autoUpdate` is whether automatic updates are on here, and `waitDays` the wait, in days ([The wait](#the-wait)).
 
 ## Where releases live
 
@@ -129,13 +149,13 @@ A foreground `self update` shows the download as a progress bar on a terminal, a
 
 ## The daily check
 
-Besides the read a launch starts, `superfluid serve` reads the release listing after the server is up, at most once a day, with a five-second limit, and prints one line when a release newer than the running one fits here. A server that stays up looks again every hour, so it learns of a release published later, or one past its hold-off, when the day is up:
+Besides the read a launch starts, `superfluid serve` reads the release listing after the server is up, at most once a day, with a five-second limit, and prints one line when a release newer than the running one fits here. A server that stays up looks again every hour, so it learns of a release published later, or one that has been out as long as the wait asks, when the day is up:
 
 ```text
 superfluid: superfluid 0.2.2 is available (this is 0.2.1): `superfluid self update` installs it · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2 · turn off: superfluid self auto-update off
 ```
 
-A release is announced, and installed automatically, a few days after it is published, so early reports land first; `self update` installs it as soon as it is out. The check is skipped with `--offline`, `--no-update`, `SUPERFLUID_NO_UPDATE=1` or `SUPERFLUID_NO_UPDATE_CHECK=1`, and it never delays serving. What it learned is in `$SUPERFLUID_HOME/update-check.json` (written whole and renamed into place) and in `superfluid self list`.
+A release is announced, and installed automatically, once it has been out as long as the wait asks: as soon as the daily read sees it, by default ([The wait](#the-wait)). `self update` installs it at once, whatever the wait. The check is skipped with `--offline`, `--no-update`, `SUPERFLUID_NO_UPDATE=1` or `SUPERFLUID_NO_UPDATE_CHECK=1`, and it never delays serving. What it learned is in `$SUPERFLUID_HOME/update-check.json` (written whole and renamed into place) and in `superfluid self list`.
 
 ## Other ways Superfluid was installed
 

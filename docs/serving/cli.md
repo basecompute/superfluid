@@ -319,10 +319,11 @@ superfluid self check
 superfluid self list
 superfluid self use <v>
 superfluid self auto-update [on|off]
+superfluid self auto-update wait <days>
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `auto-update on|off` turns automatic updates on or off (kept in `$SUPERFLUID_HOME/settings.json`), and with neither says whether they are on and, when not, what turns them off; any command takes `--no-update` for one run without them. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program; a package manager's copy has its update command named there, not run. See [Updating Superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out and, when an automatic update would take another under the wait, which. `auto-update on|off` turns automatic updates on or off (kept in `$SUPERFLUID_HOME/settings.json`), and with neither says whether they are on and, when not, what turns them off, and the wait; `auto-update wait <days>` makes automatic updates wait that many days after a release (0, the default, installs a release as soon as it is out); any command takes `--no-update` for one run without them. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program; a package manager's copy has its update command named there, not run. See [Updating Superfluid](updating.md).
 
 ## `superfluid session`
 

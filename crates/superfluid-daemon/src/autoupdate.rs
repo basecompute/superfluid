@@ -4,11 +4,11 @@
 //! A command that serves or installs (`serve`, `launch`, `node`, `top`, `runtime install|update|repair|remove|use`)
 //! looks at what the last read of the release listing found. When it is due again, a detached
 //! `superfluid self check --record` reads it, so the command never waits on the network. When the record names a
-//! release newer than this one (past the hold-off and fitting the engine here, as the daily notice's), a copy under
-//! `versions` or the install script's is updated in the foreground, with a progress bar, and the command is run
-//! again by the new version; a copy a package manager owns is left to that manager, run in the background once
-//! nothing runs from the copy. Without a terminal, under CI, or with updates turned off, one line per release says
-//! a newer one is out.
+//! release newer than this one (out as long as the wait in days asks, and fitting the engine here, as the daily
+//! notice's), a copy under `versions` or the install script's is updated in the foreground, with a progress bar, and
+//! the command is run again by the new version; a copy a package manager owns is left to that manager, run in the
+//! background once nothing runs from the copy. Without a terminal, under CI, or with updates turned off, one line
+//! per release says a newer one is out.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use superfluid_adapter_kit::install::{sha256_of, Asset};
 use crate::installs;
 use crate::runtime_pick::RuntimeId;
 use crate::runtimes::Catalog;
-use crate::selfupdate::{self, Check, Delegate, Engine, Installed, Options, Release, Report, Versions, HOLD_OFF_DAYS};
+use crate::selfupdate::{self, Check, Delegate, Engine, Installed, Options, Release, Report, Versions};
 
 /// Set to anything but empty, `0` or `false`: no update is made, none is looked for, and none is announced.
 pub const NO_UPDATE_ENV: &str = "SUPERFLUID_NO_UPDATE";
@@ -34,9 +34,15 @@ pub const UPDATED_FROM_ENV: &str = "SUPERFLUID_UPDATED_FROM";
 pub const NO_UPDATE_FLAG: &str = "--no-update";
 /// What turns automatic updates off, which every line about one names.
 pub const OFF_COMMAND: &str = "superfluid self auto-update off";
-/// `$SUPERFLUID_HOME/settings.json`: `{"autoUpdate": true|false}`, on when the file or the field is missing.
+/// `$SUPERFLUID_HOME/settings.json`: `{"autoUpdate": true|false, "updateWaitDays": <days>}`, on and no wait when the
+/// file or a field is missing.
 const SETTINGS: &str = "settings.json";
 const AUTO_UPDATE_KEY: &str = "autoUpdate";
+const WAIT_KEY: &str = "updateWaitDays";
+/// A whole number of days: the wait for the environment it is set in (a shell, a service), over the setting.
+pub const WAIT_ENV: &str = "SUPERFLUID_UPDATE_WAIT_DAYS";
+/// The longest wait, in days.
+pub const MAX_WAIT_DAYS: u32 = 365;
 /// The package managers whose update an automatic update runs itself, in the background.
 const IN_BACKGROUND: &[&str] = &["Homebrew", "npm", "cargo", "pipx", "uv"];
 /// How long the background update of a package manager's copy waits for the superfluid running from it to end.
@@ -59,19 +65,96 @@ pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> 
     })
 }
 
-/// The setting in `settings.json`: on unless it says `false`.
-pub fn setting(home: &Path) -> bool {
-    let read = std::fs::read_to_string(home.join(SETTINGS)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
-    read.and_then(|v| v[AUTO_UPDATE_KEY].as_bool()).unwrap_or(true)
+/// `settings.json` as JSON; `None` when it is missing or cannot be read, which leaves every setting as it is by default.
+fn settings(home: &Path) -> Option<Value> {
+    std::fs::read_to_string(home.join(SETTINGS)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
 }
 
-/// Sets the setting, keeping whatever else the file holds (Superfluid Desktop's own keys).
-pub fn set_setting(home: &Path, on: bool) -> Result<(), String> {
+/// The setting in `settings.json`: on unless it says `false`.
+pub fn setting(home: &Path) -> bool {
+    settings(home).and_then(|v| v[AUTO_UPDATE_KEY].as_bool()).unwrap_or(true)
+}
+
+/// Sets `key` in `settings.json`, keeping whatever else the file holds (Superfluid Desktop's own keys).
+fn set_key(home: &Path, key: &str, value: Value) -> Result<(), String> {
     std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
     let path = home.join(SETTINGS);
-    let mut v = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
-    v[AUTO_UPDATE_KEY] = Value::Bool(on);
+    let mut v = settings(home).filter(Value::is_object).unwrap_or_else(|| json!({}));
+    v[key] = value;
     write_atomically(&path, format!("{v:#}\n").as_bytes())
+}
+
+/// Sets the setting, keeping whatever else the file holds.
+pub fn set_setting(home: &Path, on: bool) -> Result<(), String> {
+    set_key(home, AUTO_UPDATE_KEY, Value::Bool(on))
+}
+
+/// Sets the wait, in days, keeping whatever else the file holds.
+pub fn set_wait(home: &Path, days: u32) -> Result<(), String> {
+    set_key(home, WAIT_KEY, json!(days))
+}
+
+/// A wait as `self auto-update wait` or the variable gives it: a whole number of days from 0 to 365.
+pub fn wait_of(text: &str) -> Option<u32> {
+    text.trim().parse::<u32>().ok().filter(|&d| d <= MAX_WAIT_DAYS)
+}
+
+/// How long after a release is published automatic updates wait before they install it, or say it is out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wait {
+    pub days: u32,
+    /// Where it came from, when not the setting as written (or no setting): the variable, or a value that was not
+    /// used and why. The state line says it.
+    pub note: Option<String>,
+}
+
+/// The wait here: `SUPERFLUID_UPDATE_WAIT_DAYS` when it holds one, else `updateWaitDays` in `settings.json`, else none.
+/// A setting that is not a whole number from 0 to 365 counts as missing, as any setting the file holds wrong does;
+/// so does a variable, which leaves the setting in force.
+pub fn wait(home: &Path, env: &dyn Fn(&str) -> Option<String>) -> Wait {
+    let given = env(WAIT_ENV).filter(|v| !v.is_empty());
+    if let Some(days) = given.as_deref().and_then(wait_of) {
+        return Wait { days, note: Some(format!("{WAIT_ENV} is set")) };
+    }
+    let mut notes = Vec::new();
+    if let Some(v) = given {
+        notes.push(format!("{WAIT_ENV}={v} is not a whole number of days from 0 to {MAX_WAIT_DAYS}, so the setting is used"));
+    }
+    let days = match settings(home).map(|v| v[WAIT_KEY].clone()).unwrap_or(Value::Null) {
+        Value::Null => 0,
+        v => match v.as_u64().filter(|&d| d <= u64::from(MAX_WAIT_DAYS)) {
+            Some(d) => d as u32,
+            None => {
+                notes.push(format!("{WAIT_KEY} {v} in {} is not a whole number of days from 0 to {MAX_WAIT_DAYS}, so there is none", home.join(SETTINGS).display()));
+                0
+            }
+        },
+    };
+    Wait { days, note: (!notes.is_empty()).then(|| notes.join("; ")) }
+}
+
+/// `1 day`, `3 days`.
+pub fn days(n: u32) -> String {
+    match n {
+        1 => "1 day".to_string(),
+        n => format!("{n} days"),
+    }
+}
+
+/// What the wait means, for the state line.
+pub fn wait_phrase(n: u32) -> String {
+    match n {
+        0 => "a release installs as soon as it is out".to_string(),
+        n => format!("a release installs once it has been out {}", days(n)),
+    }
+}
+
+/// What `self auto-update wait <n>` prints.
+pub fn wait_set(n: u32) -> String {
+    match n {
+        0 => "automatic updates install a release as soon as it is out".to_string(),
+        n => format!("automatic updates wait {} after a release", days(n)),
+    }
 }
 
 /// The variable that turns updates, the check and its line off, when one does.
@@ -96,26 +179,31 @@ pub fn enabled(home: &Path, env: &dyn Fn(&str) -> Option<String>) -> Result<(), 
     }
 }
 
-/// `automatic updates: on`, or `off (<why>)`.
+/// `automatic updates: on`, or `off (<why>)`, then the wait: `· a release installs as soon as it is out`, or `once it
+/// has been out 3 days`, with where it came from when not the setting.
 pub fn state(home: &Path, env: &dyn Fn(&str) -> Option<String>) -> String {
-    match enabled(home, env) {
+    let on = match enabled(home, env) {
         Ok(()) => "automatic updates: on".to_string(),
         Err(why) => format!("automatic updates: off ({why})"),
-    }
+    };
+    let w = wait(home, env);
+    let from = w.note.map(|n| format!(" ({n})")).unwrap_or_default();
+    format!("{on} · {}{from}", wait_phrase(w.days))
 }
 
-/// `superfluid self auto-update [on|off]`; the exit code. Superfluid Desktop runs it with `on` or `off` to follow its
-/// own switch.
-pub fn auto_update_command(home: &Path, arg: Option<&str>) -> i32 {
+/// `superfluid self auto-update [on|off|wait <days>]`, given the words after `auto-update`; the exit code. Superfluid
+/// Desktop runs it with `on` or `off`, and `wait <days>`, to follow its own settings.
+pub fn auto_update_command(home: &Path, args: &[&str]) -> i32 {
     let env = |k: &str| std::env::var(k).ok();
-    let on = match arg {
-        None => {
+    let on = match args {
+        [] => {
             println!("{}", state(home, &env));
             return 0;
         }
-        Some("on") => true,
-        Some("off") => false,
-        Some(_) => {
+        ["on"] => true,
+        ["off"] => false,
+        ["wait", n] => return wait_command(home, n, &env),
+        _ => {
             eprint!("{}", selfupdate::HELP);
             return 2;
         }
@@ -127,6 +215,24 @@ pub fn auto_update_command(home: &Path, arg: Option<&str>) -> i32 {
     println!("automatic updates: {}", if on { "on" } else { "off" });
     if let (true, Err(why)) = (on, enabled(home, &env)) {
         eprintln!("superfluid: {why}, which keeps them off here");
+    }
+    0
+}
+
+/// `superfluid self auto-update wait <n>`; the exit code.
+fn wait_command(home: &Path, n: &str, env: &dyn Fn(&str) -> Option<String>) -> i32 {
+    let Some(n) = wait_of(n) else {
+        eprintln!("superfluid: the wait is a whole number of days from 0 to {MAX_WAIT_DAYS}, not `{n}`");
+        return 2;
+    };
+    if let Err(e) = set_wait(home, n) {
+        eprintln!("superfluid: {e}");
+        return 1;
+    }
+    println!("{}", wait_set(n));
+    let here = wait(home, env);
+    if here.days != n {
+        eprintln!("superfluid: {WAIT_ENV} is set, which makes the wait {} here", days(here.days));
     }
     0
 }
@@ -269,15 +375,19 @@ pub fn at_launch(args: &[String], no_update_flag: bool) {
     }
     let Ok(exe) = std::env::current_exe() else { return };
     let exe = crate::sys::canonical(&exe).unwrap_or(exe);
+    let wait = wait(&home, &env).days;
     let check = Check::read(&home).unwrap_or_default();
     let from = selfupdate::running();
-    let newer = check.newer_than(from).map(str::to_string);
+    // A record made under another wait (the setting changed since, or the variable differs) names nothing for this
+    // one, and is read again.
+    let fresh = check.made_with(wait);
+    let newer = check.newer_than(from).filter(|_| fresh).map(str::to_string);
     let planned = newer.as_deref().map(|n| plan(&exe, mode, &check, from, n));
     // The daily read is started once the plan is made, and not before an update made here: that update reads the
     // listing itself, and the command it runs again in this process's place would be left a child it never waits for.
-    let due = check.due();
+    let due = check.due() || !fresh;
     if due && planned != Some(Plan::Here) {
-        refresh_in_background(&home, &exe);
+        refresh_in_background(&home, &exe, wait);
     }
     let (Some(newer), Some(planned)) = (newer, planned) else { return };
     let notes = check.notes_url().unwrap_or_default();
@@ -287,7 +397,7 @@ pub fn at_launch(args: &[String], no_update_flag: bool) {
             let mut say = |line: String| eprintln!("{line}");
             match update_here(&home, &catalog, &exe, from, &newer, &notes, None, named_runtime(args), &mut say) {
                 Some(bin) => run_again(&bin, args, from, &newer),
-                None if due => refresh_in_background(&home, &exe),
+                None if due => refresh_in_background(&home, &exe, wait),
                 None => {}
             }
         }
@@ -295,16 +405,17 @@ pub fn at_launch(args: &[String], no_update_flag: bool) {
             Ok(line) => eprintln!("{line}"),
             Err(e) => {
                 eprintln!("superfluid: {} could not be started in the background ({e})", found.command());
-                notice(&home, &exe);
+                notice(&home, &exe, wait);
             }
         },
-        Plan::Notice => notice(&home, &exe),
+        Plan::Notice => notice(&home, &exe, wait),
     }
 }
 
-/// The one line per release, from the record as it is now (a launch may have claimed the next read).
-fn notice(home: &Path, exe: &Path) {
-    let Some(check) = Check::read(home) else { return };
+/// The one line per release, from the record as it is now (a launch may have claimed the next read), when it was made
+/// under the wait here: what an automatic update installs and what the line says is out are the same release.
+fn notice(home: &Path, exe: &Path, wait: u32) {
+    let Some(check) = Check::read(home).filter(|c| c.made_with(wait)) else { return };
     let auto = enabled(home, &|k| std::env::var(k).ok()).is_ok();
     if let Some(line) = selfupdate::announce(home, check, &selfupdate::update_command(exe), auto) {
         eprintln!("superfluid: {line}");
@@ -312,8 +423,9 @@ fn notice(home: &Path, exe: &Path) {
 }
 
 /// The daily read, claimed first (so the launches after this one do not start it again) and made by a detached
-/// `superfluid self check --record` in a session of its own, its streams closed: the command goes on at once.
-fn refresh_in_background(home: &Path, exe: &Path) {
+/// `superfluid self check --record` in a session of its own, its streams closed: the command goes on at once. It
+/// inherits this environment, so it reads the listing under the same `wait`.
+fn refresh_in_background(home: &Path, exe: &Path, wait: u32) {
     // A home that is not there yet is not made for this: a command that fails as it starts writes nothing, and the
     // first command that keeps something there (a server, an install) has the next one read the listing.
     if !home.is_dir() {
@@ -321,7 +433,7 @@ fn refresh_in_background(home: &Path, exe: &Path) {
     }
     // The record as it is now, so what was written since this command read it (an attempt) is kept.
     let check = Check::read(home).unwrap_or_default();
-    if (Check { checked_at: selfupdate::now_secs(), ..check }).write(home).is_err() {
+    if claimed(check, wait).write(home).is_err() {
         return;
     }
     let mut cmd = Command::new(exe);
@@ -335,6 +447,16 @@ fn refresh_in_background(home: &Path, exe: &Path) {
     if let Ok(mut child) = cmd.spawn() {
         // Waited for, so it leaves no zombie while a long command runs.
         let _ = std::thread::Builder::new().name("update-check".into()).spawn(move || child.wait());
+    }
+}
+
+/// The record a launch writes as it starts the read: marked read now and, when it was made under another wait, naming
+/// no release, which that wait chose, until the read says which this one takes.
+fn claimed(check: Check, wait: u32) -> Check {
+    let check = Check { checked_at: selfupdate::now_secs(), ..check };
+    match check.made_with(wait) {
+        true => check,
+        false => Check { wait: Some(wait), newest: None, published: None, notes: None, ..check },
     }
 }
 
@@ -435,18 +557,20 @@ fn not_self_managed(exe: &Path) -> Option<String> {
 }
 
 /// What an automatic update installs from `found`, the listing just read, over `from`: the newest release that fits
-/// the engine here and is past the hold-off, unless `self use` went back from it; else why none, as a line.
-pub(crate) fn eligible<'a>(found: &'a [Release], engine: &Engine, compat: &dyn Fn(&str) -> Option<Value>, check: &Check, from: &str) -> Result<&'a Release, String> {
+/// the engine here and has been out `wait` days, unless `self use` went back from it; else why none, as a line.
+pub(crate) fn eligible<'a>(found: &'a [Release], engine: &Engine, compat: &dyn Fn(&str) -> Option<Value>, check: &Check, from: &str, wait: u32) -> Result<&'a Release, String> {
     let newer = |r: &&Release| selfupdate::later(&r.version, from);
-    match selfupdate::newest(found, engine, Some(HOLD_OFF_DAYS), compat).filter(newer) {
+    match selfupdate::newest(found, engine, Some(wait), compat).filter(newer) {
         Some(r) if declined(check, &r.version) => {
             Err(format!("you went back from {} with self use; it stays until a newer release is out", check.declined.as_deref().unwrap_or(&r.version)))
         }
         Some(r) => Ok(r),
         None => match selfupdate::newest(found, engine, None, compat).filter(newer) {
             Some(r) => Err(format!(
-                "superfluid {} (published {}) is held off: automatic updates wait {HOLD_OFF_DAYS} days after a release; `superfluid self update` installs it now",
-                r.version, r.published
+                "superfluid {} (published {}) is held off: automatic updates wait {} after a release; `superfluid self update` installs it now",
+                r.version,
+                r.published,
+                days(wait)
             )),
             None => Err(format!("superfluid {from} is up to date for automatic updates")),
         },
@@ -476,11 +600,12 @@ pub fn update_auto(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env
     };
     let engine = selfupdate::engine_here(catalog);
     let compat = selfupdate::compat_fetcher(15);
+    let wait = wait(home, env).days;
     // What was read is the day's read, too.
-    let _ = selfupdate::record(home, &found, &engine, Some(HOLD_OFF_DAYS), &compat);
+    let _ = selfupdate::record(home, &found, &engine, wait, &compat);
     let check = Check::read(home).unwrap_or_default();
     let from = version_here(exe);
-    let chosen = match eligible(&found, &engine, &compat, &check, &from) {
+    let chosen = match eligible(&found, &engine, &compat, &check, &from, wait) {
         Ok(r) => r,
         Err(why) => {
             out(why);
@@ -495,13 +620,14 @@ pub fn update_auto(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env
 
 /// `superfluid self check --json`, from the listing read now: the version here, the newest release that fits here
 /// and is newer (`self update` installs it) and its notes, the one `self update --auto` would install (`auto`) or why
-/// none (`autoReason`), and whether automatic updates are on.
+/// none (`autoReason`), whether automatic updates are on, and the wait, in days.
 pub fn check_json(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Value, String> {
     let target = selfupdate::target().ok_or("no release is published for this platform")?;
     let found = selfupdate::fetch_releases(source, target, 30)?;
     let engine = selfupdate::engine_here(catalog);
     let compat = selfupdate::compat_fetcher(15);
-    let _ = selfupdate::record(home, &found, &engine, Some(HOLD_OFF_DAYS), &compat);
+    let wait = wait(home, env).days;
+    let _ = selfupdate::record(home, &found, &engine, wait, &compat);
     let check = Check::read(home).unwrap_or_default();
     let from = version_here(exe);
     let newest = selfupdate::newest(&found, &engine, None, &compat).filter(|r| selfupdate::later(&r.version, &from));
@@ -509,7 +635,7 @@ pub fn check_json(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env:
     let auto = match (&on, not_self_managed(exe)) {
         (Err(why), _) => Err(format!("automatic updates are off ({why})")),
         (_, Some(why)) => Err(why),
-        _ => eligible(&found, &engine, &compat, &check, &from).map(|r| r.version.clone()),
+        _ => eligible(&found, &engine, &compat, &check, &from, wait).map(|r| r.version.clone()),
     };
     Ok(json!({
         "current": from,
@@ -518,7 +644,35 @@ pub fn check_json(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env:
         "autoReason": auto.as_ref().err(),
         "notes": newest.map(|r| &r.notes_url),
         "autoUpdate": on.is_ok(),
+        "waitDays": wait,
     }))
+}
+
+/// `superfluid self check`, from the listing read now (and recorded as the day's read): the newest release that fits
+/// here and is newer than this one, which `self update` installs, and, when an automatic update would take another
+/// (or none yet), which, or why none, under the wait here.
+pub fn check_lines(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Vec<String>, String> {
+    let target = selfupdate::target().ok_or("no release is published for this platform")?;
+    let found = selfupdate::fetch_releases(source, target, 5)?;
+    let engine = selfupdate::engine_here(catalog);
+    let compat = selfupdate::compat_fetcher(5);
+    let wait = wait(home, env).days;
+    let check = selfupdate::record(home, &found, &engine, wait, &compat)?;
+    Ok(described(&found, &engine, &compat, &check, &version_here(exe), wait))
+}
+
+/// The lines of `self check`, from the listing `found`, for the version `from` under `wait`.
+pub(crate) fn described(found: &[Release], engine: &Engine, compat: &dyn Fn(&str) -> Option<Value>, check: &Check, from: &str, wait: u32) -> Vec<String> {
+    let Some(newest) = selfupdate::newest(found, engine, None, compat).filter(|r| selfupdate::later(&r.version, from)) else {
+        return vec![format!("no release newer than {from} fits here")];
+    };
+    let mut lines = vec![format!("newest release: {} (published {}): `superfluid self update` installs it", newest.version, newest.published)];
+    match eligible(found, engine, compat, check, from, wait) {
+        Ok(r) if r.version == newest.version => {}
+        Ok(r) => lines.push(format!("an automatic update takes {} (published {}): automatic updates wait {} after a release", r.version, r.published, days(wait))),
+        Err(why) => lines.push(why),
+    }
+    lines
 }
 
 /// The runtimes installed here, by name.
@@ -669,11 +823,11 @@ fn in_background(home: &Path, exe: &Path, found: &Delegate, from: &str, newer: &
 }
 
 /// `superfluid self background-update --version <v>`: waits until no other superfluid runs from this copy, then runs
-/// the update of the package manager that owns it, pinned to `version` (the release the daily read chose, past the
-/// hold-off and fitting the engine here; without it, the one the record says was handed over), all of it into the log
-/// the launch opened; the exit code. It runs nothing when automatic updates were turned off meanwhile, the copy was
-/// removed or is no longer that manager's, or Homebrew offers another version; when it runs nothing, or the manager's
-/// update fails, the release is no longer marked handed over (`handed_back`).
+/// the update of the package manager that owns it, pinned to `version` (the release the daily read chose, out as long
+/// as the wait asks and fitting the engine here; without it, the one the record says was handed over), all of it into
+/// the log the launch opened; the exit code. It runs nothing when automatic updates were turned off meanwhile, the
+/// copy was removed or is no longer that manager's, or Homebrew offers another version; when it runs nothing, or the
+/// manager's update fails, the release is no longer marked handed over (`handed_back`).
 pub fn background_update(home: &Path, exe: &Path, version: Option<&str>) -> i32 {
     let exe = crate::sys::canonical(exe).unwrap_or_else(|_| exe.to_path_buf());
     let Some(Delegate::Run { manager, argv, path_first, .. }) = selfupdate::delegate(&exe) else {
@@ -768,8 +922,9 @@ const BREW_NO_AUTO_UPDATE: &str = "HOMEBREW_NO_AUTO_UPDATE";
 
 /// The manager's update `argv` (the command `self update` runs for the copy, from `selfupdate::delegate`) pinned to
 /// release `v`: the manager's own command takes whatever its registry offers now, which may be a release published
-/// since the daily read, inside the hold-off, or one that does not fit the engine here. Homebrew's takes no version, and
-/// is run as it is once what it offers was looked at (`homebrew_offers`). `None` for a manager not run in the background.
+/// since the daily read, one not yet out as long as the wait asks, or one that does not fit the engine here.
+/// Homebrew's takes no version, and is run as it is once what it offers was looked at (`homebrew_offers`). `None` for
+/// a manager not run in the background.
 pub(crate) fn pinned(manager: &str, argv: &[String], v: &str) -> Option<Vec<String>> {
     let program = argv.first()?.clone();
     Some(match manager {
@@ -1126,32 +1281,113 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         let none = env_of(&[]);
         assert!(setting(&home), "no file: on");
-        assert_eq!(state(&home, &none), "automatic updates: on");
+        assert_eq!(state(&home, &none), "automatic updates: on · a release installs as soon as it is out");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join(SETTINGS), r#"{"theme": "dark"}"#).unwrap();
         assert!(setting(&home), "no field: on");
-        assert_eq!(auto_update_command(&home, Some("off")), 0);
+        assert_eq!(auto_update_command(&home, &["off"]), 0);
         assert!(!setting(&home));
         let kept: Value = serde_json::from_str(&std::fs::read_to_string(home.join(SETTINGS)).unwrap()).unwrap();
         assert_eq!(kept, json!({"theme": "dark", "autoUpdate": false}), "Superfluid Desktop's own keys stay");
-        assert_eq!(state(&home, &none), "automatic updates: off (superfluid self auto-update off)");
-        assert_eq!(auto_update_command(&home, None), 0);
-        assert_eq!(auto_update_command(&home, Some("on")), 0);
+        assert_eq!(state(&home, &none), "automatic updates: off (superfluid self auto-update off) · a release installs as soon as it is out");
+        assert_eq!(auto_update_command(&home, &[]), 0);
+        assert_eq!(auto_update_command(&home, &["on"]), 0);
         assert!(setting(&home));
-        assert_eq!(auto_update_command(&home, Some("maybe")), 2);
+        for wrong in [&["maybe"][..], &["on", "off"], &["wait"], &["wait", "3", "4"]] {
+            assert_eq!(auto_update_command(&home, wrong), 2, "{wrong:?}");
+        }
         assert!(setting(&home), "a word that is neither changes nothing");
         assert!(!std::fs::read_dir(&home).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(".tmp-")), "written whole, then renamed");
         // The environment wins over the file, for the run it is set in.
-        assert_eq!(state(&home, &env_of(&[(NO_UPDATE_ENV, "1")])), "automatic updates: off (SUPERFLUID_NO_UPDATE is set)");
-        assert_eq!(state(&home, &env_of(&[(NO_UPDATE_ENV, "0")])), "automatic updates: on", "0 turns nothing off");
-        assert_eq!(state(&home, &env_of(&[(selfupdate::NO_CHECK_ENV, "1")])), "automatic updates: off (SUPERFLUID_NO_UPDATE_CHECK is set)");
-        assert_eq!(state(&home, &env_of(&[("CI", "true")])), "automatic updates: off (CI is set)");
-        assert_eq!(state(&home, &env_of(&[("CI", "false")])), "automatic updates: on");
+        let on = "automatic updates: on · a release installs as soon as it is out";
+        assert_eq!(state(&home, &env_of(&[(NO_UPDATE_ENV, "1")])), "automatic updates: off (SUPERFLUID_NO_UPDATE is set) · a release installs as soon as it is out");
+        assert_eq!(state(&home, &env_of(&[(NO_UPDATE_ENV, "0")])), on, "0 turns nothing off");
+        assert_eq!(
+            state(&home, &env_of(&[(selfupdate::NO_CHECK_ENV, "1")])),
+            "automatic updates: off (SUPERFLUID_NO_UPDATE_CHECK is set) · a release installs as soon as it is out"
+        );
+        assert_eq!(state(&home, &env_of(&[("CI", "true")])), "automatic updates: off (CI is set) · a release installs as soon as it is out");
+        assert_eq!(state(&home, &env_of(&[("CI", "false")])), on);
         std::fs::write(home.join(SETTINGS), "not json").unwrap();
         assert!(setting(&home), "a file that cannot be read is no switch");
         set_setting(&home, false).unwrap();
         assert!(!setting(&home));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_wait_is_a_setting_kept_beside_the_others_and_the_environment_sets_it_for_one_shell() {
+        let home = std::env::temp_dir().join(format!("superfluid-auto-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let none = env_of(&[]);
+        assert_eq!(wait(&home, &none), Wait { days: 0, note: None }, "no file: no wait");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(SETTINGS), r#"{"theme": "dark", "autoUpdate": false}"#).unwrap();
+        assert_eq!(auto_update_command(&home, &["wait", "3"]), 0);
+        let kept: Value = serde_json::from_str(&std::fs::read_to_string(home.join(SETTINGS)).unwrap()).unwrap();
+        assert_eq!(kept, json!({"theme": "dark", "autoUpdate": false, "updateWaitDays": 3}), "the other keys stay");
+        assert!(!std::fs::read_dir(&home).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(".tmp-")), "written whole, then renamed");
+        assert_eq!(wait(&home, &none).days, 3);
+        assert_eq!(state(&home, &none), "automatic updates: off (superfluid self auto-update off) · a release installs once it has been out 3 days");
+        set_setting(&home, true).unwrap();
+        assert_eq!(state(&home, &none), "automatic updates: on · a release installs once it has been out 3 days");
+        assert_eq!(wait(&home, &none).days, 3, "turning updates on keeps the wait");
+        // The variable, for one shell or service, over the setting; one that holds no wait leaves the setting.
+        assert_eq!(state(&home, &env_of(&[(WAIT_ENV, "1")])), "automatic updates: on · a release installs once it has been out 1 day (SUPERFLUID_UPDATE_WAIT_DAYS is set)");
+        assert_eq!(state(&home, &env_of(&[(WAIT_ENV, "0")])), "automatic updates: on · a release installs as soon as it is out (SUPERFLUID_UPDATE_WAIT_DAYS is set)");
+        assert_eq!(
+            state(&home, &env_of(&[(WAIT_ENV, "soon")])),
+            "automatic updates: on · a release installs once it has been out 3 days (SUPERFLUID_UPDATE_WAIT_DAYS=soon is not a whole number of days from 0 to 365, so the setting is used)"
+        );
+        assert_eq!(wait(&home, &env_of(&[(WAIT_ENV, "")])), Wait { days: 3, note: None }, "empty is unset");
+        for wrong in ["-1", "366", "2.5", "1e3"] {
+            assert_eq!(wait(&home, &env_of(&[(WAIT_ENV, wrong)])).days, 3, "{wrong}");
+        }
+        assert_eq!(auto_update_command(&home, &["wait", "0"]), 0);
+        assert_eq!(state(&home, &none), "automatic updates: on · a release installs as soon as it is out");
+        // A wait that is no whole number of days from 0 to 365 changes nothing.
+        for wrong in ["-1", "366", "three", ""] {
+            assert_eq!(auto_update_command(&home, &["wait", wrong]), 2, "{wrong}");
+        }
+        assert_eq!(auto_update_command(&home, &["wait", "365"]), 0);
+        assert_eq!(wait(&home, &none).days, 365);
+        // A value written wrong in the file counts as missing, as any setting written wrong does, and the line says so.
+        for wrong in [json!("3"), json!(-2), json!(400), json!(1.5), json!(true)] {
+            std::fs::write(home.join(SETTINGS), json!({"updateWaitDays": wrong}).to_string()).unwrap();
+            let w = wait(&home, &none);
+            assert_eq!(w.days, 0, "{wrong}");
+            assert!(w.note.as_deref().is_some_and(|n| n.starts_with(&format!("updateWaitDays {wrong} in ")) && n.ends_with("is not a whole number of days from 0 to 365, so there is none")), "{w:?}");
+        }
+        std::fs::write(home.join(SETTINGS), json!({"updateWaitDays": null}).to_string()).unwrap();
+        assert_eq!(wait(&home, &none), Wait { days: 0, note: None }, "null is no setting");
+        std::fs::write(home.join(SETTINGS), "not json").unwrap();
+        assert_eq!(wait(&home, &none), Wait { days: 0, note: None }, "a file that cannot be read leaves every setting at its default");
+        set_wait(&home, 7).unwrap();
+        assert_eq!(wait(&home, &none).days, 7);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn what_setting_the_wait_says() {
+        assert_eq!(wait_set(0), "automatic updates install a release as soon as it is out");
+        assert_eq!(wait_set(1), "automatic updates wait 1 day after a release");
+        assert_eq!(wait_set(3), "automatic updates wait 3 days after a release");
+        assert_eq!(wait_phrase(0), "a release installs as soon as it is out");
+        assert_eq!(wait_phrase(14), "a release installs once it has been out 14 days");
+        assert_eq!((wait_of("0"), wait_of(" 3 "), wait_of("365"), wait_of("366"), wait_of("-1"), wait_of("x")), (Some(0), Some(3), Some(365), None, None, None));
+    }
+
+    #[test]
+    fn a_record_made_under_another_wait_names_nothing_until_it_is_read_again() {
+        let check = Check { checked_at: 5, wait: Some(3), newest: Some("0.2.2".into()), published: Some("2026-01-01".into()), notes: Some("n".into()), attempted: Some("0.2.1".into()), ..Check::default() };
+        let same = claimed(check.clone(), 3);
+        assert_eq!((same.wait, same.newest.as_deref()), (Some(3), Some("0.2.2")), "same wait: the release it names stays while it is read again");
+        assert!(!same.due(), "claimed: the launches after it do not start the read again");
+        let other = claimed(check.clone(), 0);
+        assert_eq!((other.wait, &other.newest, &other.published, &other.notes), (Some(0), &None, &None, &None));
+        assert_eq!(other.attempted.as_deref(), Some("0.2.1"), "what else it holds is kept");
+        assert!(!other.due() && other.made_with(0));
+        assert!(!Check { wait: None, ..check }.made_with(0), "a record from before the wait was a setting is read again");
     }
 
     #[test]
@@ -1279,7 +1515,7 @@ mod tests {
 mod update_tests {
     use super::*;
     use crate::selfupdate::tests::{listing, no_compat, release_tree, scratch, seen_running_from, sleeper_at};
-    use crate::selfupdate::{record, releases, target, Engine, HOLD_OFF_DAYS};
+    use crate::selfupdate::{record, releases, target, Engine};
     use superfluid_adapter_kit::install::Manifest;
 
     fn install_of(catalog: &Catalog, id: &str, name: &str) -> PathBuf {
@@ -1304,14 +1540,15 @@ mod update_tests {
     }
 
     #[test]
-    fn the_newest_release_past_the_hold_off_that_fits_the_engine_is_installed_and_the_way_back_said() {
+    fn the_newest_release_out_as_long_as_the_wait_asks_that_fits_the_engine_is_installed_and_the_way_back_said() {
         let dir = scratch("auto-update");
         let home = dir.join("home");
         let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         let p = listing(&dir, &[("99.0.0", "2026-01-01", Some(1)), ("99.1.0", "2026-01-02", Some(2)), ("99.2.0", "2099-01-01", Some(1))]);
         let found = releases(&serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap(), target().unwrap());
-        // The record the daily read leaves: 99.2.0 is inside the hold-off, 99.1.0 drives another engine.
-        let check = record(&home, &found, &Engine::Abi(1), Some(HOLD_OFF_DAYS), &no_compat).unwrap();
+        // The record the daily read leaves under a wait of 3 days: 99.2.0 is not out that long, 99.1.0 drives another
+        // engine.
+        let check = record(&home, &found, &Engine::Abi(1), 3, &no_compat).unwrap();
         assert_eq!(check.newest.as_deref(), Some("99.0.0"));
         assert_eq!(check.notes_url().as_deref(), Some("https://github.com/basecompute/superfluid/releases/tag/v99.0.0"));
         assert_eq!(Check::read(&home), Some(check.clone()), "the record reads back whole");
@@ -1369,7 +1606,7 @@ mod update_tests {
         let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         let p = listing(&dir, &[("99.0.0", "2026-01-01", None)]);
         let found = releases(&serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap(), target().unwrap());
-        let check = record(&home, &found, &Engine::None, Some(HOLD_OFF_DAYS), &no_compat).unwrap();
+        let check = record(&home, &found, &Engine::None, 0, &no_compat).unwrap();
         let versions = Versions::of(&home);
         release_tree(&versions.version_dir("98.0.0"), "98.0.0");
         versions.set_current("98.0.0").unwrap();
@@ -1624,27 +1861,65 @@ mod update_tests {
     }
 
     #[test]
-    fn self_update_auto_installs_the_release_past_the_hold_off_not_the_newest() {
+    fn self_update_auto_installs_the_release_out_as_long_as_the_wait_asks_not_the_newest() {
         let dir = scratch("auto-command");
         let home = dir.join("home");
         let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
         let exe = managed_at(&home);
         let p = listing(&dir, &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
+        set_wait(&home, 3).unwrap();
         let (code, out, said) = auto(&home, &catalog, &exe, &p, &[]);
         assert_eq!(code, 0, "{said:?}");
         assert!(out.is_empty(), "{out:?}");
         let versions = Versions::of(&home);
-        assert_eq!(versions.current().as_deref(), Some("99.0.0"), "99.1.0 is inside the hold-off: {said:?}");
+        assert_eq!(versions.current().as_deref(), Some("99.0.0"), "99.1.0 is not out 3 days: {said:?}");
         assert_eq!(said[0], "Updating superfluid 98.0.0 → 99.0.0 · release notes: https://github.com/basecompute/superfluid/releases/tag/v99.0.0");
         assert_eq!(said.last().unwrap(), "superfluid 99.0.0 is in use · `superfluid self use 98.0.0` goes back · `superfluid self auto-update off` turns automatic updates off");
-        assert_eq!(Check::read(&home).unwrap().newest.as_deref(), Some("99.0.0"), "the listing read is recorded as the day's read");
-        // Run again by the new version: nothing past the hold-off is newer.
+        let recorded = Check::read(&home).unwrap();
+        assert_eq!((recorded.newest.as_deref(), recorded.wait), (Some("99.0.0"), Some(3)), "the listing read is recorded as the day's read, with its wait");
+        // Run again by the new version: nothing out 3 days is newer.
         let exe = std::fs::canonicalize(versions.binary("99.0.0")).unwrap();
         let (code, out, _) = auto(&home, &catalog, &exe, &p, &[]);
         assert_eq!((code, out[0].as_str()), (0, "superfluid 99.1.0 (published 2099-01-01) is held off: automatic updates wait 3 days after a release; `superfluid self update` installs it now"));
-        let p = listing(&dir.join("only"), &[("99.0.0", "2026-01-01", None)]);
-        let (code, out, _) = auto(&home, &catalog, &exe, &p, &[]);
+        let (_, out, _) = auto(&home, &catalog, &exe, &p, &[(WAIT_ENV, "1")]);
+        assert_eq!(out[0], "superfluid 99.1.0 (published 2099-01-01) is held off: automatic updates wait 1 day after a release; `superfluid self update` installs it now", "the variable sets the wait");
+        let p_only = listing(&dir.join("only"), &[("99.0.0", "2026-01-01", None)]);
+        let (code, out, _) = auto(&home, &catalog, &exe, &p_only, &[]);
         assert_eq!((code, out), (0, vec!["superfluid 99.0.0 is up to date for automatic updates".to_string()]));
+        // With no wait (the default, or the variable for this run), the newest release is installed as soon as it is
+        // out.
+        let (code, out, said) = auto(&home, &catalog, &exe, &p, &[(WAIT_ENV, "0")]);
+        assert!(code == 0 && out.is_empty(), "{out:?} {said:?}");
+        assert_eq!(versions.current().as_deref(), Some("99.1.0"), "{said:?}");
+        assert_eq!(Check::read(&home).unwrap().wait, Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn self_check_names_the_newest_release_and_the_one_the_wait_lets_an_automatic_update_take() {
+        let dir = scratch("check-lines");
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
+        let found = releases(&serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap(), target().unwrap());
+        let none = Check::default();
+        let lines = |from: &str, wait: u32, check: &Check| described(&found, &Engine::None, &no_compat, check, from, wait);
+        assert_eq!(lines("98.0.0", 0, &none), ["newest release: 99.1.0 (published 2099-01-01): `superfluid self update` installs it"], "no wait: one release");
+        assert_eq!(
+            lines("98.0.0", 3, &none),
+            [
+                "newest release: 99.1.0 (published 2099-01-01): `superfluid self update` installs it",
+                "an automatic update takes 99.0.0 (published 2026-01-01): automatic updates wait 3 days after a release",
+            ]
+        );
+        assert_eq!(
+            lines("99.0.0", 3, &none),
+            [
+                "newest release: 99.1.0 (published 2099-01-01): `superfluid self update` installs it",
+                "superfluid 99.1.0 (published 2099-01-01) is held off: automatic updates wait 3 days after a release; `superfluid self update` installs it now",
+            ]
+        );
+        let declined = Check { declined: Some("99.1.0".into()), ..Check::default() };
+        assert_eq!(lines("99.0.0", 0, &declined)[1], "you went back from 99.1.0 with self use; it stays until a newer release is out");
+        assert_eq!(lines("99.1.0", 3, &none), ["no release newer than 99.1.0 fits here"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1712,8 +1987,9 @@ mod update_tests {
         let p = listing(&dir, &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
         let source = p.to_string_lossy().to_string();
         let none = |_: &str| None;
+        let three = |k: &str| (k == WAIT_ENV).then(|| "3".to_string());
         assert_eq!(
-            check_json(&home, &catalog, &exe, &source, &none).unwrap(),
+            check_json(&home, &catalog, &exe, &source, &three).unwrap(),
             json!({
                 "current": "98.0.0",
                 "newest": "99.1.0",
@@ -1721,8 +1997,11 @@ mod update_tests {
                 "autoReason": null,
                 "notes": "https://github.com/basecompute/superfluid/releases/tag/v99.1.0",
                 "autoUpdate": true,
+                "waitDays": 3,
             })
         );
+        let now = check_json(&home, &catalog, &exe, &source, &none).unwrap();
+        assert_eq!((&now["newest"], &now["auto"], &now["waitDays"]), (&json!("99.1.0"), &json!("99.1.0"), &json!(0)), "no wait: the newest");
         set_setting(&home, false).unwrap();
         let off = check_json(&home, &catalog, &exe, &source, &none).unwrap();
         assert_eq!((&off["auto"], &off["autoReason"], &off["autoUpdate"]), (&Value::Null, &json!("automatic updates are off (superfluid self auto-update off)"), &json!(false)));

@@ -12,6 +12,7 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 | `SUPERFLUID_HOME` | `~/.superfluid` (`%USERPROFILE%\.superfluid` on Windows) | Home directory: the installed Superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
 | `SUPERFLUID_NO_UPDATE` | unset | Set to anything but empty, `0` or `false` (in any case): no automatic update, no check for a newer Superfluid and no line about one, in that environment (`--no-update` on any command does the same for one run). See [Updating Superfluid](updating.md). |
 | `SUPERFLUID_NO_UPDATE_CHECK` | unset | The same as `SUPERFLUID_NO_UPDATE`, under the name it had before automatic updates. |
+| `SUPERFLUID_UPDATE_WAIT_DAYS` | unset | A whole number of days from 0 to 365: how long after a release is published automatic updates, and the line saying a newer release is out, wait for it in that environment (a shell, a service), over `updateWaitDays` in the settings file. Any other value is ignored, and the setting is used. See [Updating Superfluid](updating.md#the-wait). |
 | `SUPERFLUID_UPDATED_FROM` | unset | Set by superfluid on a command it runs again itself: by an automatic update, on the command the new version runs again (the version it was), and by a node that starts again for the head's model. A run with it set updates nothing; it is taken out of that run's environment, so what the run starts (a server, an agent and what runs in it) updates as any other command would. |
 | `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update`, automatic updates and the daily check: a URL or a file in GitHub's releases JSON shape. |
 | `CI` | unset | Set to anything but empty, `0` or `false`: no automatic update. A command prints one line per newer release instead, as it does without a terminal. See [Updating Superfluid](updating.md#when-nothing-is-updated). |
@@ -108,7 +109,14 @@ Models pulled by id are not stored here; each runtime keeps them where its own t
 
 ### The settings file
 
-`$SUPERFLUID_HOME/settings.json` holds the settings that outlast a command line. It has one key Superfluid reads, `autoUpdate`: `false` turns automatic updates off, and a missing file or key means on. `superfluid self auto-update on|off` writes it (whole, beside it, then renamed into place) and keeps any other key there; `superfluid self auto-update` says whether updates are on, and what turns them off when they are not. `SUPERFLUID_NO_UPDATE` and `--no-update` win over the file for the run they are given to. See [Updating Superfluid](updating.md#automatic-updates).
+`$SUPERFLUID_HOME/settings.json` holds the settings that outlast a command line. It has two keys Superfluid reads:
+
+| key | default | meaning |
+|---|---|---|
+| `autoUpdate` | `true` | `false` turns automatic updates off. `superfluid self auto-update on\|off` sets it. |
+| `updateWaitDays` | `0` | How many days after a release is published an automatic update, or the line saying it is out, waits for it: a whole number from 0 to 365, where 0 installs a release as soon as the daily read sees it. `superfluid self auto-update wait <days>` sets it. |
+
+A missing file or key means the default, and so does a value of the wrong kind (a word for `autoUpdate`, anything but a whole number from 0 to 365 for `updateWaitDays`; `superfluid self auto-update` names a wait it did not use, and why); a file that is not JSON leaves every key at its default, and the next `self auto-update on|off|wait` writes it anew. The commands write the file whole, beside it, then rename it into place, and keep any other key there (Superfluid Desktop's own). `superfluid self auto-update` says whether updates are on, what turns them off when they are not, and the wait. `SUPERFLUID_NO_UPDATE` and `--no-update` win over `autoUpdate`, and `SUPERFLUID_UPDATE_WAIT_DAYS` over `updateWaitDays`, for the run or environment they are given to. See [Updating Superfluid](updating.md#automatic-updates).
 
 ## The sessions directory
 

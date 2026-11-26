@@ -18,8 +18,6 @@ use crate::runtimes::Catalog;
 
 pub const REPO: &str = "basecompute/superfluid";
 const LISTING: &str = "https://api.github.com/repos/basecompute/superfluid/releases?per_page=20";
-/// A release younger than this is not announced by the daily check, so early reports land first.
-pub const HOLD_OFF_DAYS: i64 = 3;
 const CHECK_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 pub const NO_CHECK_ENV: &str = "SUPERFLUID_NO_UPDATE_CHECK";
 /// Where the release listing is read from, for a mirror or a test: a URL or a file.
@@ -54,6 +52,7 @@ Usage:
   superfluid self list                                  The versions installed here, and which is current
   superfluid self use <v>                               Make an installed version current (the one an update replaced stays)
   superfluid self auto-update [on|off]                  Turn automatic updates on or off; with neither, say whether they are on
+  superfluid self auto-update wait <days>               Wait this many days after a release before an automatic update takes it (0-365)
   superfluid self install --from <dir> [--prefix <dir>] Place an unpacked release here; what the install script runs
 
 Releases live side by side under $SUPERFLUID_HOME/versions/<v>, with a `current` link that the
@@ -77,9 +76,10 @@ named and not run: Windows lets nothing replace a program that is running.
 
 Automatic updates: a command run in a terminal (serve, launch, node, top, runtime install,
 update, repair, remove, use) reads the release listing once a day in the background, and when
-a release newer than this one fits here and is a few days old, installs it before the command
-goes on: the download with a progress bar, the proof above, the runtimes not pinned and not in
-use updated with the new superfluid, then the command run again by the new version.
+a release newer than this one fits here (and has been out as many days as the wait asks),
+installs it before the command goes on: the download with a progress bar, the proof above, the
+runtimes not pinned and not in use updated with the new superfluid, then the command run again
+by the new version.
 `superfluid self use <old>` goes back, and no automatic update goes to the version it left or
 an older one again. A copy Homebrew, a global npm, pipx, uv or cargo installed is updated by
 that manager in the background once no superfluid runs from it, with its output in
@@ -87,17 +87,26 @@ $SUPERFLUID_HOME/logs/auto-update.log; one basert installed is left to basert.
 Without a terminal (a service, an app, a pipe), under CI, or with automatic updates off, the
 command prints one line per release instead. A failed update says so and the command goes on.
 
+The wait: by default a release is installed as soon as the daily read sees it.
+`superfluid self auto-update wait 3` makes automatic updates wait until a release has been out
+3 days (kept in $SUPERFLUID_HOME/settings.json as updateWaitDays; 0 waits for none), and
+SUPERFLUID_UPDATE_WAIT_DAYS=<days> sets it for one shell or service. The line saying a release
+is out waits as long, so it names the release an automatic update would take. `superfluid self
+update` installs the newest release at once, whatever the wait; `superfluid self check` names
+it, and the one an automatic update would take when that is another.
+
 Turning them off: `superfluid self auto-update off` (kept in $SUPERFLUID_HOME/settings.json),
 SUPERFLUID_NO_UPDATE=1 or SUPERFLUID_NO_UPDATE_CHECK=1 (no check, no update, no line), or
 --no-update on any command for that run. `superfluid serve` also says once a day when a newer
-release is out while it runs; --offline turns its check off.
+release is out while it runs; --offline turns its check off. `superfluid self auto-update` says
+whether they are on, and the wait.
 
 Apps and scripts: `superfluid self update --auto` reads the listing and installs the release an
-automatic update would (past the hold-off, fitting the engine, not one `self use` went back
-from), then updates the runtimes; with updates off, or nothing to install, it says why and exits
-0. It needs no terminal, and exits 1 when the update fails, 3 for a copy a package manager or
-basert updates. `superfluid self check --json` prints {current, newest, auto, autoReason, notes,
-autoUpdate}, where `auto` is what `--auto` would install now.
+automatic update would (out as long as the wait asks, fitting the engine, not one `self use`
+went back from), then updates the runtimes; with updates off, or nothing to install, it says
+why and exits 0. It needs no terminal, and exits 1 when the update fails, 3 for a copy a package
+manager or basert updates. `superfluid self check --json` prints {current, newest, auto,
+autoReason, notes, autoUpdate, waitDays}, where `auto` is what `--auto` would install now.
 ";
 
 /// The release asset name for this build's platform.
@@ -981,9 +990,16 @@ pub fn fits(release: &Release, engine: &Engine, compat: &dyn Fn(&str) -> Option<
     }
 }
 
-/// The newest release that fits, skipping ones published fewer than `hold_off` days ago when given.
-pub fn newest<'a>(releases: &'a [Release], engine: &Engine, hold_off: Option<i64>, compat: &dyn Fn(&str) -> Option<Value>) -> Option<&'a Release> {
-    releases.iter().find(|r| hold_off.is_none_or(|days| age_days(&r.published).is_some_and(|age| age >= days)) && fits(r, engine, compat))
+/// The newest release that fits, skipping ones published fewer than `wait` days ago when given.
+pub fn newest<'a>(releases: &'a [Release], engine: &Engine, wait: Option<u32>, compat: &dyn Fn(&str) -> Option<Value>) -> Option<&'a Release> {
+    let today = today();
+    releases.iter().find(|r| wait.is_none_or(|days| out_for(&r.published, days, today)) && fits(r, engine, compat))
+}
+
+/// Whether a release published on `published` (`2026-01-01`) has been out `days` days on `today` (days since the
+/// epoch): with no wait, as soon as it is listed; with one, never when its date cannot be read.
+pub(crate) fn out_for(published: &str, days: u32, today: i64) -> bool {
+    days == 0 || age_days(published, today).is_some_and(|age| age >= i64::from(days))
 }
 
 /// The release listing to read: `SUPERFLUID_RELEASES`, else GitHub's.
@@ -1038,11 +1054,15 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-fn age_days(published: &str) -> Option<i64> {
+fn age_days(published: &str, today: i64) -> Option<i64> {
     let mut parts = published.split('-').map(|p| p.parse::<i64>().ok());
     let (y, m, d) = (parts.next()??, parts.next()??, parts.next()??);
-    let today = (SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() / 86_400) as i64;
     Some(today - days_from_civil(y, m, d))
+}
+
+/// Today, in days since the epoch.
+fn today() -> i64 {
+    (now_secs() / 86_400) as i64
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -1814,12 +1834,14 @@ pub fn list(home: &Path, exe: &Path) -> String {
 }
 
 
-/// `$SUPERFLUID_HOME/update-check.json`: the last read, the newest release that fit and its notes, the version
-/// announced, the version an automatic update last tried and the one it handed to a package manager (and when), and
-/// the version `self use` stepped back from.
+/// `$SUPERFLUID_HOME/update-check.json`: the last read, the wait it was made under, the newest release that fit and
+/// had been out that long and its notes, the version announced, the version an automatic update last tried and the
+/// one it handed to a package manager (and when), and the version `self use` stepped back from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Check {
     pub checked_at: u64,
+    /// The wait, in days, the read was made under: a record made under another names nothing for this one.
+    pub wait: Option<u32>,
     pub newest: Option<String>,
     pub published: Option<String>,
     pub notified: Option<String>,
@@ -1848,6 +1870,7 @@ impl Check {
         let text = |k: &str| v[k].as_str().map(str::to_string);
         Some(Check {
             checked_at: v["checked_at"].as_u64().unwrap_or(0),
+            wait: v["wait_days"].as_u64().and_then(|d| u32::try_from(d).ok()),
             newest: text("newest"),
             published: text("published"),
             notified: text("notified"),
@@ -1866,6 +1889,7 @@ impl Check {
         std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
         let v = json!({
             "checked_at": self.checked_at,
+            "wait_days": self.wait,
             "newest": self.newest,
             "published": self.published,
             "notified": self.notified,
@@ -1881,6 +1905,11 @@ impl Check {
 
     pub fn due(&self) -> bool {
         now_secs().saturating_sub(self.checked_at) >= CHECK_EVERY.as_secs()
+    }
+
+    /// Whether the read was made under `wait`, so the release it names is the one that wait takes.
+    pub(crate) fn made_with(&self, wait: u32) -> bool {
+        self.wait == Some(wait)
     }
 
     /// The newest release known, when it is newer than this one.
@@ -1900,26 +1929,34 @@ impl Check {
     pub fn describe(&self) -> String {
         let ago = now_secs().saturating_sub(self.checked_at);
         let when = if ago < 3600 { format!("{}m ago", ago / 60) } else if ago < 86_400 { format!("{}h ago", ago / 3600) } else { format!("{}d ago", ago / 86_400) };
-        match self.newer() {
-            Some(n) => format!("newest release: {n} (published {}; checked {when}): `superfluid self update` installs it", self.published.as_deref().unwrap_or("?")),
-            None => format!("newest release that fits: {} (checked {when})", self.newest.as_deref().unwrap_or("none known")),
+        let published = self.published.as_deref().unwrap_or("?");
+        match (self.newer(), self.wait.filter(|&w| w > 0)) {
+            (Some(n), None) => format!("newest release: {n} (published {published}; checked {when}): `superfluid self update` installs it"),
+            (Some(n), Some(w)) => format!(
+                "newest release out {} or more: {n} (published {published}; checked {when}): `superfluid self update` installs the newest",
+                crate::autoupdate::days(w)
+            ),
+            (None, None) => format!("newest release that fits: {} (checked {when})", self.newest.as_deref().unwrap_or("none known")),
+            (None, Some(w)) => format!("newest release out {} or more that fits: {} (checked {when})", crate::autoupdate::days(w), self.newest.as_deref().unwrap_or("none known")),
         }
     }
 }
 
-/// Read the listing now and record the newest release that fits here and is past the hold-off.
-pub fn check_now(home: &Path, catalog: &Catalog, hold_off: Option<i64>, source: &str) -> Result<Check, String> {
+/// Read the listing now and record the newest release that fits here and has been out `wait` days.
+pub fn check_now(home: &Path, catalog: &Catalog, wait: u32, source: &str) -> Result<Check, String> {
     let target = target().ok_or("no release is published for this platform")?;
     let found = fetch_releases(source, target, 5)?;
-    record(home, &found, &engine_here(catalog), hold_off, &compat_fetcher(5))
+    record(home, &found, &engine_here(catalog), wait, &compat_fetcher(5))
 }
 
-/// The newest of `found` that drives `engine` and is past the hold-off, recorded with what the record held besides.
-pub(crate) fn record(home: &Path, found: &[Release], engine: &Engine, hold_off: Option<i64>, compat: &dyn Fn(&str) -> Option<Value>) -> Result<Check, String> {
-    let fit = newest(found, engine, hold_off, compat);
+/// The newest of `found` that drives `engine` and has been out `wait` days, recorded with the wait and with what the
+/// record held besides.
+pub(crate) fn record(home: &Path, found: &[Release], engine: &Engine, wait: u32, compat: &dyn Fn(&str) -> Option<Value>) -> Result<Check, String> {
+    let fit = newest(found, engine, Some(wait), compat);
     let previous = Check::read(home).unwrap_or_default();
     let check = Check {
         checked_at: now_secs(),
+        wait: Some(wait),
         newest: fit.map(|r| r.version.clone()),
         published: fit.map(|r| r.published.clone()),
         notes: fit.map(|r| r.notes_url.clone()),
@@ -1963,10 +2000,12 @@ pub fn check_in_background(home: PathBuf, offline: bool) {
 /// One round: the cache when not yet due, else the listing; the line to print for a release not yet announced.
 pub fn tick(home: &Path, catalog: &Catalog, source: &str) -> Option<String> {
     let command = update_command(&std::env::current_exe().unwrap_or_default());
-    let auto = crate::autoupdate::enabled(home, &|k| std::env::var(k).ok()).is_ok();
-    match Check::read(home).filter(|c| !c.due()) {
+    let env = |k: &str| std::env::var(k).ok();
+    let auto = crate::autoupdate::enabled(home, &env).is_ok();
+    let wait = crate::autoupdate::wait(home, &env).days;
+    match Check::read(home).filter(|c| !c.due() && c.made_with(wait)) {
         Some(cached) => announce(home, cached, &command, auto),
-        None => announce(home, check_now(home, catalog, Some(HOLD_OFF_DAYS), source).ok()?, &command, auto),
+        None => announce(home, check_now(home, catalog, wait, source).ok()?, &command, auto),
     }
 }
 
@@ -2032,9 +2071,11 @@ pub fn run(args: &[String]) -> i32 {
                 r => print(r),
             }
         }
-        Some("check") if args.len() == 1 => match check_now(&home, &catalog, Some(HOLD_OFF_DAYS), &listing_source()) {
-            Ok(check) => {
-                println!("superfluid: {}", check.describe());
+        Some("check") if args.len() == 1 => match crate::autoupdate::check_lines(&home, &catalog, &exe, &listing_source(), &|k| std::env::var(k).ok()) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("superfluid: {line}");
+                }
                 0
             }
             Err(e) => {
@@ -2053,11 +2094,11 @@ pub fn run(args: &[String]) -> i32 {
             }
         },
         // What a launch starts in the background when the daily read is due: the record alone, nothing printed.
-        Some("check") if args.len() == 2 && args[1] == "--record" => match check_now(&home, &catalog, Some(HOLD_OFF_DAYS), &listing_source()) {
+        Some("check") if args.len() == 2 && args[1] == "--record" => match check_now(&home, &catalog, crate::autoupdate::wait(&home, &|k| std::env::var(k).ok()).days, &listing_source()) {
             Ok(_) => 0,
             Err(_) => 1,
         },
-        Some("auto-update") if args.len() <= 2 => crate::autoupdate::auto_update_command(&home, args.get(1).map(String::as_str)),
+        Some("auto-update") => crate::autoupdate::auto_update_command(&home, &args[1..].iter().map(String::as_str).collect::<Vec<_>>()),
         // What an automatic update leaves running for a package manager's copy: it runs the manager once nothing runs from the copy.
         Some("background-update") if args.len() == 1 => crate::autoupdate::background_update(&home, &exe, None),
         Some("background-update") if args.len() == 3 && args[1] == "--version" => crate::autoupdate::background_update(&home, &exe, Some(&args[2])),
@@ -2511,7 +2552,8 @@ pub(crate) mod tests {
         assert_eq!(newest(&found, &Engine::Unnumbered("0.3".into()), None, &compat).map(|r| r.version.as_str()), Some("0.2.0"), "compat.json names the line");
         assert_eq!(newest(&found, &Engine::Unnumbered("0.2".into()), None, &compat), None);
         assert_eq!(newest(&found, &Engine::None, Some(100_000), &no_compat), None);
-        assert_eq!(age_days("2000-01-01").map(|d| d > 9000), Some(true));
+        assert_eq!(newest(&found, &Engine::None, Some(0), &no_compat).map(|r| r.version.as_str()), Some("0.2.0"), "no wait");
+        assert_eq!(age_days("2000-01-01", today()).map(|d| d > 9000), Some(true));
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(2000, 3, 1), 11017);
         let _ = std::fs::remove_dir_all(&dir);
@@ -3002,14 +3044,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_release_is_out_long_enough_once_the_wait_has_passed() {
+        let day = days_from_civil(2026, 3, 10);
+        assert!(out_for("2026-03-10", 0, day), "no wait: as soon as it is out");
+        assert!(out_for("2026-03-12", 0, day), "no wait: a date ahead of this clock is no matter");
+        assert!(out_for("not a date", 0, day));
+        assert!(!out_for("2026-03-10", 3, day));
+        assert!(!out_for("2026-03-08", 3, day), "two days");
+        assert!(out_for("2026-03-07", 3, day), "three days");
+        assert!(out_for("2026-02-28", 1, days_from_civil(2026, 3, 1)), "across a month");
+        assert!(!out_for("not a date", 1, day), "a date that cannot be read is never out long enough");
+    }
+
+    #[test]
     fn the_daily_check_records_the_newest_release_and_announces_it_once() {
         let dir = scratch("check");
         let home = dir.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let p = listing(&dir, &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
         let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
-        let c = check_now(&home, &catalog, Some(HOLD_OFF_DAYS), &p.to_string_lossy()).unwrap();
-        assert_eq!(c.newest.as_deref(), Some("99.0.0"), "99.1.0 is inside the hold-off");
+        let c = check_now(&home, &catalog, 3, &p.to_string_lossy()).unwrap();
+        assert_eq!(c.newest.as_deref(), Some("99.0.0"), "99.1.0 is not out 3 days");
+        assert_eq!(c.wait, Some(3));
         assert!(!c.due());
         assert_eq!(Check::read(&home), Some(c.clone()));
         let line = announce(&home, c.clone(), "superfluid self update", true).unwrap();
@@ -3022,7 +3078,10 @@ pub(crate) mod tests {
         let again = Check { notified: None, ..c.clone() };
         let line = announce(&home, again, "brew upgrade superfluid", false).unwrap();
         assert!(line.contains("`brew upgrade superfluid` installs it") && !line.contains("turn off"), "with updates off already, nothing to turn off: {line}");
-        assert!(Check::read(&home).unwrap().describe().starts_with("newest release: 99.0.0 (published 2026-01-01;"));
+        assert!(Check::read(&home).unwrap().describe().starts_with("newest release out 3 days or more: 99.0.0 (published 2026-01-01;"));
+        assert!(Check { wait: Some(0), ..Check::read(&home).unwrap() }.describe().starts_with("newest release: 99.0.0 (published 2026-01-01;"));
+        let c = check_now(&home, &catalog, 0, &p.to_string_lossy()).unwrap();
+        assert_eq!((c.newest.as_deref(), c.wait), (Some("99.1.0"), Some(0)), "no wait: the newest, as soon as it is out");
         let stale = Check { checked_at: 1, ..Check::default() };
         assert!(stale.due());
         let _ = std::fs::remove_dir_all(&dir);
