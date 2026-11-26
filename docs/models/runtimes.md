@@ -43,6 +43,8 @@ superfluid runtime remove llamacpp --all         # every install
 
 An install fetches over `https://` only, checks each asset against a SHA-256 known before the fetch (the adapter's pinned one, or `--sha256`), stages it, and runs the staged worker's `check`. An archive from elsewhere with no SHA-256 to check is refused; a local file without one installs with a warning. An archive member that would land outside the install (an absolute path, `..`, a symlink out) fails the install. If the runtime finds no device of the planned backend, the next plan is tried (CUDA, then Vulkan, then CPU). One install of a runtime runs at a time across processes; a failed install leaves the existing ones as they were.
 
+An install a running process uses (it runs the install's worker, or has loaded a library from it, as `superfluid-workerd` loads the baseRT engine) is neither replaced nor removed: `install` of the same install, `repair` and `remove` refuse it with `<id> <install> is in use (pid N): it stays until no server uses it`. An install is renamed aside before it is removed, so one that cannot be (on Windows, a file in it is open) is left whole. Run in a terminal, `runtime install`, `update`, `repair`, `remove` and `use` may first update Superfluid and the other installed runtimes ([Updating Superfluid](../serving/updating.md#automatic-updates)); `--no-update` skips that.
+
 ### Where installs live
 
 ```text

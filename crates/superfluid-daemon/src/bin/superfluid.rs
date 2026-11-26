@@ -459,8 +459,15 @@ fn media_cmd(args: &[String]) {
 
 
 fn main() {
-    use superfluid_daemon::cli;
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    use superfluid_daemon::{autoupdate, cli};
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    // `--no-update` is any command's, for that run, and for what it starts (a server `launch` starts).
+    let (args, no_update) = autoupdate::strip_no_update(&given);
+    if no_update {
+        std::env::set_var(autoupdate::NO_UPDATE_ENV, "1");
+    }
+    // An update due here is made before the command, which the new version then runs in this process's place.
+    autoupdate::at_launch(&args, no_update);
     let command = args.first().map(String::as_str);
     match command {
         None => {

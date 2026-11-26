@@ -812,7 +812,10 @@ fn restart() -> ! {
     eprintln!("superfluid: starting again to serve the head's model");
     // The next image writes its events to the stream this one wrote to, from its `start` on.
     crate::events::prepare_exec();
-    let e = crate::sys::replace_process(std::process::Command::new(exe).args(std::env::args_os().skip(1)));
+    // Started again by superfluid, not by its user: it makes no automatic update on the way.
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1)).env(crate::autoupdate::UPDATED_FROM_ENV, crate::selfupdate::running());
+    let e = crate::sys::replace_process(&mut cmd);
     fail(format!("cannot start again: {e}"))
 }
 

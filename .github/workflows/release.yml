@@ -37,6 +37,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # A superfluid run here makes no automatic update, reads no release listing
+  # and prints no line about one: the tests read fake listings, never GitHub's.
+  SUPERFLUID_NO_UPDATE: "1"
 
 jobs:
   build:

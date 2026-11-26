@@ -59,6 +59,7 @@ pub mod runtimes;
 pub mod runtimes_report;
 pub mod versions;
 pub mod selfupdate;
+pub mod autoupdate;
 pub mod linked;
 pub mod dylib_tokenizer;
 pub mod engine_flags;

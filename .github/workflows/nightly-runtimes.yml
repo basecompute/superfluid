@@ -69,6 +69,9 @@ env:
   # the SHA-256 it is checked against stays the file's.
   TEST_GGUF_URL: https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/50968a4468ef4233ed78cd7c3de230dd1d61a56b/Qwen3-0.6B-Q4_K_M.gguf
   TEST_GGUF_SHA256: ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a
+  # A superfluid run here makes no automatic update, reads no release listing
+  # and prints no line about one: the tests read fake listings, never GitHub's.
+  SUPERFLUID_NO_UPDATE: "1"
 
 jobs:
   pick:

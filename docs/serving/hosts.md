@@ -7,7 +7,7 @@ A product can run Superfluid as its server: start `superfluid serve` with its ow
 - Exec the binary by its real path. Superfluid finds `superfluid-workerd` and the adapters it ships beside its own executable, and resolves a symlink to get there, so a link or a shim script on `PATH` works too.
 - Name the runtime: `--runtime basert` (or `native`) for `.base` bundles. A model of another format is refused.
 - Hand over the engine: `--basert-lib <dir or file>` or `BASERT_LIB` names the libbaseRT to load. Without either, Superfluid looks beside its worker, in `../lib`, and in its own runtime installs. On CUDA and ROCm the engine also needs its kernel sidecar (`baseRT_cuda_kernels.fatbin`, `baseRT_rocm_kernels.hsaco`), which it finds beside the executable or at `BASERT_KERNEL_LIB`; a host that keeps the sidecar beside its own binaries sets that variable.
-- Pass `--offline` so Superfluid installs no runtime and pulls no model by itself; the host resolves model ids.
+- Pass `--offline` so Superfluid installs no runtime, pulls no model, and neither updates itself nor checks for a newer release by itself; the host resolves model ids and picks the release. Without `--offline`, set `SUPERFLUID_NO_UPDATE=1`.
 - Give each server its own `--sessions <dir>`: one server per directory, with a lock. Two servers that share the default collide.
 - `SUPERFLUID_HOME` is where Superfluid keeps its own installs and socket; a host that wants nothing under `~/.superfluid` sets it.
 

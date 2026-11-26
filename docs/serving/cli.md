@@ -27,6 +27,8 @@ superfluid help runtime           # one command's help
 superfluid --version              # also -V, superfluid version
 ```
 
+`--no-update`, given to any command before a `--`, makes no automatic update for that run ([Updating Superfluid](updating.md#automatic-updates)).
+
 Flags of `serve`, `launch`, `runtime`, `session`, `media` and `self` take their value as `--flag value` or `--flag=value`. `top`, `node join` and `superfluid-noded` take only `--flag value`. The last occurrence of a scalar flag wins; repeatable flags accumulate.
 
 `fleet token` and `node join` are described in [Distributed serving](distributed_serving.md).
@@ -273,6 +275,8 @@ superfluid runtime options <id> [--json]
 
 `remove <id>` with no install removes the runtime's only install; when it has more, it names them and removes nothing, and `--all` removes every one. The bare id is also how `superfluid runtimes` lists the default install.
 
+An install a running server uses (its worker, or a library it loaded) is neither replaced (`install`, `repair`) nor removed (`remove`) until that server stops; the refusal names its pid. Run in a terminal, `install`, `update`, `repair`, `remove` and `use` may first make an automatic update ([Updating Superfluid](updating.md#automatic-updates)).
+
 See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](../models/runtimes.md#per-runtime-options).
 
 ## `superfluid models`
@@ -314,10 +318,12 @@ superfluid self update [--version <v>] [--dry-run] [--yes]
 superfluid self check
 superfluid self list
 superfluid self use <v>
+superfluid self auto-update [on|off]
+superfluid self auto-update wait <days>
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program; a package manager's copy has its update command named there, not run. See [Updating Superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out and, when an automatic update would take another under the wait, which. `auto-update on|off` turns automatic updates on or off (kept in `$SUPERFLUID_HOME/settings.json`), and with neither says whether they are on and, when not, what turns them off, and the wait; `auto-update wait <days>` makes automatic updates wait that many days after a release (0, the default, installs a release as soon as it is out); any command takes `--no-update` for one run without them. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program; a package manager's copy has its update command named there, not run. See [Updating Superfluid](updating.md).
 
 ## `superfluid session`
 
