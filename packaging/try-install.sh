@@ -42,7 +42,7 @@ esac
 lines() { tr -d '\r'; }
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT INT TERM
-export SUPERFLUID_HOME="$tmp/home" SUPERFLUID_NO_UPDATE_CHECK=1
+export SUPERFLUID_HOME="$tmp/home" SUPERFLUID_NO_UPDATE_CHECK=1 SUPERFLUID_NO_UPDATE=1
 
 # check <bin-dir> <manager> <release-dir>: the commands in <bin-dir> run the
 # release in <release-dir> and know <manager> as what updates it.

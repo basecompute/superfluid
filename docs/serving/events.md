@@ -1,6 +1,6 @@
 # Start-up events
 
-A program that runs `superfluid serve` or `superfluid node join` (a desktop app, a supervisor, a test harness) can follow the start from stderr without reading prose. With `--log-format json`, every line Superfluid writes on stderr is one JSON object, and each step of a start (a runtime installed, a model pulled and loaded, the server ready, a node joined) is an event with a name and fields of its own. Without the flag, stderr is the prose it always was.
+A program that runs `superfluid serve` or `superfluid node join` (a desktop app, a supervisor, a test harness) can follow the start from stderr without reading prose. With `--log-format json`, every line Superfluid writes on stderr is one JSON object, and each step of a start (a runtime installed, a model pulled and loaded, the server ready, a node joined) is an event with a name and fields of its own. Without the flag, stderr is the prose it always was. One exception comes before the `start` event: an automatic update in a terminal (its lines and its download bar) and, without a terminal, the line saying a newer Superfluid is out are prose. Pass `--no-update` or `--offline`, or set `SUPERFLUID_NO_UPDATE=1`, for a stream that is JSON from its first line ([Updating Superfluid](updating.md#automatic-updates)).
 
 ```sh
 superfluid serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M --http 127.0.0.1:0 --log-format json

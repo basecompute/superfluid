@@ -255,6 +255,22 @@ impl Lock {
         }
         Ok(Lock(file))
     }
+
+    /// The lock when it is free now; `None` when another holds it, which is not waited for.
+    pub(crate) fn try_take(dir: &Path, id: &str) -> Result<Option<Lock>, String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let path = dir.join(format!("{}.lock", stem(id)));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        match crate::sys::lock_exclusive(&file, false).map_err(|e| format!("{}: {e}", path.display()))? {
+            true => Ok(Some(Lock(file))),
+            false => Ok(None),
+        }
+    }
 }
 
 // The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.

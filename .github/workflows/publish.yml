@@ -50,6 +50,9 @@ env:
   PYTHON_VERSION: "3.14.9"
   NODE_VERSION: "24.21.0"
   TAP_REPO: basecompute/homebrew-tap
+  # A superfluid run here makes no automatic update, reads no release listing
+  # and prints no line about one: the tests read fake listings, never GitHub's.
+  SUPERFLUID_NO_UPDATE: "1"
 
 jobs:
   plan:
