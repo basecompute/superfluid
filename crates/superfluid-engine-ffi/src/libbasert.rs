@@ -201,6 +201,8 @@ pub fn set_library(path: PathBuf) {
 pub fn file_names() -> &'static [&'static str] {
     if cfg!(target_os = "macos") {
         &["libbaseRT.dylib", "libbaseRT.0.dylib"]
+    } else if cfg!(windows) {
+        &["baseRT.dll"]
     } else {
         &["libbaseRT.so", "libbaseRT.so.0"]
     }
@@ -224,10 +226,24 @@ pub fn candidates() -> (Vec<PathBuf>, bool) {
         }
     }
     if let Some(home) = runtime_home(std::env::var_os("SUPERFLUID_HOME"), std::env::home_dir().map(Into::into)) {
-        dirs.push(home.join("runtimes").join("basert").join("current").join("lib"));
+        dirs.push(through_link(&home.join("runtimes").join("basert").join("current")).join("lib"));
     }
     let found = dirs.into_iter().flat_map(|d| file_names().iter().map(move |n| d.join(n))).collect();
     (found, false)
+}
+
+/// Where the install link `current` leads: a symbolic link on Unix; on Windows, where an ordinary user may make
+/// none, a file holding the name of the install beside it (as superfluid-adapter-kit's `through_link`).
+fn through_link(link: &Path) -> PathBuf {
+    if cfg!(windows) && link.is_file() {
+        if let Ok(name) = std::fs::read_to_string(link) {
+            let name = name.trim();
+            if !name.is_empty() && Path::new(name).components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+                return link.with_file_name(name);
+            }
+        }
+    }
+    link.to_path_buf()
 }
 
 fn runtime_home(superfluid_home: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Option<PathBuf> {
@@ -294,10 +310,29 @@ fn open() -> Result<Loaded, String> {
     open_at(pick(&paths, named)?)
 }
 
+/// As `libloading::Library::new`, and on Windows with the library's own directory searched for what it loads
+/// (`LOAD_WITH_ALTERED_SEARCH_PATH`), as a RUNPATH of `$ORIGIN` does on Linux.
+///
+/// # Safety
+/// The library's initializers run.
+unsafe fn load_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(windows)]
+    {
+        use libloading::os::windows::{Library, LOAD_WITH_ALTERED_SEARCH_PATH};
+        // SAFETY: as the caller's.
+        unsafe { Library::load_with_flags(path, LOAD_WITH_ALTERED_SEARCH_PATH) }.map(Into::into)
+    }
+    #[cfg(not(windows))]
+    {
+        // SAFETY: as the caller's.
+        unsafe { libloading::Library::new(path) }
+    }
+}
+
 fn open_at(path: &Path) -> Result<Loaded, String> {
     // SAFETY: loading libbaseRT runs its initializers, which set up only
     // its own state.
-    let lib = unsafe { libloading::Library::new(path) }
+    let lib = unsafe { load_library(path) }
         .map_err(|e| format!("could not load libbaseRT at {}: {e}", path.display()))?;
     let missing =
         |f: String| format!("libbaseRT at {} lacks {f}: it is not the library superfluid was built for ({BUILT_FOR})", path.display());
@@ -512,11 +547,12 @@ mod tests {
         }
         assert_eq!(none.matches(", ").count(), file_names().len() - 1, "only the named directory: {none}");
 
-        let versioned = dir.join(file_names()[1]);
+        // The last name (the versioned one on Unix; Windows has the one name, baseRT.dll).
+        let versioned = dir.join(file_names().last().unwrap());
         std::fs::write(&versioned, b"").unwrap();
         let (paths, is_file) = named(dir.clone());
         let chosen = pick(&paths, is_file).cloned();
-        let missing = dir.join(file_names()[0]);
+        let missing = dir.join("elsewhere").join(file_names()[0]);
         let (file, is_file) = named(missing.clone());
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(chosen.unwrap(), versioned, "the versioned name, where it is the one there");

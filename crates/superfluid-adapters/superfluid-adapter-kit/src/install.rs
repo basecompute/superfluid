@@ -47,8 +47,18 @@ impl Host {
             host.nvidia_driver = windows_nvidia_driver(&system32);
             let path: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
             host.cuda_runtime = windows_cuda_runtime(&path);
-            // No AMD HIP install is looked for: llama.cpp's ROCm build for Windows carries its own runtime, and
-            // whether the display driver serves it is not something a file here says. `--backend rocm` names it.
+            // llama.cpp's ROCm build for Windows carries its own runtime, and whether the display driver serves it is
+            // not something a file here says: `--backend rocm` names it. baseRT's engine runs on the driver's HIP
+            // runtime (amdhip64_7.dll) with hipBLAS and hipBLASLt from AMD's HIP SDK, whose hipInfo names the GPUs.
+            host.rocm = system32.join("amdhip64_7.dll").is_file();
+            let program_files = PathBuf::from(std::env::var_os("ProgramFiles").unwrap_or_else(|| r"C:\Program Files".into()));
+            let sdks = windows_hip_sdks(&program_files.join("AMD").join("ROCm"), std::env::var_os("HIP_PATH").map(PathBuf::from));
+            host.rocm_runtimes = sdks.iter().map(|(v, _)| v.clone()).collect();
+            if host.rocm {
+                if let Some((_, dir)) = sdks.last() {
+                    host.amd_gpus = windows_amd_gpus(&dir.join("bin").join("hipInfo.exe"));
+                }
+            }
         }
         if host.os == "linux" {
             host.nvidia_driver = std::fs::read_to_string("/proc/driver/nvidia/version").ok().and_then(|t| nvidia_driver_version(&t));
@@ -279,6 +289,79 @@ fn nvidia_driver_version(text: &str) -> Option<String> {
 
 /// The NVIDIA driver's version on Windows (`566.36`), from the tool the driver installs beside itself. None without
 /// the driver, or when the tool does not answer.
+/// AMD's HIP SDKs for Windows, oldest first, as `(release, directory)`: each `<major.minor>` directory under `root`
+/// (`C:\Program Files\AMD\ROCm`) with hipBLASLt in its `bin`, and `hip_path` (the installer's HIP_PATH) when it is one.
+pub fn windows_hip_sdks(root: &Path, hip_path: Option<PathBuf>) -> Vec<(String, PathBuf)> {
+    let release = |d: &Path| {
+        let name = d.file_name()?.to_str()?.to_string();
+        let ok = name.split('.').count() == 2 && name.split('.').all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+        (ok && d.join("bin").join("hipblaslt.dll").is_file()).then_some(name)
+    };
+    let mut out: Vec<(String, PathBuf)> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((release(&e.path())?, e.path())))
+        .collect();
+    if let Some(p) = hip_path {
+        let p = PathBuf::from(p.to_string_lossy().trim_end_matches(['\\', '/']));
+        if let Some(v) = release(&p) {
+            if !out.iter().any(|(have, _)| *have == v) {
+                out.push((v, p));
+            }
+        }
+    }
+    let key = |v: &str| v.split('.').map(|p| p.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>();
+    out.sort_by_key(|a| key(&a.0));
+    out
+}
+
+/// The AMD GPUs by LLVM target, in HIP's order, as the HIP SDK's hipInfo lists them (`gcnArchName: gfx1151`).
+fn windows_amd_gpus(hip_info: &Path) -> Vec<String> {
+    if !hip_info.is_file() {
+        return Vec::new();
+    }
+    let Ok(mut child) = Command::new(hip_info)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    // Read as it writes (a full pipe would stall it), and wait at most ten seconds.
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        if let Some(out) = stdout.as_mut() {
+            let _ = std::io::Read::read_to_string(out, &mut text);
+        }
+        text
+    });
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < Duration::from_secs(10) => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+        }
+    }
+    hip_info_gpus(&reader.join().unwrap_or_default())
+}
+
+/// The `gcnArchName` of each device hipInfo printed, without feature suffixes (`gfx1151:xnack-` is `gfx1151`).
+pub fn hip_info_gpus(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix("gcnArchName:"))
+        .filter_map(|v| v.trim().split(':').next().map(str::to_string))
+        .filter(|g| g.starts_with("gfx"))
+        .collect()
+}
+
 fn windows_nvidia_driver(system32: &Path) -> Option<String> {
     let tool = system32.join("nvidia-smi.exe");
     if !tool.is_file() {
@@ -1380,5 +1463,43 @@ mod tests {
         std::fs::create_dir_all(dir.join("d/pkg")).unwrap();
         assert_eq!(single_top(&dir.join("d")).unwrap(), dir.join("d/pkg"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hip_info_names_each_gpu_by_target_without_features() {
+        let text = "device#                           0\nName:                             AMD Radeon(TM) 8060S Graphics\n\
+                    gcnArchName:                      gfx1151\ndevice#                           1\n\
+                    gcnArchName:                      gfx1100:sramecc-:xnack-\n";
+        assert_eq!(hip_info_gpus(text), ["gfx1151", "gfx1100"]);
+        assert!(hip_info_gpus("no devices\n").is_empty());
+    }
+
+    #[test]
+    fn windows_hip_sdks_are_the_release_directories_with_hipblaslt() {
+        let root = std::env::temp_dir().join(format!("superfluid-kit-hip-sdks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sdk = |v: &str, blaslt: bool| {
+            let bin = root.join(v).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            if blaslt {
+                std::fs::write(bin.join("hipblaslt.dll"), "x").unwrap();
+            }
+        };
+        sdk("7.2", true);
+        sdk("6.4", true);
+        sdk("10.1", true);
+        sdk("7.1", false);
+        sdk("notes", true);
+        let found: Vec<String> = windows_hip_sdks(&root.join("installed"), None).into_iter().map(|(v, _)| v).collect();
+        assert!(found.is_empty(), "no SDK directory, no SDK");
+        let found: Vec<String> = windows_hip_sdks(&root, None).into_iter().map(|(v, _)| v).collect();
+        assert_eq!(found, ["6.4", "7.2", "10.1"], "release order, and only SDKs with hipBLASLt");
+        let elsewhere = root.join("elsewhere");
+        let bin = elsewhere.join("7.3").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("hipblaslt.dll"), "x").unwrap();
+        let with_path = windows_hip_sdks(&root, Some(PathBuf::from(format!("{}/", elsewhere.join("7.3").display()))));
+        assert!(with_path.iter().any(|(v, d)| v == "7.3" && d.ends_with("7.3")), "HIP_PATH, trailing separator and all");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

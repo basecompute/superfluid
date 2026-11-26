@@ -131,6 +131,7 @@ fn removing_a_runtime_with_more_than_one_install_needs_all() {
 
 /// `serve` with its key from a file or the environment, on a model that is not there: the key is
 /// read before anything loads. The environment's own key is cleared, so the developer's is not used.
+#[cfg(unix)]
 fn serve_keyed(tag: &str, args: &[&str], env_key: Option<&str>) -> (Option<i32>, String) {
     let dir = std::env::temp_dir().join(format!("superfluid-serve-cli-{tag}-{}", std::process::id()));
     let sock = std::env::temp_dir().join(format!("bsc-{tag}-{}.sock", std::process::id()));
@@ -149,6 +150,8 @@ fn serve_keyed(tag: &str, args: &[&str], env_key: Option<&str>) -> (Option<i32>,
     (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+// The key file's mode is what these check: Unix only (Windows has an access list, `sys::open_private`).
+#[cfg(unix)]
 fn key_file(tag: &str, text: &str, mode: u32) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("superfluid-serve-cli-keyfile-{tag}-{}", std::process::id()));
@@ -160,6 +163,7 @@ fn key_file(tag: &str, text: &str, mode: u32) -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_key_file_that_is_missing_or_empty_or_beside_api_key_is_refused_before_loading() {
     let empty = key_file("empty", " \n", 0o600);
     let missing = empty.with_file_name("nope");
@@ -177,6 +181,7 @@ fn a_key_file_that_is_missing_or_empty_or_beside_api_key_is_refused_before_loadi
 }
 
 #[test]
+#[cfg(unix)]
 fn a_key_file_open_to_others_is_warned_about_and_a_key_from_the_environment_is_said_so() {
     let open = key_file("open", "sk-cli-open\n", 0o644);
     let (_, err) = serve_keyed("key-open", &["--api-key-file", open.to_str().unwrap()], None);

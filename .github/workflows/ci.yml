@@ -42,11 +42,13 @@ jobs:
       - name: cargo test
         run: cargo test
 
-  # Windows builds the daemon with llama.cpp and the terminal monitor linked,
-  # the launcher its release puts on PATH (`shim`), and without what has no
-  # Windows build yet: baseRT's engine (the default feature) and MLX. The tests
-  # that stand in for a worker with a shell script, or for a link with a
-  # symlink, are Unix-only and compile to nothing.
+  # Windows builds the daemon with baseRT's engine (the default feature, loaded
+  # at run time: baseRT 0.6.0 publishes a Windows x86-64 ROCm engine), llama.cpp
+  # and the terminal monitor linked, and the launcher its release puts on PATH
+  # (`shim`); MLX has no Windows build. The tests that stand in for a worker
+  # with a shell script, or for a link with a symlink, are Unix-only and
+  # compile to nothing. The real-engine tests skip here: the hosted runner has
+  # no AMD GPU and no engine installed.
   windows:
     name: build, clippy, test (windows-2025)
     runs-on: windows-2025
@@ -58,7 +60,8 @@ jobs:
         -p superfluid-agent -p superfluid-linkf -p superfluid-executor
         -p superfluid-tokenizer-hf -p superfluid-adapter-kit
         -p superfluid-adapter-mock -p superfluid-adapter-llamacpp
-        -p superfluid-tokenizer-llamacpp
+        -p superfluid-tokenizer-llamacpp -p superfluid-engine-ffi
+        -p superfluid-adapter-basert
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -68,13 +71,14 @@ jobs:
       - name: cargo clippy
         shell: bash
         run: |
-          cargo clippy -p superfluid --no-default-features --features llamacpp,tui,shim --all-targets -- -D warnings
+          cargo clippy -p superfluid --features llamacpp,tui,shim --all-targets -- -D warnings
           cargo clippy $CRATES --all-targets -- -D warnings
       - name: cargo build
         shell: bash
         run: |
-          cargo build -p superfluid --no-default-features --features llamacpp,tui,shim
+          cargo build -p superfluid --features llamacpp,tui,shim
           cargo build -p superfluid-adapter-llamacpp -p superfluid-tokenizer-llamacpp
+          cargo build -p superfluid-adapter-basert --bin superfluid-worker-basert
       # The tests keep their session logs under the temp directory, and a log
       # syncs after every record. The runner's own temp directory is on its
       # system disk, where a synced append took 3.34 ms against 0.13 ms on the
@@ -85,7 +89,7 @@ jobs:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
         run: |
-          cargo test -p superfluid --no-default-features --features llamacpp,tui,shim
+          cargo test -p superfluid --features llamacpp,tui,shim
           cargo test $CRATES
 
   adapters:

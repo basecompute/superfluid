@@ -68,6 +68,10 @@ const ROCM_GPUS: [&str; 2] = ["gfx1151", "gfx1150"];
 /// The ROCm release the ROCm engine is linked against, which it finds at `/opt/rocm/core-<version>`.
 const ROCM_RUNTIME: &str = "10.0";
 
+/// The HIP SDK release the Windows engine is linked against: its hipBLAS and hipBLASLt are loaded from the SDK
+/// (`C:\Program Files\AMD\ROCm\<version>`, or `HIP_PATH`), the HIP runtime from the display driver.
+const WINDOWS_HIP_SDK: &str = "7.2";
+
 fn platform(host: &Host) -> Result<(&'static str, &'static str), String> {
     let strix = |g: &String| ROCM_GPUS.contains(&g.as_str());
     match (host.os.as_str(), host.arch.as_str()) {
@@ -78,6 +82,8 @@ fn platform(host: &Host) -> Result<(&'static str, &'static str), String> {
         // A visibility variable names GPUs by UUID: which one is device 0 is not known here, so the engine's own check of
         // device 0 at start decides rather than a guess from the node order.
         ("linux", "x64") if host.amd_order_unknown && host.amd_gpus.iter().any(strix) => Ok(("linux-x64-rocm", "rocm")),
+        // Windows: the same Strix engine through AMD's HIP SDK; hipInfo lists the GPUs in HIP's order.
+        ("windows", "x64") if host.amd_gpus.first().is_some_and(strix) => Ok(("windows-x64-rocm", "rocm")),
         ("linux", "x64") if host.amd_gpus.iter().any(strix) => {
             let i = host.amd_gpus.iter().position(strix).unwrap_or(0);
             // HIP_VISIBLE_DEVICES counts the GPUs ROCR_VISIBLE_DEVICES leaves, not the order an earlier HIP list made.
@@ -89,8 +95,8 @@ fn platform(host: &Host) -> Result<(&'static str, &'static str), String> {
             ))
         }
         _ => Err(format!(
-            "baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux x86-64 with an AMD \
-             Strix Halo or Strix Point GPU ({}); this is {}",
+            "baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux and Windows x86-64 \
+             with an AMD Strix Halo or Strix Point GPU ({}); this is {}",
             ROCM_GPUS.join(", "),
             host.describe()
         )),
@@ -99,6 +105,15 @@ fn platform(host: &Host) -> Result<(&'static str, &'static str), String> {
 
 /// What a release's engine needs here beyond itself: for the ROCm engine, AMD's ROCm runtime where it was linked to find it.
 fn runtime_missing(host: &Host, backend: &str) -> Option<String> {
+    if backend == "rocm" && host.os == "windows" {
+        return (!host.rocm_runtimes.iter().any(|v| v == WINDOWS_HIP_SDK)).then(|| {
+            format!(
+                "baseRT's ROCm engine for Windows loads hipBLAS and hipBLASLt from AMD's HIP SDK {WINDOWS_HIP_SDK}, and this is {}: \
+                 install the HIP SDK {WINDOWS_HIP_SDK} for Windows, then `superfluid runtime install basert` again",
+                host.describe()
+            )
+        });
+    }
     (backend == "rocm" && !host.rocm_runtimes.iter().any(|v| v == ROCM_RUNTIME)).then(|| {
         format!(
             "baseRT's ROCm engine runs on AMD's ROCm {ROCM_RUNTIME} runtime, which it finds at /opt/rocm/core-{ROCM_RUNTIME}, and this is {}: \
@@ -589,7 +604,7 @@ mod tests {
         for gpus in [vec!["gfx1100".to_string()], vec![]] {
             let other = Host { amd_gpus: gpus, ..strix("gfx1151") };
             let e = plan_with(&Request::default(), &other, &pinned, &releases).unwrap_err();
-            assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
+            assert!(e.contains("for Linux and Windows x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
         }
         // The engine opens HIP device 0, the first of Host.amd_gpus: a Strix GPU behind another AMD GPU is named, not admitted.
         let behind = Host { amd_gpus: vec!["gfx1100".into(), "gfx1151".into()], ..strix("gfx1151") };
@@ -618,7 +633,7 @@ mod tests {
         // Linux x86-64 without a Strix GPU has no baseRT engine, asked for by backend or not.
         let other = Host { amd_gpus: vec!["gfx1100".into()], ..strix("gfx1151") };
         let e = plan_with(&asked, &other, &pinned, &Value::Null).unwrap_err();
-        assert!(e.contains("for Linux x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
+        assert!(e.contains("for Linux and Windows x86-64 with an AMD Strix Halo or Strix Point GPU (gfx1151, gfx1150); this is Linux x64"), "{e}");
     }
 
     /// A Strix machine as detection sees it: the driver's GPUs in node order, then ROCR_VISIBLE_DEVICES and
@@ -662,7 +677,7 @@ mod tests {
         for arch in ["x64", "arm64"] {
             let linux = Host { os: "linux".into(), arch: arch.into(), ..Host::default() };
             let e = plan_with(&Request::default(), &linux, &[], &json!([])).unwrap_err();
-            assert!(e.starts_with("baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux x86-64 with an AMD"), "{e}");
+            assert!(e.starts_with("baseRT publishes engines for Apple silicon, for Linux arm64 with an NVIDIA GPU, and for Linux and Windows x86-64 with an AMD"), "{e}");
             assert!(e.ends_with(&format!("; this is Linux {arch}")), "{e}");
         }
         let from = Request { from: Some("/x/basert-engine-macos-arm64-0.0.1.tar.gz".into()), untested: true, ..Request::default() };
@@ -671,5 +686,33 @@ mod tests {
         let pins = [pin("0.0.1", None, "ab")];
         let p = &plan_with(&Request { from: Some("https://mirror/basert-engine-macos-arm64-0.0.1.tar.gz".into()), ..from }, &mac(), &pins, &Value::Null).unwrap()[0];
         assert_eq!(p.assets[0].sha256.as_deref(), Some("ab"), "a pinned engine is checked fetched from anywhere");
+    }
+
+    fn windows_strix(gfx: &str, sdks: &[&str]) -> Host {
+        Host {
+            os: "windows".into(),
+            arch: "x64".into(),
+            rocm: true,
+            amd_gpus: vec![gfx.into()],
+            rocm_runtimes: sdks.iter().map(|s| s.to_string()).collect(),
+            ..Host::default()
+        }
+    }
+
+    #[test]
+    fn windows_on_a_strix_gpu_takes_the_windows_rocm_engine() {
+        for gfx in ROCM_GPUS {
+            assert_eq!(platform(&windows_strix(gfx, &["7.2"])).unwrap(), ("windows-x64-rocm", "rocm"), "{gfx}");
+        }
+        let other = windows_strix("gfx1100", &["7.2"]);
+        assert!(platform(&other).unwrap_err().contains("Linux and Windows x86-64"), "a GPU it has no kernels for is named");
+    }
+
+    #[test]
+    fn the_windows_engine_needs_the_hip_sdk_it_was_linked_against() {
+        assert_eq!(runtime_missing(&windows_strix("gfx1151", &["7.2"]), "rocm"), None);
+        let e = runtime_missing(&windows_strix("gfx1151", &["6.4"]), "rocm").expect("a 6.4 SDK alone is not enough");
+        assert!(e.contains("HIP SDK 7.2"), "{e}");
+        assert!(runtime_missing(&windows_strix("gfx1151", &[]), "rocm").is_some(), "no SDK at all");
     }
 }

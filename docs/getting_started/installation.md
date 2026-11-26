@@ -57,7 +57,7 @@ The first builds `superfluid`, `superfluid-workerd` and `superfluid-noded` from 
 
 `cargo install` places programs and nothing else, so it brings neither the llama.cpp nor the MLX runtime within reach. `superfluid runtime install <id>` looks for the adapter's worker beside `superfluid` and in a release's `libexec/superfluid`, and says so when there is none. `cargo install superfluid-adapter-llamacpp` puts llama.cpp's worker there, and the install then stops for the tokenizer library (`libsuperfluid_tokenizer_llamacpp`), which is a library and so nothing `cargo install` builds. For those two runtimes take a release, or [build from source](#build-from-source).
 
-On Windows the first line builds with the MSVC toolchain, and what it builds serves no model: its one runtime is baseRT, which has no engine there. `cargo install superfluid --no-default-features --features llamacpp,tui` builds the daemon a Windows release carries, and meets the same two wants as elsewhere, the second of which (`superfluid_tokenizer_llamacpp.dll`) no `cargo install` answers. Programs installed this way also load the Visual C++ runtime (`vcruntime140.dll`) from the system, where a release links it in: the setting is in the repository's cargo configuration, and cargo reads none from a crate it installs. Take the release ([Windows](#windows)), or build from source there.
+On Windows the first line builds with the MSVC toolchain, and what it builds serves baseRT models only, on an AMD Strix GPU with the HIP SDK (above). `cargo install superfluid --no-default-features --features llamacpp,tui` builds the daemon a Windows release carries, and meets the same two wants as elsewhere, the second of which (`superfluid_tokenizer_llamacpp.dll`) no `cargo install` answers. Programs installed this way also load the Visual C++ runtime (`vcruntime140.dll`) from the system, where a release links it in: the setting is in the repository's cargo configuration, and cargo reads none from a crate it installs. Take the release ([Windows](#windows)), or build from source there.
 
 ## Build from source
 
@@ -105,7 +105,7 @@ SUPERFLUID_WORKER_MLX=target/adapters/superfluid-worker-mlx superfluid runtime i
 
 ### Windows
 
-Windows 10 1803 or later, x86-64. Superfluid serves GGUF models through llama.cpp there; baseRT and MLX have no Windows engine.
+Windows 10 1803 or later, x86-64. Superfluid serves GGUF models through llama.cpp there, and baseRT models on an AMD Strix Halo or Strix Point GPU with baseRT 0.6.0 or later: its Windows engine needs AMD's display driver and AMD's HIP SDK 7.2 for Windows, whose hipBLAS and hipBLASLt it loads (`superfluid runtime install basert` says when the SDK is missing). MLX has no Windows engine.
 
 A release, in PowerShell:
 
@@ -170,7 +170,7 @@ superfluid runtime install basert
 |---|---|
 | `llamacpp` | llama.cpp's own release build for this machine (Metal; CUDA, ROCm, Vulkan or CPU on Linux; CUDA, Vulkan or CPU on Windows), checked against pinned SHA-256s |
 | `mlx` | a private CPython 3.12 with `mlx`, `mlx-lm` and their dependencies, every wheel pinned by hash. Your own Python is never used or changed |
-| `basert` | the baseRT engine bundle (Apple silicon, Linux arm64 with an NVIDIA GPU, or Linux x86-64 with an AMD Strix Halo or Strix Point GPU) from baseRT's releases |
+| `basert` | the baseRT engine bundle (Apple silicon, Linux arm64 with an NVIDIA GPU, or Linux and Windows x86-64 with an AMD Strix Halo or Strix Point GPU) from baseRT's releases |
 
 Installs live under `~/.superfluid/runtimes/` (`$SUPERFLUID_HOME`). After installing, `superfluid runtimes` shows each as `ready` with its version and device. Pinning, updates and repair are in [Runtimes](../models/runtimes.md).
 

@@ -8,7 +8,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-Requirements: Rust (stable) and a C compiler. Development happens on macOS (Apple silicon) and Linux (arm64, x86-64). Windows x86-64 builds the daemon without its default features, which link baseRT, with either Rust toolchain ([Installation](../getting_started/installation.md#windows)); the tests that stand in for a worker with a shell script, or for a link with a symlink, are Unix-only and compile to nothing there. The flow for pull requests is in [CONTRIBUTING.md](https://github.com/basecompute/superfluid/blob/main/CONTRIBUTING.md).
+Requirements: Rust (stable) and a C compiler. Development happens on macOS (Apple silicon) and Linux (arm64, x86-64). Windows x86-64 builds the daemon with its default features, as elsewhere (baseRT's engine is loaded at run time), with either Rust toolchain ([Installation](../getting_started/installation.md#windows)); the tests that stand in for a worker with a shell script, or for a link with a symlink, are Unix-only and compile to nothing there. The flow for pull requests is in [CONTRIBUTING.md](https://github.com/basecompute/superfluid/blob/main/CONTRIBUTING.md).
 
 ## Build configurations
 
