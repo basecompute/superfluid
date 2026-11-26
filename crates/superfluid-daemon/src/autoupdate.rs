@@ -396,7 +396,7 @@ pub fn at_launch(args: &[String], no_update_flag: bool) {
         Plan::Here => {
             let catalog = Catalog::from_env();
             let mut say = |line: String| eprintln!("{line}");
-            match update_here(&home, &catalog, &exe, from, &newer, &notes, None, named_runtime(args), &mut say) {
+            match update_here(&home, &catalog, &exe, from, &newer, &notes, None, named_runtime(args), &mut Vec::new(), &mut say) {
                 Some(bin) => run_again(&bin, args, from, &newer),
                 None if due => refresh_in_background(&home, &exe, wait),
                 None => {}
@@ -485,8 +485,8 @@ fn run_again(bin: &Path, args: &[String], from: &str, newer: &str) {
 /// The automatic update of `exe`, the version `from`, to `newer`, whose notes are at `notes`: the release placed and
 /// made current as `self update --version <newer>` does it (without waiting on another update), the runtimes that
 /// are neither pinned nor in use (nor `skip`, which the command is about to change) updated by the new version, and a
-/// line each for going back and turning updates off. The new program, or `None` when the update failed, which a line
-/// says.
+/// line each for going back and turning updates off, what became of each runtime added to `ran`. The new program, or
+/// `None` when the update failed, which a line says.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_here(
     home: &Path,
@@ -497,6 +497,7 @@ pub(crate) fn update_here(
     notes: &str,
     source: Option<String>,
     skip: Option<RuntimeId>,
+    ran: &mut Vec<Value>,
     say: &mut dyn FnMut(String),
 ) -> Option<PathBuf> {
     say(format!("Updating superfluid {from} → {newer} · release notes: {notes}"));
@@ -535,7 +536,7 @@ pub(crate) fn update_here(
     for note in &report.notes {
         say(format!("superfluid: {note}"));
     }
-    update_runtimes(&bin, catalog, from, newer, skip, say);
+    ran.extend(update_runtimes(&bin, catalog, from, newer, skip, say));
     drop(caught);
     say(format!("superfluid {newer} is in use · `superfluid self use {from}` goes back · `{OFF_COMMAND}` turns automatic updates off"));
     Some(bin)
@@ -583,21 +584,28 @@ pub(crate) fn eligible<'a>(found: &'a [Release], engine: &Engine, compat: &dyn F
 /// with no terminal and nothing run again. With automatic updates on, the listing is read now, the release `eligible`
 /// picks is installed as at a launch, and the runtimes are updated, and repaired, by it. `out` takes the line saying
 /// nothing was to be updated, and why; `say` the update's own lines. The exit code: 0 when updated or nothing was to
-/// be, 1 when the update failed (the version here stays current), 3 for a copy another tool updates.
-pub fn update_auto(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env: &dyn Fn(&str) -> Option<String>, out: &mut dyn FnMut(String), say: &mut dyn FnMut(String)) -> i32 {
+/// be, 1 when the update failed (the version here stays current), 3 for a copy another tool updates; and what
+/// `--json` prints: `{from, installed, result, reason, notes, runtimes}`, `result` one of `updated`, `none`, `off`,
+/// `failed` and `not-ours`, `runtimes` what became of each (`update_runtimes`).
+pub fn update_auto(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env: &dyn Fn(&str) -> Option<String>, out: &mut dyn FnMut(String), say: &mut dyn FnMut(String)) -> (i32, Value) {
+    let from = version_here(exe);
+    let summary = |result: &str, installed: Option<&str>, reason: Option<String>, notes: Option<&str>, runtimes: Vec<Value>| {
+        json!({"from": from, "installed": installed, "result": result, "reason": reason, "notes": notes, "runtimes": runtimes})
+    };
     if let Err(why) = enabled(home, env) {
-        out(format!("automatic updates are off ({why})"));
-        return 0;
+        let line = format!("automatic updates are off ({why})");
+        out(line.clone());
+        return (0, summary("off", None, Some(line), None, Vec::new()));
     }
     if let Some(why) = not_self_managed(exe) {
         say(format!("superfluid: {why}"));
-        return 3;
+        return (3, summary("not-ours", None, Some(why), None, Vec::new()));
     }
     let found = match selfupdate::target().ok_or_else(|| "no release is published for this platform".to_string()).and_then(|t| selfupdate::fetch_releases(source, t, 30)) {
         Ok(found) => found,
         Err(e) => {
             say(format!("superfluid: {e}"));
-            return 1;
+            return (1, summary("failed", None, Some(e), None, Vec::new()));
         }
     };
     let engine = selfupdate::engine_here(catalog);
@@ -606,17 +614,22 @@ pub fn update_auto(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env
     // What was read is the day's read, too.
     let _ = selfupdate::record(home, &found, &engine, wait, &compat);
     let check = Check::read(home).unwrap_or_default();
-    let from = version_here(exe);
     let chosen = match eligible(&found, &engine, &compat, &check, &from, wait) {
         Ok(r) => r,
         Err(why) => {
-            out(why);
-            return 0;
+            out(why.clone());
+            return (0, summary("none", None, Some(why), None, Vec::new()));
         }
     };
-    match update_here(home, catalog, exe, &from, &chosen.version, &chosen.notes_url, Some(source.to_string()), None, say) {
-        Some(_) => 0,
-        None => 1,
+    let (mut ran, mut last) = (Vec::new(), None);
+    let mut saying = |line: String| {
+        last = Some(line.clone());
+        say(line)
+    };
+    let notes = Some(chosen.notes_url.as_str());
+    match update_here(home, catalog, exe, &from, &chosen.version, &chosen.notes_url, Some(source.to_string()), None, &mut ran, &mut saying) {
+        Some(_) => (0, summary("updated", Some(&chosen.version), None, notes, ran)),
+        None => (1, summary("failed", None, last, notes, ran)),
     }
 }
 
@@ -722,46 +735,78 @@ fn stderr_for_child() -> Stdio {
 /// `runtime update <id>` by the new superfluid `bin` for each runtime installed here, so its install has a build and
 /// a worker the new version runs: one it still cannot run afterwards (the build did not change, so the install keeps
 /// the worker the old version copied in) is installed again by it, `runtime repair <id>`. A runtime pinned to an
-/// install, one whose default install a running process uses, and `skip` stay.
-fn update_runtimes(bin: &Path, catalog: &Catalog, from: &str, newer: &str, skip: Option<RuntimeId>, say: &mut dyn FnMut(String)) {
+/// install, one whose default install a running process uses, and `skip` stay. What became of each, as
+/// `self update --auto --json` reports it: `{id, outcome, from, to, reason}`, the outcome `updated` (another install),
+/// `unchanged`, `repaired`, `pinned`, `in-use` or `failed` (the install it had stays, `reason` says why).
+fn update_runtimes(bin: &Path, catalog: &Catalog, from: &str, newer: &str, skip: Option<RuntimeId>, say: &mut dyn FnMut(String)) -> Vec<Value> {
+    let row = |id: RuntimeId, outcome: &str, was: &str, to: Option<String>, reason: Option<String>| {
+        json!({"id": id.name(), "outcome": outcome, "from": was, "to": to, "reason": reason})
+    };
+    let mut ran = Vec::new();
     let mut updated = Vec::new();
     for id in installed_runtimes(catalog) {
         if interrupted() {
             say("superfluid: the runtimes were left as they are: interrupted".to_string());
-            return;
+            return ran;
         }
         if Some(id) == skip {
             continue;
         }
         let Some(current) = installs::default(catalog, id) else { continue };
         if let Some(pin) = installs::pinned(catalog, id) {
-            say(format!("superfluid: {id} stays on {pin}, which is pinned (`superfluid runtime update {id}` updates it)"));
+            let why = format!("{id} stays on {pin}, which is pinned (`superfluid runtime update {id}` updates it)");
+            say(format!("superfluid: {why}"));
+            ran.push(row(id, "pinned", &current.name, None, Some(why)));
             continue;
         }
         if !selfupdate::pids_using(&current.dir).is_empty() {
-            say(format!("superfluid: {id} stays on {}: a running server uses it (`superfluid runtime update {id}` updates it once none does)", current.name));
+            let why = format!("{id} stays on {}: a running server uses it (`superfluid runtime update {id}` updates it once none does)", current.name);
+            say(format!("superfluid: {why}"));
+            ran.push(row(id, "in-use", &current.name, None, Some(why)));
             continue;
         }
         say(format!("superfluid: updating {id} ({}) with superfluid {newer}", current.name));
         let mut cmd = by_new_version(bin, catalog, from, &["runtime", "update", id.name()]);
-        match crate::exec::when_not_busy(|| cmd.status()) {
-            Ok(status) if status.success() => updated.push(id),
-            Ok(status) => say(format!("superfluid: {id} was not updated ({status}); `superfluid runtime update {id}` tries again")),
-            Err(e) => say(format!("superfluid: {id} was not updated ({e}); `superfluid runtime update {id}` tries again")),
+        let failed = match crate::exec::when_not_busy(|| cmd.status()) {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(status.to_string()),
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(e) = failed {
+            let why = format!("{id} was not updated ({e}); `superfluid runtime update {id}` tries again");
+            say(format!("superfluid: {why}"));
+            ran.push(row(id, "failed", &current.name, None, Some(why)));
+            continue;
         }
+        let now = installs::default(catalog, id).map(|i| i.name);
+        let outcome = if now.as_deref() == Some(current.name.as_str()) { "unchanged" } else { "updated" };
+        ran.push(row(id, outcome, &current.name, now, None));
+        updated.push(id);
     }
     if updated.is_empty() || interrupted() {
-        return;
+        return ran;
     }
     for (id, why) in not_run_by(bin, catalog, from).into_iter().filter(|(id, _)| updated.contains(id)) {
         say(format!("superfluid: {id} does not run with superfluid {newer} ({why}): installing it again with it"));
         let mut cmd = by_new_version(bin, catalog, from, &["runtime", "repair", id.name()]);
-        match crate::exec::when_not_busy(|| cmd.status()) {
-            Ok(status) if status.success() => {}
-            Ok(status) => say(format!("superfluid: {id} was not installed again ({status}); `superfluid runtime repair {id}` tries again")),
-            Err(e) => say(format!("superfluid: {id} was not installed again ({e}); `superfluid runtime repair {id}` tries again")),
+        let failed = match crate::exec::when_not_busy(|| cmd.status()) {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(status.to_string()),
+            Err(e) => Some(e.to_string()),
+        };
+        let Some(r) = ran.iter_mut().find(|r| r["id"] == id.name()) else { continue };
+        r["to"] = json!(installs::default(catalog, id).map(|i| i.name));
+        match failed {
+            None => r["outcome"] = json!("repaired"),
+            Some(e) => {
+                let why = format!("{id} was not installed again ({e}); `superfluid runtime repair {id}` tries again");
+                say(format!("superfluid: {why}"));
+                r["outcome"] = json!("failed");
+                r["reason"] = json!(why);
+            }
         }
     }
+    ran
 }
 
 /// The installed runtimes the new superfluid `bin` cannot run, as its `runtimes --json` reports them, and why.
@@ -887,6 +932,12 @@ pub fn background_update(home: &Path, exe: &Path, version: Option<&str>) -> i32 
             eprintln!("superfluid: {why}; {} was not run, and is tried again later", pinned.join(" "));
             handed_back(home, true);
             return 1;
+        }
+        // And again after it, which may take minutes: turned off (or uninstalled) meanwhile, nothing is run.
+        if let Some(why) = not_to_run(home, &exe, &argv) {
+            eprintln!("superfluid: {why}; {} was not run", pinned.join(" "));
+            handed_back(home, false);
+            return 0;
         }
     }
     eprintln!("superfluid: running {}", pinned.join(" "));
@@ -1597,7 +1648,7 @@ mod update_tests {
         std::fs::write(home.join("runtimes.json"), json!([{"id": "basert", "ready": true}, broken("llamacpp"), broken("mlx")]).to_string()).unwrap();
 
         let mut lines = Vec::new();
-        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &check.notes_url().unwrap(), Some(p.to_string_lossy().to_string()), None, &mut |l| lines.push(l));
+        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &check.notes_url().unwrap(), Some(p.to_string_lossy().to_string()), None, &mut Vec::new(), &mut |l| lines.push(l));
         assert_eq!(bin.map(|b| std::fs::canonicalize(b).unwrap()), Some(std::fs::canonicalize(versions.binary("99.0.0")).unwrap()), "{lines:?}");
         assert_eq!((versions.current().as_deref(), versions.previous().as_deref()), (Some("99.0.0"), Some("98.0.0")));
         assert_eq!(lines[0], "Updating superfluid 98.0.0 → 99.0.0 · release notes: https://github.com/basecompute/superfluid/releases/tag/v99.0.0");
@@ -1637,7 +1688,7 @@ mod update_tests {
 
         // Offline: the listing cannot be read.
         let mut lines = Vec::new();
-        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &notes, Some("/nonexistent/releases.json".into()), None, &mut |l| lines.push(l));
+        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &notes, Some("/nonexistent/releases.json".into()), None, &mut Vec::new(), &mut |l| lines.push(l));
         assert_eq!(bin, None);
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert!(lines[1].starts_with("couldn't update superfluid to 99.0.0: /nonexistent/releases.json: ") && lines[1].ends_with("; staying on 98.0.0"), "{lines:?}");
@@ -1652,7 +1703,7 @@ mod update_tests {
         let held = crate::pulls::Lock::take(&versions.dir, "self", "update of superfluid").unwrap();
         let began = Instant::now();
         let mut lines = Vec::new();
-        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &notes, Some(p.to_string_lossy().to_string()), None, &mut |l| lines.push(l));
+        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &notes, Some(p.to_string_lossy().to_string()), None, &mut Vec::new(), &mut |l| lines.push(l));
         assert!(bin.is_none() && began.elapsed() < Duration::from_secs(5), "{lines:?}");
         assert_eq!(lines[1], "couldn't update superfluid to 99.0.0: another update of superfluid is running; staying on 98.0.0");
         drop(held);
@@ -1660,7 +1711,7 @@ mod update_tests {
         // A download that does not check out.
         std::fs::write(dir.join(format!("superfluid-{}-99.0.0.tar.gz.sha256", target().unwrap())), format!("{}  x\n", "0".repeat(64))).unwrap();
         let mut lines = Vec::new();
-        assert!(update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &notes, Some(p.to_string_lossy().to_string()), None, &mut |l| lines.push(l)).is_none());
+        assert!(update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", &notes, Some(p.to_string_lossy().to_string()), None, &mut Vec::new(), &mut |l| lines.push(l)).is_none());
         assert!(lines[1].contains("SHA-256") && lines[1].ends_with("; staying on 98.0.0"), "{lines:?}");
         assert_eq!(versions.current().as_deref(), Some("98.0.0"));
         assert!(!versions.version_dir("99.0.0").exists());
@@ -1669,7 +1720,8 @@ mod update_tests {
 
     /// A copy Homebrew placed under `dir`, and its `brew`, which notes what it is asked to run in `dir/brew-ran`
     /// (with HOMEBREW_NO_AUTO_UPDATE), offers the version in `dir/brew-offers` (99.0.0 without it) to `brew info`,
-    /// and fails while `dir/brew-fails` is there. The copy's real path.
+    /// and fails while `dir/brew-fails` is there; `brew info` waits while `dir/brew-gate` is there. The copy's real
+    /// path.
     fn homebrew_copy(dir: &Path) -> PathBuf {
         let root = dir.join("brew/Cellar/superfluid/98.0.0/libexec");
         release_tree(&root, "98.0.0");
@@ -1677,7 +1729,7 @@ mod update_tests {
         let brew = dir.join("brew/bin/brew");
         std::fs::create_dir_all(brew.parent().unwrap()).unwrap();
         let script = format!(
-            "#!/bin/sh\necho \"$*|$HOMEBREW_NO_AUTO_UPDATE\" >> '{0}/brew-ran'\nif [ \"$1\" = info ]; then\n  v=$(cat '{0}/brew-offers' 2>/dev/null || echo 99.0.0)\n  printf '{{\"formulae\":[{{\"name\":\"superfluid\",\"versions\":{{\"stable\":\"%s\"}}}}]}}' \"$v\"\n  exit 0\nfi\n[ ! -e '{0}/brew-fails' ]\n",
+            "#!/bin/sh\necho \"$*|$HOMEBREW_NO_AUTO_UPDATE\" >> '{0}/brew-ran'\nif [ \"$1\" = info ]; then\n  while [ -e '{0}/brew-gate' ]; do sleep 0.05; done\n  v=$(cat '{0}/brew-offers' 2>/dev/null || echo 99.0.0)\n  printf '{{\"formulae\":[{{\"name\":\"superfluid\",\"versions\":{{\"stable\":\"%s\"}}}}]}}' \"$v\"\n  exit 0\nfi\n[ ! -e '{0}/brew-fails' ]\n",
             dir.display()
         );
         std::fs::write(&brew, script).unwrap();
@@ -1779,6 +1831,32 @@ mod update_tests {
     }
 
     #[test]
+    fn automatic_updates_turned_off_while_homebrew_is_asked_what_it_offers_run_nothing() {
+        let dir = scratch("auto-update-brew-off");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let exe = homebrew_copy(&dir);
+        Check { delegated: Some("99.0.0".into()), delegated_at: selfupdate::now_secs(), ..Check::default() }.write(&home).unwrap();
+        let gate = dir.join("brew-gate");
+        std::fs::write(&gate, "").unwrap();
+        let (h, e) = (home.clone(), exe.clone());
+        let update = std::thread::spawn(move || background_update(&h, &e, Some("99.0.0")));
+        // `brew info` was started, and waits: updates are turned off meanwhile, then it offers the release chosen.
+        let began = Instant::now();
+        while !std::fs::read_to_string(dir.join("brew-ran")).unwrap_or_default().starts_with("info ") {
+            assert!(began.elapsed() < Duration::from_secs(30), "brew info was not run");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        set_setting(&home, false).unwrap();
+        std::fs::remove_file(&gate).unwrap();
+        assert_eq!(update.join().unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(dir.join("brew-ran")).unwrap(), "info --json=v2 superfluid|1\n", "no upgrade");
+        let back = Check::read(&home).unwrap();
+        assert_eq!((back.delegated.as_deref(), back.attempted.as_deref()), (None, None), "handed back, not tried");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn going_back_with_self_use_is_not_undone_by_an_automatic_update() {
         let dir = scratch("auto-update-declined");
         let home = dir.join("home");
@@ -1837,7 +1915,7 @@ mod update_tests {
         install_of(&catalog, "llamacpp", "b1-cpu");
         let exe = std::fs::canonicalize(versions.binary("98.0.0")).unwrap();
         let mut lines = Vec::new();
-        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", "https://notes", Some(p.to_string_lossy().to_string()), None, &mut |l| lines.push(l));
+        let bin = update_here(&home, &catalog, &exe, "98.0.0", "99.0.0", "https://notes", Some(p.to_string_lossy().to_string()), None, &mut Vec::new(), &mut |l| lines.push(l));
         std::fs::set_permissions(&prefix, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(versions.current().as_deref(), Some("99.0.0"));
         assert_eq!(bin.map(|b| std::fs::canonicalize(b).unwrap()), Some(std::fs::canonicalize(versions.binary("99.0.0")).unwrap()), "{lines:?}");
@@ -1857,8 +1935,9 @@ mod update_tests {
         install_of(&catalog, "llamacpp", "b1-cpu");
         install_of(&catalog, "mlx", "0.1-metal");
         let mut lines = Vec::new();
-        update_runtimes(&bin, &catalog, "98.0.0", "99.0.0", Some(RuntimeId::new("llamacpp")), &mut |l| lines.push(l));
+        let ran = update_runtimes(&bin, &catalog, "98.0.0", "99.0.0", Some(RuntimeId::new("llamacpp")), &mut |l| lines.push(l));
         assert_eq!(std::fs::read_to_string(home.join("runtime-calls")).unwrap(), "runtime update mlx\n", "{lines:?}");
+        assert_eq!(ran, vec![json!({"id": "mlx", "outcome": "unchanged", "from": "0.1-metal", "to": "0.1-metal", "reason": null})]);
         // The new version's stdout is this command's stderr: a script `launch --print` writes, or a log, is not mixed with it.
         let mut cmd = by_new_version(Path::new("/bin/sh"), &catalog, "98.0.0", &["-c", "[ /dev/fd/1 -ef /dev/fd/2 ]"]);
         assert!(cmd.status().unwrap().success());
@@ -1875,11 +1954,17 @@ mod update_tests {
 
     /// `self update --auto`: the exit code, what it printed on stdout, and its own lines.
     fn auto(home: &Path, catalog: &Catalog, exe: &Path, source: &Path, env: &[(&str, &str)]) -> (i32, Vec<String>, Vec<String>) {
+        let (code, out, said, _) = auto_json(home, catalog, exe, source, env);
+        (code, out, said)
+    }
+
+    /// `self update --auto`, and what `--json` prints.
+    fn auto_json(home: &Path, catalog: &Catalog, exe: &Path, source: &Path, env: &[(&str, &str)]) -> (i32, Vec<String>, Vec<String>, Value) {
         let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         let lookup = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
         let (mut out, mut said) = (Vec::new(), Vec::new());
-        let code = update_auto(home, catalog, exe, &source.to_string_lossy(), &lookup, &mut |l| out.push(l), &mut |l| said.push(l));
-        (code, out, said)
+        let (code, summary) = update_auto(home, catalog, exe, &source.to_string_lossy(), &lookup, &mut |l| out.push(l), &mut |l| said.push(l));
+        (code, out, said, summary)
     }
 
     #[test]
@@ -1993,10 +2078,62 @@ mod update_tests {
         let broken = json!({"id": "llamacpp", "state": "broken", "worker": {"source": "installed"}, "ready": "the llamacpp runtime speaks Link W [1] and this superfluid speaks 2"});
         std::fs::write(home.join("runtimes.json"), json!([broken]).to_string()).unwrap();
         let p = listing(&dir, &[("99.0.0", "2026-01-01", None)]);
-        let (code, _, said) = auto(&home, &catalog, &exe, &p, &[]);
+        let (code, _, said, summary) = auto_json(&home, &catalog, &exe, &p, &[]);
         assert_eq!(code, 0, "{said:?}");
         assert_eq!(std::fs::read_to_string(home.join("runtime-calls")).unwrap(), "runtime update llamacpp\nruntime repair llamacpp\n", "{said:?}");
+        assert_eq!(summary["runtimes"], json!([{"id": "llamacpp", "outcome": "repaired", "from": "b1-cpu", "to": "b1-cpu", "reason": null}]));
         assert!(said.iter().any(|l| l.starts_with("superfluid: llamacpp does not run with superfluid 99.0.0 (")), "{said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn self_update_auto_json_says_what_it_did_and_a_runtime_that_failed_while_its_install_stays() {
+        let dir = scratch("auto-command-json");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let exe = managed_at(&home);
+        install_of(&catalog, "llamacpp", "b1-cpu");
+        install_of(&catalog, "mlx", "0.1-metal");
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None)]);
+        // Off: nothing read, the line on stdout is the reason.
+        set_setting(&home, false).unwrap();
+        let (code, out, _, summary) = auto_json(&home, &catalog, &exe, &p, &[]);
+        assert_eq!(code, 0);
+        assert_eq!(summary, json!({"from": "98.0.0", "installed": null, "result": "off", "reason": out[0], "notes": null, "runtimes": []}));
+        assert_eq!(out[0], "automatic updates are off (superfluid self auto-update off)");
+        set_setting(&home, true).unwrap();
+        // Updated, with the update of llamacpp failing: its install stays, and the summary says so.
+        std::fs::write(home.join("runtime-fails-llamacpp"), "").unwrap();
+        let (code, _, said, summary) = auto_json(&home, &catalog, &exe, &p, &[]);
+        assert_eq!(code, 0, "a runtime that failed is in the summary, not the exit code: {said:?}");
+        let why = "llamacpp was not updated (exit status: 23); `superfluid runtime update llamacpp` tries again";
+        assert_eq!(
+            summary,
+            json!({
+                "from": "98.0.0",
+                "installed": "99.0.0",
+                "result": "updated",
+                "reason": null,
+                "notes": "https://github.com/basecompute/superfluid/releases/tag/v99.0.0",
+                "runtimes": [
+                    {"id": "llamacpp", "outcome": "failed", "from": "b1-cpu", "to": null, "reason": why},
+                    {"id": "mlx", "outcome": "unchanged", "from": "0.1-metal", "to": "0.1-metal", "reason": null},
+                ],
+            }),
+            "{said:?}"
+        );
+        assert!(said.contains(&format!("superfluid: {why}")), "{said:?}");
+        assert_eq!(installs::default(&catalog, RuntimeId::new("llamacpp")).map(|i| i.name).as_deref(), Some("b1-cpu"));
+        // Nothing newer: none, with the line's reason.
+        let exe = std::fs::canonicalize(Versions::of(&home).binary("99.0.0")).unwrap();
+        let (code, out, _, summary) = auto_json(&home, &catalog, &exe, &p, &[]);
+        assert_eq!(code, 0);
+        assert_eq!(summary, json!({"from": "99.0.0", "installed": null, "result": "none", "reason": "superfluid 99.0.0 is up to date for automatic updates", "notes": null, "runtimes": []}));
+        assert_eq!(out, vec![summary["reason"].as_str().unwrap().to_string()]);
+        // The listing unreachable: failed, with the error, and exit 1.
+        let (code, _, said, summary) = auto_json(&home, &catalog, &exe, Path::new("/nonexistent/releases.json"), &[]);
+        assert_eq!((code, &summary["result"], &summary["installed"]), (1, &json!("failed"), &Value::Null));
+        assert_eq!(format!("superfluid: {}", summary["reason"].as_str().unwrap()), said[0]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

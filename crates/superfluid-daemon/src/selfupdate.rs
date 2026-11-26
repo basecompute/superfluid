@@ -47,7 +47,7 @@ pub const HELP: &str = "Update superfluid itself, or switch between the versions
 Usage:
   superfluid self update [--version <v>] [--dry-run] [--yes]
                                                         Install the newest release that fits this machine and make it current
-  superfluid self update --auto [--yes]                 Install what an automatic update would, now (for apps and scripts)
+  superfluid self update --auto [--json] [--yes]        Install what an automatic update would, now (for apps and scripts)
   superfluid self check [--json]                        Ask whether a newer release exists, without installing
   superfluid self list                                  The versions installed here, and which is current
   superfluid self use <v>                               Make an installed version current (the one an update replaced stays)
@@ -105,8 +105,10 @@ Apps and scripts: `superfluid self update --auto` reads the listing and installs
 automatic update would (out as long as the wait asks, fitting the engine, not one `self use`
 went back from), then updates the runtimes; with updates off, or nothing to install, it says
 why and exits 0. It needs no terminal, and exits 1 when the update fails, 3 for a copy a package
-manager or basert updates. `superfluid self check --json` prints {current, newest, auto,
-autoReason, notes, autoUpdate, waitDays}, where `auto` is what `--auto` would install now.
+manager or basert updates. With --json it also prints {from, installed, result, reason, notes,
+runtimes} on stdout, each runtime as {id, outcome, from, to, reason}, a failed one included.
+`superfluid self check --json` prints {current, newest, auto, autoReason, notes, autoUpdate,
+waitDays}, where `auto` is what `--auto` would install now.
 ";
 
 /// The release asset name for this build's platform.
@@ -2098,7 +2100,7 @@ pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("update") => {
             let mut opts = Options { live: true, ..Options::default() };
-            let mut auto = false;
+            let (mut auto, mut json) = (false, false);
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -2106,17 +2108,27 @@ pub fn run(args: &[String]) -> i32 {
                     "--dry-run" => opts.dry_run = true,
                     "--yes" | "-y" => opts.yes = true,
                     "--auto" => auto = true,
+                    "--json" => json = true,
                     _ => usage(),
                 }
             }
-            // What an automatic update would do, for an app: nothing is asked, so --yes changes nothing.
+            // What an automatic update would do, for an app: nothing is asked, so --yes changes nothing. With --json,
+            // stdout holds the summary alone, and the line saying why nothing was done goes to stderr with the rest.
+            if json && !auto {
+                usage();
+            }
             if auto {
                 if opts.version.is_some() || opts.dry_run {
                     usage();
                 }
                 crate::autoupdate::PROGRESS_LINES.store(true, std::sync::atomic::Ordering::Relaxed);
                 let env = |k: &str| std::env::var(k).ok();
-                return crate::autoupdate::update_auto(&home, &catalog, &exe, &listing_source(), &env, &mut |l| println!("{l}"), &mut |l| eprintln!("{l}"));
+                let mut out = |l: String| if json { eprintln!("{l}") } else { println!("{l}") };
+                let (code, summary) = crate::autoupdate::update_auto(&home, &catalog, &exe, &listing_source(), &env, &mut out, &mut |l| eprintln!("{l}"));
+                if json {
+                    println!("{summary}");
+                }
+                return code;
             }
             match update(&home, &catalog, &exe, &opts) {
                 Ok(Report { hand_off: Some(mut cmd), .. }) => {
@@ -2535,13 +2547,14 @@ pub(crate) mod tests {
 
     /// A release tree whose `superfluid` answers `--version` and `runtimes --json` as a real one would (the rows in
     /// `$SUPERFLUID_HOME/runtimes.json` when there are some), and notes each `runtime ...` it is asked to run in
-    /// `$SUPERFLUID_HOME/runtime-calls`, saying on stdout that it ran it.
+    /// `$SUPERFLUID_HOME/runtime-calls`, saying on stdout that it ran it (exiting 23 instead for a runtime `<id>` while
+    /// `$SUPERFLUID_HOME/runtime-fails-<id>` is there).
     pub(crate) fn release_tree(dir: &Path, v: &str) -> PathBuf {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(dir.join("libexec").join("superfluid")).unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"superfluid {v}\";;\n  runtimes) cat \"$SUPERFLUID_HOME/runtimes.json\" 2>/dev/null || echo '[{{\"id\":\"basert\",\"ready\":true}}]';;\n  runtime) echo \"$*\" >> \"$SUPERFLUID_HOME/runtime-calls\"; echo \"ran $*\";;\n  *) exit 2;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"superfluid {v}\";;\n  runtimes) cat \"$SUPERFLUID_HOME/runtimes.json\" 2>/dev/null || echo '[{{\"id\":\"basert\",\"ready\":true}}]';;\n  runtime) echo \"$*\" >> \"$SUPERFLUID_HOME/runtime-calls\"; [ -e \"$SUPERFLUID_HOME/runtime-fails-$3\" ] && exit 23; echo \"ran $*\";;\n  *) exit 2;;\nesac\n"
         );
         for name in LINKED {
             let p = bin.join(name);

@@ -89,11 +89,17 @@ The manager replaces the copy the command is running from, so a detached `superf
 An app that keeps Superfluid up to date (Superfluid Desktop) runs the automatic update itself, with no terminal:
 
 ```sh
-superfluid self update --auto   # what an automatic update would install, installed now
+superfluid self update --auto   # what an automatic update would install, installed now (--json: what it did, as one object)
 superfluid self check --json    # what is out, and what --auto would install
 ```
 
 `self update --auto` reads the release listing now and applies the same rules as an update at a launch: the newest release out as long as the wait asks that fits the engine here, not one `self use` went back from, and nothing at all with automatic updates off (the setting, `SUPERFLUID_NO_UPDATE`, `SUPERFLUID_NO_UPDATE_CHECK`, `CI`). It installs that release the same way, then updates and repairs the runtimes as above, and prints the lines above on stderr; the download is a line per tenth (`downloading superfluid-aarch64-apple-darwin.tar.gz: 45%`) when stderr is not a terminal. When there is nothing to do it prints why on stdout (`automatic updates are off (superfluid self auto-update off)`, `superfluid 0.2.2 is up to date for automatic updates`, ``superfluid 0.2.3 (published 2026-11-26) is held off: automatic updates wait 3 days after a release; `superfluid self update` installs it now``, `you went back from 0.2.3 with self use; it stays until a newer release is out`) and exits 0. It exits 1 when the update fails (the version in use stays), and 3 for a copy a package manager or basert updates, naming that copy's command. `--yes` is accepted; nothing is asked.
+
+With `--json` it also prints one object on stdout at the end (the line saying why nothing was done then goes to stderr), with the same exit codes; `result` is `updated`, `none`, `off`, `failed` or `not-ours`, `installed` the version it made current, and each runtime's `outcome` is `updated`, `repaired`, `unchanged`, `pinned`, `in-use` or `failed` (its install stays, `reason` says why):
+
+```json
+{"from":"0.2.2","installed":"0.2.3","result":"updated","reason":null,"notes":"https://github.com/basecompute/superfluid/releases/tag/v0.2.3","runtimes":[{"id":"llamacpp","outcome":"failed","from":"b8100-metal","to":null,"reason":"llamacpp was not updated (exit status: 23); `superfluid runtime update llamacpp` tries again"}]}
+```
 
 `self check --json` prints one object, from a read of the listing made now:
 
