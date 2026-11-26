@@ -299,6 +299,7 @@ Commands:
 Options:
   -h, --help           Show help
   -V, --version        Show the version
+  --no-update          Make no automatic update for this run (any command; see `superfluid self --help`)
 
 Get started:
   superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M     # llama.cpp; installed and pulled on first run

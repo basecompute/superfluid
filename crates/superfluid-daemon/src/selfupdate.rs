@@ -11,7 +11,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
-use superfluid_adapter_kit::install::{fetch, single_top, unpack, version_key, Asset};
+use superfluid_adapter_kit::install::{single_top, unpack, version_key, Asset};
 
 use crate::runtime_pick::RuntimeId;
 use crate::runtimes::Catalog;
@@ -52,6 +52,7 @@ Usage:
   superfluid self check                                 Ask whether a newer release exists, without installing
   superfluid self list                                  The versions installed here, and which is current
   superfluid self use <v>                               Make an installed version current (the one an update replaced stays)
+  superfluid self auto-update [on|off]                  Turn automatic updates on or off; with neither, say whether they are on
   superfluid self install --from <dir> [--prefix <dir>] Place an unpacked release here; what the install script runs
 
 Releases live side by side under $SUPERFLUID_HOME/versions/<v>, with a `current` link that the
@@ -73,9 +74,21 @@ the version's name, and each command on PATH is a small launcher that reads it a
 version's program. A copy npm, pip, pipx or uv installed there has its manager's command
 named and not run: Windows lets nothing replace a program that is running.
 
-`superfluid serve` checks for a newer release once a day, after the server is up, and prints
-one line; SUPERFLUID_NO_UPDATE_CHECK=1 or --offline turns that off. A release is announced a
-few days after it is published.
+Automatic updates: a command run in a terminal (serve, launch, node, top, runtime install,
+update, repair, remove, use) reads the release listing once a day in the background, and when
+a release newer than this one fits here and is a few days old, installs it before the command
+goes on: the download with a progress bar, the proof above, the runtimes not pinned and not in
+use updated with the new superfluid, then the command run again by the new version.
+`superfluid self use <old>` goes back. A copy Homebrew, a global npm, pipx, uv or cargo
+installed is updated by that manager in the background once no superfluid runs from it, with
+its output in $SUPERFLUID_HOME/logs/auto-update.log; one basert installed is left to basert.
+Without a terminal (a service, an app, a pipe), under CI, or with automatic updates off, the
+command prints one line per release instead. A failed update says so and the command goes on.
+
+Turning them off: `superfluid self auto-update off` (kept in $SUPERFLUID_HOME/settings.json),
+SUPERFLUID_NO_UPDATE=1 or SUPERFLUID_NO_UPDATE_CHECK=1 (no check, no update, no line), or
+--no-update on any command for that run. `superfluid serve` also says once a day when a newer
+release is out while it runs; --offline turns its check off.
 ";
 
 /// The release asset name for this build's platform.
@@ -136,7 +149,7 @@ impl Versions {
         self.dir.join(v)
     }
 
-    fn binary(&self, v: &str) -> PathBuf {
+    pub(crate) fn binary(&self, v: &str) -> PathBuf {
         self.version_dir(v).join("bin").join(crate::sys::exe_name("superfluid"))
     }
 
@@ -439,7 +452,7 @@ fn package_manager(exe: &Path) -> Option<(String, String)> {
 }
 
 /// The command that updates the running superfluid, for the line `serve` prints when a newer release is out.
-fn update_command(exe: &Path) -> String {
+pub(crate) fn update_command(exe: &Path) -> String {
     let exe = crate::sys::canonical(exe).unwrap_or_else(|_| exe.to_path_buf());
     match installed_as(&exe) {
         Installed::Other(p) => delegate(&p).map(|d| d.command().to_string()),
@@ -469,13 +482,13 @@ pub enum Delegate {
 }
 
 impl Delegate {
-    fn manager(&self) -> &str {
+    pub(crate) fn manager(&self) -> &str {
         match self {
             Delegate::Run { manager, .. } | Delegate::Name { manager, .. } => manager,
         }
     }
 
-    fn command(&self) -> &str {
+    pub(crate) fn command(&self) -> &str {
         match self {
             Delegate::Run { command, .. } | Delegate::Name { command, .. } => command,
         }
@@ -485,7 +498,7 @@ impl Delegate {
 /// The delegate for the copy at the real path `exe` (`<root>/bin/superfluid`), from the manager its `installed-by`
 /// file names, or from where it is for packages published before they carried the file; `None` for a copy no package
 /// manager or basert placed.
-fn delegate(exe: &Path) -> Option<Delegate> {
+pub(crate) fn delegate(exe: &Path) -> Option<Delegate> {
     let found = delegate_by_place(exe)?;
     Some(if cfg!(windows) { named_while_it_runs(found) } else { found })
 }
@@ -761,6 +774,24 @@ fn cargo(bin: &Path) -> Delegate {
     Delegate::Run { manager: "cargo".into(), command: "cargo install superfluid".into(), argv, path_first: Some(bin.to_path_buf()) }
 }
 
+/// The directory a package manager's update of the copy at `exe` replaces, which nothing may run from while it does:
+/// the release's root, or for cargo the bin directory it shares with other tools.
+pub(crate) fn watched_dir(exe: &Path, manager: &str) -> PathBuf {
+    let root = exe.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
+    let watched = if manager == "cargo" { exe.parent().unwrap_or(root) } else { root };
+    crate::sys::canonical(watched).unwrap_or_else(|_| watched.to_path_buf())
+}
+
+/// The other processes running a program of superfluid's from under `watched`: its workers start from the copy's
+/// own directories; only superfluid's programs count (a cargo install shares ~/.cargo/bin with other tools).
+pub(crate) fn superfluid_under(watched: &Path) -> Vec<i32> {
+    other_processes()
+        .into_iter()
+        .filter(|(_, e)| runs_under(e, watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
 /// A yes/no question on stderr, answered on stdin; an empty answer is yes.
 fn confirm(question: &str) -> Result<bool, String> {
     eprint!("{question}");
@@ -793,17 +824,9 @@ fn update_by_manager(exe: &Path, opts: &Options) -> Result<Report, String> {
         report.say(format!("{p} was installed by {manager}: `self update` would run {shown}"));
         return Ok(report);
     }
-    // Its workers start from the copy's own directories; only superfluid's programs count (a cargo install shares
-    // ~/.cargo/bin with other tools).
-    let root = exe.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
-    let watched = if manager == "cargo" { exe.parent().unwrap_or(root) } else { root };
-    let watched = crate::sys::canonical(watched).unwrap_or_else(|_| watched.to_path_buf());
+    let watched = watched_dir(exe, &manager);
     let idle = || -> Result<(), String> {
-        let busy: Vec<String> = other_processes()
-            .into_iter()
-            .filter(|(_, e)| runs_under(e, &watched) && e.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("superfluid")))
-            .map(|(pid, _)| pid.to_string())
-            .collect();
+        let busy: Vec<String> = superfluid_under(&watched).iter().map(i32::to_string).collect();
         if busy.is_empty() {
             return Ok(());
         }
@@ -855,6 +878,13 @@ pub struct Release {
     /// The basert engine ABI the release declares in an asset name.
     pub abi: Option<u32>,
     pub compat_url: Option<String>,
+    /// The release's page, its notes: the listing's `html_url`, else the tag's page on GitHub.
+    pub notes_url: String,
+}
+
+/// The page of release `v`'s notes: the one the listing gives when it is an https URL, else the tag's on GitHub.
+pub fn notes_url(v: &str, listed: Option<&str>) -> String {
+    listed.filter(|u| u.starts_with("https://")).map(str::to_string).unwrap_or_else(|| format!("https://github.com/{REPO}/releases/tag/v{v}"))
 }
 
 /// The releases of the listing with a tarball for `target`, newest first; drafts and prereleases left out.
@@ -886,6 +916,7 @@ fn release_of(r: &Value, tar: &str, target: &str) -> Option<Release> {
         sha256_url: url(&format!("{tar}.sha256"))?,
         abi,
         compat_url: url(&format!("superfluid-{target}.compat.json")),
+        notes_url: notes_url(&version, r["html_url"].as_str()),
         version,
     })
 }
@@ -1005,7 +1036,7 @@ fn age_days(published: &str) -> Option<i64> {
     Some(today - days_from_civil(y, m, d))
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
@@ -1148,6 +1179,11 @@ pub fn running_from(dir: &Path) -> bool {
     !processes_from(dir).is_empty()
 }
 
+/// The other processes running an executable under `dir`, by pid.
+pub(crate) fn pids_from(dir: &Path) -> Vec<i32> {
+    processes_from(dir).into_iter().map(|(p, _)| p).collect()
+}
+
 /// The other processes running an executable under `dir`, by pid and when each started.
 fn processes_from(dir: &Path) -> Vec<(i32, u64)> {
     let Ok(dir) = crate::sys::canonical(dir) else { return Vec::new() };
@@ -1170,20 +1206,40 @@ pub struct Options {
     pub yes: bool,
     /// The release listing; `listing_source()` when not set.
     pub source: Option<String>,
+    /// Each line printed as it is said, and the download drawn as a bar on a terminal: `self update` run by hand.
+    pub live: bool,
+    /// Give up at once when another update holds the lock, rather than wait for it: an automatic update, which a
+    /// command waits on.
+    pub no_wait: bool,
 }
 
 /// What `self update` did, line by line.
 #[derive(Debug, Default)]
 pub struct Report {
     pub lines: Vec<String>,
+    /// The lines out of the ordinary (a link left as it was, a version not removed), which an automatic update shows.
+    pub notes: Vec<String>,
     pub changed: bool,
     /// The command `superfluid self update` replaces itself with, its own update left to that command.
     pub hand_off: Option<Command>,
+    /// Lines are printed as they are said.
+    pub live: bool,
 }
 
 impl Report {
     fn say(&mut self, line: impl Into<String>) {
-        self.lines.push(line.into());
+        let line = line.into();
+        if self.live {
+            println!("superfluid: {line}");
+            let _ = std::io::stdout().flush();
+        }
+        self.lines.push(line);
+    }
+
+    fn note(&mut self, line: impl Into<String>) {
+        let line = line.into();
+        self.notes.push(line.clone());
+        self.say(line);
     }
 }
 
@@ -1276,15 +1332,15 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 
 /// Download, check and unpack `release` into the layout; nothing is placed until the whole tree is verified, and what
 /// was downloaded goes whether or not it was placed.
-fn place(versions: &Versions, release: &Release, report: &mut Report) -> Result<(), String> {
+fn place(versions: &Versions, release: &Release, report: &mut Report, bar: bool) -> Result<(), String> {
     let staging = versions.dir.join(".staging").join(&release.version);
     let _ = std::fs::remove_dir_all(&staging);
-    let placed = place_through(versions, release, &staging, report);
+    let placed = place_through(versions, release, &staging, report, bar);
     let _ = std::fs::remove_dir_all(&staging);
     placed
 }
 
-fn place_through(versions: &Versions, release: &Release, staging: &Path, report: &mut Report) -> Result<(), String> {
+fn place_through(versions: &Versions, release: &Release, staging: &Path, report: &mut Report, bar: bool) -> Result<(), String> {
     let v = &release.version;
     std::fs::create_dir_all(staging).map_err(|e| format!("{}: {e}", staging.display()))?;
     let want = get_text(&release.sha256_url, 30)?.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
@@ -1293,7 +1349,7 @@ fn place_through(versions: &Versions, release: &Release, staging: &Path, report:
     }
     let asset = Asset { sha256: Some(want), ..release.tarball.clone() };
     report.say(format!("downloading {} ({})", asset.name, asset.size.map(|s| format!("{:.1} MB", s as f64 / 1e6)).unwrap_or_else(|| "size unknown".into())));
-    let (archive, _) = fetch(&asset, staging)?;
+    let archive = crate::autoupdate::download(&asset, staging, bar)?;
     let unpacked = staging.join("unpacked");
     unpack(&archive, &unpacked)?;
     let top = single_top(&unpacked)?;
@@ -1358,7 +1414,7 @@ fn holds_in_place(dest: &Path, bin: &Path, libexec: &Path) -> bool {
 /// The install script's in-place copies become links into the layout (see `Versions::link` for a running server).
 fn migrate(versions: &Versions, prefix: &Path, report: &mut Report) -> Result<(), String> {
     for note in versions.link(&prefix.join("bin"), true)? {
-        report.say(note);
+        report.note(note);
     }
     report.say(format!("the copy the install script placed in {}/bin is kept under {} as the version to go back to", prefix.display(), versions.dir.display()));
     Ok(())
@@ -1395,13 +1451,13 @@ fn prune_older(versions: &Versions, report: &mut Report) {
     match versions.prune() {
         Ok(gone) if !gone.is_empty() => report.say(format!("removed {}", gone.join(", "))),
         Ok(_) => {}
-        Err(e) => report.say(format!("an older version was not removed ({e}); the next update tries again")),
+        Err(e) => report.note(format!("an older version was not removed ({e}); the next update tries again")),
     }
 }
 
 /// `self update`: the newest release that fits, or the one named.
 pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Result<Report, String> {
-    let mut report = Report::default();
+    let mut report = Report { live: opts.live, ..Report::default() };
     let installed = installed_as(exe);
     let (versions, migrating) = match &installed {
         Installed::Managed { versions, .. } => (Versions { dir: versions.clone() }, None),
@@ -1414,7 +1470,10 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
         true => None,
         false => {
             std::fs::create_dir_all(&versions.dir).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
-            Some(crate::pulls::Lock::take(&versions.dir, "self", "update of superfluid")?)
+            match opts.no_wait {
+                true => Some(crate::pulls::Lock::try_take(&versions.dir, "self")?.ok_or("another update of superfluid is running")?),
+                false => Some(crate::pulls::Lock::take(&versions.dir, "self", "update of superfluid")?),
+            }
         }
     };
     let engine = engine_here(catalog);
@@ -1459,6 +1518,9 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
         report.say("dry run: nothing fetched or changed");
         return Ok(report);
     }
+    if opts.live {
+        eprintln!("Updating superfluid {} → {v} · release notes: {}", current.as_deref().unwrap_or(running()), chosen.notes_url);
+    }
     // The in-place copy goes under the layout first, as the version to go back to.
     let kept = match &migrating {
         Some(prefix) => Some(keep_in_place(&versions, prefix)?),
@@ -1466,7 +1528,7 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
     };
     let on_disk = on_disk || versions.binary(&v).is_file();
     if !on_disk {
-        place(&versions, chosen, &mut report)?;
+        place(&versions, chosen, &mut report, opts.live || opts.no_wait)?;
     }
     if let Err(e) = probe(&versions, &v, home, &engine) {
         if !on_disk {
@@ -1489,7 +1551,7 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
         migrate(&versions, prefix, &mut report)?;
     } else if let Some(prefix) = versions.prefix() {
         for note in versions.link(&prefix, false)? {
-            report.say(note);
+            report.note(note);
         }
     }
     report.say("a running server keeps the version it started with; starting it again uses the new one");
@@ -1614,13 +1676,20 @@ pub fn list(home: &Path, exe: &Path) -> String {
 }
 
 
-/// `$SUPERFLUID_HOME/update-check.json`: the last read, the newest release that fit, and the version announced.
+/// `$SUPERFLUID_HOME/update-check.json`: the last read, the newest release that fit and its notes, the version
+/// announced, and the version an automatic update last tried, and when.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Check {
     pub checked_at: u64,
     pub newest: Option<String>,
     pub published: Option<String>,
     pub notified: Option<String>,
+    /// The page of the newest release's notes.
+    pub notes: Option<String>,
+    pub attempted: Option<String>,
+    /// When an automatic update of `attempted` was tried, in seconds since the epoch: one that failed is not tried
+    /// again for a day, until the next daily read.
+    pub attempted_at: u64,
 }
 
 impl Check {
@@ -1630,18 +1699,32 @@ impl Check {
 
     pub fn read(home: &Path) -> Option<Check> {
         let v: Value = serde_json::from_str(&std::fs::read_to_string(Self::path(home)).ok()?).ok()?;
+        let text = |k: &str| v[k].as_str().map(str::to_string);
         Some(Check {
             checked_at: v["checked_at"].as_u64().unwrap_or(0),
-            newest: v["newest"].as_str().map(str::to_string),
-            published: v["published"].as_str().map(str::to_string),
-            notified: v["notified"].as_str().map(str::to_string),
+            newest: text("newest"),
+            published: text("published"),
+            notified: text("notified"),
+            notes: text("notes"),
+            attempted: text("attempted"),
+            attempted_at: v["attempted_at"].as_u64().unwrap_or(0),
         })
     }
 
-    fn write(&self, home: &Path) -> Result<(), String> {
+    /// Written whole beside the file and renamed over it, so a process reading it at the same time (the launch of
+    /// another command, the background check) finds the old record or the new, never half of one.
+    pub(crate) fn write(&self, home: &Path) -> Result<(), String> {
         std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
-        let v = json!({"checked_at": self.checked_at, "newest": self.newest, "published": self.published, "notified": self.notified});
-        std::fs::write(Self::path(home), format!("{v:#}\n")).map_err(|e| format!("{}: {e}", Self::path(home).display()))
+        let v = json!({
+            "checked_at": self.checked_at,
+            "newest": self.newest,
+            "published": self.published,
+            "notified": self.notified,
+            "notes": self.notes,
+            "attempted": self.attempted,
+            "attempted_at": self.attempted_at,
+        });
+        crate::autoupdate::write_atomically(&Self::path(home), format!("{v:#}\n").as_bytes())
     }
 
     pub fn due(&self) -> bool {
@@ -1650,7 +1733,16 @@ impl Check {
 
     /// The newest release known, when it is newer than this one.
     pub fn newer(&self) -> Option<&str> {
-        self.newest.as_deref().filter(|n| release_order(n) > release_order(running()))
+        self.newer_than(running())
+    }
+
+    pub(crate) fn newer_than(&self, here: &str) -> Option<&str> {
+        self.newest.as_deref().filter(|n| release_order(n) > release_order(here))
+    }
+
+    /// The page of the newest release's notes.
+    pub(crate) fn notes_url(&self) -> Option<String> {
+        self.newest.as_deref().map(|v| notes_url(v, self.notes.as_deref()))
     }
 
     pub fn describe(&self) -> String {
@@ -1667,34 +1759,41 @@ impl Check {
 pub fn check_now(home: &Path, catalog: &Catalog, hold_off: Option<i64>, source: &str) -> Result<Check, String> {
     let target = target().ok_or("no release is published for this platform")?;
     let found = fetch_releases(source, target, 5)?;
-    let engine = engine_here(catalog);
-    let compat = compat_fetcher(5);
-    let fit = newest(&found, &engine, hold_off, &compat);
+    record(home, &found, &engine_here(catalog), hold_off, &compat_fetcher(5))
+}
+
+/// The newest of `found` that drives `engine` and is past the hold-off, recorded with what the record held besides.
+pub(crate) fn record(home: &Path, found: &[Release], engine: &Engine, hold_off: Option<i64>, compat: &dyn Fn(&str) -> Option<Value>) -> Result<Check, String> {
+    let fit = newest(found, engine, hold_off, compat);
     let previous = Check::read(home).unwrap_or_default();
     let check = Check {
         checked_at: now_secs(),
         newest: fit.map(|r| r.version.clone()),
         published: fit.map(|r| r.published.clone()),
-        notified: previous.notified,
+        notes: fit.map(|r| r.notes_url.clone()),
+        ..previous
     };
     check.write(home)?;
     Ok(check)
 }
 
-/// The one line `serve` prints when a newer release is out, once per release; `command` installs it.
-fn announce(home: &Path, mut check: Check, command: &str) -> Option<String> {
+/// The one line printed when a newer release is out, once per release; `command` installs it. With automatic updates
+/// on, it says how to turn them off.
+pub(crate) fn announce(home: &Path, mut check: Check, command: &str, auto: bool) -> Option<String> {
     let newer = check.newer()?.to_string();
     if check.notified.as_deref() == Some(newer.as_str()) {
         return None;
     }
+    let notes = check.notes_url().unwrap_or_default();
     check.notified = Some(newer.clone());
     let _ = check.write(home);
-    Some(format!("superfluid {newer} is available (this is {}): `{command}` installs it; {NO_CHECK_ENV}=1 silences this", running()))
+    let off = if auto { format!(" · turn off: {}", crate::autoupdate::OFF_COMMAND) } else { String::new() };
+    Some(format!("superfluid {newer} is available (this is {}): `{command}` installs it · release notes: {notes}{off}", running()))
 }
 
 /// What `serve` runs once the server is up: one listing read a day at most, one line per new release.
 pub fn check_in_background(home: PathBuf, offline: bool) {
-    if offline || std::env::var_os(NO_CHECK_ENV).is_some_and(|v| !v.is_empty() && v != "0") {
+    if offline || crate::autoupdate::switched_off(&|k| std::env::var(k).ok()).is_some() {
         return;
     }
     std::thread::Builder::new()
@@ -1712,9 +1811,10 @@ pub fn check_in_background(home: PathBuf, offline: bool) {
 /// One round: the cache when not yet due, else the listing; the line to print for a release not yet announced.
 pub fn tick(home: &Path, catalog: &Catalog, source: &str) -> Option<String> {
     let command = update_command(&std::env::current_exe().unwrap_or_default());
+    let auto = crate::autoupdate::enabled(home, &|k| std::env::var(k).ok()).is_ok();
     match Check::read(home).filter(|c| !c.due()) {
-        Some(cached) => announce(home, cached, &command),
-        None => announce(home, check_now(home, catalog, Some(HOLD_OFF_DAYS), source).ok()?, &command),
+        Some(cached) => announce(home, cached, &command, auto),
+        None => announce(home, check_now(home, catalog, Some(HOLD_OFF_DAYS), source).ok()?, &command, auto),
     }
 }
 
@@ -1733,8 +1833,10 @@ pub fn run(args: &[String]) -> i32 {
     let print = |r: Result<Report, String>| -> i32 {
         match r {
             Ok(report) => {
-                for line in report.lines {
-                    println!("superfluid: {line}");
+                if !report.live {
+                    for line in report.lines {
+                        println!("superfluid: {line}");
+                    }
                 }
                 0
             }
@@ -1746,7 +1848,7 @@ pub fn run(args: &[String]) -> i32 {
     };
     match args.first().map(String::as_str) {
         Some("update") => {
-            let mut opts = Options::default();
+            let mut opts = Options { live: true, ..Options::default() };
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -1777,6 +1879,14 @@ pub fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        // What a launch starts in the background when the daily read is due: the record alone, nothing printed.
+        Some("check") if args.len() == 2 && args[1] == "--record" => match check_now(&home, &catalog, Some(HOLD_OFF_DAYS), &listing_source()) {
+            Ok(_) => 0,
+            Err(_) => 1,
+        },
+        Some("auto-update") if args.len() <= 2 => crate::autoupdate::auto_update_command(&home, args.get(1).map(String::as_str)),
+        // What an automatic update leaves running for a package manager's copy: it runs the manager once nothing runs from the copy.
+        Some("background-update") if args.len() == 1 => crate::autoupdate::background_update(&exe),
         Some("list") if args.len() == 1 => {
             let _ = std::io::stdout().write_all(list(&home, &exe).as_bytes());
             0
@@ -2137,26 +2247,27 @@ mod windows_tests {
 
 // The tests stand in for a worker with a POSIX shell script, and for a link with a symlink.
 #[cfg(all(test, unix))]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Stdio;
     use superfluid_adapter_kit::install::sha256_of;
 
-    fn scratch(tag: &str) -> PathBuf {
+    pub(crate) fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("superfluid-self-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
-    /// A release tree whose `superfluid` answers `--version` and `runtimes --json` as a real one would.
-    fn release_tree(dir: &Path, v: &str) -> PathBuf {
+    /// A release tree whose `superfluid` answers `--version` and `runtimes --json` as a real one would, and notes each
+    /// `runtime ...` it is asked to run in `$SUPERFLUID_HOME/runtime-calls`.
+    pub(crate) fn release_tree(dir: &Path, v: &str) -> PathBuf {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(dir.join("libexec").join("superfluid")).unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"superfluid {v}\";;\n  runtimes) echo '[{{\"id\":\"basert\",\"ready\":true}}]';;\n  *) exit 2;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"superfluid {v}\";;\n  runtimes) echo '[{{\"id\":\"basert\",\"ready\":true}}]';;\n  runtime) echo \"$*\" >> \"$SUPERFLUID_HOME/runtime-calls\";;\n  *) exit 2;;\nesac\n"
         );
         for name in LINKED {
             let p = bin.join(name);
@@ -2168,7 +2279,7 @@ mod tests {
     }
 
     /// A listing with one release per version, its assets as local files.
-    fn listing(dir: &Path, versions: &[(&str, &str, Option<u32>)]) -> PathBuf {
+    pub(crate) fn listing(dir: &Path, versions: &[(&str, &str, Option<u32>)]) -> PathBuf {
         let target = target().unwrap();
         let mut rs = Vec::new();
         for (v, published, abi) in versions {
@@ -2199,7 +2310,7 @@ mod tests {
         p
     }
 
-    fn no_compat(_: &str) -> Option<Value> {
+    pub(crate) fn no_compat(_: &str) -> Option<Value> {
         None
     }
 
@@ -2387,7 +2498,7 @@ mod tests {
     }
 
     /// Killed and waited for on every way out of a test.
-    struct Sleeper(std::process::Child);
+    pub(crate) struct Sleeper(pub(crate) std::process::Child);
 
     impl Drop for Sleeper {
         fn drop(&mut self) {
@@ -2400,7 +2511,7 @@ mod tests {
     /// A copy of this test binary rather than a system one: macOS kills a platform binary run from elsewhere. Started
     /// as `when_not_busy` starts a program: on Linux a child another test forks while the copy is still open for
     /// writing holds that write until it execs, and the copy cannot be run until then (ETXTBSY).
-    fn sleeper_at(exe: &Path) -> Sleeper {
+    pub(crate) fn sleeper_at(exe: &Path) -> Sleeper {
         std::fs::copy(std::env::current_exe().unwrap(), exe).unwrap();
         let mut cmd = Command::new(exe);
         cmd.args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
@@ -2411,7 +2522,7 @@ mod tests {
     }
 
     /// Whether a process is seen running from `dir` within five seconds.
-    fn seen_running_from(dir: &Path) -> bool {
+    pub(crate) fn seen_running_from(dir: &Path) -> bool {
         (0..50).any(|_| {
             std::thread::sleep(Duration::from_millis(100));
             running_from(dir)
@@ -2674,11 +2785,16 @@ mod tests {
         assert_eq!(c.newest.as_deref(), Some("99.0.0"), "99.1.0 is inside the hold-off");
         assert!(!c.due());
         assert_eq!(Check::read(&home), Some(c.clone()));
-        let line = announce(&home, c.clone(), "superfluid self update").unwrap();
+        let line = announce(&home, c.clone(), "superfluid self update", true).unwrap();
         assert!(line.starts_with("superfluid 99.0.0 is available (this is ") && line.contains("`superfluid self update`"), "{line}");
-        assert_eq!(announce(&home, Check::read(&home).unwrap(), "superfluid self update"), None, "announced once");
+        assert!(
+            line.ends_with("installs it · release notes: https://github.com/basecompute/superfluid/releases/tag/v99.0.0 · turn off: superfluid self auto-update off"),
+            "every notice names the release's notes and how to turn updates off: {line}"
+        );
+        assert_eq!(announce(&home, Check::read(&home).unwrap(), "superfluid self update", true), None, "announced once");
         let again = Check { notified: None, ..c.clone() };
-        assert!(announce(&home, again, "brew upgrade superfluid").unwrap().contains("`brew upgrade superfluid` installs it"));
+        let line = announce(&home, again, "brew upgrade superfluid", false).unwrap();
+        assert!(line.contains("`brew upgrade superfluid` installs it") && !line.contains("turn off"), "with updates off already, nothing to turn off: {line}");
         assert!(Check::read(&home).unwrap().describe().starts_with("newest release: 99.0.0 (published 2026-01-01;"));
         let stale = Check { checked_at: 1, ..Check::default() };
         assert!(stale.due());

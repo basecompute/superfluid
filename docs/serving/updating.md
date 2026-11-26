@@ -1,6 +1,6 @@
 # Updating Superfluid
 
-Superfluid updates itself with `superfluid self update`, and `superfluid serve` says once a day when a newer release is out. Releases are kept side by side, so an update never overwrites the copy that is running and the version it replaced stays for going back.
+Superfluid updates itself: a command run in a terminal installs a newer release before it goes on, and `superfluid self update` installs one by hand. Releases are kept side by side, so an update never overwrites the copy that is running and the version it replaced stays for going back.
 
 ```sh
 superfluid self check            # is a newer release out?
@@ -8,7 +8,61 @@ superfluid self update           # install the newest release that fits this mac
 superfluid self update --dry-run # say what it would do
 superfluid self list             # the versions here, which is current, which was replaced
 superfluid self use 0.1.3        # go back to a version that is still here
+superfluid self auto-update off  # no automatic updates (on turns them back on; neither says which)
 ```
+
+## Automatic updates
+
+`serve`, `launch`, `node`, `top` and `runtime install|update|repair|remove|use`, run in a terminal, look at what the last read of the release listing found. The read is made at most once a day, by a `superfluid self check --record` started in the background in a session of its own, so the command never waits on the network; the first command after the day is up starts it and goes on.
+
+When that read found a release newer than the one running, past the hold-off (a few days after it is published, so early reports land first) and fitting the engine here (the same ABI rule as `self update`), the command updates first:
+
+```text
+Updating superfluid 0.2.1 → 0.2.2 · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2
+  superfluid-aarch64-apple-darwin.tar.gz [####################....................]  50%  13.5/27.0 MB
+superfluid: updating llamacpp (b12722-metal) with superfluid 0.2.2
+superfluid 0.2.2 is in use · `superfluid self use 0.2.1` goes back · `superfluid self auto-update off` turns automatic updates off
+```
+
+1. The release is placed and made current as `self update --version 0.2.2` would place it: the download checked against its SHA-256, the new copy proved before `current` moves (see [What an update does](#what-an-update-does)).
+2. Each runtime installed under `$SUPERFLUID_HOME/runtimes` is updated by the new version (`runtime update <id>`), so its worker speaks the new protocol. A runtime pinned with `superfluid runtime use` stays on its pin, and one whose default install a running server uses stays until none does; each says so.
+3. The command is run again by the new version, in the same process, with `SUPERFLUID_UPDATED_FROM` set to the old version (such a run updates nothing).
+
+An update that fails (offline, a download that does not check out, a copy that does not start, another update already running, Ctrl+C) prints one line and the command goes on with the version it was started as; it is not tried again until the next day's read:
+
+```text
+couldn't update superfluid to 0.2.2: fetching https://github.com/... failed: curl: (6) Could not resolve host: github.com; staying on 0.2.1
+```
+
+Going back: `superfluid self use 0.2.1` makes the version it replaced current again (`superfluid self list` shows which versions are here), and `superfluid runtime use <id> <install>` pins a runtime to the install it had, which an update installs beside, never over; `superfluid runtimes` lists them.
+
+### When nothing is updated
+
+Automatic updates are off with any of these, and the command makes no update:
+
+| switch | for | what is left |
+|---|---|---|
+| `superfluid self auto-update off` | every run, until `on` | one line per release, saying a newer one is out |
+| `--no-update` on any command (before a `--`) | that run, and what it starts | nothing: no read, no line |
+| `SUPERFLUID_NO_UPDATE=1` | the environment it is set in | nothing |
+| `SUPERFLUID_NO_UPDATE_CHECK=1` | the environment it is set in | nothing |
+| `--offline` | that run | nothing |
+
+The setting is `{"autoUpdate": false}` in `$SUPERFLUID_HOME/settings.json` (missing means on); Superfluid Desktop sets it with `superfluid self auto-update on|off` to follow its own switch. A command whose stderr is not a terminal (a service, an app, a pipe), one run with `CI` set, and one that only reads or reports (help, `--version`, `self`, `compat`, `stop`, `runtimes`, `models`, `runtime versions|options`, `session`, `media`, `fleet`, anything with `--json`) update nothing either; the first two print the line, once per release:
+
+```text
+superfluid: superfluid 0.2.2 is available (this is 0.2.1): `superfluid self update` installs it · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2 · turn off: superfluid self auto-update off
+```
+
+### A copy a package manager installed
+
+A copy from Homebrew, a global npm, pipx, uv or `cargo install` that this user owns, with no other Superfluid running from it, is updated by its manager in the background, once per release, the same command `self update` runs for it:
+
+```text
+Updating superfluid 0.2.1 → 0.2.2 with Homebrew in the background (log: ~/.superfluid/logs/auto-update.log) · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2 · turn off: superfluid self auto-update off
+```
+
+The manager replaces the copy the command is running from, so a detached `superfluid self background-update` waits until no Superfluid runs from the copy (this command included: a server keeps its version until it stops), then runs the manager; what it prints goes to `$SUPERFLUID_HOME/logs/auto-update.log`. A pinned formula, another user's Homebrew, an npm folder that needs root, a project's npm dependency, pip in an environment, and every manager on Windows get the line with their command instead. The Superfluid basert installed is basert's to update (`basert superfluid install`), and is never updated automatically.
 
 ## Where releases live
 
@@ -50,17 +104,19 @@ The launcher is a small program the release carries (`libexec\superfluid\superfl
 
 A running server keeps the version it started with; its next start uses the new one. A server started by `superfluid launch` is stopped with `superfluid stop`. One update, install or switch runs at a time: a second waits for the first and then decides on what it left. An installed version is never written to: a release placed again over a working copy is kept as it is, and only a copy that is proved first replaces one that no longer works.
 
-After an update, the runtime installs under `$SUPERFLUID_HOME/runtimes` still carry the worker copied in when they were installed. A newer daemon that does not speak that worker's protocol says so in `superfluid runtimes`, and `superfluid runtime repair <id>` installs the runtime again with the new worker.
+After `self update`, the runtime installs under `$SUPERFLUID_HOME/runtimes` still carry the worker copied in when they were installed (an automatic update updates them, above). A newer daemon that does not speak that worker's protocol says so in `superfluid runtimes`, and `superfluid runtime update <id>` or `superfluid runtime repair <id>` installs the runtime again with the new worker. An install a running server uses is neither replaced nor removed: `runtime repair`, `install` and `remove` refuse it, saying it stays until no server uses it.
+
+A foreground `self update` shows the download as a progress bar on a terminal, after a line naming the release's notes.
 
 ## The daily check
 
-After the server is up, `superfluid serve` reads the release listing at most once a day, with a five-second limit, and prints one line when a release newer than the running one fits here. A server that stays up looks again every hour, so it learns of a release published later, or one past its hold-off, when the day is up:
+Besides the read a launch starts, `superfluid serve` reads the release listing after the server is up, at most once a day, with a five-second limit, and prints one line when a release newer than the running one fits here. A server that stays up looks again every hour, so it learns of a release published later, or one past its hold-off, when the day is up:
 
 ```text
-superfluid 0.1.4 is available (this is 0.1.3): `superfluid self update` installs it; SUPERFLUID_NO_UPDATE_CHECK=1 silences this
+superfluid 0.2.2 is available (this is 0.2.1): `superfluid self update` installs it · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2 · turn off: superfluid self auto-update off
 ```
 
-A release is announced a few days after it is published, so early reports land first; `self update` installs it as soon as it is out. The check is skipped with `--offline` or `SUPERFLUID_NO_UPDATE_CHECK=1`, and it never delays serving. What it learned is in `$SUPERFLUID_HOME/update-check.json` and in `superfluid self list`.
+A release is announced, and installed automatically, a few days after it is published, so early reports land first; `self update` installs it as soon as it is out. The check is skipped with `--offline`, `--no-update`, `SUPERFLUID_NO_UPDATE=1` or `SUPERFLUID_NO_UPDATE_CHECK=1`, and it never delays serving. What it learned is in `$SUPERFLUID_HOME/update-check.json` (written whole and renamed into place) and in `superfluid self list`.
 
 ## Other ways Superfluid was installed
 
@@ -68,4 +124,4 @@ A release is announced a few days after it is published, so early reports land f
 
 The Superfluid basert installs for `basert serve` is basert's (an `installed-by` file says `basert`, or basert's `.release` stamp for a copy it placed before writing one): `self update` hands over to `basert superfluid install` (the process becomes basert, which refuses while anything runs from the copy), which installs the newest release that serves basert's engine, rather than moving the copy under `~/.superfluid` and checking it against an engine that is not basert's; `--version` is refused, as basert picks the release.
 
-`SUPERFLUID_RELEASES` names another release listing, a URL or a file in GitHub's releases JSON shape, for a mirror.
+`SUPERFLUID_RELEASES` names another release listing, a URL or a file in GitHub's releases JSON shape, for a mirror (and for tests, which never read the network).

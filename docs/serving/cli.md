@@ -27,6 +27,8 @@ superfluid help runtime           # one command's help
 superfluid --version              # also -V, superfluid version
 ```
 
+`--no-update`, given to any command before a `--`, makes no automatic update for that run ([Updating Superfluid](updating.md#automatic-updates)).
+
 Flags of `serve`, `launch`, `runtime`, `session`, `media` and `self` take their value as `--flag value` or `--flag=value`. `top`, `node join` and `superfluid-noded` take only `--flag value`. The last occurrence of a scalar flag wins; repeatable flags accumulate.
 
 `fleet token` and `node join` are described in [Distributed serving](distributed_serving.md).
@@ -314,10 +316,11 @@ superfluid self update [--version <v>] [--dry-run] [--yes]
 superfluid self check
 superfluid self list
 superfluid self use <v>
+superfluid self auto-update [on|off]
 superfluid self install --from <dir> [--prefix <dir>]
 ```
 
-`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program; a package manager's copy has its update command named there, not run. See [Updating Superfluid](updating.md).
+`update` installs the newest release that fits this machine beside the current one, proves it starts, and makes it current; the version it replaced stays for `use`. For a copy a package manager or basert installed, it runs that one's update instead (asking first, or with `--yes`). `check` asks whether a newer release is out. `auto-update on|off` turns automatic updates on or off (kept in `$SUPERFLUID_HOME/settings.json`), and with neither says whether they are on and, when not, what turns them off; any command takes `--no-update` for one run without them. `install` places an unpacked release, which is what the install script runs. On Windows, where an ordinary user may make no symbolic link, `current` is a file that holds the version's name, and each command on `PATH` is a small launcher that runs the current version's program; a package manager's copy has its update command named there, not run. See [Updating Superfluid](updating.md).
 
 ## `superfluid session`
 

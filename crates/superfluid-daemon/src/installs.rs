@@ -96,6 +96,21 @@ pub fn unpin(catalog: &Catalog, id: RuntimeId) -> Result<Option<String>, String>
     refresh_current(catalog, id)
 }
 
+/// An error when a running process runs a program of the install `name` at `dir` (its worker, a server started from
+/// it): the install is not set aside or removed under it, and stays until nothing runs from it.
+pub fn refuse_in_use(id: RuntimeId, name: &str, dir: &Path) -> Result<(), String> {
+    let pids = crate::selfupdate::pids_from(dir);
+    if pids.is_empty() {
+        return Ok(());
+    }
+    let pids: Vec<String> = pids.iter().map(i32::to_string).collect();
+    Err(format!(
+        "{} {name} is in use (pid {}): it stays until no server uses it; stop that server, then run this again",
+        id.base(),
+        pids.join(", ")
+    ))
+}
+
 fn names(all: &[Install]) -> String {
     if all.is_empty() {
         "none".into()
@@ -204,6 +219,10 @@ pub fn install(catalog: &Catalog, id: RuntimeId, installer: &Path, plans: &[Plan
     }
     let mut fell_back = Vec::new();
     for plan in plans {
+        // An install of the plan's name is set aside for the new one, which a server running it would lose.
+        if root.join(&plan.install).is_dir() {
+            refuse_in_use(id, &plan.install, &root.join(&plan.install))?;
+        }
         let staging = root.join(format!(".staging-{}", unguessable()?));
         std::fs::create_dir(&staging).map_err(|e| format!("{}: {e}", staging.display()))?;
         let staged = stage(id, installer, plan, &staging);
@@ -345,6 +364,7 @@ pub fn remove(catalog: &Catalog, id: RuntimeId, name: Option<&str>) -> Result<Ve
             let Some(i) = all.iter().find(|i| i.name == n) else {
                 return Err(format!("{} has no install {n} (installed: {})", id.base(), names(&all)));
             };
+            refuse_in_use(id, &i.name, &i.dir)?;
             std::fs::remove_dir_all(&i.dir).map_err(|e| format!("{}: {e}", i.dir.display()))?;
             if pinned(catalog, id).is_none() {
                 let _ = std::fs::remove_file(root.join("pinned"));
@@ -355,6 +375,9 @@ pub fn remove(catalog: &Catalog, id: RuntimeId, name: Option<&str>) -> Result<Ve
         None => {
             if all.is_empty() {
                 return Err(format!("{} is not installed", id.base()));
+            }
+            for i in &all {
+                refuse_in_use(id, &i.name, &i.dir)?;
             }
             std::fs::remove_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
             Ok(all.into_iter().map(|i| i.name).collect())
@@ -625,6 +648,38 @@ cat "$dir/runtime.json"
         assert!(!w.with_extension("staged").exists() && list(&cat, id).is_empty(), "nothing was staged");
         plan.assets = vec![asset("https://mirror.example/a.tar.gz", Some("ab")), asset("/local/a.tar.gz", None)];
         install(&cat, id, &w, &[plan]).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_install_a_server_runs_from_is_neither_replaced_nor_removed_until_it_stops() {
+        let dir = scratch("in-use");
+        let home = dir.join("home");
+        let cat = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let id = RuntimeId::new("toyrt");
+        let root = home.join("runtimes/toyrt");
+        let w = installer(&dir, "toyrt", &format!(r#"{{"cpu":[{}]}}"#, device("CPU")), "");
+        install(&cat, id, &w, &[plan_for("toyrt", "b1", "cpu")]).unwrap();
+        install(&cat, id, &w, &[plan_for("toyrt", "b2", "cpu")]).unwrap();
+        // A worker running from the install: this test binary, asleep, as the self-update tests run one.
+        let mut server = crate::selfupdate::tests::sleeper_at(&root.join("b1-cpu/bin/superfluid-worker-toyrt"));
+        if !crate::selfupdate::tests::seen_running_from(&root.join("b1-cpu")) {
+            eprintln!("SKIP: this platform does not report the sleeper's executable");
+            return;
+        }
+        let pid = server.0.id();
+        let e = install(&cat, id, &w, &[plan_for("toyrt", "b1", "cpu")]).unwrap_err();
+        assert_eq!(e, format!("toyrt b1-cpu is in use (pid {pid}): it stays until no server uses it; stop that server, then run this again"));
+        assert_eq!(std::fs::read_to_string(w.with_extension("staged")).unwrap().lines().count(), 2, "refused before anything was staged");
+        assert!(remove(&cat, id, Some("b1-cpu")).unwrap_err().contains("it stays until no server uses it"));
+        assert!(remove(&cat, id, None).unwrap_err().contains("toyrt b1-cpu is in use"), "nor with every other install");
+        assert!(root.join("b1-cpu/runtime.json").is_file() && root.join("b2-cpu/runtime.json").is_file());
+        // An install beside it, and one nothing runs from, are another's to replace or remove.
+        install(&cat, id, &w, &[plan_for("toyrt", "b3", "cpu")]).unwrap();
+        assert_eq!(remove(&cat, id, Some("b2-cpu")).unwrap(), ["b2-cpu"]);
+        drop(std::mem::replace(&mut server, crate::selfupdate::tests::Sleeper(Command::new("true").spawn().unwrap())));
+        assert!(install(&cat, id, &w, &[plan_for("toyrt", "b1", "cpu")]).unwrap().replaced);
+        assert_eq!(remove(&cat, id, Some("b1-cpu")).unwrap(), ["b1-cpu"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
