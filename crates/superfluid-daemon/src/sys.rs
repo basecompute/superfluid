@@ -359,10 +359,10 @@ pub fn kill_hard(pid: i32) {
     }
 }
 
-/// Asks the server with this process id to drain: stop accepting, finish what it runs, exit.
-/// SIGUSR1 on Unix. Windows has no signal to send, so a server there waits on an event named
-/// for its process id ([`DrainRequest`]), which this sets; a process that made no such event
-/// is not a server that drains, and is left alone.
+/// Asks the server or fleet node with this process id to drain: stop taking work, finish what
+/// it runs, exit. SIGUSR1 on Unix. Windows has no signal to send, so a server or node there
+/// waits on an event named for its process id ([`DrainRequest`]), which this sets; a process
+/// that made no such event is not one that drains, and is left alone.
 pub fn ask_to_drain(pid: i32) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -390,7 +390,7 @@ pub fn ask_to_drain(pid: i32) -> std::io::Result<()> {
                 return if set { Ok(()) } else { Err(err) };
             }
         }
-        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no superfluid server that drains has that process id"))
+        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no superfluid server or node that drains has that process id"))
     }
 }
 
@@ -403,7 +403,22 @@ fn drain_event_names(pid: u32) -> [Vec<u16>; 2] {
     [wide("Global"), wide("Local")]
 }
 
-/// A Windows server's standing request to be asked to drain: an event named for this process,
+/// Whether this process made its drain event, which a program run in its place
+/// ([`replace_process`]) is then asked through.
+#[cfg(windows)]
+static DRAINS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Passes a drain asked of this process (`own`) on to process `to` once `to` listens for one:
+/// a program started a moment ago makes its event only as it starts.
+#[cfg(windows)]
+fn pass_drain_on(own: DrainRequest, to: u32) {
+    own.wait();
+    while ask_to_drain(to as i32).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// A Windows server's or node's standing request to be asked to drain: an event named for this process,
 /// which [`ask_to_drain`] sets from another.
 #[cfg(windows)]
 pub struct DrainRequest(windows_sys::Win32::Foundation::HANDLE);
@@ -416,7 +431,9 @@ unsafe impl Send for DrainRequest {}
 impl DrainRequest {
     /// Makes the event. It lasts as long as this process.
     pub fn listen() -> std::io::Result<DrainRequest> {
-        Self::listen_as(std::process::id())
+        let request = Self::listen_as(std::process::id())?;
+        DRAINS.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(request)
     }
 
     fn listen_as(pid: u32) -> std::io::Result<DrainRequest> {
@@ -487,8 +504,10 @@ pub fn detached_hidden(cmd: &mut Command) -> &mut Command {
 /// execs it. Windows has no exec: the program runs as a child with this process's streams, and
 /// this process waits and exits with its status. While it waits it stands for the program:
 /// Ctrl+C and Ctrl+Break, which reach every process on the console, are the program's to
-/// answer, and ending this process ends the program. What the program itself starts is left
-/// out of that, as it would be after an exec.
+/// answer, and ending this process ends the program. A drain asked of this process, when it
+/// made the event it is asked by (a node starting again to follow its head), is passed on to
+/// the program: whoever started this process knows its id alone. What the program itself
+/// starts is left out of that, as it would be after an exec.
 pub fn replace_process(cmd: &mut Command) -> std::io::Error {
     #[cfg(unix)]
     {
@@ -526,6 +545,13 @@ pub fn replace_process(cmd: &mut Command) -> std::io::Error {
                 if SetInformationJobObject(job, JobObjectExtendedLimitInformation, std::ptr::addr_of!(limits).cast(), size) != 0 {
                     AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE);
                 }
+            }
+        }
+        // The event is this process's, so one asked already (it stays asked) is passed on too.
+        if DRAINS.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Ok(own) = DrainRequest::listen() {
+                let to = child.id();
+                let _ = std::thread::Builder::new().name("drain-forward".into()).spawn(move || pass_drain_on(own, to));
             }
         }
         match child.wait() {
@@ -687,6 +713,27 @@ mod tests {
         assert!(hears.recv_timeout(std::time::Duration::from_millis(100)).is_err(), "not asked yet");
         ask_to_drain(nobody as i32).unwrap();
         hears.recv_timeout(std::time::Duration::from_secs(10)).expect("the request was heard");
+    }
+
+    // As above, under ids of its own: tests run at once in one process, and share event names.
+    #[cfg(windows)]
+    #[test]
+    fn a_drain_asked_of_a_process_is_passed_on_to_the_one_run_in_its_place_once_that_one_listens() {
+        let own = 0x7ffe_0000 - (std::process::id() % 1024);
+        let to = own - 2048;
+        let request = DrainRequest::listen_as(own).unwrap();
+        ask_to_drain(own as i32).unwrap();
+        // Asked before passing on begins, and before the other listens: it stays asked.
+        let passing = std::thread::spawn(move || pass_drain_on(request, to));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let theirs = DrainRequest::listen_as(to).unwrap();
+        let (heard, hears) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            theirs.wait();
+            let _ = heard.send(());
+        });
+        hears.recv_timeout(std::time::Duration::from_secs(10)).expect("the program in its place was asked");
+        passing.join().unwrap();
     }
 
     #[test]

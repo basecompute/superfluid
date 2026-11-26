@@ -1,6 +1,6 @@
 # Install superfluid on Windows from a GitHub release.
 #
-#   irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex
+#   irm https://basecompute.co/sf/install.ps1 | iex
 #
 # Environment:
 #   SUPERFLUID_VERSION      a release tag (v0.2.0); default: the latest release

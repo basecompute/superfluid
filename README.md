@@ -39,7 +39,7 @@ superfluid serve basecompute/Qwen3.8-27B
 On Windows, in PowerShell (GGUF models through llama.cpp; see [Installation](docs/getting_started/installation.md#windows)):
 
 ```powershell
-irm https://github.com/basecompute/superfluid/releases/latest/download/install.ps1 | iex
+irm https://basecompute.co/sf/install.ps1 | iex
 superfluid serve unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M
 ```
 
