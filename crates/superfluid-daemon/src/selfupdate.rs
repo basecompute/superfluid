@@ -49,7 +49,8 @@ pub const HELP: &str = "Update superfluid itself, or switch between the versions
 Usage:
   superfluid self update [--version <v>] [--dry-run] [--yes]
                                                         Install the newest release that fits this machine and make it current
-  superfluid self check                                 Ask whether a newer release exists, without installing
+  superfluid self update --auto [--yes]                 Install what an automatic update would, now (for apps and scripts)
+  superfluid self check [--json]                        Ask whether a newer release exists, without installing
   superfluid self list                                  The versions installed here, and which is current
   superfluid self use <v>                               Make an installed version current (the one an update replaced stays)
   superfluid self auto-update [on|off]                  Turn automatic updates on or off; with neither, say whether they are on
@@ -90,6 +91,13 @@ Turning them off: `superfluid self auto-update off` (kept in $SUPERFLUID_HOME/se
 SUPERFLUID_NO_UPDATE=1 or SUPERFLUID_NO_UPDATE_CHECK=1 (no check, no update, no line), or
 --no-update on any command for that run. `superfluid serve` also says once a day when a newer
 release is out while it runs; --offline turns its check off.
+
+Apps and scripts: `superfluid self update --auto` reads the listing and installs the release an
+automatic update would (past the hold-off, fitting the engine, not one `self use` went back
+from), then updates the runtimes; with updates off, or nothing to install, it says why and exits
+0. It needs no terminal, and exits 1 when the update fails, 3 for a copy a package manager or
+basert updates. `superfluid self check --json` prints {current, newest, auto, autoReason, notes,
+autoUpdate}, where `auto` is what `--auto` would install now.
 ";
 
 /// The release asset name for this build's platform.
@@ -110,7 +118,7 @@ pub fn running() -> &'static str {
 
 /// Whether `v` can name a version directory: it starts with a digit and holds only what a version does, so it is one
 /// path component and never empty, `.` or `..`, which would make the version's directory the layout or above it.
-fn is_version(v: &str) -> bool {
+pub(crate) fn is_version(v: &str) -> bool {
     v.starts_with(|c: char| c.is_ascii_digit()) && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
@@ -462,7 +470,7 @@ pub(crate) fn update_command(exe: &Path) -> String {
     .unwrap_or_else(|| "superfluid self update".to_string())
 }
 
-fn not_ours(exe: &Path) -> String {
+pub(crate) fn not_ours(exe: &Path) -> String {
     let p = exe.to_string_lossy();
     if let Some(d) = delegate(exe) {
         return format!("{p} was installed by {}; `{}` updates it", d.manager(), d.command());
@@ -1015,7 +1023,7 @@ pub fn fetch_releases(source: &str, target: &str, max_time: u32) -> Result<Vec<R
     Ok(found)
 }
 
-fn compat_fetcher(max_time: u32) -> impl Fn(&str) -> Option<Value> {
+pub(crate) fn compat_fetcher(max_time: u32) -> impl Fn(&str) -> Option<Value> {
     move |url: &str| get_json(url, max_time).ok()
 }
 
@@ -1993,14 +2001,25 @@ pub fn run(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
         Some("update") => {
             let mut opts = Options { live: true, ..Options::default() };
+            let mut auto = false;
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--version" => opts.version = it.next().cloned().or_else(|| usage()),
                     "--dry-run" => opts.dry_run = true,
                     "--yes" | "-y" => opts.yes = true,
+                    "--auto" => auto = true,
                     _ => usage(),
                 }
+            }
+            // What an automatic update would do, for an app: nothing is asked, so --yes changes nothing.
+            if auto {
+                if opts.version.is_some() || opts.dry_run {
+                    usage();
+                }
+                crate::autoupdate::PROGRESS_LINES.store(true, std::sync::atomic::Ordering::Relaxed);
+                let env = |k: &str| std::env::var(k).ok();
+                return crate::autoupdate::update_auto(&home, &catalog, &exe, &listing_source(), &env, &mut |l| println!("{l}"), &mut |l| eprintln!("{l}"));
             }
             match update(&home, &catalog, &exe, &opts) {
                 Ok(Report { hand_off: Some(mut cmd), .. }) => {
@@ -2023,6 +2042,16 @@ pub fn run(args: &[String]) -> i32 {
                 1
             }
         },
+        Some("check") if args.len() == 2 && args[1] == "--json" => match crate::autoupdate::check_json(&home, &catalog, &exe, &listing_source(), &|k| std::env::var(k).ok()) {
+            Ok(v) => {
+                println!("{v}");
+                0
+            }
+            Err(e) => {
+                eprintln!("superfluid: {e}");
+                1
+            }
+        },
         // What a launch starts in the background when the daily read is due: the record alone, nothing printed.
         Some("check") if args.len() == 2 && args[1] == "--record" => match check_now(&home, &catalog, Some(HOLD_OFF_DAYS), &listing_source()) {
             Ok(_) => 0,
@@ -2030,7 +2059,8 @@ pub fn run(args: &[String]) -> i32 {
         },
         Some("auto-update") if args.len() <= 2 => crate::autoupdate::auto_update_command(&home, args.get(1).map(String::as_str)),
         // What an automatic update leaves running for a package manager's copy: it runs the manager once nothing runs from the copy.
-        Some("background-update") if args.len() == 1 => crate::autoupdate::background_update(&home, &exe),
+        Some("background-update") if args.len() == 1 => crate::autoupdate::background_update(&home, &exe, None),
+        Some("background-update") if args.len() == 3 && args[1] == "--version" => crate::autoupdate::background_update(&home, &exe, Some(&args[2])),
         Some("list") if args.len() == 1 => {
             let _ = std::io::stdout().write_all(list(&home, &exe).as_bytes());
             0

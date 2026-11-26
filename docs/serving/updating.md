@@ -56,13 +56,32 @@ superfluid: superfluid 0.2.2 is available (this is 0.2.1): `superfluid self upda
 
 ### A copy a package manager installed
 
-A copy from Homebrew, a global npm, pipx, uv or `cargo install` that this user owns is updated by its manager in the background, once per release, the same command `self update` runs for it:
+A copy from Homebrew, a global npm, pipx, uv or `cargo install` that this user owns is updated by its manager in the background, once per release, with the command `self update` runs for it pinned to the release the daily read chose (`npm install … @basecompute/superfluid@<v>`, `cargo install superfluid --version <v>`, `pipx install --force superfluid-cli==<v>`, `uv tool install --force superfluid-cli==<v>`), so a release published since, or one that does not fit the engine, is not installed in its place. Homebrew takes no version: `brew upgrade` is run, with `HOMEBREW_NO_AUTO_UPDATE=1`, only when `brew info` offers that release; otherwise it is tried again after the next day's read:
 
 ```text
 Updating superfluid 0.2.1 → 0.2.2 with Homebrew in the background (log: ~/.superfluid/logs/auto-update.log) · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2 · turn off: superfluid self auto-update off
 ```
 
 The manager replaces the copy the command is running from, so a detached `superfluid self background-update` waits until no Superfluid runs from the copy (this command included: a server keeps its version until it stops), for up to seven days, then runs the manager; what it prints goes to `$SUPERFLUID_HOME/logs/auto-update.log`. The release handed over is `delegated` in `update-check.json`, apart from the line that says a release is out, so a server's hourly line or a run without a terminal does not use it up. Right before it runs the manager it looks again: with automatic updates turned off meanwhile (`superfluid self auto-update off`, also while it waits), or the copy uninstalled or no longer that manager's, it runs nothing. When it runs nothing, gives up after the seven days, or the manager fails, the release is no longer marked handed over: after a failure the next launch prints the line again and the update is handed over again a day later. A pinned formula, another user's Homebrew, an npm folder that needs root, a project's npm dependency, pip in an environment, and every manager on Windows get the line with their command instead. The Superfluid basert installed is basert's to update. Superfluid's automatic updates leave it alone, and the line they print names `basert superfluid install`. basert's own automatic updates, made when a `basert` command runs in a terminal, bring it to the newest release that serves basert's engine. `basert superfluid install <older version>` goes back.
+
+### Apps and scripts
+
+An app that keeps Superfluid up to date (Superfluid Desktop) runs the automatic update itself, with no terminal:
+
+```sh
+superfluid self update --auto   # what an automatic update would install, installed now
+superfluid self check --json    # what is out, and what --auto would install
+```
+
+`self update --auto` reads the release listing now and applies the same rules as an update at a launch: the newest release past the hold-off that fits the engine here, not one `self use` went back from, and nothing at all with automatic updates off (the setting, `SUPERFLUID_NO_UPDATE`, `SUPERFLUID_NO_UPDATE_CHECK`, `CI`). It installs that release the same way, then updates and repairs the runtimes as above, and prints the lines above on stderr; the download is a line per tenth (`downloading superfluid-aarch64-apple-darwin.tar.gz: 45%`) when stderr is not a terminal. When there is nothing to do it prints why on stdout (`automatic updates are off (superfluid self auto-update off)`, `superfluid 0.2.2 is up to date for automatic updates`, `you went back from 0.2.3 with self use; it stays until a newer release is out`) and exits 0. It exits 1 when the update fails (the version in use stays), and 3 for a copy a package manager or basert updates, naming that copy's command. `--yes` is accepted; nothing is asked.
+
+`self check --json` prints one object, from a read of the listing made now:
+
+```json
+{"current":"0.2.2","newest":"0.2.4","auto":"0.2.3","autoReason":null,"notes":"https://github.com/basecompute/superfluid/releases/tag/v0.2.4","autoUpdate":true}
+```
+
+`newest` is the newest release that fits here and is newer than `current` (what `self update` installs), with `notes` its release notes; `auto` is what `self update --auto` would install, and when it is `null`, `autoReason` is the line `--auto` would print; `autoUpdate` is whether automatic updates are on here.
 
 ## Where releases live
 

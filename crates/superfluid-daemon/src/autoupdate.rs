@@ -22,7 +22,7 @@ use superfluid_adapter_kit::install::{sha256_of, Asset};
 use crate::installs;
 use crate::runtime_pick::RuntimeId;
 use crate::runtimes::Catalog;
-use crate::selfupdate::{self, Check, Delegate, Installed, Options, Report, Versions};
+use crate::selfupdate::{self, Check, Delegate, Engine, Installed, Options, Release, Report, Versions, HOLD_OFF_DAYS};
 
 /// Set to anything but empty, `0` or `false`: no update is made, none is looked for, and none is announced.
 pub const NO_UPDATE_ENV: &str = "SUPERFLUID_NO_UPDATE";
@@ -417,6 +417,110 @@ pub(crate) fn update_here(
     Some(bin)
 }
 
+/// The version `self update --auto` updates from: `current` for a copy under `versions` (an app may run a version by
+/// its own name), else this one.
+fn version_here(exe: &Path) -> String {
+    match selfupdate::installed_as(exe) {
+        Installed::Managed { versions, .. } => (Versions { dir: versions }).current().unwrap_or_else(|| selfupdate::running().to_string()),
+        _ => selfupdate::running().to_string(),
+    }
+}
+
+/// Why `self update --auto` leaves the copy `exe` as it is: another tool installed it, and updates it.
+fn not_self_managed(exe: &Path) -> Option<String> {
+    match selfupdate::installed_as(exe) {
+        Installed::Other(p) => Some(format!("{}; `superfluid self update --auto` updates only a copy the install script or `superfluid self update` placed", selfupdate::not_ours(&p))),
+        _ => None,
+    }
+}
+
+/// What an automatic update installs from `found`, the listing just read, over `from`: the newest release that fits
+/// the engine here and is past the hold-off, unless `self use` went back from it; else why none, as a line.
+pub(crate) fn eligible<'a>(found: &'a [Release], engine: &Engine, compat: &dyn Fn(&str) -> Option<Value>, check: &Check, from: &str) -> Result<&'a Release, String> {
+    let newer = |r: &&Release| selfupdate::later(&r.version, from);
+    match selfupdate::newest(found, engine, Some(HOLD_OFF_DAYS), compat).filter(newer) {
+        Some(r) if declined(check, &r.version) => {
+            Err(format!("you went back from {} with self use; it stays until a newer release is out", check.declined.as_deref().unwrap_or(&r.version)))
+        }
+        Some(r) => Ok(r),
+        None => match selfupdate::newest(found, engine, None, compat).filter(newer) {
+            Some(r) => Err(format!(
+                "superfluid {} (published {}) is held off: automatic updates wait {HOLD_OFF_DAYS} days after a release; `superfluid self update` installs it now",
+                r.version, r.published
+            )),
+            None => Err(format!("superfluid {from} is up to date for automatic updates")),
+        },
+    }
+}
+
+/// `superfluid self update --auto`: the update a launch makes, for an app or a script to run (Superfluid Desktop),
+/// with no terminal and nothing run again. With automatic updates on, the listing is read now, the release `eligible`
+/// picks is installed as at a launch, and the runtimes are updated, and repaired, by it. `out` takes the line saying
+/// nothing was to be updated, and why; `say` the update's own lines. The exit code: 0 when updated or nothing was to
+/// be, 1 when the update failed (the version here stays current), 3 for a copy another tool updates.
+pub fn update_auto(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env: &dyn Fn(&str) -> Option<String>, out: &mut dyn FnMut(String), say: &mut dyn FnMut(String)) -> i32 {
+    if let Err(why) = enabled(home, env) {
+        out(format!("automatic updates are off ({why})"));
+        return 0;
+    }
+    if let Some(why) = not_self_managed(exe) {
+        say(format!("superfluid: {why}"));
+        return 3;
+    }
+    let found = match selfupdate::target().ok_or_else(|| "no release is published for this platform".to_string()).and_then(|t| selfupdate::fetch_releases(source, t, 30)) {
+        Ok(found) => found,
+        Err(e) => {
+            say(format!("superfluid: {e}"));
+            return 1;
+        }
+    };
+    let engine = selfupdate::engine_here(catalog);
+    let compat = selfupdate::compat_fetcher(15);
+    // What was read is the day's read, too.
+    let _ = selfupdate::record(home, &found, &engine, Some(HOLD_OFF_DAYS), &compat);
+    let check = Check::read(home).unwrap_or_default();
+    let from = version_here(exe);
+    let chosen = match eligible(&found, &engine, &compat, &check, &from) {
+        Ok(r) => r,
+        Err(why) => {
+            out(why);
+            return 0;
+        }
+    };
+    match update_here(home, catalog, exe, &from, &chosen.version, &chosen.notes_url, Some(source.to_string()), None, say) {
+        Some(_) => 0,
+        None => 1,
+    }
+}
+
+/// `superfluid self check --json`, from the listing read now: the version here, the newest release that fits here
+/// and is newer (`self update` installs it) and its notes, the one `self update --auto` would install (`auto`) or why
+/// none (`autoReason`), and whether automatic updates are on.
+pub fn check_json(home: &Path, catalog: &Catalog, exe: &Path, source: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Value, String> {
+    let target = selfupdate::target().ok_or("no release is published for this platform")?;
+    let found = selfupdate::fetch_releases(source, target, 30)?;
+    let engine = selfupdate::engine_here(catalog);
+    let compat = selfupdate::compat_fetcher(15);
+    let _ = selfupdate::record(home, &found, &engine, Some(HOLD_OFF_DAYS), &compat);
+    let check = Check::read(home).unwrap_or_default();
+    let from = version_here(exe);
+    let newest = selfupdate::newest(&found, &engine, None, &compat).filter(|r| selfupdate::later(&r.version, &from));
+    let on = enabled(home, env);
+    let auto = match (&on, not_self_managed(exe)) {
+        (Err(why), _) => Err(format!("automatic updates are off ({why})")),
+        (_, Some(why)) => Err(why),
+        _ => eligible(&found, &engine, &compat, &check, &from).map(|r| r.version.clone()),
+    };
+    Ok(json!({
+        "current": from,
+        "newest": newest.map(|r| &r.version),
+        "auto": auto.as_ref().ok(),
+        "autoReason": auto.as_ref().err(),
+        "notes": newest.map(|r| &r.notes_url),
+        "autoUpdate": on.is_ok(),
+    }))
+}
+
 /// The runtimes installed here, by name.
 fn installed_runtimes(catalog: &Catalog) -> Vec<RuntimeId> {
     let mut ids: Vec<RuntimeId> = std::fs::read_dir(catalog.home().join("runtimes"))
@@ -538,7 +642,7 @@ fn in_background(home: &Path, exe: &Path, found: &Delegate, from: &str, newer: &
     let _ = writeln!(out, "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z superfluid {from} -> {newer}: {} for {}", found.command(), exe.display());
     let err = out.try_clone().map_err(|e| format!("{}: {e}", log.display()))?;
     let mut cmd = Command::new(exe);
-    cmd.args(["self", "background-update"])
+    cmd.args(["self", "background-update", "--version", newer])
         .env(selfupdate::NO_CHECK_ENV, "1")
         .env(NO_UPDATE_ENV, "1")
         .stdin(Stdio::null())
@@ -564,11 +668,13 @@ fn in_background(home: &Path, exe: &Path, found: &Delegate, from: &str, newer: &
     ))
 }
 
-/// `superfluid self background-update`: waits until no other superfluid runs from this copy, then runs the update
-/// of the package manager that owns it, all of it into the log the launch opened; the exit code. It runs nothing when
-/// automatic updates were turned off meanwhile, or the copy was removed or is no longer that manager's; when it runs
-/// nothing, or the manager's update fails, the release is no longer marked handed over (`handed_back`).
-pub fn background_update(home: &Path, exe: &Path) -> i32 {
+/// `superfluid self background-update --version <v>`: waits until no other superfluid runs from this copy, then runs
+/// the update of the package manager that owns it, pinned to `version` (the release the daily read chose, past the
+/// hold-off and fitting the engine here; without it, the one the record says was handed over), all of it into the log
+/// the launch opened; the exit code. It runs nothing when automatic updates were turned off meanwhile, the copy was
+/// removed or is no longer that manager's, or Homebrew offers another version; when it runs nothing, or the manager's
+/// update fails, the release is no longer marked handed over (`handed_back`).
+pub fn background_update(home: &Path, exe: &Path, version: Option<&str>) -> i32 {
     let exe = crate::sys::canonical(exe).unwrap_or_else(|_| exe.to_path_buf());
     let Some(Delegate::Run { manager, argv, path_first, .. }) = selfupdate::delegate(&exe) else {
         eprintln!("superfluid: {} is not a copy superfluid updates with its package manager", exe.display());
@@ -580,13 +686,20 @@ pub fn background_update(home: &Path, exe: &Path) -> i32 {
         handed_back(home, false);
         return 1;
     }
+    let v = version.map(str::to_string).or_else(|| Check::read(home).and_then(|c| c.delegated));
+    let Some(pinned) = v.as_deref().filter(|v| selfupdate::is_version(v)).and_then(|v| pinned(&manager, &argv, v)) else {
+        eprintln!("superfluid: no release to update to was handed over; {} was not run", argv.join(" "));
+        handed_back(home, false);
+        return 1;
+    };
+    let v = v.unwrap_or_default();
     let watched = selfupdate::watched_dir(&exe, &manager);
     let began = Instant::now();
     let mut said = false;
     loop {
         // The file's setting: this process's environment turns updates off for itself.
         if !setting(home) {
-            eprintln!("superfluid: automatic updates were turned off; {} was not run", argv.join(" "));
+            eprintln!("superfluid: automatic updates were turned off; {} was not run", pinned.join(" "));
             handed_back(home, false);
             return 0;
         }
@@ -607,13 +720,25 @@ pub fn background_update(home: &Path, exe: &Path) -> i32 {
     }
     // Looked at again now the wait is over: an uninstall made meanwhile is not undone by an install.
     if let Some(why) = not_to_run(home, &exe, &argv) {
-        eprintln!("superfluid: {why}; {} was not run", argv.join(" "));
+        eprintln!("superfluid: {why}; {} was not run", pinned.join(" "));
         handed_back(home, false);
         return 0;
     }
-    eprintln!("superfluid: running {}", argv.join(" "));
-    let mut run = Command::new(&argv[0]);
-    run.args(&argv[1..]).stdin(Stdio::null());
+    // Homebrew takes no version: it is run only when what it offers is the release chosen, and told not to update its
+    // taps first, so it installs what was looked at. Another version is left for a later read.
+    if manager == "Homebrew" {
+        if let Err(why) = homebrew_offers(&argv, &v) {
+            eprintln!("superfluid: {why}; {} was not run, and is tried again later", pinned.join(" "));
+            handed_back(home, true);
+            return 1;
+        }
+    }
+    eprintln!("superfluid: running {}", pinned.join(" "));
+    let mut run = Command::new(&pinned[0]);
+    run.args(&pinned[1..]).stdin(Stdio::null());
+    if manager == "Homebrew" {
+        run.env(BREW_NO_AUTO_UPDATE, "1");
+    }
     if let Some(first) = path_first {
         let rest = std::env::var_os("PATH").unwrap_or_default();
         if let Ok(path) = std::env::join_paths(std::iter::once(first).chain(std::env::split_paths(&rest))) {
@@ -626,15 +751,59 @@ pub fn background_update(home: &Path, exe: &Path) -> i32 {
             0
         }
         Ok(status) => {
-            eprintln!("superfluid: `{}` failed ({status})", argv.join(" "));
+            eprintln!("superfluid: `{}` failed ({status})", pinned.join(" "));
             handed_back(home, true);
             1
         }
         Err(e) => {
-            eprintln!("superfluid: running {}: {e}", argv[0]);
+            eprintln!("superfluid: running {}: {e}", pinned[0]);
             handed_back(home, true);
             1
         }
+    }
+}
+
+/// Keeps a `brew` command from updating Homebrew's taps before it runs.
+const BREW_NO_AUTO_UPDATE: &str = "HOMEBREW_NO_AUTO_UPDATE";
+
+/// The manager's update `argv` (the command `self update` runs for the copy, from `selfupdate::delegate`) pinned to
+/// release `v`: the manager's own command takes whatever its registry offers now, which may be a release published
+/// since the daily read, inside the hold-off, or one that does not fit the engine here. Homebrew's takes no version, and
+/// is run as it is once what it offers was looked at (`homebrew_offers`). `None` for a manager not run in the background.
+pub(crate) fn pinned(manager: &str, argv: &[String], v: &str) -> Option<Vec<String>> {
+    let program = argv.first()?.clone();
+    Some(match manager {
+        "npm" => {
+            let at = argv.iter().position(|a| a.starts_with("@basecompute/superfluid@"))?;
+            let mut out = argv.to_vec();
+            out[at] = format!("@basecompute/superfluid@{v}");
+            out
+        }
+        "cargo" => argv.iter().cloned().chain(["--version".to_string(), v.to_string()]).collect(),
+        "pipx" => vec![program, "install".into(), "--force".into(), format!("superfluid-cli=={v}")],
+        "uv" => vec![program, "tool".into(), "install".into(), "--force".into(), format!("superfluid-cli=={v}")],
+        "Homebrew" => argv.to_vec(),
+        _ => return None,
+    })
+}
+
+/// Whether the Homebrew whose `brew upgrade <formula>` is `argv` offers release `v` of the formula now, as `brew info`
+/// reads its taps without updating them; when not, what it offers.
+fn homebrew_offers(argv: &[String], v: &str) -> Result<(), String> {
+    let (Some(brew), Some(formula)) = (argv.first(), argv.last()) else { return Err("no brew to ask".to_string()) };
+    let mut cmd = Command::new(brew);
+    cmd.args(["info", "--json=v2", formula]).env(BREW_NO_AUTO_UPDATE, "1");
+    let out = match crate::exec::output_within(&mut cmd, Duration::from_secs(5 * 60)) {
+        Ok(Some(out)) if out.status.success() => out,
+        Ok(Some(out)) => return Err(format!("`brew info {formula}` failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim())),
+        Ok(None) => return Err(format!("`brew info {formula}` did not answer within 5 minutes")),
+        Err(e) => return Err(format!("running {brew}: {e}")),
+    };
+    let info: Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    match info["formulae"][0]["versions"]["stable"].as_str() {
+        Some(offered) if offered == v => Ok(()),
+        Some(offered) => Err(format!("Homebrew offers {formula} {offered}, not {v}, the release the check chose")),
+        None => Err(format!("`brew info {formula}` names no version")),
     }
 }
 
@@ -669,6 +838,9 @@ fn handed_back(home: &Path, failed: bool) {
 
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// A download with no terminal to draw its bar on says how far it is in lines instead: `self update --auto`, which an
+/// app runs and reads.
+pub(crate) static PROGRESS_LINES: AtomicBool = AtomicBool::new(false);
 
 /// Whether Ctrl+C was pressed while an automatic update caught it.
 pub(crate) fn interrupted() -> bool {
@@ -776,22 +948,48 @@ pub(crate) fn bar_line(name: &str, have: u64, total: Option<u64>, width: usize) 
     format!("{head}[{}{}]{tail}", "#".repeat(filled), ".".repeat(cells - filled))
 }
 
-/// The progress of a download, drawn over itself on stderr; nothing when off.
+/// The line a download with no terminal prints when it has come another tenth of the way (another 10 MB when its
+/// size is not known) since `said`, which it moves on.
+pub(crate) fn progress_line(name: &str, have: u64, total: Option<u64>, said: &mut u64) -> Option<String> {
+    let (step, line) = match total.filter(|&t| t > 0) {
+        Some(total) => {
+            let percent = have.min(total) * 100 / total;
+            (percent / 10, format!("downloading {name}: {percent}%"))
+        }
+        None => (have / 10_000_000, format!("downloading {name}: {:.1} MB", have as f64 / 1e6)),
+    };
+    (step > *said).then(|| {
+        *said = step;
+        line
+    })
+}
+
+/// The progress of a download, drawn over itself on stderr, or said in lines (`PROGRESS_LINES`); nothing when off.
 struct Bar {
     name: String,
     total: Option<u64>,
     on: bool,
+    lines: bool,
+    said: u64,
     width: usize,
     drawn: usize,
     last: Option<Instant>,
 }
 
 impl Bar {
-    fn new(name: &str, total: Option<u64>, on: bool) -> Bar {
-        Bar { name: name.to_string(), total, on, width: if on { terminal_width() } else { 80 }, drawn: 0, last: None }
+    fn new(name: &str, total: Option<u64>, wanted: bool) -> Bar {
+        let on = wanted && std::io::stderr().is_terminal();
+        let lines = wanted && !on && PROGRESS_LINES.load(Ordering::Relaxed);
+        Bar { name: name.to_string(), total, on, lines, said: 0, width: if on { terminal_width() } else { 80 }, drawn: 0, last: None }
     }
 
     fn show(&mut self, have: u64, force: bool) {
+        if self.lines {
+            if let Some(line) = progress_line(&self.name, have, self.total, &mut self.said) {
+                eprintln!("{line}");
+            }
+            return;
+        }
         if !self.on || (!force && self.last.is_some_and(|t| t.elapsed() < Duration::from_millis(100))) {
             return;
         }
@@ -815,14 +1013,15 @@ impl Bar {
 }
 
 /// Downloads `asset` into `dir`, checking its size and SHA-256, with a progress bar on stderr when `bar` and stderr is
-/// a terminal: the size from the listing, against the bytes in the `.part` file curl writes. The file's path.
+/// a terminal (lines, with `PROGRESS_LINES`, when it is not): the size from the listing, against the bytes in the
+/// `.part` file curl writes. The file's path.
 pub(crate) fn download(asset: &Asset, dir: &Path, bar: bool) -> Result<PathBuf, String> {
     let src = asset.url.as_str();
     let Some(want) = asset.sha256.as_deref() else { return Err(format!("{src}: no SHA-256 to check it against")) };
     let dest = dir.join(&asset.name);
     let part = dir.join(format!("{}.part", asset.name));
     let _ = std::fs::remove_file(&part);
-    let mut shown = Bar::new(&asset.name, asset.size, bar && std::io::stderr().is_terminal());
+    let mut shown = Bar::new(&asset.name, asset.size, bar);
     let local = src.strip_prefix("file://").or_else(|| (!src.contains("://")).then_some(src));
     let got = match local {
         Some(path) => copy_showing(Path::new(path), &part, &mut shown),
@@ -1006,6 +1205,39 @@ mod tests {
     }
 
     #[test]
+    fn a_package_managers_update_in_the_background_is_pinned_to_the_release_the_check_chose() {
+        let pin = |manager: &str, argv: &str| pinned(manager, &words(argv), "0.2.3").map(|a| a.join(" "));
+        assert_eq!(
+            pin("npm", "/n/bin/npm install --global --prefix /n @basecompute/superfluid@latest").as_deref(),
+            Some("/n/bin/npm install --global --prefix /n @basecompute/superfluid@0.2.3")
+        );
+        assert_eq!(pin("cargo", "/c/bin/cargo install superfluid").as_deref(), Some("/c/bin/cargo install superfluid --version 0.2.3"));
+        assert_eq!(pin("pipx", "/b/pipx upgrade superfluid-cli").as_deref(), Some("/b/pipx install --force superfluid-cli==0.2.3"));
+        assert_eq!(pin("uv", "/b/uv tool upgrade superfluid-cli").as_deref(), Some("/b/uv tool install --force superfluid-cli==0.2.3"));
+        // Homebrew takes no version: what it offers is looked at before it runs.
+        assert_eq!(pin("Homebrew", "/h/bin/brew upgrade superfluid").as_deref(), Some("/h/bin/brew upgrade superfluid"));
+        assert_eq!(pin("basert", "/b/basert superfluid install"), None, "not run in the background");
+        assert_eq!(pin("npm", "/n/bin/npm install --global left-pad"), None, "not the command superfluid runs");
+        assert_eq!(pinned("cargo", &[], "0.2.3"), None);
+    }
+
+    #[test]
+    fn a_download_with_no_terminal_says_how_far_it_is_every_tenth() {
+        let mut said = 0;
+        let mut lines = Vec::new();
+        for have in (0..=27_000_000).step_by(1_000_000) {
+            lines.extend(progress_line("superfluid-x.tar.gz", have, Some(27_000_000), &mut said));
+        }
+        assert_eq!(lines.len(), 10, "{lines:?}");
+        assert_eq!(lines[0], "downloading superfluid-x.tar.gz: 11%");
+        assert_eq!(lines.last().unwrap(), "downloading superfluid-x.tar.gz: 100%");
+        assert_eq!(progress_line("x", 27_000_000, Some(27_000_000), &mut said), None, "said once");
+        let mut said = 0;
+        assert_eq!(progress_line("x", 9_000_000, None, &mut said), None);
+        assert_eq!(progress_line("x", 21_000_000, None, &mut said).as_deref(), Some("downloading x: 21.0 MB"), "no size: every 10 MB");
+    }
+
+    #[test]
     fn the_runtime_a_runtime_command_installs_repairs_or_removes_is_left_to_it() {
         assert_eq!(named_runtime(&words("runtime remove llamacpp")), Some(RuntimeId::new("llamacpp")));
         assert_eq!(named_runtime(&words("runtime remove mlx --all")), Some(RuntimeId::new("mlx")));
@@ -1177,6 +1409,7 @@ mod update_tests {
     }
 
     /// A copy Homebrew placed under `dir`, and its `brew`, which notes what it is asked to run in `dir/brew-ran`
+    /// (with HOMEBREW_NO_AUTO_UPDATE), offers the version in `dir/brew-offers` (99.0.0 without it) to `brew info`,
     /// and fails while `dir/brew-fails` is there. The copy's real path.
     fn homebrew_copy(dir: &Path) -> PathBuf {
         let root = dir.join("brew/Cellar/superfluid/98.0.0/libexec");
@@ -1184,7 +1417,10 @@ mod update_tests {
         std::fs::write(root.join(selfupdate::INSTALLED_BY), "Homebrew: brew upgrade superfluid\n").unwrap();
         let brew = dir.join("brew/bin/brew");
         std::fs::create_dir_all(brew.parent().unwrap()).unwrap();
-        let script = format!("#!/bin/sh\necho \"$*\" >> '{0}/brew-ran'\n[ ! -e '{0}/brew-fails' ]\n", dir.display());
+        let script = format!(
+            "#!/bin/sh\necho \"$*|$HOMEBREW_NO_AUTO_UPDATE\" >> '{0}/brew-ran'\nif [ \"$1\" = info ]; then\n  v=$(cat '{0}/brew-offers' 2>/dev/null || echo 99.0.0)\n  printf '{{\"formulae\":[{{\"name\":\"superfluid\",\"versions\":{{\"stable\":\"%s\"}}}}]}}' \"$v\"\n  exit 0\nfi\n[ ! -e '{0}/brew-fails' ]\n",
+            dir.display()
+        );
         std::fs::write(&brew, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&brew, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1220,15 +1456,33 @@ mod update_tests {
         assert!(matches!(plan(&exe, Mode::Update, &lost, "98.0.0", "99.0.0"), Plan::Manager(_)), "an update in the background lost to a restart is handed over again");
         assert_eq!(plan(&exe, Mode::Notice, &check, "98.0.0", "99.0.0"), Plan::Notice);
 
-        // The update in the background runs brew once nothing runs from the copy.
-        assert_eq!(background_update(&home, &exe), 0);
-        assert_eq!(std::fs::read_to_string(dir.join("brew-ran")).unwrap(), "upgrade superfluid\n");
+        // The update in the background runs brew once nothing runs from the copy, when it offers the release chosen,
+        // its taps left as they are so that it installs what it offered.
+        assert_eq!(background_update(&home, &exe, Some("99.0.0")), 0);
+        assert_eq!(std::fs::read_to_string(dir.join("brew-ran")).unwrap(), "info --json=v2 superfluid|1\nupgrade superfluid|1\n");
+        std::fs::remove_file(dir.join("brew-ran")).unwrap();
+
+        // Homebrew offers a release published since (or one not yet in its taps): nothing is upgraded, and it is
+        // tried again after the next day's read.
+        handed.write(&home).unwrap();
+        std::fs::write(dir.join("brew-offers"), "99.1.0").unwrap();
+        assert_eq!(background_update(&home, &exe, Some("99.0.0")), 1);
+        assert_eq!(std::fs::read_to_string(dir.join("brew-ran")).unwrap(), "info --json=v2 superfluid|1\n", "no upgrade");
+        let other = Check::read(&home).unwrap();
+        assert_eq!((other.delegated.as_deref(), other.attempted.as_deref()), (None, Some("99.0.0")));
+        std::fs::remove_file(dir.join("brew-offers")).unwrap();
+        std::fs::remove_file(dir.join("brew-ran")).unwrap();
+
+        // Without --version, the release the record says was handed over.
+        handed.write(&home).unwrap();
+        assert_eq!(background_update(&home, &exe, None), 0);
+        assert!(std::fs::read_to_string(dir.join("brew-ran")).unwrap().ends_with("upgrade superfluid|1\n"));
         std::fs::remove_file(dir.join("brew-ran")).unwrap();
 
         // brew fails: tried, so handed over again after a day, and said again.
         handed.write(&home).unwrap();
         std::fs::write(dir.join("brew-fails"), "").unwrap();
-        assert_eq!(background_update(&home, &exe), 1);
+        assert_eq!(background_update(&home, &exe, Some("99.0.0")), 1);
         let failed = Check::read(&home).unwrap();
         assert_eq!((failed.delegated.as_deref(), failed.attempted.as_deref(), failed.notified.as_deref()), (None, Some("99.0.0"), None));
         assert_eq!(plan(&exe, Mode::Update, &failed, "98.0.0", "99.0.0"), Plan::Notice, "not handed over again within the day");
@@ -1241,7 +1495,7 @@ mod update_tests {
         // Turned off while it waited: brew is not run, and the release is no longer handed over.
         handed.write(&home).unwrap();
         set_setting(&home, false).unwrap();
-        assert_eq!(background_update(&home, &exe), 0);
+        assert_eq!(background_update(&home, &exe, Some("99.0.0")), 0);
         assert!(!dir.join("brew-ran").exists(), "turned off: nothing run");
         assert_eq!(Check::read(&home).unwrap().delegated, None);
         set_setting(&home, true).unwrap();
@@ -1349,6 +1603,136 @@ mod update_tests {
         // The new version's stdout is this command's stderr: a script `launch --print` writes, or a log, is not mixed with it.
         let mut cmd = by_new_version(Path::new("/bin/sh"), &catalog, "98.0.0", &["-c", "[ /dev/fd/1 -ef /dev/fd/2 ]"]);
         assert!(cmd.status().unwrap().success());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A home with superfluid 98.0.0 current under `versions`, and the copy's real path.
+    fn managed_at(home: &Path) -> PathBuf {
+        let versions = Versions::of(home);
+        release_tree(&versions.version_dir("98.0.0"), "98.0.0");
+        versions.set_current("98.0.0").unwrap();
+        std::fs::canonicalize(versions.binary("98.0.0")).unwrap()
+    }
+
+    /// `self update --auto`: the exit code, what it printed on stdout, and its own lines.
+    fn auto(home: &Path, catalog: &Catalog, exe: &Path, source: &Path, env: &[(&str, &str)]) -> (i32, Vec<String>, Vec<String>) {
+        let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let lookup = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone());
+        let (mut out, mut said) = (Vec::new(), Vec::new());
+        let code = update_auto(home, catalog, exe, &source.to_string_lossy(), &lookup, &mut |l| out.push(l), &mut |l| said.push(l));
+        (code, out, said)
+    }
+
+    #[test]
+    fn self_update_auto_installs_the_release_past_the_hold_off_not_the_newest() {
+        let dir = scratch("auto-command");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let exe = managed_at(&home);
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
+        let (code, out, said) = auto(&home, &catalog, &exe, &p, &[]);
+        assert_eq!(code, 0, "{said:?}");
+        assert!(out.is_empty(), "{out:?}");
+        let versions = Versions::of(&home);
+        assert_eq!(versions.current().as_deref(), Some("99.0.0"), "99.1.0 is inside the hold-off: {said:?}");
+        assert_eq!(said[0], "Updating superfluid 98.0.0 → 99.0.0 · release notes: https://github.com/basecompute/superfluid/releases/tag/v99.0.0");
+        assert_eq!(said.last().unwrap(), "superfluid 99.0.0 is in use · `superfluid self use 98.0.0` goes back · `superfluid self auto-update off` turns automatic updates off");
+        assert_eq!(Check::read(&home).unwrap().newest.as_deref(), Some("99.0.0"), "the listing read is recorded as the day's read");
+        // Run again by the new version: nothing past the hold-off is newer.
+        let exe = std::fs::canonicalize(versions.binary("99.0.0")).unwrap();
+        let (code, out, _) = auto(&home, &catalog, &exe, &p, &[]);
+        assert_eq!((code, out[0].as_str()), (0, "superfluid 99.1.0 (published 2099-01-01) is held off: automatic updates wait 3 days after a release; `superfluid self update` installs it now"));
+        let p = listing(&dir.join("only"), &[("99.0.0", "2026-01-01", None)]);
+        let (code, out, _) = auto(&home, &catalog, &exe, &p, &[]);
+        assert_eq!((code, out), (0, vec!["superfluid 99.0.0 is up to date for automatic updates".to_string()]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn self_update_auto_keeps_a_step_back_and_does_nothing_with_updates_off() {
+        let dir = scratch("auto-command-held");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let exe = managed_at(&home);
+        let versions = Versions::of(&home);
+        release_tree(&versions.version_dir("99.0.0"), "99.0.0");
+        versions.set_current("99.0.0").unwrap();
+        selfupdate::use_version(&home, &catalog, &exe, "98.0.0").unwrap();
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None)]);
+        let (code, out, said) = auto(&home, &catalog, &exe, &p, &[]);
+        assert_eq!((code, out), (0, vec!["you went back from 99.0.0 with self use; it stays until a newer release is out".to_string()]), "{said:?}");
+        assert_eq!(versions.current().as_deref(), Some("98.0.0"));
+        // Off, by the setting or the environment: nothing read, nothing changed.
+        set_setting(&home, false).unwrap();
+        let (code, out, said) = auto(&home, &catalog, &exe, Path::new("/nonexistent/releases.json"), &[]);
+        assert_eq!((code, out), (0, vec!["automatic updates are off (superfluid self auto-update off)".to_string()]), "{said:?}");
+        set_setting(&home, true).unwrap();
+        let (code, out, _) = auto(&home, &catalog, &exe, Path::new("/nonexistent/releases.json"), &[(NO_UPDATE_ENV, "1")]);
+        assert_eq!((code, out), (0, vec!["automatic updates are off (SUPERFLUID_NO_UPDATE is set)".to_string()]));
+        assert_eq!(versions.current().as_deref(), Some("98.0.0"));
+        // Unreachable listing: one line, and a failure.
+        let (code, out, said) = auto(&home, &catalog, &exe, Path::new("/nonexistent/releases.json"), &[]);
+        assert!(code == 1 && out.is_empty() && said.len() == 1 && said[0].starts_with("superfluid: /nonexistent/releases.json: "), "{said:?}");
+        // A copy a package manager owns is that manager's.
+        let brew_copy = {
+            let root = dir.join("brew/Cellar/superfluid/98.0.0/libexec");
+            release_tree(&root, "98.0.0");
+            std::fs::write(root.join(selfupdate::INSTALLED_BY), "Homebrew: brew upgrade superfluid\n").unwrap();
+            std::fs::canonicalize(root.join("bin/superfluid")).unwrap()
+        };
+        let (code, out, said) = auto(&home, &catalog, &brew_copy, &p, &[]);
+        assert!(code == 3 && out.is_empty(), "{said:?}");
+        assert!(said[0].contains("was installed by Homebrew") && said[0].ends_with("`superfluid self update --auto` updates only a copy the install script or `superfluid self update` placed"), "{said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn self_update_auto_installs_again_a_runtime_whose_worker_the_new_version_cannot_run() {
+        let dir = scratch("auto-command-repair");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let exe = managed_at(&home);
+        install_of(&catalog, "llamacpp", "b1-cpu");
+        let broken = json!({"id": "llamacpp", "state": "broken", "worker": {"source": "installed"}, "ready": "the llamacpp runtime speaks Link W [1] and this superfluid speaks 2"});
+        std::fs::write(home.join("runtimes.json"), json!([broken]).to_string()).unwrap();
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None)]);
+        let (code, _, said) = auto(&home, &catalog, &exe, &p, &[]);
+        assert_eq!(code, 0, "{said:?}");
+        assert_eq!(std::fs::read_to_string(home.join("runtime-calls")).unwrap(), "runtime update llamacpp\nruntime repair llamacpp\n", "{said:?}");
+        assert!(said.iter().any(|l| l.starts_with("superfluid: llamacpp does not run with superfluid 99.0.0 (")), "{said:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn self_check_json_says_the_newest_release_and_the_one_an_automatic_update_installs() {
+        let dir = scratch("check-json");
+        let home = dir.join("home");
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let exe = managed_at(&home);
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
+        let source = p.to_string_lossy().to_string();
+        let none = |_: &str| None;
+        assert_eq!(
+            check_json(&home, &catalog, &exe, &source, &none).unwrap(),
+            json!({
+                "current": "98.0.0",
+                "newest": "99.1.0",
+                "auto": "99.0.0",
+                "autoReason": null,
+                "notes": "https://github.com/basecompute/superfluid/releases/tag/v99.1.0",
+                "autoUpdate": true,
+            })
+        );
+        set_setting(&home, false).unwrap();
+        let off = check_json(&home, &catalog, &exe, &source, &none).unwrap();
+        assert_eq!((&off["auto"], &off["autoReason"], &off["autoUpdate"]), (&Value::Null, &json!("automatic updates are off (superfluid self auto-update off)"), &json!(false)));
+        assert_eq!(off["newest"], "99.1.0", "what is out is said all the same");
+        set_setting(&home, true).unwrap();
+        let p = listing(&dir.join("old"), &[("97.0.0", "2026-01-01", None)]);
+        let none_newer = check_json(&home, &catalog, &exe, &p.to_string_lossy(), &none).unwrap();
+        assert_eq!((&none_newer["newest"], &none_newer["notes"], &none_newer["auto"]), (&Value::Null, &Value::Null, &Value::Null));
+        assert_eq!(none_newer["autoReason"], "superfluid 98.0.0 is up to date for automatic updates");
+        assert!(check_json(&home, &catalog, &exe, "/nonexistent/releases.json", &none).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
