@@ -79,9 +79,10 @@ update, repair, remove, use) reads the release listing once a day in the backgro
 a release newer than this one fits here and is a few days old, installs it before the command
 goes on: the download with a progress bar, the proof above, the runtimes not pinned and not in
 use updated with the new superfluid, then the command run again by the new version.
-`superfluid self use <old>` goes back. A copy Homebrew, a global npm, pipx, uv or cargo
-installed is updated by that manager in the background once no superfluid runs from it, with
-its output in $SUPERFLUID_HOME/logs/auto-update.log; one basert installed is left to basert.
+`superfluid self use <old>` goes back, and no automatic update goes to the version it left or
+an older one again. A copy Homebrew, a global npm, pipx, uv or cargo installed is updated by
+that manager in the background once no superfluid runs from it, with its output in
+$SUPERFLUID_HOME/logs/auto-update.log; one basert installed is left to basert.
 Without a terminal (a service, an app, a pipe), under CI, or with automatic updates off, the
 command prints one line per release instead. A failed update says so and the command goes on.
 
@@ -1179,9 +1180,111 @@ pub fn running_from(dir: &Path) -> bool {
     !processes_from(dir).is_empty()
 }
 
-/// The other processes running an executable under `dir`, by pid.
-pub(crate) fn pids_from(dir: &Path) -> Vec<i32> {
-    processes_from(dir).into_iter().map(|(p, _)| p).collect()
+/// The other processes that use what is under `dir`: run an executable from it, or have a file of it mapped (a library
+/// loaded: the engine `superfluid-workerd` loads from a basert install, a tokenizer the daemon loads, an MLX
+/// install's Python extensions), by pid.
+pub(crate) fn pids_using(dir: &Path) -> Vec<i32> {
+    let Ok(dir) = crate::sys::canonical(dir) else { return Vec::new() };
+    other_processes().into_iter().filter(|(p, exe)| runs_under(exe, &dir) || maps_from(*p, &dir)).map(|(p, _)| p).collect()
+}
+
+/// Whether the process `pid` has a file under the real path `dir` mapped: the file-backed lines of its `maps`.
+#[cfg(target_os = "linux")]
+fn maps_from(pid: i32, dir: &Path) -> bool {
+    let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else { return false };
+    // The path is what follows the fifth field, from its first '/'; a file removed since says so after it.
+    maps.lines().filter_map(|l| l.find('/').map(|i| &l[i..])).any(|p| Path::new(p.strip_suffix(" (deleted)").unwrap_or(p)).starts_with(dir))
+}
+
+#[cfg(target_os = "macos")]
+fn maps_from(pid: i32, dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    // <sys/proc_info.h>, which the libc crate does not carry.
+    #[repr(C)]
+    struct RegionInfo {
+        protection: u32,
+        max_protection: u32,
+        inheritance: u32,
+        flags: u32,
+        offset: u64,
+        behavior: u32,
+        user_wired_count: u32,
+        user_tag: u32,
+        pages_resident: u32,
+        pages_shared_now_private: u32,
+        pages_swapped_out: u32,
+        pages_dirtied: u32,
+        ref_count: u32,
+        shadow_depth: u32,
+        share_mode: u32,
+        private_pages_resident: u32,
+        shared_pages_resident: u32,
+        obj_id: u32,
+        depth: u32,
+        address: u64,
+        size: u64,
+    }
+    #[repr(C)]
+    struct RegionWithPath {
+        info: RegionInfo,
+        vip: libc::vnode_info_path,
+    }
+    // PROC_PIDREGIONPATHINFO2: the region at or after an address that a file backs, with that file's path.
+    const REGION_PATH_INFO_2: libc::c_int = 22;
+    let size = std::mem::size_of::<RegionWithPath>() as libc::c_int;
+    let mut at = 0u64;
+    // At most this many regions are looked at; a process maps far fewer files.
+    for _ in 0..100_000 {
+        // SAFETY: plain data, for which all zeroes is a value.
+        let mut region: RegionWithPath = unsafe { std::mem::zeroed() };
+        // SAFETY: proc_pidinfo writes at most `size` bytes into `region`, which is that big.
+        let got = unsafe { libc::proc_pidinfo(pid, REGION_PATH_INFO_2, at, &mut region as *mut _ as *mut libc::c_void, size) };
+        if got != size {
+            return false;
+        }
+        // SAFETY: the path is a C array of the struct's own, which the call ends with a NUL or fills.
+        let path: &[u8] = unsafe { std::slice::from_raw_parts(region.vip.vip_path.as_ptr() as *const u8, std::mem::size_of_val(&region.vip.vip_path)) };
+        let path = &path[..path.iter().position(|&b| b == 0).unwrap_or(path.len())];
+        if !path.is_empty() && Path::new(std::ffi::OsStr::from_bytes(path)).starts_with(dir) {
+            return true;
+        }
+        let next = region.info.address.saturating_add(region.info.size);
+        if next <= at {
+            return false;
+        }
+        at = next;
+    }
+    false
+}
+
+#[cfg(windows)]
+fn maps_from(pid: i32, dir: &Path) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32};
+    // SAFETY: the snapshot is closed here; `entry` is plain data whose size is set as the call requires, and only the
+    // part of its path the call filled is read.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid as u32);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut entry: MODULEENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        let mut more = Module32FirstW(snapshot, &mut entry) != 0;
+        let mut found = false;
+        while more && !found {
+            let len = entry.szExePath.iter().position(|&c| c == 0).unwrap_or(entry.szExePath.len());
+            found = runs_under(&PathBuf::from(String::from_utf16_lossy(&entry.szExePath[..len])), dir);
+            more = Module32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+        found
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn maps_from(_pid: i32, _dir: &Path) -> bool {
+    false
 }
 
 /// The other processes running an executable under `dir`, by pid and when each started.
@@ -1541,6 +1644,10 @@ pub fn update(home: &Path, catalog: &Catalog, exe: &Path, opts: &Options) -> Res
         std::fs::write(versions.dir.join("previous"), format!("{old}\n")).map_err(|e| format!("{}: {e}", versions.dir.display()))?;
     }
     report.changed = true;
+    // An update made, by hand or automatically, ends a step back `self use` made.
+    if let Some(check) = Check::read(home).filter(|c| c.declined.is_some()) {
+        let _ = Check { declined: None, ..check }.write(home);
+    }
     report.say(format!("superfluid {v} is current ({})", versions.dir.join("current").display()));
     if let Some(prev) = versions.previous() {
         report.say(format!("{prev} stays installed: `superfluid self use {prev}` goes back to it"));
@@ -1576,15 +1683,38 @@ pub fn use_version(home: &Path, catalog: &Catalog, exe: &Path, v: &str) -> Resul
         return Ok(report);
     }
     probe(&versions, v, home, &engine_here(catalog))?;
+    let was = versions.current();
     versions.set_current(v)?;
     report.changed = true;
     report.say(format!("superfluid {v} is current"));
+    declined_after_use(home, was.as_deref(), v);
     if let Some(prefix) = versions.prefix() {
         for note in versions.link(&prefix, false)? {
             report.say(note);
         }
     }
     Ok(report)
+}
+
+/// Whether the release `a` comes after `b`.
+pub(crate) fn later(a: &str, b: &str) -> bool {
+    release_order(a) > release_order(b)
+}
+
+/// What `self use` from `was` to `v` leaves in the record: going back from a newer version declines it, so an
+/// automatic update does not undo the choice; going to the declined version or past it ends that.
+fn declined_after_use(home: &Path, was: Option<&str>, v: &str) {
+    let check = Check::read(home).unwrap_or_default();
+    let declined = match (was, check.declined.as_deref()) {
+        // Back from `was`: it and what is older are declined, and a later release declined before stays so.
+        (Some(was), Some(d)) if release_order(was) > release_order(v) && release_order(d) > release_order(was) => Some(d.to_string()),
+        (Some(was), _) if release_order(was) > release_order(v) => Some(was.to_string()),
+        (_, Some(d)) if release_order(v) >= release_order(d) => None,
+        (_, d) => d.map(str::to_string),
+    };
+    if declined != check.declined {
+        let _ = Check { declined, ..check }.write(home);
+    }
 }
 
 /// `self install --from <dir> [--prefix <dir>]`: an unpacked release placed
@@ -1677,7 +1807,8 @@ pub fn list(home: &Path, exe: &Path) -> String {
 
 
 /// `$SUPERFLUID_HOME/update-check.json`: the last read, the newest release that fit and its notes, the version
-/// announced, and the version an automatic update last tried, and when.
+/// announced, the version an automatic update last tried and the one it handed to a package manager (and when), and
+/// the version `self use` stepped back from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Check {
     pub checked_at: u64,
@@ -1690,6 +1821,13 @@ pub struct Check {
     /// When an automatic update of `attempted` was tried, in seconds since the epoch: one that failed is not tried
     /// again for a day, until the next daily read.
     pub attempted_at: u64,
+    /// The release an automatic update handed to the package manager that owns the copy, and when: a detached
+    /// `self background-update` runs its update once nothing runs from the copy, and clears this when it could not.
+    pub delegated: Option<String>,
+    pub delegated_at: u64,
+    /// The version `self use` stepped back from: no automatic update goes to it or to an older one, until a newer
+    /// release, `self update`, or `self use` of it again.
+    pub declined: Option<String>,
 }
 
 impl Check {
@@ -1708,6 +1846,9 @@ impl Check {
             notes: text("notes"),
             attempted: text("attempted"),
             attempted_at: v["attempted_at"].as_u64().unwrap_or(0),
+            delegated: text("delegated"),
+            delegated_at: v["delegated_at"].as_u64().unwrap_or(0),
+            declined: text("declined"),
         })
     }
 
@@ -1723,6 +1864,9 @@ impl Check {
             "notes": self.notes,
             "attempted": self.attempted,
             "attempted_at": self.attempted_at,
+            "delegated": self.delegated,
+            "delegated_at": self.delegated_at,
+            "declined": self.declined,
         });
         crate::autoupdate::write_atomically(&Self::path(home), format!("{v:#}\n").as_bytes())
     }
@@ -1886,7 +2030,7 @@ pub fn run(args: &[String]) -> i32 {
         },
         Some("auto-update") if args.len() <= 2 => crate::autoupdate::auto_update_command(&home, args.get(1).map(String::as_str)),
         // What an automatic update leaves running for a package manager's copy: it runs the manager once nothing runs from the copy.
-        Some("background-update") if args.len() == 1 => crate::autoupdate::background_update(&exe),
+        Some("background-update") if args.len() == 1 => crate::autoupdate::background_update(&home, &exe),
         Some("list") if args.len() == 1 => {
             let _ = std::io::stdout().write_all(list(&home, &exe).as_bytes());
             0
@@ -2260,14 +2404,15 @@ pub(crate) mod tests {
         d
     }
 
-    /// A release tree whose `superfluid` answers `--version` and `runtimes --json` as a real one would, and notes each
-    /// `runtime ...` it is asked to run in `$SUPERFLUID_HOME/runtime-calls`.
+    /// A release tree whose `superfluid` answers `--version` and `runtimes --json` as a real one would (the rows in
+    /// `$SUPERFLUID_HOME/runtimes.json` when there are some), and notes each `runtime ...` it is asked to run in
+    /// `$SUPERFLUID_HOME/runtime-calls`, saying on stdout that it ran it.
     pub(crate) fn release_tree(dir: &Path, v: &str) -> PathBuf {
         let bin = dir.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(dir.join("libexec").join("superfluid")).unwrap();
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"superfluid {v}\";;\n  runtimes) echo '[{{\"id\":\"basert\",\"ready\":true}}]';;\n  runtime) echo \"$*\" >> \"$SUPERFLUID_HOME/runtime-calls\";;\n  *) exit 2;;\nesac\n"
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo \"superfluid {v}\";;\n  runtimes) cat \"$SUPERFLUID_HOME/runtimes.json\" 2>/dev/null || echo '[{{\"id\":\"basert\",\"ready\":true}}]';;\n  runtime) echo \"$*\" >> \"$SUPERFLUID_HOME/runtime-calls\"; echo \"ran $*\";;\n  *) exit 2;;\nesac\n"
         );
         for name in LINKED {
             let p = bin.join(name);
@@ -2470,8 +2615,60 @@ pub(crate) mod tests {
     #[test]
     fn sleeps_when_asked_to() {
         if std::env::var_os(SLEEP_ENV).is_some() {
+            // With a file named, it is mapped first, as a library is when loaded.
+            let _mapped = std::env::var_os(SLEEP_MAP_ENV).map(|p| {
+                use std::os::fd::AsRawFd;
+                let f = std::fs::File::open(p).unwrap();
+                // SAFETY: a private read-only mapping of a file this process opened, never read through here.
+                let at = unsafe { libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ, libc::MAP_PRIVATE, f.as_raw_fd(), 0) };
+                assert_ne!(at, libc::MAP_FAILED);
+                f
+            });
             std::thread::sleep(Duration::from_secs(60));
         }
+    }
+
+    const SLEEP_MAP_ENV: &str = "SUPERFLUID_SELF_TEST_MAP";
+
+    /// This test binary, run from where it is, asleep with `file` mapped: a `superfluid-workerd` that loaded an engine
+    /// library from an install.
+    pub(crate) fn sleeper_mapping(file: &Path) -> Sleeper {
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["selfupdate::tests::sleeps_when_asked_to", "--exact", "--quiet"])
+            .env(SLEEP_ENV, "1")
+            .env(SLEEP_MAP_ENV, file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        Sleeper(crate::exec::when_not_busy(|| cmd.spawn()).unwrap())
+    }
+
+    /// Whether a process is seen using what is under `dir` within five seconds.
+    pub(crate) fn seen_using(dir: &Path) -> bool {
+        (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            !pids_using(dir).is_empty()
+        })
+    }
+
+    #[test]
+    fn a_process_that_maps_a_file_under_a_directory_uses_it_though_it_runs_from_elsewhere() {
+        let dir = scratch("maps");
+        let lib = dir.join("lib").join("libbaseRT.dylib");
+        std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        std::fs::write(&lib, vec![7u8; 8192]).unwrap();
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let loaded = sleeper_mapping(&lib);
+        assert!(seen_using(&dir), "the library it loaded is under the directory");
+        assert!(pids_using(&dir).contains(&(loaded.0.id() as i32)));
+        assert!(!running_from(&dir), "it runs from elsewhere");
+        assert!(pids_using(&other).is_empty());
+        drop(loaded);
+        assert!((0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            pids_using(&dir).is_empty()
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

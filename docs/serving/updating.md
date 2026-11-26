@@ -25,16 +25,16 @@ superfluid 0.2.2 is in use · `superfluid self use 0.2.1` goes back · `superflu
 ```
 
 1. The release is placed and made current as `self update --version 0.2.2` would place it: the download checked against its SHA-256, the new copy proved before `current` moves (see [What an update does](#what-an-update-does)).
-2. Each runtime installed under `$SUPERFLUID_HOME/runtimes` is updated by the new version (`runtime update <id>`), so its worker speaks the new protocol. A runtime pinned with `superfluid runtime use` stays on its pin, and one whose default install a running server uses stays until none does; each says so.
-3. The command is run again by the new version, in the same process, with `SUPERFLUID_UPDATED_FROM` set to the old version (such a run updates nothing).
+2. Each runtime installed under `$SUPERFLUID_HOME/runtimes` is updated by the new version (`runtime update <id>`), which installs the newest build it is tested with, and with it the new version's worker. When that build is the one installed already, the install keeps the worker the old version copied in; if the new version cannot run it (`superfluid runtimes` reports it broken, say a worker that speaks an older protocol), it installs it again (`runtime repair <id>`). A runtime pinned with `superfluid runtime use` stays on its pin, and one whose default install a running process uses (runs its worker, or has loaded a library from it, as `superfluid-workerd` loads the baseRT engine) stays until none does; each says so. The runtime `runtime install`, `repair` or `remove` names is left to that command. What these say goes to stderr, so the command's stdout (`launch --print`, a log) holds only its own output.
+3. The command is run again by the new version, with `SUPERFLUID_UPDATED_FROM` set to the old version, for that run alone (it updates nothing; what it starts updates as any command does). On Unix the new version takes the process's place; on Windows, which has no such call, the old version starts the new one with the same console and waits for it to end.
 
-An update that fails (offline, a download that does not check out, a copy that does not start, another update already running, Ctrl+C) prints one line and the command goes on with the version it was started as; it is not tried again until the next day's read:
+An update that fails (offline, a download that does not check out, a copy that does not start, another update already running, Ctrl+C) prints one line and the command goes on with the version it was started as; it is not tried again until the next day's read. One that made the new version current and then failed to place a link beside it (a prefix that may no longer be written to) says what failed and goes on as an update, since every later run is the new version:
 
 ```text
 couldn't update superfluid to 0.2.2: fetching https://github.com/... failed: curl: (6) Could not resolve host: github.com; staying on 0.2.1
 ```
 
-Going back: `superfluid self use 0.2.1` makes the version it replaced current again (`superfluid self list` shows which versions are here), and `superfluid runtime use <id> <install>` pins a runtime to the install it had, which an update installs beside, never over; `superfluid runtimes` lists them.
+Going back: `superfluid self use 0.2.1` makes the version it replaced current again (`superfluid self list` shows which versions are here), and `superfluid runtime use <id> <install>` pins a runtime to the install it had, which an update installs beside, never over; `superfluid runtimes` lists them. Going back with `self use` is kept: no automatic update goes to the version it left, or to an older one, again (the line saying it is out is printed once). A later release is updated to as usual, and `superfluid self update`, or `self use` of that version, ends it. The version left is `declined` in `$SUPERFLUID_HOME/update-check.json`.
 
 ### When nothing is updated
 
@@ -56,13 +56,13 @@ superfluid: superfluid 0.2.2 is available (this is 0.2.1): `superfluid self upda
 
 ### A copy a package manager installed
 
-A copy from Homebrew, a global npm, pipx, uv or `cargo install` that this user owns, with no other Superfluid running from it, is updated by its manager in the background, once per release, the same command `self update` runs for it:
+A copy from Homebrew, a global npm, pipx, uv or `cargo install` that this user owns is updated by its manager in the background, once per release, the same command `self update` runs for it:
 
 ```text
 Updating superfluid 0.2.1 → 0.2.2 with Homebrew in the background (log: ~/.superfluid/logs/auto-update.log) · release notes: https://github.com/basecompute/superfluid/releases/tag/v0.2.2 · turn off: superfluid self auto-update off
 ```
 
-The manager replaces the copy the command is running from, so a detached `superfluid self background-update` waits until no Superfluid runs from the copy (this command included: a server keeps its version until it stops), then runs the manager; what it prints goes to `$SUPERFLUID_HOME/logs/auto-update.log`. A pinned formula, another user's Homebrew, an npm folder that needs root, a project's npm dependency, pip in an environment, and every manager on Windows get the line with their command instead. The Superfluid basert installed is basert's to update (`basert superfluid install`), and is never updated automatically.
+The manager replaces the copy the command is running from, so a detached `superfluid self background-update` waits until no Superfluid runs from the copy (this command included: a server keeps its version until it stops), for up to seven days, then runs the manager; what it prints goes to `$SUPERFLUID_HOME/logs/auto-update.log`. The release handed over is `delegated` in `update-check.json`, apart from the line that says a release is out, so a server's hourly line or a run without a terminal does not use it up. Right before it runs the manager it looks again: with automatic updates turned off meanwhile (`superfluid self auto-update off`, also while it waits), or the copy uninstalled or no longer that manager's, it runs nothing. When it runs nothing, gives up after the seven days, or the manager fails, the release is no longer marked handed over: after a failure the next launch prints the line again and the update is handed over again a day later. A pinned formula, another user's Homebrew, an npm folder that needs root, a project's npm dependency, pip in an environment, and every manager on Windows get the line with their command instead. The Superfluid basert installed is basert's to update (`basert superfluid install`), and is never updated automatically.
 
 ## Where releases live
 
@@ -104,7 +104,7 @@ The launcher is a small program the release carries (`libexec\superfluid\superfl
 
 A running server keeps the version it started with; its next start uses the new one. A server started by `superfluid launch` is stopped with `superfluid stop`. One update, install or switch runs at a time: a second waits for the first and then decides on what it left. An installed version is never written to: a release placed again over a working copy is kept as it is, and only a copy that is proved first replaces one that no longer works.
 
-After `self update`, the runtime installs under `$SUPERFLUID_HOME/runtimes` still carry the worker copied in when they were installed (an automatic update updates them, above). A newer daemon that does not speak that worker's protocol says so in `superfluid runtimes`, and `superfluid runtime update <id>` or `superfluid runtime repair <id>` installs the runtime again with the new worker. An install a running server uses is neither replaced nor removed: `runtime repair`, `install` and `remove` refuse it, saying it stays until no server uses it.
+After `self update`, the runtime installs under `$SUPERFLUID_HOME/runtimes` still carry the worker copied in when they were installed (an automatic update updates them, above). A newer daemon that does not speak that worker's protocol says so in `superfluid runtimes`, and `superfluid runtime repair <id>` installs the runtime again with the new worker (`runtime update <id>` does when a newer build is tested, which it installs beside the old one). An install a running process uses, running its worker or with a library of it loaded, is neither replaced nor removed: `runtime repair`, `install` and `remove` refuse it, saying it stays until no server uses it. An install is renamed aside before it is removed, so one that cannot be (on Windows, a file in it is open) is left whole.
 
 A foreground `self update` shows the download as a progress bar on a terminal, after a line naming the release's notes.
 

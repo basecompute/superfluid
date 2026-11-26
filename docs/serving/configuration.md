@@ -10,9 +10,9 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 |---|---|---|
 | `SUPERFLUID_LOG_FORMAT` | `text` | `json` makes every stderr line of `serve` and `node join` one JSON event, as `--log-format json` does; the flag wins. See [Start-up events](events.md). |
 | `SUPERFLUID_HOME` | `~/.superfluid` (`%USERPROFILE%\.superfluid` on Windows) | Home directory: the installed Superfluid versions, runtime installs, pull locks, and the default sessions directory and socket. |
-| `SUPERFLUID_NO_UPDATE` | unset | Set to anything but `0`: no automatic update, no check for a newer Superfluid and no line about one, in that environment (`--no-update` on any command does the same for one run). See [Updating Superfluid](updating.md). |
+| `SUPERFLUID_NO_UPDATE` | unset | Set to anything but empty, `0` or `false` (in any case): no automatic update, no check for a newer Superfluid and no line about one, in that environment (`--no-update` on any command does the same for one run). See [Updating Superfluid](updating.md). |
 | `SUPERFLUID_NO_UPDATE_CHECK` | unset | The same as `SUPERFLUID_NO_UPDATE`, under the name it had before automatic updates. |
-| `SUPERFLUID_UPDATED_FROM` | unset | Set by an automatic update on the command it runs again with the new version: the version it was. A run with it set updates nothing. |
+| `SUPERFLUID_UPDATED_FROM` | unset | Set by superfluid on a command it runs again itself: by an automatic update, on the command the new version runs again (the version it was), and by a node that starts again for the head's model. A run with it set updates nothing; it is taken out of that run's environment, so what the run starts (a server, an agent and what runs in it) updates as any other command would. |
 | `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |
 | `SUPERFLUID_WORKER_<ID>` | unset | Explicit worker executable for runtime `<ID>` (upper-cased, `-` and `.` as `_`, e.g. `SUPERFLUID_WORKER_LLAMACPP`). Also the installer `runtime install` uses. A runtime named this way is never auto-installed. |
 | `BASERT_LIB` | search | libbaseRT file or directory. Set by `--basert-lib`. When set, nothing else is searched. |

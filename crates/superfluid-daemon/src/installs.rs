@@ -96,10 +96,11 @@ pub fn unpin(catalog: &Catalog, id: RuntimeId) -> Result<Option<String>, String>
     refresh_current(catalog, id)
 }
 
-/// An error when a running process runs a program of the install `name` at `dir` (its worker, a server started from
-/// it): the install is not set aside or removed under it, and stays until nothing runs from it.
+/// An error when a running process uses the install `name` at `dir`: runs a program of it (its worker) or has a file
+/// of it loaded (the engine library a `superfluid-workerd` loads, a tokenizer library a server loads). The install is
+/// not set aside or removed under it, and stays until nothing uses it.
 pub fn refuse_in_use(id: RuntimeId, name: &str, dir: &Path) -> Result<(), String> {
-    let pids = crate::selfupdate::pids_from(dir);
+    let pids = crate::selfupdate::pids_using(dir);
     if pids.is_empty() {
         return Ok(());
     }
@@ -365,7 +366,7 @@ pub fn remove(catalog: &Catalog, id: RuntimeId, name: Option<&str>) -> Result<Ve
                 return Err(format!("{} has no install {n} (installed: {})", id.base(), names(&all)));
             };
             refuse_in_use(id, &i.name, &i.dir)?;
-            std::fs::remove_dir_all(&i.dir).map_err(|e| format!("{}: {e}", i.dir.display()))?;
+            remove_whole(&root, &[&i.dir])?;
             if pinned(catalog, id).is_none() {
                 let _ = std::fs::remove_file(root.join("pinned"));
             }
@@ -379,10 +380,36 @@ pub fn remove(catalog: &Catalog, id: RuntimeId, name: Option<&str>) -> Result<Ve
             for i in &all {
                 refuse_in_use(id, &i.name, &i.dir)?;
             }
+            remove_whole(&root, &all.iter().map(|i| i.dir.as_path()).collect::<Vec<_>>())?;
             std::fs::remove_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
             Ok(all.into_iter().map(|i| i.name).collect())
         }
     }
+}
+
+/// Removes the installs `dirs` under `root`, each renamed aside first: a file that cannot be removed (on Windows, one a
+/// process has open) fails the rename, and the install is left whole rather than with part of it gone. When one
+/// cannot be set aside, those set aside before it are put back. What is set aside and cannot then be removed is left
+/// under a name no install has, and removed by the next remove.
+fn remove_whole(root: &Path, dirs: &[&Path]) -> Result<(), String> {
+    let mut aside: Vec<(PathBuf, &Path)> = Vec::new();
+    for dir in dirs {
+        let to = root.join(format!(".removed-{}", unguessable()?));
+        if let Err(e) = std::fs::rename(dir, &to) {
+            for (from, back) in aside.iter().rev() {
+                let _ = std::fs::rename(from, back);
+            }
+            return Err(format!("{}: {e} (it is in use; it stays until nothing uses it)", dir.display()));
+        }
+        aside.push((to, dir));
+    }
+    // What an earlier remove left aside goes with these.
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for e in rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".removed-")) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+    Ok(())
 }
 
 fn last_lines(stderr: &[u8]) -> Option<String> {
@@ -680,6 +707,70 @@ cat "$dir/runtime.json"
         drop(std::mem::replace(&mut server, crate::selfupdate::tests::Sleeper(Command::new("true").spawn().unwrap())));
         assert!(install(&cat, id, &w, &[plan_for("toyrt", "b1", "cpu")]).unwrap().replaced);
         assert_eq!(remove(&cat, id, Some("b1-cpu")).unwrap(), ["b1-cpu"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_install_whose_library_a_server_loaded_is_not_removed_under_it() {
+        let dir = scratch("in-use-library");
+        let home = dir.join("home");
+        let cat = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let id = RuntimeId::new("toyrt");
+        let root = home.join("runtimes/toyrt");
+        let w = installer(&dir, "toyrt", &format!(r#"{{"cpu":[{}]}}"#, device("CPU")), "");
+        install(&cat, id, &w, &[plan_for("toyrt", "b1", "cpu")]).unwrap();
+        // A workerd running from superfluid's own release, with the engine library it loaded from the install.
+        let lib = root.join("b1-cpu/lib/libtoy.so");
+        std::fs::create_dir_all(lib.parent().unwrap()).unwrap();
+        std::fs::write(&lib, vec![0u8; 8192]).unwrap();
+        let server = crate::selfupdate::tests::sleeper_mapping(&lib);
+        assert!(crate::selfupdate::tests::seen_using(&root.join("b1-cpu")));
+        let e = remove(&cat, id, None).unwrap_err();
+        assert_eq!(e, format!("toyrt b1-cpu is in use (pid {}): it stays until no server uses it; stop that server, then run this again", server.0.id()));
+        assert!(remove(&cat, id, Some("b1-cpu")).unwrap_err().contains("is in use"));
+        assert!(install(&cat, id, &w, &[plan_for("toyrt", "b1", "cpu")]).unwrap_err().contains("is in use"));
+        assert!(lib.is_file() && root.join("b1-cpu/runtime.json").is_file());
+        drop(server);
+        assert!((0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            remove(&cat, id, Some("b1-cpu")).is_ok()
+        }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_install_that_cannot_be_set_aside_is_left_whole() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("remove-whole");
+        let home = dir.join("home");
+        let cat = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let id = RuntimeId::new("toyrt");
+        let root = home.join("runtimes/toyrt");
+        let w = installer(&dir, "toyrt", &format!(r#"{{"cpu":[{}]}}"#, device("CPU")), "");
+        install(&cat, id, &w, &[plan_for("toyrt", "b1", "cpu")]).unwrap();
+        install(&cat, id, &w, &[plan_for("toyrt", "b2", "cpu")]).unwrap();
+        // The runtime's directory may not be written to: no install can be renamed aside, as on Windows one a process
+        // has a file of open cannot.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(root.join("probe"), "").is_ok() {
+            eprintln!("SKIP: this user writes to a directory whose mode forbids it");
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let one = remove(&cat, id, Some("b1-cpu")).unwrap_err();
+        let all = remove(&cat, id, None).unwrap_err();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(one.contains("it stays until nothing uses it") && all.contains("it stays until nothing uses it"), "{one} / {all}");
+        for name in ["b1-cpu", "b2-cpu"] {
+            assert!(root.join(name).join("runtime.json").is_file() && root.join(name).join("bin/superfluid-worker-toyrt").is_file(), "{name} is whole");
+        }
+        // An earlier remove's leftovers go with the next one.
+        std::fs::create_dir_all(root.join(".removed-1/bin")).unwrap();
+        assert_eq!(remove(&cat, id, Some("b1-cpu")).unwrap(), ["b1-cpu"]);
+        assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".removed-")));
+        assert_eq!(remove(&cat, id, None).unwrap(), ["b2-cpu"]);
+        assert!(!root.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

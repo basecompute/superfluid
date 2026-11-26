@@ -467,6 +467,22 @@ pub fn detached(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// As `detached`, for a helper that shows nothing (the daily read, a package manager's update in the background). On
+/// Windows it gets a console of its own that is never shown: a process with no console at all would have each console
+/// program it starts (curl) open a new window.
+pub fn detached_hidden(cmd: &mut Command) -> &mut Command {
+    #[cfg(unix)]
+    detached(cmd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    }
+    cmd
+}
+
 /// Runs `cmd` in this process's place, and returns only when it could not be started. Unix
 /// execs it. Windows has no exec: the program runs as a child with this process's streams, and
 /// this process waits and exits with its status. While it waits it stands for the program:
