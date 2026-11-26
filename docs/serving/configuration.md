@@ -80,7 +80,7 @@ Each `--spec-*` flag, when absent, falls back to a variable, then to a constant.
   superfluid.sock           default --socket
   versions/<v>/             the installed Superfluid releases (self update, the install script)
   update-check.json         the last read of the release listing, and what automatic updates tried, handed to a package manager (`delegated`) or were told to leave (`declined`, by `self use`)
-  settings.json             {"autoUpdate": true|false} (`superfluid self auto-update on|off`)
+  settings.json             {"autoUpdate": true|false, "updateWaitDays": <days>} (`superfluid self auto-update on|off|wait <days>`)
   fleet/
     token                   the fleet token (`superfluid fleet token`)
     nodes/<identity>/       a `node join` node's session store

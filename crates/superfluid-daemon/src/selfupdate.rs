@@ -1825,7 +1825,8 @@ pub fn list(home: &Path, exe: &Path) -> String {
     }
     out.push_str(&format!("running: {}\n", running()));
     if let Some(cache) = Check::read(home) {
-        out.push_str(&format!("{}\n", cache.describe()));
+        let wait = crate::autoupdate::wait(home, &|k| std::env::var(k).ok()).days;
+        out.push_str(&format!("{}\n", cache.under(wait).describe()));
     }
     if let Some(n) = note {
         out.push_str(&format!("{n}\n"));
@@ -1834,13 +1835,14 @@ pub fn list(home: &Path, exe: &Path) -> String {
 }
 
 
-/// `$SUPERFLUID_HOME/update-check.json`: the last read, the wait it was made under, the newest release that fit and
-/// had been out that long and its notes, the version announced, the version an automatic update last tried and the
+/// `$SUPERFLUID_HOME/update-check.json`: the last read, the releases it found that fit here, the newest of them that
+/// has been out as long as the wait asks and its notes (as the wait it was last read under picks it), the version
+/// announced, the version an automatic update last tried and the
 /// one it handed to a package manager (and when), and the version `self use` stepped back from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Check {
     pub checked_at: u64,
-    /// The wait, in days, the read was made under: a record made under another names nothing for this one.
+    /// The wait, in days, `newest` was picked under; `under` picks again for another.
     pub wait: Option<u32>,
     pub newest: Option<String>,
     pub published: Option<String>,
@@ -1858,7 +1860,23 @@ pub struct Check {
     /// The version `self use` stepped back from: no automatic update goes to it or to an older one, until a newer
     /// release, `self update`, or `self use` of it again.
     pub declined: Option<String>,
+    /// The releases the last read found that fit here, newest first, a few of them: each wait picks the newest that
+    /// has been out that long, so a record serves every wait (a shell and a service with different ones) without a
+    /// read of its own. `None` in a record from before they were kept, which names only what its own wait picked.
+    pub seen: Option<Vec<Seen>>,
 }
+
+/// A release the last read found that fits here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seen {
+    pub version: String,
+    pub published: String,
+    /// The page of its notes.
+    pub notes: String,
+}
+
+/// How many of the releases that fit a read keeps: enough for any wait between releases.
+const SEEN_KEPT: usize = 8;
 
 impl Check {
     fn path(home: &Path) -> PathBuf {
@@ -1880,6 +1898,17 @@ impl Check {
             delegated: text("delegated"),
             delegated_at: v["delegated_at"].as_u64().unwrap_or(0),
             declined: text("declined"),
+            seen: v["releases"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(|r| {
+                        Some(Seen {
+                            version: r["version"].as_str()?.to_string(),
+                            published: r["published"].as_str().unwrap_or_default().to_string(),
+                            notes: r["notes"].as_str().unwrap_or_default().to_string(),
+                        })
+                    })
+                    .collect()
+            }),
         })
     }
 
@@ -1899,6 +1928,7 @@ impl Check {
             "delegated": self.delegated,
             "delegated_at": self.delegated_at,
             "declined": self.declined,
+            "releases": self.seen.as_ref().map(|seen| seen.iter().map(|r| json!({"version": r.version, "published": r.published, "notes": r.notes})).collect::<Vec<_>>()),
         });
         crate::autoupdate::write_atomically(&Self::path(home), format!("{v:#}\n").as_bytes())
     }
@@ -1910,6 +1940,30 @@ impl Check {
     /// Whether the read was made under `wait`, so the release it names is the one that wait takes.
     pub(crate) fn made_with(&self, wait: u32) -> bool {
         self.wait == Some(wait)
+    }
+
+    /// Whether the record says what `wait` takes without a read: it keeps the releases every wait picks from, or (one
+    /// from before) was made under this wait.
+    pub(crate) fn answers(&self, wait: u32) -> bool {
+        self.seen.is_some() || self.made_with(wait)
+    }
+
+    /// The record as `wait` reads it: naming the newest release kept that has been out that long. One from before the
+    /// releases were kept names nothing for a wait other than its own.
+    pub(crate) fn under(self, wait: u32) -> Check {
+        let today = today();
+        let pick = match &self.seen {
+            Some(seen) => seen.iter().find(|r| out_for(&r.published, wait, today)).cloned(),
+            None if self.made_with(wait) => return self,
+            None => None,
+        };
+        Check {
+            wait: Some(wait),
+            newest: pick.as_ref().map(|r| r.version.clone()),
+            published: pick.as_ref().map(|r| r.published.clone()),
+            notes: pick.map(|r| r.notes),
+            ..self
+        }
     }
 
     /// The newest release known, when it is newer than this one.
@@ -1949,25 +2003,26 @@ pub fn check_now(home: &Path, catalog: &Catalog, wait: u32, source: &str) -> Res
     record(home, &found, &engine_here(catalog), wait, &compat_fetcher(5))
 }
 
-/// The newest of `found` that drives `engine` and has been out `wait` days, recorded with the wait and with what the
-/// record held besides.
+/// The releases of `found` that drive `engine`, newest first (a few, down to one out as long as any wait asks),
+/// recorded with what the record held besides; the record as `wait` reads it, naming the newest that has been out
+/// `wait` days.
 pub(crate) fn record(home: &Path, found: &[Release], engine: &Engine, wait: u32, compat: &dyn Fn(&str) -> Option<Value>) -> Result<Check, String> {
-    let fit = newest(found, engine, Some(wait), compat);
+    let today = today();
+    let mut seen = Vec::new();
+    for r in found.iter().filter(|r| fits(r, engine, compat)) {
+        seen.push(Seen { version: r.version.clone(), published: r.published.clone(), notes: r.notes_url.clone() });
+        if seen.len() == SEEN_KEPT || out_for(&r.published, crate::autoupdate::MAX_WAIT_DAYS, today) {
+            break;
+        }
+    }
     let previous = Check::read(home).unwrap_or_default();
-    let check = Check {
-        checked_at: now_secs(),
-        wait: Some(wait),
-        newest: fit.map(|r| r.version.clone()),
-        published: fit.map(|r| r.published.clone()),
-        notes: fit.map(|r| r.notes_url.clone()),
-        ..previous
-    };
+    let check = Check { checked_at: now_secs(), seen: Some(seen), ..previous }.under(wait);
     check.write(home)?;
     Ok(check)
 }
 
-/// The one line printed when a newer release is out, once per release; `command` installs it. With automatic updates
-/// on, it says how to turn them off.
+/// The one line printed when a newer release is out, once per release; `command` installs it, or, under a wait, the
+/// newest (which may be younger than the release named). With automatic updates on, it says how to turn them off.
 pub(crate) fn announce(home: &Path, mut check: Check, command: &str, auto: bool) -> Option<String> {
     let newer = check.newer()?.to_string();
     if check.notified.as_deref() == Some(newer.as_str()) {
@@ -1977,7 +2032,8 @@ pub(crate) fn announce(home: &Path, mut check: Check, command: &str, auto: bool)
     check.notified = Some(newer.clone());
     let _ = check.write(home);
     let off = if auto { format!(" · turn off: {}", crate::autoupdate::OFF_COMMAND) } else { String::new() };
-    Some(format!("superfluid {newer} is available (this is {}): `{command}` installs it · release notes: {notes}{off}", running()))
+    let installs = if check.wait.unwrap_or(0) > 0 { "installs the newest" } else { "installs it" };
+    Some(format!("superfluid {newer} is available (this is {}): `{command}` {installs} · release notes: {notes}{off}", running()))
 }
 
 /// What `serve` runs once the server is up: one listing read a day at most, one line per new release.
@@ -2003,8 +2059,10 @@ pub fn tick(home: &Path, catalog: &Catalog, source: &str) -> Option<String> {
     let env = |k: &str| std::env::var(k).ok();
     let auto = crate::autoupdate::enabled(home, &env).is_ok();
     let wait = crate::autoupdate::wait(home, &env).days;
-    match Check::read(home).filter(|c| !c.due() && c.made_with(wait)) {
-        Some(cached) => announce(home, cached, &command, auto),
+    // A record made under another wait answers for this one from the releases it keeps: a shell and a service with
+    // different waits share the one read a day.
+    match Check::read(home).filter(|c| !c.due() && c.answers(wait)) {
+        Some(cached) => announce(home, cached.under(wait), &command, auto),
         None => announce(home, check_now(home, catalog, wait, source).ok()?, &command, auto),
     }
 }
@@ -2993,6 +3051,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_check_answers_a_changed_wait_from_the_cache_and_never_with_the_release_another_wait_picked() {
+        let dir = scratch("tick-wait");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let catalog = Catalog::new(home.clone(), None, home.join("superfluid-workerd"));
+        let unreachable = "/nonexistent/releases.json";
+        // Read under a wait of 3 days: 99.1.0 is not out that long.
+        let p = listing(&dir, &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
+        crate::autoupdate::set_wait(&home, 3).unwrap();
+        let c = check_now(&home, &catalog, 3, &p.to_string_lossy()).unwrap();
+        assert_eq!((c.newest.as_deref(), c.wait), (Some("99.0.0"), Some(3)));
+        let checked = c.checked_at;
+        // The wait set to none: the newest is announced, not the release the wait of 3 days picked, from the releases
+        // the record keeps; nothing is read again (the listing is unreachable, the record says when it was read).
+        crate::autoupdate::set_wait(&home, 0).unwrap();
+        let line = tick(&home, &catalog, unreachable).unwrap_or_default();
+        assert!(line.starts_with("superfluid 99.1.0 is available") && line.contains("installs it ·"), "{line}");
+        assert_eq!(Check::read(&home).unwrap().checked_at, checked, "no read of its own");
+        // Read under no wait (a listing of a fresh release alone), then a wait of a week: the release the record named
+        // under no wait is not announced, from the cache, with the listing unreachable.
+        let p = listing(&dir.join("fresh"), &[("99.1.0", "2099-01-01", None)]);
+        let c = check_now(&home, &catalog, 0, &p.to_string_lossy()).unwrap();
+        assert_eq!(c.newest.as_deref(), Some("99.1.0"));
+        Check { notified: None, ..Check::read(&home).unwrap() }.write(&home).unwrap();
+        crate::autoupdate::set_wait(&home, 7).unwrap();
+        assert_eq!(tick(&home, &catalog, unreachable), None, "a week's wait names nothing the read found, whatever the record named");
+        assert_eq!(Check::read(&home).unwrap().notified, None, "nothing announced");
+        // A record from before the releases were kept, made under another wait, is read again once.
+        let legacy = Check { seen: None, wait: Some(0), newest: Some("99.1.0".into()), notified: None, ..Check::read(&home).unwrap() };
+        legacy.write(&home).unwrap();
+        assert_eq!(tick(&home, &catalog, unreachable), None, "read again (unreachable), not answered with 99.1.0");
+        let p = listing(&dir.join("both"), &[("99.0.0", "2026-01-01", None), ("99.1.0", "2099-01-01", None)]);
+        let line = tick(&home, &catalog, &p.to_string_lossy()).unwrap_or_default();
+        assert!(line.starts_with("superfluid 99.0.0 is available") && line.contains("installs the newest"), "{line}");
+        assert!(Check::read(&home).unwrap().seen.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_release_that_does_not_start_or_drive_the_engine_is_not_made_current() {
         let dir = scratch("probe");
         let home = dir.join("home");
@@ -3071,13 +3168,13 @@ pub(crate) mod tests {
         let line = announce(&home, c.clone(), "superfluid self update", true).unwrap();
         assert!(line.starts_with("superfluid 99.0.0 is available (this is ") && line.contains("`superfluid self update`"), "{line}");
         assert!(
-            line.ends_with("installs it · release notes: https://github.com/basecompute/superfluid/releases/tag/v99.0.0 · turn off: superfluid self auto-update off"),
-            "every notice names the release's notes and how to turn updates off: {line}"
+            line.ends_with("installs the newest · release notes: https://github.com/basecompute/superfluid/releases/tag/v99.0.0 · turn off: superfluid self auto-update off"),
+            "every notice names the release's notes and how to turn updates off; under a wait, the command installs the newest, not the release named: {line}"
         );
         assert_eq!(announce(&home, Check::read(&home).unwrap(), "superfluid self update", true), None, "announced once");
         let again = Check { notified: None, ..c.clone() };
         let line = announce(&home, again, "brew upgrade superfluid", false).unwrap();
-        assert!(line.contains("`brew upgrade superfluid` installs it") && !line.contains("turn off"), "with updates off already, nothing to turn off: {line}");
+        assert!(line.contains("`brew upgrade superfluid` installs the newest") && !line.contains("turn off"), "with updates off already, nothing to turn off: {line}");
         assert!(Check::read(&home).unwrap().describe().starts_with("newest release out 3 days or more: 99.0.0 (published 2026-01-01;"));
         assert!(Check { wait: Some(0), ..Check::read(&home).unwrap() }.describe().starts_with("newest release: 99.0.0 (published 2026-01-01;"));
         let c = check_now(&home, &catalog, 0, &p.to_string_lossy()).unwrap();

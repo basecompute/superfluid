@@ -378,14 +378,15 @@ pub fn at_launch(args: &[String], no_update_flag: bool) {
     let wait = wait(&home, &env).days;
     let check = Check::read(&home).unwrap_or_default();
     let from = selfupdate::running();
-    // A record made under another wait (the setting changed since, or the variable differs) names nothing for this
-    // one, and is read again.
-    let fresh = check.made_with(wait);
-    let newer = check.newer_than(from).filter(|_| fresh).map(str::to_string);
+    // The record answers for this wait (the setting changed since, or the variable differs) from the releases it
+    // keeps, so environments with different waits share the one read a day; one from before they were kept, made
+    // under another wait, names nothing for this one, and is read again once.
+    let due = check.due() || !check.answers(wait);
+    let check = check.under(wait);
+    let newer = check.newer_than(from).map(str::to_string);
     let planned = newer.as_deref().map(|n| plan(&exe, mode, &check, from, n));
     // The daily read is started once the plan is made, and not before an update made here: that update reads the
     // listing itself, and the command it runs again in this process's place would be left a child it never waits for.
-    let due = check.due() || !fresh;
     if due && planned != Some(Plan::Here) {
         refresh_in_background(&home, &exe, wait);
     }
@@ -412,10 +413,10 @@ pub fn at_launch(args: &[String], no_update_flag: bool) {
     }
 }
 
-/// The one line per release, from the record as it is now (a launch may have claimed the next read), when it was made
-/// under the wait here: what an automatic update installs and what the line says is out are the same release.
+/// The one line per release, from the record as it is now (a launch may have claimed the next read), as the wait here
+/// reads it: what an automatic update installs and what the line says is out are the same release.
 fn notice(home: &Path, exe: &Path, wait: u32) {
-    let Some(check) = Check::read(home).filter(|c| c.made_with(wait)) else { return };
+    let Some(check) = Check::read(home).map(|c| c.under(wait)) else { return };
     let auto = enabled(home, &|k| std::env::var(k).ok()).is_ok();
     if let Some(line) = selfupdate::announce(home, check, &selfupdate::update_command(exe), auto) {
         eprintln!("superfluid: {line}");
@@ -450,11 +451,12 @@ fn refresh_in_background(home: &Path, exe: &Path, wait: u32) {
     }
 }
 
-/// The record a launch writes as it starts the read: marked read now and, when it was made under another wait, naming
-/// no release, which that wait chose, until the read says which this one takes.
+/// The record a launch writes as it starts the read: marked read now and, when it cannot answer for this wait (one from
+/// before the releases were kept, made under another), naming no release, which that wait chose, until the read says
+/// which this one takes.
 fn claimed(check: Check, wait: u32) -> Check {
     let check = Check { checked_at: selfupdate::now_secs(), ..check };
-    match check.made_with(wait) {
+    match check.answers(wait) {
         true => check,
         false => Check { wait: Some(wait), newest: None, published: None, notes: None, ..check },
     }
@@ -1378,7 +1380,24 @@ mod tests {
     }
 
     #[test]
-    fn a_record_made_under_another_wait_names_nothing_until_it_is_read_again() {
+    fn a_record_that_keeps_the_releases_answers_every_wait_without_a_read() {
+        let seen = |v: &str, published: &str| selfupdate::Seen { version: v.into(), published: published.into(), notes: format!("n{v}") };
+        let kept = vec![seen("99.2.0", "2099-01-01"), seen("99.1.0", "2026-01-01"), seen("99.0.0", "2020-01-01")];
+        let check = Check { checked_at: selfupdate::now_secs(), wait: Some(3), newest: Some("99.1.0".into()), seen: Some(kept.clone()), ..Check::default() };
+        assert!(check.answers(0) && check.answers(7) && !check.due(), "made under 3 days, it answers for any wait: no read of its own");
+        let now = check.clone().under(0);
+        assert_eq!((now.wait, now.newest.as_deref(), now.published.as_deref(), now.notes.as_deref()), (Some(0), Some("99.2.0"), Some("2099-01-01"), Some("n99.2.0")), "no wait: the newest");
+        assert_eq!(check.clone().under(3).newest.as_deref(), Some("99.1.0"));
+        assert_eq!(check.clone().under(365).newest.as_deref(), Some("99.0.0"));
+        let none = Check { seen: Some(vec![seen("99.2.0", "2099-01-01")]), ..check.clone() }.under(7);
+        assert_eq!((none.newest, none.published, none.notes), (None, None, None), "none out a week: nothing named, not the one the record was made under");
+        let other = claimed(Check { checked_at: 5, ..check.clone() }, 7);
+        assert_eq!((other.wait, other.newest.as_deref(), &other.seen), (Some(3), Some("99.1.0"), &Some(kept)), "claimed under another wait: kept whole");
+        assert!(!other.due());
+    }
+
+    #[test]
+    fn a_record_from_before_the_releases_were_kept_names_nothing_for_another_wait_until_it_is_read_again() {
         let check = Check { checked_at: 5, wait: Some(3), newest: Some("0.2.2".into()), published: Some("2026-01-01".into()), notes: Some("n".into()), attempted: Some("0.2.1".into()), ..Check::default() };
         let same = claimed(check.clone(), 3);
         assert_eq!((same.wait, same.newest.as_deref()), (Some(3), Some("0.2.2")), "same wait: the release it names stays while it is read again");
@@ -1386,8 +1405,11 @@ mod tests {
         let other = claimed(check.clone(), 0);
         assert_eq!((other.wait, &other.newest, &other.published, &other.notes), (Some(0), &None, &None, &None));
         assert_eq!(other.attempted.as_deref(), Some("0.2.1"), "what else it holds is kept");
-        assert!(!other.due() && other.made_with(0));
-        assert!(!Check { wait: None, ..check }.made_with(0), "a record from before the wait was a setting is read again");
+        assert!(!other.due() && other.made_with(0) && other.answers(0));
+        assert!(!check.answers(0) && check.answers(3));
+        assert_eq!(check.clone().under(3), check.clone(), "its own wait: what it names");
+        assert_eq!(check.clone().under(0).newest, None);
+        assert!(!Check { wait: None, ..check }.answers(0), "a record from before the wait was a setting is read again");
     }
 
     #[test]
