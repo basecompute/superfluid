@@ -275,6 +275,8 @@ superfluid runtime options <id> [--json]
 
 `remove <id>` with no install removes the runtime's only install; when it has more, it names them and removes nothing, and `--all` removes every one. The bare id is also how `superfluid runtimes` lists the default install.
 
+An install a running server uses (its worker, or a library it loaded) is neither replaced (`install`, `repair`) nor removed (`remove`) until that server stops; the refusal names its pid. Run in a terminal, `install`, `update`, `repair`, `remove` and `use` may first make an automatic update ([Updating Superfluid](updating.md#automatic-updates)).
+
 See [Runtimes](../models/runtimes.md#managing-installs). `options` lists the knobs the runtime takes on `serve` as `--<id>-<name> <value>`, with the shape of each value and its default. It answers before the runtime is installed or runs here, from the adapter that would install it, so `--llamacpp-lib` can be found when the runtime needs it; see [per-runtime options](../models/runtimes.md#per-runtime-options).
 
 ## `superfluid models`

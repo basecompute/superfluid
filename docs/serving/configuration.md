@@ -13,7 +13,8 @@ Almost everything is set on the `serve` command line ([CLI reference](cli.md)). 
 | `SUPERFLUID_NO_UPDATE` | unset | Set to anything but empty, `0` or `false` (in any case): no automatic update, no check for a newer Superfluid and no line about one, in that environment (`--no-update` on any command does the same for one run). See [Updating Superfluid](updating.md). |
 | `SUPERFLUID_NO_UPDATE_CHECK` | unset | The same as `SUPERFLUID_NO_UPDATE`, under the name it had before automatic updates. |
 | `SUPERFLUID_UPDATED_FROM` | unset | Set by superfluid on a command it runs again itself: by an automatic update, on the command the new version runs again (the version it was), and by a node that starts again for the head's model. A run with it set updates nothing; it is taken out of that run's environment, so what the run starts (a server, an agent and what runs in it) updates as any other command would. |
-| `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update` and the daily check: a URL or a file in GitHub's releases JSON shape. |
+| `SUPERFLUID_RELEASES` | GitHub's listing | Another release listing for `self update`, automatic updates and the daily check: a URL or a file in GitHub's releases JSON shape. |
+| `CI` | unset | Set to anything but empty, `0` or `false`: no automatic update. A command prints one line per newer release instead, as it does without a terminal. See [Updating Superfluid](updating.md#when-nothing-is-updated). |
 | `SUPERFLUID_WORKER_<ID>` | unset | Explicit worker executable for runtime `<ID>` (upper-cased, `-` and `.` as `_`, e.g. `SUPERFLUID_WORKER_LLAMACPP`). Also the installer `runtime install` uses. A runtime named this way is never auto-installed. |
 | `BASERT_LIB` | search | libbaseRT file or directory. Set by `--basert-lib`. When set, nothing else is searched. |
 | `BASERT_CLI` | search | The `basert` tool that pulls `.base` models; else the one beside libbaseRT, else `PATH`. |
@@ -77,7 +78,7 @@ Each `--spec-*` flag, when absent, falls back to a variable, then to a constant.
   sessions/                 default --sessions
   superfluid.sock           default --socket
   versions/<v>/             the installed Superfluid releases (self update, the install script)
-  update-check.json         the daily update check's last result
+  update-check.json         the last read of the release listing, and what automatic updates tried, handed to a package manager (`delegated`) or were told to leave (`declined`, by `self use`)
   settings.json             {"autoUpdate": true|false} (`superfluid self auto-update on|off`)
   fleet/
     token                   the fleet token (`superfluid fleet token`)
