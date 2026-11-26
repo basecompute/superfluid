@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 superfluid-adapter-kit = { workspace = true }
-superfluid-adapter-llamacpp = { path = "..", version = "0.2.2" }
+superfluid-adapter-llamacpp = { path = "..", version = "0.2.3" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
